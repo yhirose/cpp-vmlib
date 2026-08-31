@@ -37,7 +37,9 @@ namespace coreir {
 // declaring the variable still shares one copy of it; Func is such a closure.
 // Both are values because both are refcounted heap objects, and making them
 // ordinary tags means one lifetime rule covers everything.
-enum class ValueTag : uint8_t { Uninit, Nil, Bool, Int, Double, Str, Cell, Func };
+enum class ValueTag : uint8_t {
+  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func
+};
 
 struct HeapObj;
 
@@ -122,6 +124,8 @@ struct StrObj : HeapObj {
 
 class Value;
 
+struct ArrayObj;
+struct ObjectObj;
 // The box a captured variable lives in. Defined out of line because it holds
 // a Value, which is not complete yet.
 struct CellObj;
@@ -200,10 +204,13 @@ class Value {
 
   static Value make_cell();                     // a fresh box holding nil
   static Value make_closure(int32_t func, std::vector<Value> cells);
+  static Value make_array(std::vector<Value> items);
+  static Value make_object();
 
   ValueTag tag() const { return tag_; }
   bool is_heap() const {
-    return tag_ == ValueTag::Str || tag_ == ValueTag::Cell ||
+    return tag_ == ValueTag::Str || tag_ == ValueTag::Array ||
+           tag_ == ValueTag::Object || tag_ == ValueTag::Cell ||
            tag_ == ValueTag::Func;
   }
   bool is_uninit() const { return tag_ == ValueTag::Uninit; }
@@ -212,6 +219,8 @@ class Value {
   bool is_double() const { return tag_ == ValueTag::Double; }
   bool is_number() const { return is_int() || is_double(); }
   bool is_str() const { return tag_ == ValueTag::Str; }
+  bool is_array() const { return tag_ == ValueTag::Array; }
+  bool is_object() const { return tag_ == ValueTag::Object; }
   bool is_nil() const { return tag_ == ValueTag::Nil; }
   bool is_cell() const { return tag_ == ValueTag::Cell; }
   bool is_func() const { return tag_ == ValueTag::Func; }
@@ -228,6 +237,10 @@ class Value {
     return is_int() ? static_cast<double>(data_) : as_double();
   }
   const std::string& as_str() const { return str_obj()->s; }
+  ArrayObj* as_array() const { return reinterpret_cast<ArrayObj*>(data_); }
+  ObjectObj* as_object() const {
+    return reinterpret_cast<ObjectObj*>(data_);
+  }
   CellObj* as_cell() const { return reinterpret_cast<CellObj*>(data_); }
   ClosureObj* as_closure() const {
     return reinterpret_cast<ClosureObj*>(data_);
@@ -261,6 +274,34 @@ class Value {
   int64_t data_;
 };
 
+struct ArrayObj : HeapObj {
+  ArrayObj() : HeapObj(ValueTag::Array) {}
+  std::vector<Value> items;
+};
+
+// Keys in insertion order, looked up linearly. A hash map would be faster and
+// would lose the order, which JavaScript's own object semantics require and
+// which makes a printed object reproducible; at the sizes a front end built
+// on this deals in, the scan is not what will be slow.
+struct ObjectObj : HeapObj {
+  ObjectObj() : HeapObj(ValueTag::Object) {}
+  std::vector<std::pair<std::string, Value>> props;
+
+  Value* find(const std::string& k) {
+    for (auto& kv : props) {
+      if (kv.first == k) return &kv.second;
+    }
+    return nullptr;
+  }
+  void set(const std::string& k, const Value& v) {
+    if (Value* slot = find(k)) {
+      *slot = v;
+      return;
+    }
+    props.emplace_back(k, v);
+  }
+};
+
 struct CellObj : HeapObj {
   CellObj() : HeapObj(ValueTag::Cell) {}
   Value v;
@@ -271,6 +312,22 @@ struct ClosureObj : HeapObj {
   int32_t func = 0;
   std::vector<Value> cells;  // every element is a Cell
 };
+
+inline Value Value::make_array(std::vector<Value> items) {
+  auto* a = new ArrayObj();
+  a->items = std::move(items);
+  Value r;
+  r.tag_ = ValueTag::Array;
+  r.data_ = reinterpret_cast<int64_t>(a);
+  return r;
+}
+
+inline Value Value::make_object() {
+  Value r;
+  r.tag_ = ValueTag::Object;
+  r.data_ = reinterpret_cast<int64_t>(new ObjectObj());
+  return r;
+}
 
 inline Value Value::make_cell() {
   Value r;

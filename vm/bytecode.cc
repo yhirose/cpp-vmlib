@@ -28,6 +28,11 @@ const char* name_of(Op op) {
     case Op::LoadNil:     return "loadnil";
     case Op::Move:        return "move";
     case Op::ClearRegs:   return "clearregs";
+    case Op::NewArray:    return "newarray";
+    case Op::Index:       return "index";
+    case Op::SetIndex:    return "setindex";
+    case Op::Len:         return "len";
+    case Op::NewObject:   return "newobject";
   }
   return "?";
 }
@@ -78,6 +83,10 @@ std::string to_string(const Program& p) {
           break;
         case Op::ClearRegs:
           out << " r" << in.a << ".." << in.b;
+          break;
+        case Op::NewArray:
+          out << " r" << in.a << ", items r" << in.b << ".."
+              << (in.b + in.c);
           break;
         case Op::Jump:
           out << " " << in.a;

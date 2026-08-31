@@ -112,6 +112,14 @@ struct FnCompiler {
           emit(Op::In, r, 0, 0, n.pos);
           return r;
         }
+        if (v.id == IntrinsicId::Len) {
+          const int32_t base = top;
+          const int32_t s = compile_expr(m.child(id, 0));
+          top = base;
+          const int32_t r = alloc();
+          emit(Op::Len, r, s, 0, n.pos);
+          return r;
+        }
         // Print is a statement; in value position it yields nil. This used to
         // emit LoadConst 0, which read the first entry of a const pool that
         // a program need not have -- latent until Block became a value-
@@ -161,6 +169,44 @@ struct FnCompiler {
         auto v = view_make_closure(m, id);
         const int32_t r = alloc();
         emit(Op::MakeClosure, r, v.func, v.capture_map, n.pos);
+        return r;
+      }
+      case Tag::ArrayLit: {
+        // Items go in one contiguous run, the same arrangement CallValue's
+        // arguments use, so the instruction needs only a start and a count.
+        const int32_t base = top;
+        const int32_t items_at = top;
+        for (uint32_t i = 0; i < n.num_children; ++i) {
+          compile_expr(m.child(id, i));
+        }
+        top = base;
+        const int32_t r = alloc();
+        emit(Op::NewArray, r, items_at, static_cast<int32_t>(n.num_children),
+             n.pos);
+        return r;
+      }
+      case Tag::ObjectLit: {
+        // Built empty and filled with the same SetIndex a later assignment
+        // uses, rather than a second construction path that could disagree
+        // with it about duplicate keys or key types.
+        const int32_t r = alloc();
+        emit(Op::NewObject, r, 0, 0, n.pos);
+        for (uint32_t i = 0; i < n.num_children; i += 2) {
+          const int32_t base = top;
+          const int32_t k = compile_expr(m.child(id, i));
+          const int32_t v = compile_expr(m.child(id, i + 1));
+          emit(Op::SetIndex, r, k, v, n.pos);
+          top = base;
+        }
+        return r;
+      }
+      case Tag::Index: {
+        const int32_t base = top;
+        const int32_t recv = compile_expr(m.child(id, 0));
+        const int32_t key = compile_expr(m.child(id, 1));
+        top = base;
+        const int32_t r = alloc();
+        emit(Op::Index, r, recv, key, n.pos);
         return r;
       }
       case Tag::CallValue: {
@@ -246,9 +292,16 @@ struct FnCompiler {
           const int32_t s = compile_expr(m.child(id, 0));
           emit(Op::Out, s, 0, 0, n.pos);
         } else {
-          const int32_t r = alloc();
-          emit(Op::In, r, 0, 0, n.pos);  // value discarded
+          compile_expr(id);  // value discarded
         }
+        break;
+      }
+
+      case Tag::SetIndex: {
+        const int32_t recv = compile_expr(m.child(id, 0));
+        const int32_t key = compile_expr(m.child(id, 1));
+        const int32_t val = compile_expr(m.child(id, 2));
+        emit(Op::SetIndex, recv, key, val, n.pos);
         break;
       }
 

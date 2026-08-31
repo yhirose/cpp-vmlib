@@ -241,6 +241,36 @@ struct Exec {
         case Op::ClearRegs:
           for (int32_t i = in.a; i < in.b; ++i) f.regs[i] = Value();
           break;
+        case Op::NewArray: {
+          std::vector<Value> items;
+          items.reserve(static_cast<size_t>(in.c));
+          for (int32_t i = 0; i < in.c; ++i) items.push_back(f.regs[in.b + i]);
+          f.regs[in.a] = Value::make_array(std::move(items));
+          break;
+        }
+        case Op::NewObject:
+          f.regs[in.a] = Value::make_object();
+          break;
+        case Op::Index: {
+          const Value& recv = f.regs[in.b];
+          const Value& key = f.regs[in.c];
+          if (auto err = index_error(recv, key); !err.empty()) fail(f, err);
+          f.regs[in.a] = index_get(recv, key);
+          break;
+        }
+        case Op::SetIndex: {
+          const Value& recv = f.regs[in.a];
+          const Value& key = f.regs[in.b];
+          if (auto err = index_error(recv, key); !err.empty()) fail(f, err);
+          index_set(recv, key, f.regs[in.c]);
+          break;
+        }
+        case Op::Len: {
+          const Value& v = f.regs[in.b];
+          if (auto err = len_error(v); !err.empty()) fail(f, err);
+          f.regs[in.a] = length_of(v);
+          break;
+        }
         case Op::CellNew:
           f.cells[in.a] = Value::make_cell();
           break;

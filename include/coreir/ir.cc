@@ -62,6 +62,12 @@ HeapObj::~HeapObj() {
 
 void clear_heap_object_refs(HeapObj* o) {
   switch (o->kind) {
+    case ValueTag::Array:
+      static_cast<ArrayObj*>(o)->items.clear();
+      break;
+    case ValueTag::Object:
+      static_cast<ObjectObj*>(o)->props.clear();
+      break;
     case ValueTag::Cell:
       static_cast<CellObj*>(o)->v = Value();
       break;
@@ -75,9 +81,11 @@ void clear_heap_object_refs(HeapObj* o) {
 
 void destroy_heap_object(HeapObj* o) {
   switch (o->kind) {
-    case ValueTag::Str:  delete static_cast<StrObj*>(o); break;
-    case ValueTag::Cell: delete static_cast<CellObj*>(o); break;
-    case ValueTag::Func: delete static_cast<ClosureObj*>(o); break;
+    case ValueTag::Str:   delete static_cast<StrObj*>(o); break;
+    case ValueTag::Array: delete static_cast<ArrayObj*>(o); break;
+    case ValueTag::Object: delete static_cast<ObjectObj*>(o); break;
+    case ValueTag::Cell:  delete static_cast<CellObj*>(o); break;
+    case ValueTag::Func:  delete static_cast<ClosureObj*>(o); break;
     default: break;  // no other tag names a heap object
   }
 }
@@ -108,6 +116,7 @@ const char* name_of(IntrinsicId id) {
   switch (id) {
     case IntrinsicId::Print:   return "print";
     case IntrinsicId::ReadInt: return "readint";
+    case IntrinsicId::Len:     return "len";
   }
   return "?";
 }
@@ -190,6 +199,11 @@ struct Verifier {
       case Tag::CallValue:
         if (n.num_children < 1) return fail("CallValue needs a callee");
         break;
+      case Tag::ObjectLit:
+        if (n.num_children % 2 != 0) {
+          return fail("ObjectLit takes key/value pairs");
+        }
+        break;
       case Tag::Intrinsic: {
         const auto id = static_cast<IntrinsicId>(n.op);
         if (n.num_children != intrinsic_arity(id)) {
@@ -213,6 +227,10 @@ struct Verifier {
       case Tag::Unary:
       case Tag::Binary:
       case Tag::Intrinsic:
+      case Tag::ArrayLit:
+      case Tag::ObjectLit:
+      case Tag::Index:
+      case Tag::SetIndex:
       case Tag::CallValue:  // callee, then args -- all value positions
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
@@ -277,6 +295,10 @@ struct Dumper {
       case Tag::CallValue:
         out << "callvalue";
         break;
+      case Tag::ArrayLit:  out << "arraylit"; break;
+      case Tag::ObjectLit: out << "objectlit"; break;
+      case Tag::Index:    out << "index"; break;
+      case Tag::SetIndex: out << "setindex"; break;
     }
     out << "  @" << p.line << ":" << p.col << "\n";
     for (uint32_t i = 0; i < n.num_children; ++i) node(m.child(id, i), d + 1);

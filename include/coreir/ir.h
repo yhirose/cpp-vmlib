@@ -1,6 +1,6 @@
 // coreir -- a closed intermediate representation.
 //
-// A front end lowers its own grammar into these eleven node shapes; nothing in
+// A front end lowers its own grammar into these fifteen node shapes; nothing in
 // this header, or in any backend that consumes it, knows what parser produced
 // them. That is the whole point: the tag set is closed, so a backend written
 // once serves every front end that can reach it.
@@ -53,6 +53,14 @@ enum class Tag : uint8_t {
   // examples/pl0 does exactly that.
   MakeClosure,  // a = func index, b = capture map index
   CallValue,    // children: callee, args...
+  // Containers. Index and SetIndex dispatch on what the receiver turns out
+  // to be, rather than there being a separate pair per container type: a[0]
+  // and o["k"] differ only in what a and o are, and a front end that wants
+  // them to be different syntax can still lower both to these.
+  ArrayLit,   // children: items...
+  ObjectLit,  // children: key, value, key, value, ...
+  Index,      // children: receiver, key
+  SetIndex,   // children: receiver, key, value
 };
 
 enum class UnOp : uint8_t { Neg };
@@ -62,7 +70,7 @@ enum class BinOp : uint8_t {
   Eq, Ne, Lt, Le, Gt, Ge,
 };
 
-enum class IntrinsicId : uint8_t { Print, ReadInt };
+enum class IntrinsicId : uint8_t { Print, ReadInt, Len };
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -188,6 +196,10 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Intrinsic: return -1;  // per IntrinsicId
     case Tag::MakeClosure: return 0;
     case Tag::CallValue:   return -1;  // callee, then args
+    case Tag::ArrayLit:    return -1;
+    case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
+    case Tag::Index:       return 2;
+    case Tag::SetIndex:    return 3;
   }
   return -1;
 }
@@ -209,6 +221,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
   switch (id) {
     case IntrinsicId::Print:   return 1;
     case IntrinsicId::ReadInt: return 0;
+    case IntrinsicId::Len:     return 1;
   }
   return 0;
 }
@@ -237,6 +250,9 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::If:
     case Tag::MakeClosure:
     case Tag::CallValue:
+    case Tag::ArrayLit:
+    case Tag::ObjectLit:
+    case Tag::Index:
       return true;
     default:
       return false;
@@ -398,6 +414,27 @@ public:
   }
   NodeId make_closure(int32_t func, int32_t capture_map, SrcPos p) {
     return emit(Tag::MakeClosure, 0, p, func, capture_map, {});
+  }
+  NodeId array_lit(const std::vector<NodeId>& items, SrcPos p) {
+    return emit(Tag::ArrayLit, 0, p, 0, 0, items);
+  }
+  // Pairs rather than a side table of names, so a computed key costs nothing
+  // extra and the verifier has one shape to check.
+  NodeId object_lit(const std::vector<std::pair<NodeId, NodeId>>& kvs,
+                    SrcPos p) {
+    std::vector<NodeId> children;
+    children.reserve(kvs.size() * 2);
+    for (const auto& kv : kvs) {
+      children.push_back(kv.first);
+      children.push_back(kv.second);
+    }
+    return emit(Tag::ObjectLit, 0, p, 0, 0, children);
+  }
+  NodeId index(NodeId recv, NodeId key, SrcPos p) {
+    return emit(Tag::Index, 0, p, 0, 0, {recv, key});
+  }
+  NodeId set_index(NodeId recv, NodeId key, NodeId value, SrcPos p) {
+    return emit(Tag::SetIndex, 0, p, 0, 0, {recv, key, value});
   }
   NodeId call_value(NodeId callee, const std::vector<NodeId>& args, SrcPos p) {
     std::vector<NodeId> children{callee};

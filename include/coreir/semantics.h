@@ -36,6 +36,8 @@ inline const char* type_name(ValueTag t) {
     case ValueTag::Int:    return "int";
     case ValueTag::Double: return "double";
     case ValueTag::Str:    return "string";
+    case ValueTag::Array:  return "array";
+    case ValueTag::Object: return "object";
     case ValueTag::Cell:   return "cell";
     case ValueTag::Func:   return "function";
   }
@@ -172,6 +174,67 @@ inline std::string unop_error(UnOp op, const Value& v) {
 inline Value apply_unop(UnOp, const Value& v) {
   return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
                     : Value::make_double(-v.as_double());
+}
+
+// Indexing, shared by the executor's Index and SetIndex so that "what can be
+// indexed by what" is answered once. An out-of-range or wrong-typed key
+// fails rather than yielding nil: a language that wants nil can ask the
+// length first, while one that wants the error cannot recover it from a nil.
+inline std::string index_error(const Value& recv, const Value& key) {
+  if (recv.is_array()) {
+    if (!key.is_int()) {
+      return std::string("array index must be an int, not ") +
+             type_name(key.tag());
+    }
+    const int64_t i = key.as_int();
+    const auto n = static_cast<int64_t>(recv.as_array()->items.size());
+    if (i < 0 || i >= n) {
+      return "array index " + std::to_string(i) + " out of range for length " +
+             std::to_string(n);
+    }
+    return {};
+  }
+  if (recv.is_object()) {
+    if (!key.is_str()) {
+      return std::string("object key must be a string, not ") +
+             type_name(key.tag());
+    }
+    return {};
+  }
+  return std::string("cannot index ") + type_name(recv.tag());
+}
+
+// A missing property reads as nil rather than failing, unlike a missing array
+// element. The asymmetry is deliberate and matches what the two are for: an
+// array index out of range is almost always a bug, while asking an object
+// whether it has a key is how you find out.
+inline Value index_get(const Value& recv, const Value& key) {
+  if (recv.is_array()) {
+    return recv.as_array()->items[static_cast<size_t>(key.as_int())];
+  }
+  const Value* v = recv.as_object()->find(key.as_str());
+  return v ? *v : Value();
+}
+
+inline void index_set(const Value& recv, const Value& key, const Value& v) {
+  if (recv.is_array()) {
+    recv.as_array()->items[static_cast<size_t>(key.as_int())] = v;
+    return;
+  }
+  recv.as_object()->set(key.as_str(), v);
+}
+
+inline std::string len_error(const Value& v) {
+  if (v.is_array() || v.is_str() || v.is_object()) return {};
+  return std::string("cannot take the length of ") + type_name(v.tag());
+}
+
+inline Value length_of(const Value& v) {
+  if (v.is_str()) return Value::make_int(static_cast<int64_t>(v.as_str().size()));
+  if (v.is_array()) {
+    return Value::make_int(static_cast<int64_t>(v.as_array()->items.size()));
+  }
+  return Value::make_int(static_cast<int64_t>(v.as_object()->props.size()));
 }
 
 // How a non-string scalar prints, when a front end has not formatted it

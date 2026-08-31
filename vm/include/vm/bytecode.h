@@ -40,6 +40,11 @@ enum class Op : uint8_t {
   // register is reused or the frame returns, which for a value with a
   // release worth timing is too late.
   ClearRegs,    // a = first, b = one past last
+  NewArray,     // a = dst, b = first item reg, c = item count
+  Index,        // a = dst, b = receiver reg, c = key reg
+  SetIndex,     // a = receiver reg, b = key reg, c = value reg
+  Len,          // a = dst, b = src
+  NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
 };
 
 // vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own
