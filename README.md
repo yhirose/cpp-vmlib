@@ -47,10 +47,15 @@ ever having to change what it means.
 ## Building
 
 ```
-cmake -S . -B build -DLLVM_DIR=$(llvm-config --cmakedir)
+cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+If CMake can't find LLVM on its own, point it at the config directory
+directly: `-DLLVM_DIR=/path/to/lib/cmake/llvm` (find it with
+`llvm-config --cmakedir` when that binary is on `PATH`, or by locating
+`LLVMConfig.cmake` under your LLVM install otherwise).
 
 `-DPL0_ENABLE_LLVM=OFF` drops the third lane for the PL/0 front end. The
 default is ON deliberately: a lane that is off by default is a lane that rots.
