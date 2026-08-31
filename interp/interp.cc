@@ -45,8 +45,7 @@ struct Interp {
         Slot& s = slot_of(f, v.kind, v.index);
         if (!s.inited) {
           const SrcPos p = m.pos_of(id);
-          pl0rt::fail("uninitialized variable '" +
-                          var_name(fn, v.kind, v.index) + "'",
+          pl0rt::fail(format_uninit_var(var_name(fn, v.kind, v.index)),
                       p.line, p.col);
         }
         return s.value;

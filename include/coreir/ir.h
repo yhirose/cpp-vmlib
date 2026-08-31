@@ -135,8 +135,12 @@ struct Module {
 // ---------------------------------------------------------------------------
 // Arity
 //
-// -1 means variadic. verify() and the builder both read this table, so a tag's
-// shape is stated once.
+// -1 means variadic, or -- for If and Intrinsic -- "constrained, but not by a
+// single number." The six fixed-arity tags have their shape stated exactly
+// once, here. If's 2-or-3 and Intrinsic's per-id count are still centralized,
+// just in Verifier::check_node and intrinsic_arity() respectively rather than
+// in this table. Call's shape (capture map length against the callee) has no
+// single-number arity at all and lives entirely in check_node.
 // ---------------------------------------------------------------------------
 
 inline constexpr int arity_of(Tag t) {
@@ -236,6 +240,10 @@ class Builder {
 public:
   explicit Builder(Module& m) : m_(m) {}
 
+  // Linear scan: called from every node emit() builds, so this is O(n) over
+  // already-seen positions per node -- fine for PL/0's few hundred nodes, but
+  // an O(module size squared) cost if this IR is ever pointed at something
+  // large. A hash map keyed on (line, col) is the fix, if that day comes.
   uint32_t intern_pos(SrcPos p) {
     for (uint32_t i = 0; i < m_.positions.size(); ++i) {
       if (m_.positions[i].line == p.line && m_.positions[i].col == p.col) {
@@ -246,6 +254,8 @@ public:
     return static_cast<uint32_t>(m_.positions.size() - 1);
   }
 
+  // Same tradeoff as intern_pos, once per numeric literal rather than per
+  // node.
   int32_t intern_int(int64_t v) {
     for (uint32_t i = 0; i < m_.consts.size(); ++i) {
       if (m_.consts[i].kind == ConstKind::Int && m_.consts[i].bits == v) {
@@ -315,5 +325,9 @@ std::optional<std::string> verify(const Module& m);
 
 // A readable dump of the IR, for --dump-ir.
 std::string to_string(const Module& m);
+
+// Public so vm's own instruction-name table can share it instead of
+// restating the same eleven strings.
+const char* name_of(BinOp op);
 
 }  // namespace coreir

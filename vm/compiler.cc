@@ -1,6 +1,7 @@
 #include "vm/compiler.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 using namespace coreir;
 
@@ -91,30 +92,11 @@ struct FnCompiler {
         return r;
       }
       default:
-        // Statement in value position -- verify() rejects this before we get
-        // here, so reaching it means the IR was not verified.
-        compile_stmt(id);
-        const int32_t r = alloc();
-        emit(Op::LoadConst, r, 0, 0, n.pos);
-        return r;
+        // A statement in value position: verify() rejects this shape before
+        // compilation ever runs (main.cc always verifies first), so there is
+        // no legitimate value to fabricate here.
+        std::abort();
     }
-  }
-
-  static Op op_of(BinOp op) {
-    switch (op) {
-      case BinOp::Add: return Op::Add;
-      case BinOp::Sub: return Op::Sub;
-      case BinOp::Mul: return Op::Mul;
-      case BinOp::Div: return Op::Div;
-      case BinOp::Mod: return Op::Mod;
-      case BinOp::Eq:  return Op::Eq;
-      case BinOp::Ne:  return Op::Ne;
-      case BinOp::Lt:  return Op::Lt;
-      case BinOp::Le:  return Op::Le;
-      case BinOp::Gt:  return Op::Gt;
-      case BinOp::Ge:  return Op::Ge;
-    }
-    return Op::Add;
   }
 
   void compile_stmt(NodeId id) {

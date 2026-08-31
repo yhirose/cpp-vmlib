@@ -9,17 +9,12 @@ const char* name_of(Op op) {
   switch (op) {
     case Op::LoadConst:   return "loadconst";
     case Op::Neg:         return "neg";
-    case Op::Add:         return "add";
-    case Op::Sub:         return "sub";
-    case Op::Mul:         return "mul";
-    case Op::Div:         return "div";
-    case Op::Mod:         return "mod";
-    case Op::Eq:          return "eq";
-    case Op::Ne:          return "ne";
-    case Op::Lt:          return "lt";
-    case Op::Le:          return "le";
-    case Op::Gt:          return "gt";
-    case Op::Ge:          return "ge";
+    // The arithmetic/compare range shares coreir's name table via binop_of
+    // rather than re-typing the same eleven strings.
+    case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
+    case Op::Eq:  case Op::Ne:  case Op::Lt:  case Op::Le:
+    case Op::Gt:  case Op::Ge:
+      return coreir::name_of(binop_of(op));
     case Op::LoadVar:     return "loadvar";
     case Op::StoreVar:    return "storevar";
     case Op::Jump:        return "jump";

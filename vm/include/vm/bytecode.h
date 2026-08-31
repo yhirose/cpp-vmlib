@@ -31,6 +31,22 @@ enum class Op : uint8_t {
   Ret,
 };
 
+// vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own
+// Add..Ge, so the compiler and the executor can share one arithmetic
+// conversion instead of each hand-writing an eleven-arm switch that could
+// silently drift out of step with the other.
+inline constexpr int32_t kBinOpOffset =
+    static_cast<int32_t>(Op::Add) - static_cast<int32_t>(coreir::BinOp::Add);
+
+inline constexpr Op op_of(coreir::BinOp op) {
+  return static_cast<Op>(static_cast<int32_t>(op) + kBinOpOffset);
+}
+inline constexpr coreir::BinOp binop_of(Op op) {
+  return static_cast<coreir::BinOp>(static_cast<int32_t>(op) - kBinOpOffset);
+}
+static_assert(op_of(coreir::BinOp::Add) == Op::Add);
+static_assert(op_of(coreir::BinOp::Ge) == Op::Ge);
+
 struct Insn {
   Op op;
   int32_t a = 0;

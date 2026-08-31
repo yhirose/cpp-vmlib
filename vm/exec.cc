@@ -11,6 +11,9 @@ using namespace coreir;
 namespace vm {
 namespace {
 
+// Same shape and the same safety argument as interp's Frame: a capture is a
+// raw pointer into an enclosing frame's locals, sound because `locals` is
+// sized once at frame creation and PL/0 has no upward funarg to outlive it.
 struct Frame {
   std::vector<Slot> locals;
   std::vector<Slot*> captures;
@@ -71,7 +74,7 @@ struct Exec {
             const auto& names = static_cast<VarKind>(in.b) == VarKind::Local
                                     ? ch.local_names
                                     : ch.capture_names;
-            fail(ch, pc, "uninitialized variable '" + names[in.c] + "'");
+            fail(ch, pc, format_uninit_var(names[in.c]));
           }
           f.regs[in.a] = s.value;
           break;
@@ -106,22 +109,6 @@ struct Exec {
           return;
       }
       ++pc;
-    }
-  }
-
-  static BinOp binop_of(Op op) {
-    switch (op) {
-      case Op::Add: return BinOp::Add;
-      case Op::Sub: return BinOp::Sub;
-      case Op::Mul: return BinOp::Mul;
-      case Op::Div: return BinOp::Div;
-      case Op::Mod: return BinOp::Mod;
-      case Op::Eq:  return BinOp::Eq;
-      case Op::Ne:  return BinOp::Ne;
-      case Op::Lt:  return BinOp::Lt;
-      case Op::Le:  return BinOp::Le;
-      case Op::Gt:  return BinOp::Gt;
-      default:      return BinOp::Ge;
     }
   }
 };

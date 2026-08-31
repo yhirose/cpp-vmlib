@@ -3,8 +3,10 @@
 #include <sstream>
 
 namespace coreir {
-namespace {
 
+// Declared in ir.h and public: vm::bytecode.cc's own instruction-name table
+// shares this rather than repeating the eleven arithmetic/compare names in a
+// second switch of its own.
 const char* name_of(BinOp op) {
   switch (op) {
     case BinOp::Add: return "add";
@@ -21,6 +23,8 @@ const char* name_of(BinOp op) {
   }
   return "?";
 }
+
+namespace {
 
 const char* name_of(IntrinsicId id) {
   switch (id) {
@@ -121,6 +125,9 @@ struct Verifier {
       case Tag::Unary:
       case Tag::Binary:
       case Tag::Intrinsic:
+      case Tag::Call:  // args..., empty for PL/0 but part of the documented
+                       // shape (a future frontend with call arguments should
+                       // not need this switch touched to be checked).
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
         }

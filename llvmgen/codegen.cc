@@ -17,6 +17,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "coreir/ir.h"
+#include "coreir/semantics.h"
 
 using namespace llvm;
 
@@ -148,15 +149,6 @@ struct Gen {
     }
     if (!b.GetInsertBlock()->getTerminator()) b.CreateRetVoid();
 
-    // Leaders nothing branches to (dead code after an unconditional jump)
-    // still need a terminator for the verifier.
-    for (BasicBlock& bb : *fn) {
-      if (!bb.getTerminator()) {
-        b.SetInsertPoint(&bb);
-        b.CreateRetVoid();
-      }
-    }
-
     std::string err;
     raw_string_ostream os(err);
     if (verifyFunction(*fn, &os)) {
@@ -200,7 +192,7 @@ struct Gen {
         BasicBlock* chk = BasicBlock::Create(ctx, "div.chk", fn);
         b.CreateCondBr(b.CreateICmpEQ(r, k64(0)), zero, chk);
         b.SetInsertPoint(zero);
-        trap("divide by zero", sp);
+        trap(coreir::kDivideByZero, sp);
         b.SetInsertPoint(chk);
         // INT64_MIN / -1 is poison in LLVM exactly as it is UB in C++, and
         // wrapping arithmetic puts INT64_MIN in reach.
@@ -210,7 +202,7 @@ struct Gen {
         BasicBlock* ok = BasicBlock::Create(ctx, "div.ok", fn);
         b.CreateCondBr(ovf, over, ok);
         b.SetInsertPoint(over);
-        trap("division overflow", sp);
+        trap(coreir::kDivisionOverflow, sp);
         b.SetInsertPoint(ok);
         store_reg(in.a, in.op == vm::Op::Div ? b.CreateSDiv(l, r)
                                              : b.CreateSRem(l, r));
@@ -248,8 +240,7 @@ struct Gen {
               static_cast<coreir::VarKind>(in.b) == coreir::VarKind::Local
                   ? ch.local_names
                   : ch.capture_names;
-          const std::string msg =
-              "uninitialized variable '" + names[in.c] + "'";
+          const std::string msg = coreir::format_uninit_var(names[in.c]);
           trap(msg.c_str(), sp);
         }
         b.SetInsertPoint(good);

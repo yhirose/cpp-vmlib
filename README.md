@@ -10,45 +10,39 @@ A closed intermediate representation and three backends that consume it.
          (register)   └→ llvm (LLJIT)  lane 3
 ```
 
-A front end lowers its own grammar into ten node shapes. Nothing below
-`coreir` knows what parser produced them, so a backend written once serves
-every front end that can reach the IR. The first front end is PL/0, under
-`examples/pl0`.
+A front end lowers its own grammar into a fixed set of node shapes. Nothing
+below `coreir` knows what parser -- or what language -- produced them, so a
+backend written once serves every front end that can reach the IR. See
+[Front ends](#front-ends) for what exists today.
 
 ## Why the shape is this shape
 
-**The IR is closed.** `Tag` has ten members and a front end cannot add to it.
-Its own rule names, child positions and vocabulary stay in its binder; what
+**The IR is closed.** `Tag` is a fixed enum a front end cannot add to. A front
+end's own rule names, child positions and vocabulary stay in its binder; what
 reaches the backends is a fixed set of shapes with a fixed arity table that
 `verify()` enforces. That is the difference between "an IR" and "whatever tree
 the parser happened to produce".
 
-**The LLVM lane consumes the bytecode, not the tree.** This is the load-bearing
-decision. Two backends that independently interpret `if` and `while` can
-disagree about them; two backends reading one instruction stream with one set
-of jump targets cannot. Lowering to LLVM here is label resolution rather than a
-second reading of the language.
+**The LLVM lane consumes the bytecode, not the tree.** This is the
+load-bearing decision. Two backends that each interpret a language's control
+flow for themselves can disagree about it; two backends reading one
+instruction stream with one set of jump targets cannot. Lowering to LLVM is
+label resolution, not a second reading of the language.
 
-**One runtime, three lanes.** `pl0_rt_out`, `pl0_rt_in` and `pl0_rt_fail` are C
-functions in the host process, and the JIT resolves them out of that same
-process. Output formatting, error wording, error position and exit code
-therefore have exactly one implementation. Divergence in those is not caught by
-a test here; it is unavailable.
+**One runtime, three lanes.** A front end's I/O and error reporting go through
+a small set of C functions in the host process, which the JIT resolves out of
+that same process. Output formatting, error wording, error position and exit
+code therefore have exactly one implementation per front end. Divergence in
+those is not caught by a test; it is unavailable.
 
-**Variables are captures, not static links.** `VarRef` names either a slot in
-this frame or a slot borrowed from an enclosing one. A static link would be the
-textbook fit for PL/0 and simpler today, but it assumes the defining activation
-is still on the stack, which closures break — and `VarRef` appears at every
-variable access, so changing its meaning later is a breaking change rather than
-a new tag.
-
-The capture forwarding table belongs to the **call site**, not the function. A
-per-function list expressed in the defining frame cannot work: `fib` captures
-the root frame's variables, but `fib`'s own recursive call runs with `fib`'s
-frame, and finding "the defining frame" at run time is exactly the static link
-this design rejects. `--dump-ir examples/pl0/samples/fib.pas` shows the two
-call sites resolving differently — `local[1] local[2]` from the root, and
-`capture[0] capture[1]` forwarding through the recursion.
+**Variables are captures, not static links.** A variable reference names
+either a slot in the current frame or a slot borrowed from an enclosing one,
+and the forwarding table for a call's captures belongs to the call site, not
+the callee. A static link would assume the defining activation is still on the
+stack, which closures break, and a per-function capture list would break on
+self-recursion for the same reason. A design built around call-site forwarding
+survives both without `VarRef` -- which appears at every variable access --
+ever having to change what it means.
 
 ## Building
 
@@ -58,55 +52,33 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-`-DPL0_ENABLE_LLVM=OFF` drops the third lane. The default is ON deliberately: a
-lane that is off by default is a lane that rots.
+`-DPL0_ENABLE_LLVM=OFF` drops the third lane for the PL/0 front end. The
+default is ON deliberately: a lane that is off by default is a lane that rots.
 
-## Running
+## Front ends
 
-```
-build/examples/pl0/pl0 [--engine=interp|vm|llvm] [--dump-ir] [--dump-bc] [--emit-ir] PROGRAM.pas
-```
+| Front end | Parser | Notes |
+|---|---|---|
+| [PL/0](examples/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [examples/pl0/README.md](examples/pl0/README.md). |
+
+Adding one means writing a binder -- your parser's tree to `coreir::Module` --
+under `examples/<name>/`, plus that front end's own runtime and CLI if it
+needs them. Nothing in `coreir`, `interp`, `vm` or `llvmgen` changes, or even
+has to know the front end exists.
 
 ## Testing
 
-Two tiers, because one is not enough.
-
-`ctest -R samples` runs every sample under all three lanes and requires stdout,
-stderr and exit code to match — and then requires that agreed-upon output to
-match a golden file taken from culebra's own PL/0 interpreter. Three lanes
-agreeing does not make them right: cpp-peglib's `pl0.cc` has two lanes that
-agree with each other that `ODD e` means `e != 0`, and both are wrong. Its only
-`ODD` sample cannot tell, because the value it affects is overwritten before
-anything prints it. `samples/odd.pas` exists to tell.
-
-`ctest -R errors` covers the diagnostics. These are not golden-compared: the
-binder reports undefined names, constant assignment and duplicate declarations
-at bind time where culebra's interpreter reports them at run time, and this
-runtime writes to stderr where that one writes to stdout. Both departures are
-deliberate. What is checked is that the three lanes are byte-identical in
-message, position and exit code, and that the message matches
-`tests/errors/expected/`.
-
-## What the reference implementations get wrong
-
-Two PL/0 implementations informed this one, and neither could be copied whole.
-
-| | `pl0.cul` (culebra) | `pl0.cc` (cpp-peglib) | here |
-|---|---|---|---|
-| `ODD e` | `e mod 2 != 0` | `e != 0` in both lanes | `e mod 2 != 0` |
-| divide by zero | `divide by zero`, stdout, at the right operand | `divide by 0 error` on stderr in one lane, `divide by 0` on stdout with no position in the other | one message, one stream, at the right operand |
-| uninitialized read | reported | reported by the interpreter, **not checked at all by the JIT** (`undef` load) | reported by all three |
-| `?x` | reads a line | **no `in` case in the JIT** — it crashes | reads a line, all three |
-| forward call to a later sibling | works | fails | works |
-
-The last one is a traversal-order side effect in `pl0.cc` rather than a
-decision about the language: it registers each procedure and descends into it
-before looking at the next. The binder here collects every sibling's name
-first.
+Each front end owns its own verification, but the shape is the same
+everywhere: run every sample through all three lanes and require them to
+agree, then check that agreement against an oracle this repository does not
+contain. Three lanes agreeing with each other is not the same as three lanes
+agreeing with the language -- see a front end's own README for what its oracle
+is and what it catches that cross-lane comparison alone would miss.
 
 ## Scope
 
-PL/0 only, and deliberately: integers, nested procedures without parameters,
-seven statements. No heap, so nothing here rehearses the memory-management side
-of multi-backend symmetry. What it does rehearse is diagnostics — position
-propagation into compiled code, message identity, and the ordering of checks.
+The IR and its three lanes are meant to grow only by adding tags, never by
+special-casing an existing one -- see each header's own design notes
+(`include/coreir/ir.h`, `include/coreir/semantics.h`) for what is deliberately
+fixed. What a given front end exercises is necessarily narrower than that;
+see its own README for what it does and does not rehearse.
