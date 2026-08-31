@@ -27,6 +27,7 @@ const char* name_of(Op op) {
     case Op::CellNew:     return "cellnew";
     case Op::LoadNil:     return "loadnil";
     case Op::Move:        return "move";
+    case Op::ClearRegs:   return "clearregs";
   }
   return "?";
 }
@@ -74,6 +75,9 @@ std::string to_string(const Program& p) {
           break;
         case Op::CellNew:
           out << " cell[" << in.a << "]";
+          break;
+        case Op::ClearRegs:
+          out << " r" << in.a << ".." << in.b;
           break;
         case Op::Jump:
           out << " " << in.a;

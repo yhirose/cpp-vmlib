@@ -238,6 +238,9 @@ struct Exec {
         case Op::Move:
           f.regs[in.a] = f.regs[in.b];
           break;
+        case Op::ClearRegs:
+          for (int32_t i = in.a; i < in.b; ++i) f.regs[i] = Value();
+          break;
         case Op::CellNew:
           f.cells[in.a] = Value::make_cell();
           break;
@@ -281,10 +284,16 @@ struct Exec {
 
 }  // namespace
 
-void run(const Program& p, int max_call_depth) {
+void run(const Program& p, Runtime& rt, int max_call_depth) {
+  Runtime::Scope scope(rt);
   Exec e{p, max_call_depth < 0 ? 0 : static_cast<size_t>(max_call_depth), {}};
   e.frames.push_back(e.make_frame(p.chunks[0]));
   e.run();
+}
+
+void run(const Program& p, int max_call_depth) {
+  Runtime rt;
+  run(p, rt, max_call_depth);
 }
 
 }  // namespace vm

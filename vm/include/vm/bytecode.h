@@ -35,6 +35,11 @@ enum class Op : uint8_t {
   CellNew,      // a = cell index   (fresh box, holding nil)
   LoadNil,      // a = dst
   Move,         // a = dst, b = src
+  // Drops registers [a, b) -- the temporaries a statement finished with.
+  // Without it a dead temporary keeps whatever it holds alive until its
+  // register is reused or the frame returns, which for a value with a
+  // release worth timing is too late.
+  ClearRegs,    // a = first, b = one past last
 };
 
 // vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own

@@ -39,21 +39,85 @@ namespace coreir {
 // ordinary tags means one lifetime rule covers everything.
 enum class ValueTag : uint8_t { Uninit, Nil, Bool, Int, Double, Str, Cell, Func };
 
-// Live heap objects, so a test can assert a program left none behind, and so
-// the cycle a reference count cannot collect has a number attached to it.
-extern int64_t g_live_heap_objects;
+struct HeapObj;
+
+// Everything a running program's heap consists of, owned by an object rather
+// than by file-scope state.
+//
+// Two things want that. A tracing collector has to enumerate live objects,
+// which a bare counter cannot do, so objects go on an intrusive list. And a
+// design where two programs run at once -- separate heaps, values crossing
+// only by copying -- needs the heap to be a thing there can be two of.
+// Neither is built yet; both would be a rewrite rather than an addition if
+// this state stayed global, which is the reason to pay for it now.
+//
+// One Runtime is current per thread; Value's allocators reach it through
+// Runtime::current(), the way culebra's runtime reaches its own.
+class Runtime {
+ public:
+  Runtime() = default;
+  ~Runtime();
+  Runtime(const Runtime&) = delete;
+  Runtime& operator=(const Runtime&) = delete;
+
+  int64_t live_objects() const { return live_; }
+  HeapObj* first_object() const { return head_; }
+
+  static Runtime* current() { return current_; }
+
+  // Makes `rt` current for its own lifetime and restores whatever was current
+  // before. Scoped rather than set-and-forget, so an exception leaving a run
+  // cannot strand a dangling current pointer.
+  class Scope {
+   public:
+    explicit Scope(Runtime& rt) : prev_(current_) { current_ = &rt; }
+    ~Scope() { current_ = prev_; }
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+
+   private:
+    Runtime* prev_;
+  };
+
+ private:
+  friend struct HeapObj;
+  void link(HeapObj* o);
+  void unlink(HeapObj* o);
+
+  HeapObj* head_ = nullptr;
+  int64_t live_ = 0;
+  static thread_local Runtime* current_;
+};
 
 struct HeapObj {
   int64_t rc;  // offset zero, as in culebra's refcounted structs
-  explicit HeapObj() : rc(1) { ++g_live_heap_objects; }
-  ~HeapObj() { --g_live_heap_objects; }
+  // Which concrete object this is. A tag rather than a vtable: ir.h's own
+  // rule is that nothing here has virtual functions or RTTI, because that is
+  // what survives --gc-sections as residue in a binary that never uses it.
+  ValueTag kind;
+  // Intrusive links: enumerating the heap costs no side table, and allocating
+  // costs no container growth.
+  HeapObj* prev = nullptr;
+  HeapObj* next = nullptr;
+  Runtime* owner = nullptr;
+
+  explicit HeapObj(ValueTag k);
+  ~HeapObj();
   HeapObj(const HeapObj&) = delete;
   HeapObj& operator=(const HeapObj&) = delete;
 };
 
+// Frees a heap object through its kind tag. Out of line because it needs
+// every concrete type complete.
+void destroy_heap_object(HeapObj* o);
+
+// Drops everything an object refers to, without freeing the object itself.
+// Teardown needs this separated from destruction: see ~Runtime.
+void clear_heap_object_refs(HeapObj* o);
+
 struct StrObj : HeapObj {
   std::string s;
-  explicit StrObj(std::string v) : s(std::move(v)) {}
+  explicit StrObj(std::string v) : HeapObj(ValueTag::Str), s(std::move(v)) {}
 };
 
 class Value;
@@ -198,10 +262,12 @@ class Value {
 };
 
 struct CellObj : HeapObj {
+  CellObj() : HeapObj(ValueTag::Cell) {}
   Value v;
 };
 
 struct ClosureObj : HeapObj {
+  ClosureObj() : HeapObj(ValueTag::Func) {}
   int32_t func = 0;
   std::vector<Value> cells;  // every element is a Cell
 };
@@ -233,19 +299,12 @@ inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
 inline void Value::release() {
   if (!is_heap()) return;
   HeapObj* h = reinterpret_cast<HeapObj*>(data_);
-  const ValueTag t = tag_;
   // Clear before deleting: a cell holding the last reference to a closure
   // holding this same cell would otherwise re-enter release() on a half-dead
   // object.
   tag_ = ValueTag::Nil;
   data_ = 0;
-  if (--h->rc != 0) return;
-  switch (t) {
-    case ValueTag::Str:  delete static_cast<StrObj*>(h); break;
-    case ValueTag::Cell: delete static_cast<CellObj*>(h); break;
-    case ValueTag::Func: delete static_cast<ClosureObj*>(h); break;
-    default: break;
-  }
+  if (--h->rc == 0) destroy_heap_object(h);
 }
 
 }  // namespace coreir

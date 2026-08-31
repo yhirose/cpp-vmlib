@@ -6,10 +6,81 @@
 
 namespace coreir {
 
-// See coreir/value.h. Defined here rather than in a value.cc of its own so
-// that no new translation unit appears -- culebra's CMakeLists names
-// cpp-vmlib's sources one by one, in two separate places.
-int64_t g_live_heap_objects = 0;
+// coreir/value.h's out-of-line members. They live here rather than in a
+// value.cc of their own so that no new translation unit appears -- culebra's
+// CMakeLists names cpp-vmlib's sources one by one, in two separate places.
+
+thread_local Runtime* Runtime::current_ = nullptr;
+
+void Runtime::link(HeapObj* o) {
+  o->prev = nullptr;
+  o->next = head_;
+  if (head_) head_->prev = o;
+  head_ = o;
+  ++live_;
+}
+
+void Runtime::unlink(HeapObj* o) {
+  if (o->prev) o->prev->next = o->next;
+  else head_ = o->next;
+  if (o->next) o->next->prev = o->prev;
+  o->prev = o->next = nullptr;
+  --live_;
+}
+
+// A Runtime outliving its objects is the normal case -- everything a program
+// allocated and released is already gone. What can remain is a reference
+// cycle, which counting cannot collect; those are freed here, so the heap
+// really does end empty and a leak checker does not report as a bug the one
+// thing this design openly cannot do on its own.
+//
+// Freeing a cycle cannot be a single pass. Destroying one member releases its
+// references, which frees the next member, whose destructor releases the
+// reference back to the first -- which is mid-destruction. So: pin everything
+// first, drop every outgoing reference while nothing can be freed, and only
+// then free the shells, which by that point refer to nothing. culebra's
+// collector separates the same two steps for the same reason (memory.md's
+// finalize-then-sweep), and this is where a tracing collector would hook in.
+Runtime::~Runtime() {
+  for (HeapObj* o = head_; o; o = o->next) ++o->rc;
+  for (HeapObj* o = head_; o; o = o->next) clear_heap_object_refs(o);
+  while (head_) {
+    HeapObj* o = head_;
+    unlink(o);
+    o->owner = nullptr;  // already unlinked; do not let ~HeapObj do it again
+    destroy_heap_object(o);
+  }
+}
+
+HeapObj::HeapObj(ValueTag k) : rc(1), kind(k), owner(Runtime::current()) {
+  if (owner) owner->link(this);
+}
+
+HeapObj::~HeapObj() {
+  if (owner) owner->unlink(this);
+}
+
+void clear_heap_object_refs(HeapObj* o) {
+  switch (o->kind) {
+    case ValueTag::Cell:
+      static_cast<CellObj*>(o)->v = Value();
+      break;
+    case ValueTag::Func:
+      static_cast<ClosureObj*>(o)->cells.clear();
+      break;
+    default:
+      break;  // a string refers to nothing
+  }
+}
+
+void destroy_heap_object(HeapObj* o) {
+  switch (o->kind) {
+    case ValueTag::Str:  delete static_cast<StrObj*>(o); break;
+    case ValueTag::Cell: delete static_cast<CellObj*>(o); break;
+    case ValueTag::Func: delete static_cast<ClosureObj*>(o); break;
+    default: break;  // no other tag names a heap object
+  }
+}
 
 // Declared in ir.h and public: vm::bytecode.cc's own instruction-name table
 // shares this rather than repeating the eleven arithmetic/compare names in a

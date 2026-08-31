@@ -68,17 +68,20 @@ std::string run_module(const coreir::Module& m, const std::string& what) {
     return {};
   }
   std::string failure;
+  int64_t left = 0;
   {
+    coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     try {
-      vm::run(p);
+      vm::run(p, rt);
     } catch (const Failure& e) {
       failure = e.what();
     }
+    // Taken before ~Runtime, which would free even a cycle.
+    left = rt.live_objects();
   }
-  check(coreir::g_live_heap_objects == 0,
-        what + ": leaked " + std::to_string(coreir::g_live_heap_objects) +
-            " heap object(s)");
+  check(left == 0,
+        what + ": leaked " + std::to_string(left) + " heap object(s)");
   return failure;
 }
 

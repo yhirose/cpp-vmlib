@@ -13,9 +13,14 @@ struct FnCompiler {
   const Func& fn;
   Chunk& ch;
   int32_t top = 0;  // next free register
+  // Highest register the statement being compiled has reached, so its end can
+  // drop exactly the range it used rather than every register the function
+  // owns.
+  int32_t high_water = 0;
 
   int32_t alloc() {
     const int32_t r = top++;
+    if (top > high_water) high_water = top;
     ch.num_regs = std::max(ch.num_regs, top);
     return r;
   }
@@ -186,6 +191,12 @@ struct FnCompiler {
   void compile_stmt(NodeId id) {
     const Node& n = m.at(id);
     const int32_t base = top;
+    // A statement's temporaries die with the statement. Resetting `top` alone
+    // only tells the compiler the registers are reusable; whatever they hold
+    // stays held until something overwrites them or the frame returns, which
+    // is not when a source-level scope ended.
+    const int32_t outer_high_water = high_water;
+    high_water = top;
     switch (n.tag) {
       case Tag::Block:
         for (uint32_t i = 0; i < n.num_children; ++i) {
@@ -247,6 +258,8 @@ struct FnCompiler {
         break;
       }
     }
+    if (high_water > base) emit(Op::ClearRegs, base, high_water, 0, n.pos);
+    high_water = std::max(outer_high_water, high_water);
     top = base;
   }
 };

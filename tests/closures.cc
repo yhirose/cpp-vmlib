@@ -14,10 +14,13 @@
 //   2. Do two closures over the same variable see each other's writes? (The
 //      sharing case -- a cell per closure would pass test 1 and fail this.)
 //   3. What does reference counting alone do with a closure that captures
-//      itself? Answer: leaks it, unavoidably. This test asserts the leak
-//      rather than wishing it away, because that measurement is the whole
-//      argument for the tracing-backstop phase -- and if some later change
-//      makes the leak go away, that is worth being told about too.
+//      itself? Answer: nothing -- it leaks, unavoidably, for as long as the
+//      program runs. This test asserts the leak rather than wishing it away,
+//      because that measurement is the whole argument for a tracing
+//      collector, and a later change that quietly fixed it is worth being
+//      told about. The Runtime's own destructor does sweep the cycle up
+//      afterwards, so the process does not leak; what it cannot do is free
+//      it while the program is still running and might want the memory.
 
 #include <cstdio>
 #include <stdexcept>
@@ -72,16 +75,18 @@ RunResult run_module(const coreir::Module& m, const std::string& what) {
     ++g_failures;
     return r;
   }
-  const int64_t before = coreir::g_live_heap_objects;
   {
+    coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     try {
-      vm::run(p);
+      vm::run(p, rt);
     } catch (const Failure& e) {
       r.failure = e.what();
     }
+    // Taken before ~Runtime: that destructor frees whatever counting could
+    // not, so afterwards even the cycle case would read zero.
+    r.leaked = rt.live_objects();
   }
-  r.leaked = coreir::g_live_heap_objects - before;
   return r;
 }
 
@@ -110,14 +115,6 @@ void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
   throw Failure(msg);
 }
-
-// Case 6 leaks on purpose -- a reference cycle is exactly what counting
-// cannot collect -- so LeakSanitizer would fail this binary for doing its
-// job. Turning it off here costs nothing: every case in this file already
-// asserts its own exact live-object count, which is stricter than "did
-// anything leak" and can tell a deliberate two-object cycle from a mistake.
-// The other test binaries keep LSan on.
-int __lsan_is_turned_off() { return 1; }
 }
 
 int main() {

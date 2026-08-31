@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  # The ordinary build, on both platforms a host is likely to embed this from.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+
+  # Reference counting is the memory model, so "did anything leak" is a
+  # correctness question here rather than a hygiene one. LeakSanitizer sees
+  # what the tests' own live-object counts cannot: an object the executor
+  # dropped on the floor without the count ever being consulted.
+  #
+  # A reference cycle is the one thing counting cannot collect, and the tests
+  # assert those exist rather than pretending otherwise -- ~Runtime sweeps
+  # them at the end of a run, which is what keeps this lane honest instead of
+  # suppressed.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
