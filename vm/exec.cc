@@ -3,17 +3,26 @@
 #include <string>
 #include <vector>
 
+#include "coreir/rt.h"
 #include "coreir/semantics.h"
-#include "pl0rt.h"
 
 using namespace coreir;
 
 namespace vm {
 namespace {
 
-// Same shape and the same safety argument as interp's Frame: a capture is a
-// raw pointer into an enclosing frame's locals, sound because `locals` is
-// sized once at frame creation and PL/0 has no upward funarg to outlive it.
+// Every procedure call recurses through the host's own C++ stack (call() ->
+// run_chunk() -> call() -> ...), so nothing here can catch a runaway recursion
+// itself -- the host's process would simply overflow its stack, silently,
+// with no exception to catch. This counter turns that into the same kind of
+// reported failure as a divide-by-zero, at a limit conservative enough for an
+// 8 MB stack.
+constexpr int kMaxCallDepth = 10000;
+
+// Same shape and the same safety argument as an interpreter's frame would
+// need: a capture is a raw pointer into an enclosing frame's locals, sound
+// because `locals` is sized once at frame creation and PL/0 has no upward
+// funarg to outlive it.
 struct Frame {
   std::vector<Slot> locals;
   std::vector<Slot*> captures;
@@ -22,8 +31,14 @@ struct Frame {
 
 struct Exec {
   const Program& p;
+  int depth = 0;
 
-  void call(int32_t func, const std::vector<CaptureSrc>& cmap, Frame* caller) {
+  void call(int32_t func, const std::vector<CaptureSrc>& cmap, Frame* caller,
+            SrcPos pos) {
+    if (++depth > kMaxCallDepth) {
+      coreir_rt::fail("recursion limit exceeded", pos.line, pos.col);
+    }
+    coreir_rt_poll();
     const Chunk& ch = p.chunks[func];
     Frame f;
     f.locals.resize(static_cast<size_t>(ch.num_locals));
@@ -35,11 +50,12 @@ struct Exec {
                                : caller->captures[src.index]);
     }
     run_chunk(ch, f);
+    --depth;
   }
 
   [[noreturn]] void fail(const Chunk& ch, size_t pc, const std::string& msg) {
     const SrcPos sp = p.positions[ch.code_pos[pc]];
-    pl0rt::fail(msg, sp.line, sp.col);
+    coreir_rt::fail(msg, sp.line, sp.col);
   }
 
   Slot& slot_of(Frame& f, int32_t kind, int32_t index) {
@@ -86,6 +102,10 @@ struct Exec {
           break;
         }
         case Op::Jump:
+          // A backward (or self) jump is a loop iteration -- the one place a
+          // program can spin without ever calling or producing output, so
+          // it is also the one place a host needs to interrupt one.
+          if (static_cast<size_t>(in.a) <= pc) coreir_rt_poll();
           pc = static_cast<size_t>(in.a);
           continue;
         case Op::JumpIfFalse:
@@ -95,14 +115,14 @@ struct Exec {
           }
           break;
         case Op::Call:
-          call(in.a, p.capture_maps[in.b], &f);
+          call(in.a, p.capture_maps[in.b], &f, p.positions[ch.code_pos[pc]]);
           break;
         case Op::Out:
-          pl0_rt_out(f.regs[in.a]);
+          coreir_rt_out(f.regs[in.a]);
           break;
         case Op::In: {
           const SrcPos sp = p.positions[ch.code_pos[pc]];
-          f.regs[in.a] = pl0_rt_in(sp.line, sp.col);
+          f.regs[in.a] = coreir_rt_in(sp.line, sp.col);
           break;
         }
         case Op::Ret:

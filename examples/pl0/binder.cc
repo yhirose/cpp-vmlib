@@ -11,7 +11,7 @@
 #include <peglib.h>
 
 #include "grammar.h"
-#include "pl0rt.h"
+#include "coreir/rt.h"
 
 using namespace peg;
 using namespace peg::udl;
@@ -25,7 +25,7 @@ SrcPos pos_of(const Ast& a) {
 }
 
 [[noreturn]] void fail(const Ast& a, const std::string& msg) {
-  pl0rt::fail(msg, static_cast<uint32_t>(a.line),
+  coreir_rt::fail(msg, static_cast<uint32_t>(a.line),
               static_cast<uint32_t>(a.column));
 }
 
@@ -489,13 +489,13 @@ Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,
                   const std::string&) {
-    pl0rt::fail(msg, static_cast<uint32_t>(line), static_cast<uint32_t>(col));
+    coreir_rt::fail(msg, static_cast<uint32_t>(line), static_cast<uint32_t>(col));
   });
-  if (!p.load_grammar(kGrammar)) pl0rt::fail("invalid grammar", 0, 0);
+  if (!p.load_grammar(kGrammar)) coreir_rt::fail("invalid grammar", 0, 0);
   p.enable_ast();
 
   std::shared_ptr<Ast> ast;
-  if (!p.parse(source, ast)) pl0rt::fail("syntax error", 0, 0);
+  if (!p.parse(source, ast)) coreir_rt::fail("syntax error", 0, 0);
   // The grammar's no_ast_opt annotations are written for this; without it the
   // tree has a different shape than the binder below expects.
   ast = p.optimize_ast(ast);
@@ -504,7 +504,7 @@ Module bind_source(const std::string& source) {
   Module m = b.build(*ast);
 
   if (auto err = verify(m)) {
-    pl0rt::fail("internal error: malformed IR: " + *err, 0, 0);
+    coreir_rt::fail("internal error: malformed IR: " + *err, 0, 0);
   }
   return m;
 }

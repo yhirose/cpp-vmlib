@@ -1,9 +1,9 @@
 // The binder is the front end's job, not the library's.
 //
-// Everything peglib-shaped stops here: coreir, interp, vm and llvmgen never
-// see a peg::Ast, and their include paths do not even reach peglib.h. A front
-// end built on a hand-written recursive-descent parser would replace this file
-// and nothing else.
+// Everything peglib-shaped stops here: coreir and vm never see a peg::Ast,
+// and their include paths do not even reach peglib.h. A front end built on a
+// hand-written recursive-descent parser would replace this file and nothing
+// else.
 
 #pragma once
 

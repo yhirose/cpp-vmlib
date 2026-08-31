@@ -1,0 +1,7 @@
+PROCEDURE loop;
+BEGIN
+  CALL loop
+END;
+BEGIN
+  CALL loop
+END.

@@ -38,8 +38,7 @@ struct FnCompiler {
   int32_t here() const { return static_cast<int32_t>(ch.code.size()); }
 
   // Every expression lands in a fresh register; a statement releases whatever
-  // it used. PL/0 nests shallowly enough that nothing smarter earns its
-  // keep -- and mem2reg flattens the result in the LLVM lane anyway.
+  // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
   int32_t compile_expr(NodeId id) {
     const Node& n = m.at(id);
     switch (n.tag) {

@@ -5,10 +5,11 @@
 // arithmetic positions, but Core-IR claims to be grammar-independent, so that
 // accident is not something a backend may rely on.
 //
-// interp and the bytecode executor share these helpers outright, so they
-// cannot drift. llvmgen has to emit the equivalent instead of calling them --
-// the one place where the value model is restated rather than shared, and
-// therefore the one place worth reading twice.
+// vm::compile and the bytecode executor both include this header directly,
+// so wrapping and trap conditions have exactly one implementation between
+// them. A backend that cannot call C++ (one that emits another language's
+// text, say) has to restate the equivalent instead -- the one place such a
+// backend's author should expect to read this file twice.
 
 #pragma once
 
@@ -25,10 +26,8 @@ struct Slot {
   uint8_t inited = 0;
 };
 
-// Wrapping, always: signed overflow is UB in C++ and poison in LLVM, so the
-// arithmetic goes through uint64_t here and llvmgen emits add/sub/mul with
-// neither nsw nor nuw. Leaving this undecided is how -O2 makes one lane
-// disagree with the others.
+// Wrapping, always: signed overflow is UB in C++, so the arithmetic goes
+// through uint64_t here rather than leaving it to the optimizer's discretion.
 inline int64_t wrap_add(int64_t a, int64_t b) {
   return static_cast<int64_t>(static_cast<uint64_t>(a) +
                               static_cast<uint64_t>(b));
@@ -45,21 +44,13 @@ inline int64_t wrap_neg(int64_t a) {
   return static_cast<int64_t>(0u - static_cast<uint64_t>(a));
 }
 
-// Named so llvmgen -- which cannot call binop_trap itself, since it checks
-// concrete int64_t values this lane never has at codegen time -- still shares
-// the wording rather than retyping it. That leaves only the trap *condition*
-// restated in codegen.cc, not the message too.
-inline constexpr const char* kDivideByZero = "divide by zero";
-inline constexpr const char* kDivisionOverflow = "division overflow";
-
-// Div and Mod are the only trapping operations. INT64_MIN / -1 is UB in C++
-// and poison in LLVM just as surely as division by zero is, and wrapping
-// arithmetic puts INT64_MIN within reach, so both are guarded.
+// Div and Mod are the only trapping operations. INT64_MIN / -1 is UB in C++,
+// and wrapping arithmetic puts INT64_MIN within reach, so both are guarded.
 inline const char* binop_trap(BinOp op, int64_t l, int64_t r) {
   if (op != BinOp::Div && op != BinOp::Mod) return nullptr;
-  if (r == 0) return kDivideByZero;
+  if (r == 0) return "divide by zero";
   if (l == std::numeric_limits<int64_t>::min() && r == -1) {
-    return kDivisionOverflow;
+    return "division overflow";
   }
   return nullptr;
 }
@@ -84,10 +75,10 @@ inline int64_t apply_binop(BinOp op, int64_t l, int64_t r) {
 
 inline bool truthy(int64_t v) { return v != 0; }
 
-// The one formatter for "read before assigned", called identically by interp,
-// exec and llvmgen (the last one at IR-build time, to bake the finished string
-// into the module). Restating this string at each call site instead is
-// exactly the class of divergence this project exists to make unavailable.
+// The one formatter for "read before assigned". A future backend that cannot
+// call this directly (one emitting another language's text, say) should call
+// this at IR-build time to bake the finished string into what it emits,
+// rather than restating the wording itself.
 inline std::string format_uninit_var(const std::string& name) {
   return "uninitialized variable '" + name + "'";
 }

@@ -189,8 +189,8 @@ inline constexpr bool yields_value(Tag t) {
 //
 // Each view is paired with a Builder::make_* below. Nothing outside this
 // header should index child_ids directly, so a tag's layout lives in exactly
-// one place even though four consumers (binder, interp, vm compiler, and
-// through the bytecode, llvmgen) read it.
+// one place even though both the binder that builds a Module and the
+// compiler that reads it need to agree on that layout.
 //
 // Views hold NodeId, never const Node* -- the arena grows and pointers into it
 // do not survive that.

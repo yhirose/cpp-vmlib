@@ -1,10 +1,11 @@
 // A register machine, matching culebra's choice.
 //
-// Both remaining lanes read this: the executor runs it, and llvmgen lowers it.
-// That is the structural reason they cannot disagree -- not that they are
-// tested against each other, but that there is only one instruction stream.
-// Lowering a stack machine to SSA means symbolically executing the operand
-// stack across block boundaries, which is knowledge worth not acquiring.
+// A stack machine was the other option; a register machine was chosen because
+// it is what culebra's own bytecode is, and this library exists in part to
+// rehearse a design culebra could grow into. Lowering a stack machine to SSA
+// (for a future backend that wants one) means symbolically executing the
+// operand stack across block boundaries, which is knowledge worth not
+// acquiring if a register machine sidesteps it for free.
 
 #pragma once
 
