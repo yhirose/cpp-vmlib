@@ -76,7 +76,10 @@ struct SrcPos {
   uint32_t col = 0;
 };
 
-enum class ConstKind : uint8_t { Int };
+// SPIKE: Str joins Int. `bits` indexes Module::str_consts rather than holding
+// the bytes, so Const stays a two-word POD and the pool stays in one place --
+// the shape a Double or a Bool would slot into without changing either.
+enum class ConstKind : uint8_t { Int, Str };
 
 struct Const {
   ConstKind kind = ConstKind::Int;
@@ -120,6 +123,7 @@ struct Module {
   std::vector<NodeId> child_ids;  // flat backing for every node's children
   std::vector<SrcPos> positions;
   std::vector<Const> consts;
+  std::vector<std::string> str_consts;  // SPIKE: bytes for ConstKind::Str
   std::vector<Func> funcs;                      // funcs[0] is the entry point
   std::vector<std::vector<CaptureSrc>> capture_maps;
 
@@ -266,8 +270,25 @@ public:
     return static_cast<int32_t>(m_.consts.size() - 1);
   }
 
+  // SPIKE: same interning shape as intern_int, over the string pool.
+  int32_t intern_str(const std::string& s) {
+    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
+      if (m_.consts[i].kind == ConstKind::Str &&
+          m_.str_consts[static_cast<size_t>(m_.consts[i].bits)] == s) {
+        return static_cast<int32_t>(i);
+      }
+    }
+    m_.str_consts.push_back(s);
+    m_.consts.push_back(
+        {ConstKind::Str, static_cast<int64_t>(m_.str_consts.size() - 1)});
+    return static_cast<int32_t>(m_.consts.size() - 1);
+  }
+
   NodeId literal(int64_t v, SrcPos p) {
     return emit(Tag::Literal, 0, p, intern_int(v), 0, {});
+  }
+  NodeId str_literal(const std::string& s, SrcPos p) {
+    return emit(Tag::Literal, 0, p, intern_str(s), 0, {});
   }
   NodeId varref(VarKind k, int32_t index, SrcPos p) {
     return emit(Tag::VarRef, static_cast<uint8_t>(k), p, index, 0, {});

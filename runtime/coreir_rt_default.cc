@@ -22,6 +22,10 @@ extern "C" {
 
 void coreir_rt_out(int64_t v) { std::printf("%" PRId64 "\n", v); }
 
+void coreir_rt_out_str(const char* bytes, int64_t len) {
+  std::printf("%.*s\n", static_cast<int>(len), bytes);
+}
+
 int64_t coreir_rt_in(int64_t line, int64_t col) {
   std::string s;
   if (!std::getline(std::cin, s)) coreir_rt_fail("invalid input", line, col);

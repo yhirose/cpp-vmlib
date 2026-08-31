@@ -2,7 +2,14 @@
 
 #include <sstream>
 
+#include "coreir/value.h"
+
 namespace coreir {
+
+// SPIKE: see coreir/value.h. Defined here rather than in a value.cc of its
+// own so the spike adds no new translation unit -- culebra's CMakeLists names
+// cpp-vmlib's sources one by one, in two separate places.
+int64_t g_live_heap_objects = 0;
 
 // Declared in ir.h and public: vm::bytecode.cc's own instruction-name table
 // shares this rather than repeating the eleven arithmetic/compare names in a

@@ -177,6 +177,7 @@ struct FnCompiler {
 Program compile(const Module& m) {
   Program p;
   p.consts = m.consts;
+  p.str_consts = m.str_consts;
   p.positions = m.positions;
   p.capture_maps = m.capture_maps;
   p.chunks.resize(m.funcs.size());

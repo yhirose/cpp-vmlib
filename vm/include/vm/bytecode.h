@@ -72,6 +72,7 @@ struct Chunk {
 struct Program {
   std::vector<Chunk> chunks;  // chunks[0] is the entry point
   std::vector<coreir::Const> consts;
+  std::vector<std::string> str_consts;  // SPIKE: bytes for ConstKind::Str
   std::vector<coreir::SrcPos> positions;
   std::vector<std::vector<coreir::CaptureSrc>> capture_maps;
 };

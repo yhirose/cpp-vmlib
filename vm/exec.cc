@@ -6,6 +6,7 @@
 
 #include "coreir/rt.h"
 #include "coreir/semantics.h"
+#include "coreir/value.h"
 
 using namespace coreir;
 
@@ -16,12 +17,20 @@ namespace {
 // a C++ stack frame, so its address is stable for as long as it is live --
 // which is what lets `captures` be raw pointers into the frame that declared
 // each variable.
+//
+// SPIKE: `regs` and `locals` hold owned references now, and nothing in this
+// file places a retain or a release to make that work. Value is an RAII
+// handle, so an ordinary assignment releases what a register held and retains
+// what it now holds, and ~Frame releases the lot. That is also what keeps a
+// host throw exception-safe for free: the unwind that destroys Exec's frame
+// stack releases every value in every live frame, with no unwind table to
+// get wrong.
 struct Frame {
   const Chunk* chunk = nullptr;
   size_t pc = 0;
   std::vector<Slot> locals;
   std::vector<Slot*> captures;
-  std::vector<int64_t> regs;
+  std::vector<Value> regs;
 };
 
 struct Exec {
@@ -69,6 +78,23 @@ struct Exec {
     coreir_rt::fail(msg, sp.line, sp.col);
   }
 
+  // A constant is materialized fresh on every load rather than held as a
+  // ready-made Value in the pool. That costs an allocation per string literal
+  // load, which the real version will not want -- culebra's answer is that
+  // constants are immortal and LoadConst does not refcount them at all
+  // (vm.md 5.2). Deferred on purpose: an immortal object is a second lifetime
+  // rule, and this spike is testing whether one rule suffices.
+  Value const_value(int32_t index) const {
+    const Const& c = p.consts[static_cast<size_t>(index)];
+    switch (c.kind) {
+      case ConstKind::Int:
+        return Value::make_int(c.bits);
+      case ConstKind::Str:
+        return Value::make_str(p.str_consts[static_cast<size_t>(c.bits)]);
+    }
+    return Value();
+  }
+
   Slot& slot_of(Frame& f, int32_t kind, int32_t index) {
     return static_cast<VarKind>(kind) == VarKind::Local ? f.locals[index]
                                                         : *f.captures[index];
@@ -90,18 +116,21 @@ struct Exec {
       const Insn& in = ch.code[f.pc];
       switch (in.op) {
         case Op::LoadConst:
-          f.regs[in.a] = p.consts[in.b].bits;
+          f.regs[in.a] = const_value(in.b);
           break;
-        case Op::Neg:
-          f.regs[in.a] = wrap_neg(f.regs[in.b]);
+        case Op::Neg: {
+          const Value& v = f.regs[in.b];
+          if (auto err = unop_error(UnOp::Neg, v); !err.empty()) fail(f, err);
+          f.regs[in.a] = apply_unop(UnOp::Neg, v);
           break;
+        }
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
         case Op::Eq:  case Op::Ne:  case Op::Lt:  case Op::Le:
         case Op::Gt:  case Op::Ge: {
           const BinOp op = binop_of(in.op);
-          const int64_t l = f.regs[in.b];
-          const int64_t r = f.regs[in.c];
-          if (const char* trap = binop_trap(op, l, r)) fail(f, trap);
+          const Value& l = f.regs[in.b];
+          const Value& r = f.regs[in.c];
+          if (auto err = binop_error(op, l, r); !err.empty()) fail(f, err);
           f.regs[in.a] = apply_binop(op, l, r);
           break;
         }
@@ -130,7 +159,7 @@ struct Exec {
           f.pc = static_cast<size_t>(in.a);
           continue;
         case Op::JumpIfFalse:
-          if (!truthy(f.regs[in.a])) {
+          if (!f.regs[in.a].truthy()) {
             f.pc = static_cast<size_t>(in.b);
             continue;
           }
@@ -143,12 +172,21 @@ struct Exec {
           push(in.a, p.capture_maps[in.b], f, pos);
           continue;
         }
-        case Op::Out:
-          coreir_rt_out(f.regs[in.a]);
+        case Op::Out: {
+          const Value& v = f.regs[in.a];
+          if (v.is_str()) {
+            coreir_rt_out_str(v.as_str().data(),
+                              static_cast<int64_t>(v.as_str().size()));
+          } else if (v.is_int()) {
+            coreir_rt_out(v.as_int());
+          } else {
+            coreir_rt_out_str("nil", 3);
+          }
           break;
+        }
         case Op::In: {
           const SrcPos sp = p.positions[ch.code_pos[f.pc]];
-          f.regs[in.a] = coreir_rt_in(sp.line, sp.col);
+          f.regs[in.a] = Value::make_int(coreir_rt_in(sp.line, sp.col));
           break;
         }
         case Op::Ret:

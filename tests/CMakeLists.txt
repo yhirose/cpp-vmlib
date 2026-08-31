@@ -21,7 +21,7 @@ add_test(NAME errors
 # in the exception-safety property include/coreir/rt.h documents.
 # deep_calls: call chains deeper than the machine stack, which the executor
 # survives because its frames are heap objects rather than C++ activations.
-foreach(t throw_safety deep_calls)
+foreach(t throw_safety deep_calls spike_values)
   add_executable(${t}_test ${t}.cc)
   target_link_libraries(${t}_test PRIVATE coreir vm)
   add_test(NAME ${t} COMMAND ${t}_test)
