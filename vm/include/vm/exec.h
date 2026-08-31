@@ -4,11 +4,11 @@
 
 namespace vm {
 
-// Run the bytecode. max_call_depth bounds the executor's own C++ recursion
-// (one call() per procedure call) so a runaway program fails cleanly instead
-// of overflowing whatever stack this call runs on -- the default assumes an
-// 8 MB stack; a host running on a thread with a different budget should pass
-// its own.
+// Run the bytecode. Calls do not recurse through this thread's C++ stack --
+// the executor keeps its own stack of heap-allocated frames -- so the bound
+// is on how many of those may be live at once, not on how much machine stack
+// they would need. A runaway program still fails cleanly, at its call site,
+// rather than growing the heap until the allocator gives out.
 void run(const Program& p, int max_call_depth = 10000);
 
 }  // namespace vm

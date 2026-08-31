@@ -1,12 +1,15 @@
 // Locks in the property include/coreir/rt.h documents but the standalone
 // CLI never exercises: a host whose coreir_rt_fail throws instead of exiting
-// must see vm/exec.cc unwind cleanly, with every live Frame's vectors
-// destructed normally, rather than being coupled to process-exit semantics.
+// must see vm/exec.cc unwind cleanly, releasing every live frame, rather than
+// being coupled to process-exit semantics. The executor owns its frames on
+// the heap, so what has to hold is that its own frame stack is destroyed as
+// the throw leaves vm::run -- not that the C++ unwinder passes through one
+// activation per frame, which it no longer does.
 //
 // Builds a tiny Core-IR program by hand (no PEG front end needed): a two-deep
-// call divides by zero, so the failure fires from inside two nested
-// Exec::call() frames, not the outermost one -- the case that would expose a
-// depth counter or resource cleanup skipped by an unwind.
+// call divides by zero, so the failure fires with two frames live rather than
+// one -- the case that would expose frames leaked or bookkeeping skipped by
+// an unwind.
 
 #include <cstdio>
 #include <cstdlib>
@@ -79,12 +82,11 @@ int main() {
     }
   }
 
-  // The exception unwound through two Exec::call() frames (main -> inner).
-  // Running a second, independent program afterward guards against the
-  // regression this test exists to prevent: today vm/exec.cc has no global
-  // or process-wide state, so nothing carries over between runs by
-  // construction, but that is an invariant worth re-checking mechanically if
-  // it is ever true.
+  // The throw left vm::run with two frames live (main -> inner). Running a
+  // second, independent program afterward guards against the regression this
+  // test exists to prevent: today vm/exec.cc has no global or process-wide
+  // state, so nothing carries over between runs by construction, but that is
+  // an invariant worth re-checking mechanically if it is ever true.
   const coreir::Module m2 = build_program();
   const vm::Program p2 = vm::compile(m2);
   try {

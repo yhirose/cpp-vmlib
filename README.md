@@ -83,6 +83,11 @@ see its own README for what it does and does not rehearse.
 Two things a host embedding this library gets for free, because the executor
 calls for them at the right points rather than leaving a host to add them
 after the fact: `coreir_rt_poll()` runs on every loop back-edge and call, so a
-host that wants to interrupt a running program has a place to do it; a
-recursion-depth counter turns a runaway procedure call into a reported
-failure instead of a silent stack overflow.
+host that wants to interrupt a running program has a place to do it; a bound
+on how many frames may be live turns a runaway procedure call into a reported
+failure at its call site.
+
+Calls do not recurse through the host's C++ stack. The executor keeps its own
+stack of heap-allocated frames, so a deep call chain costs heap rather than
+machine stack and cannot overflow the thread it runs on, and a frame's address
+stays put for as long as it is live.
