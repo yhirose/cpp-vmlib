@@ -1,0 +1,3 @@
+BEGIN
+  CALL p
+END.

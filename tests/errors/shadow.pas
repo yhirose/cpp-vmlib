@@ -1,0 +1,5 @@
+VAR a;
+PROCEDURE p;
+VAR a;
+BEGIN END;
+BEGIN END.

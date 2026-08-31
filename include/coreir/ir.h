@@ -1,0 +1,319 @@
+// coreir -- a closed intermediate representation.
+//
+// A front end lowers its own grammar into these ten node shapes; nothing in
+// this header, or in any backend that consumes it, knows what parser produced
+// them. That is the whole point: the tag set is closed, so a backend written
+// once serves every front end that can reach it.
+//
+// Node is a fixed-size POD with no virtual functions, no RTTI, no
+// std::function and no static initializer. Those are what survive
+// --gc-sections as vtable/typeinfo/comdat residue in a binary that never uses
+// them, so keeping them out is a size property, not a style preference.
+
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace coreir {
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+// Convention: every node produces a value. Statements produce Void. Block is
+// the value of its last child, If the value of the branch taken, Call the
+// callee's return value. PL/0 never observes this -- everything is Void -- but
+// fixing it now keeps an expression-oriented front end from having to redefine
+// Block/If/Call later, which would be a breaking change rather than a new tag.
+enum class Tag : uint8_t {
+  Literal,    // a = const pool index
+  VarRef,     // op = VarKind, a = index
+  Unary,      // op = UnOp,    children: operand
+  Binary,     // op = BinOp,   children: lhs, rhs
+  Assign,     // op = VarKind, a = index, children: value
+  If,         // children: cond, then [, else]
+  While,      // children: cond, body
+  Block,      // children: stmts...  (zero children = the empty statement)
+  Call,       // a = func index, b = capture map index, children: args...
+  Intrinsic,  // op = IntrinsicId, children: args...
+};
+
+enum class UnOp : uint8_t { Neg };
+
+enum class BinOp : uint8_t {
+  Add, Sub, Mul, Div, Mod,
+  Eq, Ne, Lt, Le, Gt, Ge,
+};
+
+enum class IntrinsicId : uint8_t { Print, ReadInt };
+
+// A variable is either a slot in this frame or a slot borrowed from an
+// enclosing one. There is deliberately no "level" -- static links assume the
+// defining activation is still on the stack, which closures break. A capture
+// list survives first-class functions, so VarRef's meaning does not have to
+// change when they arrive.
+enum class VarKind : uint8_t { Local, Capture };
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+inline constexpr uint32_t kNoNodeId = 0xFFFFFFFFu;
+
+struct NodeId {
+  uint32_t v = kNoNodeId;
+  constexpr bool valid() const { return v != kNoNodeId; }
+};
+
+inline constexpr bool operator==(NodeId a, NodeId b) { return a.v == b.v; }
+inline constexpr bool operator!=(NodeId a, NodeId b) { return a.v != b.v; }
+
+struct SrcPos {
+  uint32_t line = 0;
+  uint32_t col = 0;
+};
+
+enum class ConstKind : uint8_t { Int };
+
+struct Const {
+  ConstKind kind = ConstKind::Int;
+  int64_t bits = 0;
+};
+
+// Where a callee's capture comes from, expressed in the *caller's* frame. A
+// per-function list would not work: fib's captures live in the root frame, but
+// fib's own recursive call runs with fib's frame, and finding "the defining
+// frame" at run time is exactly the static link this design rejects. So the
+// forwarding table belongs to the call site.
+struct CaptureSrc {
+  VarKind from = VarKind::Local;
+  int32_t index = 0;
+};
+
+struct Func {
+  std::string name;
+  int32_t num_locals = 0;
+  int32_t num_captures = 0;
+  NodeId body;
+  // Diagnostics only -- never read to execute anything. Kept the way culebra
+  // keeps Chunk::positions: information the run does not need, held
+  // structurally so error messages do not have to thread it by hand.
+  std::vector<std::string> local_names;
+  std::vector<std::string> capture_names;
+};
+
+struct Node {
+  Tag tag = Tag::Block;
+  uint8_t op = 0;        // UnOp / BinOp / IntrinsicId / VarKind, per tag
+  uint32_t pos = 0;      // index into Module::positions
+  int32_t a = 0;         // const index / var index / func index
+  int32_t b = 0;         // capture map index
+  uint32_t first_child = 0;
+  uint32_t num_children = 0;
+};
+
+struct Module {
+  std::vector<Node> nodes;
+  std::vector<NodeId> child_ids;  // flat backing for every node's children
+  std::vector<SrcPos> positions;
+  std::vector<Const> consts;
+  std::vector<Func> funcs;                      // funcs[0] is the entry point
+  std::vector<std::vector<CaptureSrc>> capture_maps;
+
+  const Node& at(NodeId id) const { return nodes[id.v]; }
+  NodeId child(NodeId id, uint32_t i) const {
+    return child_ids[nodes[id.v].first_child + i];
+  }
+  uint32_t num_children(NodeId id) const { return nodes[id.v].num_children; }
+  SrcPos pos_of(NodeId id) const { return positions[nodes[id.v].pos]; }
+  int64_t int_const(NodeId id) const { return consts[nodes[id.v].a].bits; }
+};
+
+// ---------------------------------------------------------------------------
+// Arity
+//
+// -1 means variadic. verify() and the builder both read this table, so a tag's
+// shape is stated once.
+// ---------------------------------------------------------------------------
+
+inline constexpr int arity_of(Tag t) {
+  switch (t) {
+    case Tag::Literal:   return 0;
+    case Tag::VarRef:    return 0;
+    case Tag::Unary:     return 1;
+    case Tag::Binary:    return 2;
+    case Tag::Assign:    return 1;
+    case Tag::If:        return -1;  // 2 or 3
+    case Tag::While:     return 2;
+    case Tag::Block:     return -1;
+    case Tag::Call:      return -1;
+    case Tag::Intrinsic: return -1;  // per IntrinsicId
+  }
+  return -1;
+}
+
+inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
+  switch (id) {
+    case IntrinsicId::Print:   return 1;
+    case IntrinsicId::ReadInt: return 0;
+  }
+  return 0;
+}
+
+// Whether a tag yields a value usable as an operand. Under the "every node
+// produces a value" convention every tag does in principle, but PL/0's
+// statements are Void, and verify() uses this to catch a front end that wires
+// a statement into an operand position.
+inline constexpr bool yields_value(Tag t) {
+  switch (t) {
+    case Tag::Literal:
+    case Tag::VarRef:
+    case Tag::Unary:
+    case Tag::Binary:
+    case Tag::Intrinsic:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Views -- the only way to read a node's children
+//
+// Each view is paired with a Builder::make_* below. Nothing outside this
+// header should index child_ids directly, so a tag's layout lives in exactly
+// one place even though four consumers (binder, interp, vm compiler, and
+// through the bytecode, llvmgen) read it.
+//
+// Views hold NodeId, never const Node* -- the arena grows and pointers into it
+// do not survive that.
+// ---------------------------------------------------------------------------
+
+struct UnaryView  { UnOp op; NodeId operand; };
+struct BinaryView { BinOp op; NodeId lhs, rhs; };
+struct AssignView { VarKind kind; int32_t index; NodeId value; };
+struct VarRefView { VarKind kind; int32_t index; };
+struct IfView     { NodeId cond, then_, els; };  // els may be invalid
+struct WhileView  { NodeId cond, body; };
+struct CallView   { int32_t func; int32_t capture_map; };
+struct IntrinsicView { IntrinsicId id; };
+
+inline UnaryView view_unary(const Module& m, NodeId n) {
+  return {static_cast<UnOp>(m.at(n).op), m.child(n, 0)};
+}
+inline BinaryView view_binary(const Module& m, NodeId n) {
+  return {static_cast<BinOp>(m.at(n).op), m.child(n, 0), m.child(n, 1)};
+}
+inline AssignView view_assign(const Module& m, NodeId n) {
+  return {static_cast<VarKind>(m.at(n).op), m.at(n).a, m.child(n, 0)};
+}
+inline VarRefView view_varref(const Module& m, NodeId n) {
+  return {static_cast<VarKind>(m.at(n).op), m.at(n).a};
+}
+inline IfView view_if(const Module& m, NodeId n) {
+  IfView v{m.child(n, 0), m.child(n, 1), NodeId{}};
+  if (m.num_children(n) > 2) v.els = m.child(n, 2);
+  return v;
+}
+inline WhileView view_while(const Module& m, NodeId n) {
+  return {m.child(n, 0), m.child(n, 1)};
+}
+inline CallView view_call(const Module& m, NodeId n) {
+  return {m.at(n).a, m.at(n).b};
+}
+inline IntrinsicView view_intrinsic(const Module& m, NodeId n) {
+  return {static_cast<IntrinsicId>(m.at(n).op)};
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+class Builder {
+public:
+  explicit Builder(Module& m) : m_(m) {}
+
+  uint32_t intern_pos(SrcPos p) {
+    for (uint32_t i = 0; i < m_.positions.size(); ++i) {
+      if (m_.positions[i].line == p.line && m_.positions[i].col == p.col) {
+        return i;
+      }
+    }
+    m_.positions.push_back(p);
+    return static_cast<uint32_t>(m_.positions.size() - 1);
+  }
+
+  int32_t intern_int(int64_t v) {
+    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
+      if (m_.consts[i].kind == ConstKind::Int && m_.consts[i].bits == v) {
+        return static_cast<int32_t>(i);
+      }
+    }
+    m_.consts.push_back({ConstKind::Int, v});
+    return static_cast<int32_t>(m_.consts.size() - 1);
+  }
+
+  NodeId literal(int64_t v, SrcPos p) {
+    return emit(Tag::Literal, 0, p, intern_int(v), 0, {});
+  }
+  NodeId varref(VarKind k, int32_t index, SrcPos p) {
+    return emit(Tag::VarRef, static_cast<uint8_t>(k), p, index, 0, {});
+  }
+  NodeId unary(UnOp op, NodeId operand, SrcPos p) {
+    return emit(Tag::Unary, static_cast<uint8_t>(op), p, 0, 0, {operand});
+  }
+  NodeId binary(BinOp op, NodeId lhs, NodeId rhs, SrcPos p) {
+    return emit(Tag::Binary, static_cast<uint8_t>(op), p, 0, 0, {lhs, rhs});
+  }
+  NodeId assign(VarKind k, int32_t index, NodeId value, SrcPos p) {
+    return emit(Tag::Assign, static_cast<uint8_t>(k), p, index, 0, {value});
+  }
+  NodeId make_if(NodeId cond, NodeId then_, NodeId els, SrcPos p) {
+    if (els.valid()) return emit(Tag::If, 0, p, 0, 0, {cond, then_, els});
+    return emit(Tag::If, 0, p, 0, 0, {cond, then_});
+  }
+  NodeId make_while(NodeId cond, NodeId body, SrcPos p) {
+    return emit(Tag::While, 0, p, 0, 0, {cond, body});
+  }
+  NodeId block(const std::vector<NodeId>& stmts, SrcPos p) {
+    return emit(Tag::Block, 0, p, 0, 0, stmts);
+  }
+  NodeId call(int32_t func, int32_t capture_map, SrcPos p) {
+    return emit(Tag::Call, 0, p, func, capture_map, {});
+  }
+  NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args, SrcPos p) {
+    return emit(Tag::Intrinsic, static_cast<uint8_t>(id), p, 0, 0, args);
+  }
+
+private:
+  NodeId emit(Tag tag, uint8_t op, SrcPos p, int32_t a, int32_t b,
+              const std::vector<NodeId>& children) {
+    Node n;
+    n.tag = tag;
+    n.op = op;
+    n.pos = intern_pos(p);
+    n.a = a;
+    n.b = b;
+    n.first_child = static_cast<uint32_t>(m_.child_ids.size());
+    n.num_children = static_cast<uint32_t>(children.size());
+    for (NodeId c : children) m_.child_ids.push_back(c);
+    m_.nodes.push_back(n);
+    return NodeId{static_cast<uint32_t>(m_.nodes.size() - 1)};
+  }
+
+  Module& m_;
+};
+
+// ---------------------------------------------------------------------------
+// verify -- what makes "closed" mean something
+// ---------------------------------------------------------------------------
+
+std::optional<std::string> verify(const Module& m);
+
+// A readable dump of the IR, for --dump-ir.
+std::string to_string(const Module& m);
+
+}  // namespace coreir
