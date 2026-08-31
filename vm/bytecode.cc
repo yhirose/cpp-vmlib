@@ -23,6 +23,20 @@ const char* name_of(Op op) {
     case Op::Out:         return "out";
     case Op::In:          return "in";
     case Op::Ret:         return "ret";
+    case Op::MakeClosure: return "makeclosure";
+    case Op::CallValue:   return "callvalue";
+    case Op::CellNew:     return "cellnew";
+    case Op::LoadNil:     return "loadnil";
+    case Op::Move:        return "move";
+  }
+  return "?";
+}
+
+const char* kind_name(int32_t k) {
+  switch (static_cast<coreir::VarKind>(k)) {
+    case coreir::VarKind::Local:   return "local";
+    case coreir::VarKind::Capture: return "capture";
+    case coreir::VarKind::Cell:    return "cell";
   }
   return "?";
 }
@@ -47,12 +61,20 @@ std::string to_string(const Program& p) {
           out << " r" << in.a << ", r" << in.b;
           break;
         case Op::LoadVar:
-          out << " r" << in.a << ", " << (in.b == 0 ? "local" : "capture")
-              << "[" << in.c << "]";
+          out << " r" << in.a << ", " << kind_name(in.b) << "[" << in.c << "]";
           break;
         case Op::StoreVar:
-          out << " " << (in.a == 0 ? "local" : "capture") << "[" << in.b
-              << "], r" << in.c;
+          out << " " << kind_name(in.a) << "[" << in.b << "], r" << in.c;
+          break;
+        case Op::MakeClosure:
+          out << " r" << in.a << ", #" << in.b << " cmap=" << in.c;
+          break;
+        case Op::CallValue:
+          out << " r" << in.a << ", r" << in.b << ", args r" << in.c << ".."
+              << (in.c + in.d);
+          break;
+        case Op::CellNew:
+          out << " cell[" << in.a << "]";
           break;
         case Op::Jump:
           out << " " << in.a;

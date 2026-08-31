@@ -76,10 +76,9 @@ struct Verifier {
         break;
       case Tag::VarRef:
       case Tag::Assign: {
-        const auto k = static_cast<VarKind>(n.op);
-        const int32_t limit =
-            k == VarKind::Local ? f.num_locals : f.num_captures;
-        if (n.a < 0 || n.a >= limit) return fail("var index out of range");
+        if (n.a < 0 || n.a >= slot_limit(f, static_cast<VarKind>(n.op))) {
+          return fail("var index out of range");
+        }
         break;
       }
       case Tag::If:
@@ -101,14 +100,40 @@ struct Verifier {
         }
         // Every forwarding entry must be resolvable in this frame.
         for (const CaptureSrc& src : cmap) {
-          const int32_t limit = src.from == VarKind::Local ? f.num_locals
-                                                           : f.num_captures;
-          if (src.index < 0 || src.index >= limit) {
+          if (src.index < 0 || src.index >= slot_limit(f, src.from)) {
             return fail("capture map entry out of range in caller frame");
           }
         }
         break;
       }
+      // SPIKE: a closure's captures are cells, which outlive the frame that
+      // built it. A plain Local cannot be one -- it dies with the frame -- so
+      // naming one here is the mistake this rejects, and the front end's cue
+      // that the variable needed promoting to a Cell first.
+      case Tag::MakeClosure: {
+        if (n.a < 0 || static_cast<size_t>(n.a) >= m.funcs.size()) {
+          return fail("closure func index out of range");
+        }
+        if (n.b < 0 || static_cast<size_t>(n.b) >= m.capture_maps.size()) {
+          return fail("closure capture map index out of range");
+        }
+        const auto& cmap = m.capture_maps[n.b];
+        if (cmap.size() != static_cast<size_t>(m.funcs[n.a].num_captures)) {
+          return fail("capture map length does not match closure");
+        }
+        for (const CaptureSrc& src : cmap) {
+          if (src.from == VarKind::Local) {
+            return fail("a closure cannot capture a local; promote it to a cell");
+          }
+          if (src.index < 0 || src.index >= slot_limit(f, src.from)) {
+            return fail("capture map entry out of range in caller frame");
+          }
+        }
+        break;
+      }
+      case Tag::CallValue:
+        if (n.num_children < 1) return fail("CallValue needs a callee");
+        break;
       case Tag::Intrinsic: {
         const auto id = static_cast<IntrinsicId>(n.op);
         if (n.num_children != intrinsic_arity(id)) {
@@ -135,6 +160,7 @@ struct Verifier {
       case Tag::Call:  // args..., empty for PL/0 but part of the documented
                        // shape (a future frontend with call arguments should
                        // not need this switch touched to be checked).
+      case Tag::CallValue:  // callee, then args -- all value positions
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
         }

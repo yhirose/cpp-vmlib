@@ -39,6 +39,13 @@ enum class Tag : uint8_t {
   Block,      // children: stmts...  (zero children = the empty statement)
   Call,       // a = func index, b = capture map index, children: args...
   Intrinsic,  // op = IntrinsicId, children: args...
+  // SPIKE: first-class functions. MakeClosure yields a callable value that
+  // owns the cells named by its capture map, resolved in the frame that
+  // builds it; CallValue calls whatever a value turns out to be. Together
+  // they are what Call cannot express -- a function that outlives the frame
+  // it was written in.
+  MakeClosure,  // a = func index, b = capture map index
+  CallValue,    // children: callee, args...
 };
 
 enum class UnOp : uint8_t { Neg };
@@ -55,7 +62,13 @@ enum class IntrinsicId : uint8_t { Print, ReadInt };
 // defining activation is still on the stack, which closures break. A capture
 // list survives first-class functions, so VarRef's meaning does not have to
 // change when they arrive.
-enum class VarKind : uint8_t { Local, Capture };
+// SPIKE: Cell joins the two. A local a closure captures cannot stay a slot in
+// the frame -- the closure may outlive the frame -- so a front end promotes it
+// to a Cell, a heap box the frame and every closure over it share. Which
+// locals need promoting is the front end's analysis to do (culebra's
+// FnAnalysis calls them captured_locals); the IR only needs the distinction to
+// exist. A CaptureSrc therefore names a Cell or a Capture, never a Local.
+enum class VarKind : uint8_t { Local, Capture, Cell };
 
 // ---------------------------------------------------------------------------
 // Storage
@@ -106,6 +119,14 @@ struct Func {
   // structurally so error messages do not have to thread it by hand.
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
+  // SPIKE: cells are storage the frame shares with closures built inside it;
+  // params are the first `num_params` locals, so an argument that needs
+  // capturing is copied into a cell by the front end and the calling
+  // convention itself stays about locals only. Both sit after the existing
+  // members so that every brace initializer already written still means what
+  // it did.
+  int32_t num_cells = 0;
+  int32_t num_params = 0;
 };
 
 struct Node {
@@ -159,8 +180,23 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Block:     return -1;
     case Tag::Call:      return -1;
     case Tag::Intrinsic: return -1;  // per IntrinsicId
+    case Tag::MakeClosure: return 0;
+    case Tag::CallValue:   return -1;  // callee, then args
   }
   return -1;
+}
+
+// How many slots of a given kind a function has. One place, because the
+// verifier bounds-checks three different things against it (a VarRef, an
+// Assign and a capture map entry) and a fourth kind would otherwise mean
+// finding all three.
+inline int32_t slot_limit(const Func& f, VarKind k) {
+  switch (k) {
+    case VarKind::Local:   return f.num_locals;
+    case VarKind::Capture: return f.num_captures;
+    case VarKind::Cell:    return f.num_cells;
+  }
+  return 0;
 }
 
 inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
@@ -182,6 +218,19 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Unary:
     case Tag::Binary:
     case Tag::Intrinsic:
+    // SPIKE: unlike Call, these produce a value. Call is left alone rather
+    // than widened to match, so PL/0 keeps compiling to exactly the bytecode
+    // it did; unifying the two call forms is Phase 1b's job.
+    //
+    // Block and If were always documented as producing one -- "Block is the
+    // value of its last child, If the value of the branch taken" at the top
+    // of this header -- and were only false here because PL/0 has no way to
+    // observe it. A function whose body is a block that ends in an expression
+    // does observe it.
+    case Tag::Block:
+    case Tag::If:
+    case Tag::MakeClosure:
+    case Tag::CallValue:
       return true;
     default:
       return false;
@@ -317,6 +366,14 @@ public:
   }
   NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args, SrcPos p) {
     return emit(Tag::Intrinsic, static_cast<uint8_t>(id), p, 0, 0, args);
+  }
+  NodeId make_closure(int32_t func, int32_t capture_map, SrcPos p) {
+    return emit(Tag::MakeClosure, 0, p, func, capture_map, {});
+  }
+  NodeId call_value(NodeId callee, const std::vector<NodeId>& args, SrcPos p) {
+    std::vector<NodeId> children{callee};
+    children.insert(children.end(), args.begin(), args.end());
+    return emit(Tag::CallValue, 0, p, 0, 0, children);
   }
 
 private:

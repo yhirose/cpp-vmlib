@@ -31,6 +31,15 @@ struct Frame {
   std::vector<Slot> locals;
   std::vector<Slot*> captures;
   std::vector<Value> regs;
+  // SPIKE: cells this frame owns, and cells it borrowed from whoever built
+  // the closure being run. Both are Cell values, so both are shared rather
+  // than pointed at -- which is the whole difference from `captures` above:
+  // a Slot* dies with the frame it points into, a Cell does not.
+  std::vector<Value> cells;
+  std::vector<Value> cell_captures;
+  // Where in the caller this frame's return value goes, and whether the
+  // caller is waiting for one at all (a static Call is not).
+  int32_t ret_reg = -1;
 };
 
 struct Exec {
@@ -49,7 +58,16 @@ struct Exec {
     f->chunk = &ch;
     f->locals.resize(static_cast<size_t>(ch.num_locals));
     f->regs.resize(static_cast<size_t>(ch.num_regs));
+    f->cells.resize(static_cast<size_t>(ch.num_cells));
     return f;
+  }
+
+  // Shared by both call forms: the depth bound and the interrupt point.
+  void check_can_push(SrcPos pos) {
+    if (frames.size() > max_frames) {
+      coreir_rt::fail("recursion limit exceeded", pos.line, pos.col);
+    }
+    coreir_rt_poll();
   }
 
   // The one place a call can fail before it starts. An explicit frame stack
@@ -59,10 +77,7 @@ struct Exec {
   // runaway call reported at its call site, the way a divide-by-zero is.
   void push(int32_t func, const std::vector<CaptureSrc>& cmap, Frame& caller,
             SrcPos pos) {
-    if (frames.size() > max_frames) {
-      coreir_rt::fail("recursion limit exceeded", pos.line, pos.col);
-    }
-    coreir_rt_poll();
+    check_can_push(pos);
     std::unique_ptr<Frame> f = make_frame(p.chunks[func]);
     f->captures.reserve(cmap.size());
     for (const CaptureSrc& src : cmap) {
@@ -70,6 +85,34 @@ struct Exec {
                                 ? &caller.locals[src.index]
                                 : caller.captures[src.index]);
     }
+    frames.push_back(std::move(f));
+  }
+
+  // SPIKE: calling a closure. Where push() forwards Slot pointers into a
+  // caller that must still be alive, this hands over the closure's own cells
+  // -- which is why the closure can be called from anywhere, including after
+  // the frame that built it has returned.
+  void push_closure(const Value& callee, const Value* args, int32_t argc,
+                    int32_t ret_reg, SrcPos pos) {
+    if (!callee.is_func()) {
+      coreir_rt::fail(std::string("cannot call ") + type_name(callee.tag()),
+                      pos.line, pos.col);
+    }
+    const ClosureObj* c = callee.as_closure();
+    const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
+    if (argc != ch.num_params) {
+      coreir_rt::fail(ch.name + " takes " + std::to_string(ch.num_params) +
+                          " argument(s), given " + std::to_string(argc),
+                      pos.line, pos.col);
+    }
+    check_can_push(pos);
+    std::unique_ptr<Frame> f = make_frame(ch);
+    f->cell_captures = c->cells;  // shared, not copied: each is a Cell value
+    for (int32_t i = 0; i < argc; ++i) {
+      f->locals[static_cast<size_t>(i)].value = args[i];
+      f->locals[static_cast<size_t>(i)].inited = 1;
+    }
+    f->ret_reg = ret_reg;
     frames.push_back(std::move(f));
   }
 
@@ -95,9 +138,66 @@ struct Exec {
     return Value();
   }
 
-  Slot& slot_of(Frame& f, int32_t kind, int32_t index) {
-    return static_cast<VarKind>(kind) == VarKind::Local ? f.locals[index]
-                                                        : *f.captures[index];
+  // Reading and writing a variable, in whichever of the three storage classes
+  // it lives.
+  //
+  // SPIKE: Capture means two different things depending on how the frame was
+  // entered, and a frame is only ever entered one of the two ways. A static
+  // Call forwards Slot pointers into a caller that must outlive it; a closure
+  // call hands over cells, which nothing has to outlive. Phase 1b retires the
+  // static form and this fork with it -- until then, `cell_captures` being
+  // non-empty is what says which kind of frame this is.
+  //
+  // Locals and Slot captures carry an `inited` flag; a cell starts out holding
+  // nil, so "read before assigned" cannot be observed through one. Folding
+  // that difference away (an Uninit tag) is Phase 1a's job.
+  Value& var_ref(Frame& f, int32_t kind, int32_t index, const Chunk& ch) {
+    switch (static_cast<VarKind>(kind)) {
+      case VarKind::Local: {
+        Slot& s = f.locals[index];
+        if (!s.inited) fail(f, format_uninit_var(ch.local_names[index]));
+        return s.value;
+      }
+      case VarKind::Capture: {
+        if (!f.cell_captures.empty()) {
+          return f.cell_captures[index].as_cell()->v;
+        }
+        Slot& s = *f.captures[index];
+        if (!s.inited) fail(f, format_uninit_var(ch.capture_names[index]));
+        return s.value;
+      }
+      case VarKind::Cell:
+        return f.cells[index].as_cell()->v;
+    }
+    return f.regs[0];  // unreachable
+  }
+
+  void var_store(Frame& f, int32_t kind, int32_t index, const Value& v) {
+    switch (static_cast<VarKind>(kind)) {
+      case VarKind::Local:
+        f.locals[index].value = v;
+        f.locals[index].inited = 1;
+        break;
+      case VarKind::Capture:
+        if (!f.cell_captures.empty()) {
+          f.cell_captures[index].as_cell()->v = v;
+        } else {
+          f.captures[index]->value = v;
+          f.captures[index]->inited = 1;
+        }
+        break;
+      case VarKind::Cell:
+        f.cells[index].as_cell()->v = v;
+        break;
+    }
+  }
+
+  // The cells a MakeClosure hands to the closure it builds, resolved in the
+  // frame doing the building. A Local is rejected by verify() -- it would die
+  // with this frame -- so only these two cases exist.
+  Value capture_cell(Frame& f, const CaptureSrc& src) {
+    return src.from == VarKind::Cell ? f.cells[src.index]
+                                     : f.cell_captures[src.index];
   }
 
   void run() {
@@ -134,23 +234,12 @@ struct Exec {
           f.regs[in.a] = apply_binop(op, l, r);
           break;
         }
-        case Op::LoadVar: {
-          Slot& s = slot_of(f, in.b, in.c);
-          if (!s.inited) {
-            const auto& names = static_cast<VarKind>(in.b) == VarKind::Local
-                                    ? ch.local_names
-                                    : ch.capture_names;
-            fail(f, format_uninit_var(names[in.c]));
-          }
-          f.regs[in.a] = s.value;
+        case Op::LoadVar:
+          f.regs[in.a] = var_ref(f, in.b, in.c, ch);
           break;
-        }
-        case Op::StoreVar: {
-          Slot& s = slot_of(f, in.a, in.b);
-          s.value = f.regs[in.c];
-          s.inited = 1;
+        case Op::StoreVar:
+          var_store(f, in.a, in.b, f.regs[in.c]);
           break;
-        }
         case Op::Jump:
           // A backward (or self) jump is a loop iteration -- the one place a
           // program can spin without ever calling or producing output, so
@@ -189,10 +278,45 @@ struct Exec {
           f.regs[in.a] = Value::make_int(coreir_rt_in(sp.line, sp.col));
           break;
         }
-        case Op::Ret:
+        case Op::LoadNil:
+          f.regs[in.a] = Value();
+          break;
+        case Op::Move:
+          f.regs[in.a] = f.regs[in.b];
+          break;
+        case Op::CellNew:
+          f.cells[in.a] = Value::make_cell();
+          break;
+        case Op::MakeClosure: {
+          std::vector<Value> cells;
+          const auto& cmap = p.capture_maps[static_cast<size_t>(in.c)];
+          cells.reserve(cmap.size());
+          for (const CaptureSrc& src : cmap) {
+            cells.push_back(capture_cell(f, src));
+          }
+          f.regs[in.a] = Value::make_closure(in.b, std::move(cells));
+          break;
+        }
+        case Op::CallValue: {
+          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          // Copy the callee out first: the result register may be the callee's
+          // own, and the frame this pushes outlives the read either way.
+          const Value callee = f.regs[in.b];
+          ++f.pc;
+          push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+          continue;
+        }
+        case Op::Ret: {
+          // Move the result into the caller before the frame goes: after the
+          // pop, the register it lives in is gone.
+          Value result;
+          if (in.b != 0) result = f.regs[in.a];
+          const int32_t ret_reg = f.ret_reg;
           frames.pop_back();
           if (frames.empty()) return;
+          if (ret_reg >= 0) frames.back()->regs[ret_reg] = std::move(result);
           continue;
+        }
       }
       ++f.pc;
     }

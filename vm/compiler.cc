@@ -20,8 +20,9 @@ struct FnCompiler {
     return r;
   }
 
-  size_t emit(Op op, int32_t a, int32_t b, int32_t c, uint32_t pos) {
-    ch.code.push_back({op, a, b, c});
+  size_t emit(Op op, int32_t a, int32_t b, int32_t c, uint32_t pos,
+              int32_t d = 0) {
+    ch.code.push_back({op, a, b, c, d});
     ch.code_pos.push_back(pos);
     return ch.code.size() - 1;
   }
@@ -36,6 +37,28 @@ struct FnCompiler {
   }
 
   int32_t here() const { return static_cast<int32_t>(ch.code.size()); }
+
+  // "Whatever this node is, leave its value in a register." A statement --
+  // an Assign, a static Call, a While -- has no value, so it runs and yields
+  // nil. Three callers need exactly this (a function body, a block's last
+  // child, an If arm), and each of them can be handed a statement by a front
+  // end that is not doing anything wrong.
+  int32_t compile_value(NodeId id) {
+    if (yields_value(m.at(id).tag)) return compile_expr(id);
+    compile_stmt(id);
+    const int32_t r = alloc();
+    emit(Op::LoadNil, r, 0, 0, m.at(id).pos);
+    return r;
+  }
+
+  // Compile one arm of a value-producing If so its result lands in `dst`
+  // rather than wherever the arm's own allocation happened to put it.
+  void branch_into(int32_t dst, NodeId arm, uint32_t pos) {
+    const int32_t base = top;
+    const int32_t r = compile_value(arm);
+    if (r != dst) emit(Op::Move, dst, r, 0, pos);
+    top = base;
+  }
 
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
@@ -84,10 +107,71 @@ struct FnCompiler {
           emit(Op::In, r, 0, 0, n.pos);
           return r;
         }
-        // Print is a statement; in value position it yields Void.
+        // Print is a statement; in value position it yields nil. This used to
+        // emit LoadConst 0, which read the first entry of a const pool that
+        // a program need not have -- latent until Block became a value-
+        // producing tag and put Print in value position for the first time.
         compile_stmt(id);
         const int32_t r = alloc();
-        emit(Op::LoadConst, r, 0, 0, n.pos);
+        emit(Op::LoadNil, r, 0, 0, n.pos);
+        return r;
+      }
+      // A block's value is its last child's; every child before it is a
+      // statement. An empty block is nil.
+      case Tag::Block: {
+        if (n.num_children == 0) {
+          const int32_t r = alloc();
+          emit(Op::LoadNil, r, 0, 0, n.pos);
+          return r;
+        }
+        for (uint32_t i = 0; i + 1 < n.num_children; ++i) {
+          compile_stmt(m.child(id, i));
+        }
+        return compile_value(m.child(id, n.num_children - 1));
+      }
+
+      // An If's value is the branch taken's, so both branches have to land in
+      // the same register -- which is why this cannot just be two
+      // compile_expr calls. A missing else yields nil.
+      case Tag::If: {
+        auto v = view_if(m, id);
+        const int32_t base = top;
+        const int32_t c = compile_expr(v.cond);
+        top = base;
+        const int32_t r = alloc();
+        const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
+        branch_into(r, v.then_, n.pos);
+        const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
+        patch(jf, here());
+        if (v.els.valid()) {
+          branch_into(r, v.els, n.pos);
+        } else {
+          emit(Op::LoadNil, r, 0, 0, n.pos);
+        }
+        patch(jend, here());
+        return r;
+      }
+
+      case Tag::MakeClosure: {
+        const int32_t r = alloc();
+        emit(Op::MakeClosure, r, n.a, n.b, n.pos);
+        return r;
+      }
+      case Tag::CallValue: {
+        // The callee and the arguments go into one contiguous run of
+        // registers, so the instruction needs only where the run starts and
+        // how long it is. `top` is already a stack, so "contiguous" costs
+        // nothing to arrange -- just do not reset it between operands.
+        const int32_t base = top;
+        const int32_t callee = compile_expr(m.child(id, 0));
+        const int32_t argc = static_cast<int32_t>(n.num_children) - 1;
+        const int32_t args_at = top;
+        for (int32_t i = 0; i < argc; ++i) {
+          compile_expr(m.child(id, static_cast<uint32_t>(i + 1)));
+        }
+        top = base;
+        const int32_t r = alloc();
+        emit(Op::CallValue, r, callee, args_at, n.pos, argc);
         return r;
       }
       default:
@@ -191,9 +275,25 @@ Program compile(const Module& m) {
     ch.local_names = fn.local_names;
     ch.capture_names = fn.capture_names;
 
+    ch.num_cells = fn.num_cells;
+    ch.num_params = fn.num_params;
+
     FnCompiler fc{m, fn, ch};
-    fc.compile_stmt(fn.body);
-    fc.emit(Op::Ret, 0, 0, 0, m.at(fn.body).pos);
+    const uint32_t body_pos = m.at(fn.body).pos;
+
+    // SPIKE: cells are boxes, and a fresh frame needs fresh ones -- sharing
+    // them across activations is exactly the bug that makes a recursive
+    // closure see the wrong variable.
+    for (int32_t c = 0; c < fn.num_cells; ++c) {
+      fc.emit(Op::CellNew, c, 0, 0, body_pos);
+    }
+
+    // A function returns its body's value, whatever that is. PL/0's bodies
+    // are blocks ending in statements, so they return nil and nothing reads
+    // it -- one path rather than a "does this body produce a value" fork that
+    // Block, now value-producing, no longer answers usefully anyway.
+    const int32_t r = fc.compile_value(fn.body);
+    fc.emit(Op::Ret, r, 1, 0, body_pos);
   }
   return p;
 }

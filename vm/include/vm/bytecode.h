@@ -29,7 +29,13 @@ enum class Op : uint8_t {
   Call,         // a = func index, b = capture map index
   Out,          // a = src
   In,           // a = dst
-  Ret,
+  Ret,          // a = result reg, b = 1 if there is one
+  // SPIKE: first-class functions.
+  MakeClosure,  // a = dst, b = func index, c = capture map index
+  CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count
+  CellNew,      // a = cell index   (fresh box, holding nil)
+  LoadNil,      // a = dst
+  Move,         // a = dst, b = src
 };
 
 // vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own
@@ -53,6 +59,7 @@ struct Insn {
   int32_t a = 0;
   int32_t b = 0;
   int32_t c = 0;
+  int32_t d = 0;  // SPIKE: only CallValue needs a fourth operand (arg count)
 };
 
 struct Chunk {
@@ -65,6 +72,8 @@ struct Chunk {
   int32_t num_locals = 0;
   int32_t num_captures = 0;
   int32_t num_regs = 0;
+  int32_t num_cells = 0;    // SPIKE
+  int32_t num_params = 0;   // SPIKE
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
 };
