@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -39,7 +40,7 @@ enum class Tag : uint8_t {
   Block,      // children: stmts...  (zero children = the empty statement)
   Call,       // a = func index, b = capture map index, children: args...
   Intrinsic,  // op = IntrinsicId, children: args...
-  // SPIKE: first-class functions. MakeClosure yields a callable value that
+  // First-class functions. MakeClosure yields a callable value that
   // owns the cells named by its capture map, resolved in the frame that
   // builds it; CallValue calls whatever a value turns out to be. Together
   // they are what Call cannot express -- a function that outlives the frame
@@ -62,7 +63,7 @@ enum class IntrinsicId : uint8_t { Print, ReadInt };
 // defining activation is still on the stack, which closures break. A capture
 // list survives first-class functions, so VarRef's meaning does not have to
 // change when they arrive.
-// SPIKE: Cell joins the two. A local a closure captures cannot stay a slot in
+// Cell joins the two. A local a closure captures cannot stay a slot in
 // the frame -- the closure may outlive the frame -- so a front end promotes it
 // to a Cell, a heap box the frame and every closure over it share. Which
 // locals need promoting is the front end's analysis to do (culebra's
@@ -89,10 +90,10 @@ struct SrcPos {
   uint32_t col = 0;
 };
 
-// SPIKE: Str joins Int. `bits` indexes Module::str_consts rather than holding
-// the bytes, so Const stays a two-word POD and the pool stays in one place --
-// the shape a Double or a Bool would slot into without changing either.
-enum class ConstKind : uint8_t { Int, Str };
+// `bits` is the payload for Int, Bool and Double (the last as its bit
+// pattern); for Str it indexes Module::str_consts rather than holding the
+// bytes, so Const stays a two-word POD and the pool stays in one place.
+enum class ConstKind : uint8_t { Nil, Int, Bool, Double, Str };
 
 struct Const {
   ConstKind kind = ConstKind::Int;
@@ -119,7 +120,7 @@ struct Func {
   // structurally so error messages do not have to thread it by hand.
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
-  // SPIKE: cells are storage the frame shares with closures built inside it;
+  // Cells are storage the frame shares with closures built inside it;
   // params are the first `num_params` locals, so an argument that needs
   // capturing is copied into a cell by the front end and the calling
   // convention itself stays about locals only. Both sit after the existing
@@ -144,7 +145,7 @@ struct Module {
   std::vector<NodeId> child_ids;  // flat backing for every node's children
   std::vector<SrcPos> positions;
   std::vector<Const> consts;
-  std::vector<std::string> str_consts;  // SPIKE: bytes for ConstKind::Str
+  std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<Func> funcs;                      // funcs[0] is the entry point
   std::vector<std::vector<CaptureSrc>> capture_maps;
 
@@ -218,7 +219,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Unary:
     case Tag::Binary:
     case Tag::Intrinsic:
-    // SPIKE: unlike Call, these produce a value. Call is left alone rather
+    // Unlike Call, these produce a value. Call is left alone rather
     // than widened to match, so PL/0 keeps compiling to exactly the bytecode
     // it did; unifying the two call forms is Phase 1b's job.
     //
@@ -319,7 +320,7 @@ public:
     return static_cast<int32_t>(m_.consts.size() - 1);
   }
 
-  // SPIKE: same interning shape as intern_int, over the string pool.
+  // Same interning shape as intern_int, over the string pool.
   int32_t intern_str(const std::string& s) {
     for (uint32_t i = 0; i < m_.consts.size(); ++i) {
       if (m_.consts[i].kind == ConstKind::Str &&
@@ -333,8 +334,34 @@ public:
     return static_cast<int32_t>(m_.consts.size() - 1);
   }
 
+  // Interning by (kind, bits) rather than a per-kind scan: Bool and Double
+  // want the same dedup Int gets, and one comparison covers all three because
+  // a Double is stored as its bit pattern.
+  int32_t intern_scalar(ConstKind kind, int64_t bits) {
+    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
+      if (m_.consts[i].kind == kind && m_.consts[i].bits == bits) {
+        return static_cast<int32_t>(i);
+      }
+    }
+    m_.consts.push_back({kind, bits});
+    return static_cast<int32_t>(m_.consts.size() - 1);
+  }
+
   NodeId literal(int64_t v, SrcPos p) {
     return emit(Tag::Literal, 0, p, intern_int(v), 0, {});
+  }
+  NodeId bool_literal(bool v, SrcPos p) {
+    return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Bool, v ? 1 : 0),
+                0, {});
+  }
+  NodeId double_literal(double v, SrcPos p) {
+    int64_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(double));
+    return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Double, bits), 0,
+                {});
+  }
+  NodeId nil_literal(SrcPos p) {
+    return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Nil, 0), 0, {});
   }
   NodeId str_literal(const std::string& s, SrcPos p) {
     return emit(Tag::Literal, 0, p, intern_str(s), 0, {});

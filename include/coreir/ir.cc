@@ -6,8 +6,8 @@
 
 namespace coreir {
 
-// SPIKE: see coreir/value.h. Defined here rather than in a value.cc of its
-// own so the spike adds no new translation unit -- culebra's CMakeLists names
+// See coreir/value.h. Defined here rather than in a value.cc of its own so
+// that no new translation unit appears -- culebra's CMakeLists names
 // cpp-vmlib's sources one by one, in two separate places.
 int64_t g_live_heap_objects = 0;
 
@@ -42,7 +42,12 @@ const char* name_of(IntrinsicId id) {
 }
 
 const char* name_of(VarKind k) {
-  return k == VarKind::Local ? "local" : "capture";
+  switch (k) {
+    case VarKind::Local:   return "local";
+    case VarKind::Capture: return "capture";
+    case VarKind::Cell:    return "cell";
+  }
+  return "?";
 }
 
 struct Verifier {
@@ -106,7 +111,7 @@ struct Verifier {
         }
         break;
       }
-      // SPIKE: a closure's captures are cells, which outlive the frame that
+      // A closure's captures are cells, which outlive the frame that
       // built it. A plain Local cannot be one -- it dies with the frame -- so
       // naming one here is the mistake this rejects, and the front end's cue
       // that the variable needed promoting to a Cell first.
@@ -222,6 +227,13 @@ struct Dumper {
       }
       case Tag::Intrinsic:
         out << name_of(static_cast<IntrinsicId>(n.op));
+        break;
+      case Tag::MakeClosure:
+        out << "makeclosure " << m.funcs[n.a].name << " #" << n.a
+            << " cmap=" << n.b;
+        break;
+      case Tag::CallValue:
+        out << "callvalue";
         break;
     }
     out << "  @" << p.line << ":" << p.col << "\n";

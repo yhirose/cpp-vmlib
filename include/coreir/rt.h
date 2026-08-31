@@ -18,12 +18,11 @@ extern "C" {
 // Print one integer, followed by a newline.
 void coreir_rt_out(int64_t v);
 
-// SPIKE: print one string, followed by a newline. A fifth symbol rather than
-// a widened coreir_rt_out, deliberately: culebra defines these itself, so
-// changing an existing signature breaks its build on the next submodule bump
-// while adding one does not. Whether the eventual contract keeps this shape
-// -- an entry point per type, versus one that takes a Value -- is a Phase 1
-// decision, not one this spike settles.
+// Print one string, followed by a newline. Everything that is not an integer
+// arrives here, formatted by the executor. A fifth symbol rather than a
+// widened coreir_rt_out, deliberately: a host defines these itself, so
+// changing an existing signature breaks that host's build while adding one
+// does not.
 void coreir_rt_out_str(const char* bytes, int64_t len);
 
 // Read one line and convert it to an integer. A line that is not an integer,

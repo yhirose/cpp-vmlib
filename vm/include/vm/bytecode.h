@@ -22,7 +22,7 @@ enum class Op : uint8_t {
   Neg,          // a = dst, b = src
   Add, Sub, Mul, Div, Mod,   // a = dst, b = lhs, c = rhs
   Eq, Ne, Lt, Le, Gt, Ge,    // a = dst, b = lhs, c = rhs   (writes 0 or 1)
-  LoadVar,      // a = dst, b = VarKind, c = index   (checks the inited flag)
+  LoadVar,      // a = dst, b = VarKind, c = index   (rejects Uninit)
   StoreVar,     // a = VarKind, b = index, c = src
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
@@ -30,7 +30,7 @@ enum class Op : uint8_t {
   Out,          // a = src
   In,           // a = dst
   Ret,          // a = result reg, b = 1 if there is one
-  // SPIKE: first-class functions.
+  // First-class functions.
   MakeClosure,  // a = dst, b = func index, c = capture map index
   CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count
   CellNew,      // a = cell index   (fresh box, holding nil)
@@ -59,7 +59,7 @@ struct Insn {
   int32_t a = 0;
   int32_t b = 0;
   int32_t c = 0;
-  int32_t d = 0;  // SPIKE: only CallValue needs a fourth operand (arg count)
+  int32_t d = 0;  // only CallValue needs a fourth operand (arg count)
 };
 
 struct Chunk {
@@ -72,8 +72,8 @@ struct Chunk {
   int32_t num_locals = 0;
   int32_t num_captures = 0;
   int32_t num_regs = 0;
-  int32_t num_cells = 0;    // SPIKE
-  int32_t num_params = 0;   // SPIKE
+  int32_t num_cells = 0;
+  int32_t num_params = 0;
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
 };
@@ -81,7 +81,7 @@ struct Chunk {
 struct Program {
   std::vector<Chunk> chunks;  // chunks[0] is the entry point
   std::vector<coreir::Const> consts;
-  std::vector<std::string> str_consts;  // SPIKE: bytes for ConstKind::Str
+  std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<coreir::SrcPos> positions;
   std::vector<std::vector<coreir::CaptureSrc>> capture_maps;
 };

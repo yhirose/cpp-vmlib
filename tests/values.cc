@@ -1,21 +1,16 @@
-// SPIKE (Phase 0b) -- does a tagged, reference-counted Value hold up?
+// The tagged, reference-counted value model: what each tag does, and what
+// becomes of the heap ones.
 //
-// Two questions, and the second is the one worth the spike:
+// The case most worth having is the *failing* program. The executor used to
+// be exception-safe for free, because a Frame held only plain vectors of
+// int64; once registers hold owned references that stops being free. What
+// coreir/value.h bets is that putting the ownership in the type means the
+// ordinary C++ unwind out of vm::run releases everything, with no unwind
+// table for a compiler to emit and get wrong. If that bet is wrong, it is
+// wrong here.
 //
-//   1. Do strings flow through the IR at all -- literal, concatenation,
-//      assignment, print -- and does the count of live heap objects return to
-//      zero when the program ends?
-//
-//   2. Does a *failed* program leak? This is where the design could have gone
-//      wrong quietly. Today's executor is exception-safe for free because a
-//      Frame holds only plain vectors of int64; once registers hold owned
-//      references that stops being free. The bet coreir/value.h makes is that
-//      putting the ownership in the type means the ordinary C++ unwind out of
-//      vm::run releases everything, with no unwind table for the compiler to
-//      emit and get wrong. If that bet is wrong, it is wrong here.
-//
-// Every case asserts g_live_heap_objects == 0 afterward, so a missing release
-// fails the test rather than waiting for a leak checker to notice.
+// Every case asserts the live heap-object count is zero afterward, so a
+// missing release fails the test rather than waiting for a leak checker.
 
 #include <cstdio>
 #include <stdexcept>
@@ -256,10 +251,83 @@ int main() {
     check_eq(joined(), "0|", "loop output");
   }
 
+  // --- 7. The scalar tags: nil, bool, double, and how they mix. -----------
+  {
+    Module m;
+    Builder b(m);
+    const NodeId body = b.block(
+        {b.intrinsic(IntrinsicId::Print, {b.nil_literal(p)}, p),
+         b.intrinsic(IntrinsicId::Print, {b.bool_literal(true, p)}, p),
+         b.intrinsic(IntrinsicId::Print, {b.bool_literal(false, p)}, p),
+         // A comparison is a Bool, not 0/1. PL/0 cannot tell, because its
+         // grammar only ever puts one in a condition; a language with a
+         // boolean type would have had to undo an integer here.
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Lt, b.literal(1, p), b.literal(2, p), p)},
+                     p),
+         // Int stays Int; anything else numeric widens to double.
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Div, b.literal(7, p), b.literal(2, p), p)},
+                     p),
+         b.intrinsic(
+             IntrinsicId::Print,
+             {b.binary(BinOp::Div, b.literal(7, p), b.double_literal(2.0, p), p)},
+             p),
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Add, b.double_literal(0.5, p),
+                               b.double_literal(0.25, p), p)},
+                     p)},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    const std::string failed = run_module(m, "scalars");
+    check_eq(failed, "", "scalars: unexpected failure");
+    check_eq(joined(), "nil|true|false|true|3|3.5|0.75|", "scalar output");
+  }
+
+  // --- 8. Reading a local before assigning it. ----------------------------
+  // Uninit is a tag now rather than a flag beside the value, so this is the
+  // case that says the tag never escapes into a program's hands.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back({"main", 1, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.varref(VarKind::Local, 0, p)}, p),
+                       {"x"},
+                       {}});
+    const std::string failed = run_module(m, "uninitialized read");
+    check_eq(failed, "uninitialized variable 'x'", "uninit: message");
+  }
+
+  // --- 9. Type errors the new tags make possible. -------------------------
+  struct Case {
+    const char* what;
+    BinOp op;
+    bool lhs_double;
+    const char* want;
+  };
+  for (const Case& c :
+       {Case{"mod on doubles", BinOp::Mod, true, "cannot mod double"},
+        Case{"int vs bool", BinOp::Eq, false, "cannot eq int and bool"}}) {
+    Module m;
+    Builder b(m);
+    const NodeId lhs =
+        c.lhs_double ? b.double_literal(1.5, p) : b.literal(1, p);
+    const NodeId rhs =
+        c.lhs_double ? b.double_literal(2.0, p) : b.bool_literal(true, p);
+    m.funcs.push_back({"main", 0, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.binary(c.op, lhs, rhs, p)}, p),
+                       {},
+                       {}});
+    const std::string failed = run_module(m, c.what);
+    check_eq(failed, c.want, std::string(c.what) + ": message");
+  }
+
   if (g_failures != 0) {
-    std::fprintf(stderr, "spike_values: %d failure(s)\n", g_failures);
+    std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;
   }
-  std::printf("spike_values OK\n");
+  std::printf("values OK\n");
   return 0;
 }

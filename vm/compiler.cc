@@ -281,7 +281,7 @@ Program compile(const Module& m) {
     FnCompiler fc{m, fn, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
 
-    // SPIKE: cells are boxes, and a fresh frame needs fresh ones -- sharing
+    // Cells are boxes, and a fresh frame needs fresh ones -- sharing
     // them across activations is exactly the bug that makes a recursive
     // closure see the wrong variable.
     for (int32_t c = 0; c < fn.num_cells; ++c) {

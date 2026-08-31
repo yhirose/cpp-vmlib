@@ -1,7 +1,7 @@
-// SPIKE (Phase 0b), second half -- first-class functions.
+// First-class functions.
 //
-// The thing being tested is the one the review of this arc called out as
-// already broken before closures were even asked for. vm/exec.cc's `captures`
+// The thing being tested was already broken before closures were asked for.
+// vm/exec.cc's `captures`
 // are raw Slot pointers into the caller's frame, sound only because "PL/0 has
 // no upward funarg" -- no way to make a function outlive the frame that wrote
 // it. A first-class function is exactly that, so the pointers have to become
@@ -314,9 +314,9 @@ int main() {
   }
 
   if (g_failures != 0) {
-    std::fprintf(stderr, "spike_closures: %d failure(s)\n", g_failures);
+    std::fprintf(stderr, "closures: %d failure(s)\n", g_failures);
     return 1;
   }
-  std::printf("spike_closures OK\n");
+  std::printf("closures OK\n");
   return 0;
 }

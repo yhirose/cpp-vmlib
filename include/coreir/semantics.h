@@ -1,13 +1,12 @@
 // The value model, stated once.
 //
-// SPIKE (Phase 0b): a value is no longer an i64. It is a tagged Value (see
-// coreir/value.h) that may hold a reference to a heap object, so every
+// A value is a tagged Value (see coreir/value.h), not an i64, so every
 // operation here dispatches on the operand tags and may fail because of them
 // -- the shape a dynamically typed front end needs, and the shape PL/0 never
 // exercised because it only ever had one type.
 //
-// Comparisons yield 0 or 1; If and While test truthiness. Integer arithmetic
-// wraps. PL/0's grammar happens to keep comparisons out of arithmetic
+// Comparisons yield Bool; If and While test truthiness. Integer arithmetic
+// wraps, and mixed integer/double arithmetic widens. PL/0's grammar happens to keep comparisons out of arithmetic
 // positions, but Core-IR claims to be grammar-independent, so that accident
 // is not something a backend may rely on.
 //
@@ -19,6 +18,7 @@
 
 #pragma once
 
+#include <charconv>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -28,20 +28,16 @@
 
 namespace coreir {
 
-// A variable's storage. `inited` is separate from the tag rather than folded
-// into it as an Uninit tag: a spike is not the place to decide whether "read
-// before assigned" is a distinct value or a distinct flag, and keeping it a
-// flag leaves today's diagnostic wording untouched.
-struct Slot {
-  Value value;
-  uint8_t inited = 0;
-};
-
 inline const char* type_name(ValueTag t) {
   switch (t) {
-    case ValueTag::Nil: return "nil";
-    case ValueTag::Int: return "int";
-    case ValueTag::Str: return "string";
+    case ValueTag::Uninit: return "uninitialized";
+    case ValueTag::Nil:    return "nil";
+    case ValueTag::Bool:   return "bool";
+    case ValueTag::Int:    return "int";
+    case ValueTag::Double: return "double";
+    case ValueTag::Str:    return "string";
+    case ValueTag::Cell:   return "cell";
+    case ValueTag::Func:   return "function";
   }
   return "?";
 }
@@ -79,12 +75,13 @@ inline bool is_comparison(BinOp op) {
 // had one: the arithmetic traps it always had, and type errors, which only
 // exist once values can disagree about what they are.
 //
-// SPIKE: returning std::string rather than a const char* costs an allocation
-// the old code did not pay. It buys operand types in the message, which is
-// most of what makes a dynamic language's type error useful; whether the real
-// version formats lazily is a decision for the phase that has a Double, a
-// Bool and an Array to name as well.
+// Returning std::string rather than a const char* costs an allocation on the
+// failing path only, and buys operand types in the message -- most of what
+// makes a dynamic language's type error useful.
 inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
+  // Two ints stay integers; anything else numeric widens to double. Mod on
+  // doubles is deliberately absent -- fmod versus truncation is a language's
+  // decision, and no front end here needs it yet.
   if (l.is_int() && r.is_int()) {
     if (op == BinOp::Div || op == BinOp::Mod) {
       if (r.as_int() == 0) return "divide by zero";
@@ -95,61 +92,106 @@ inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
     }
     return {};
   }
+  if (l.is_number() && r.is_number()) {
+    if (op == BinOp::Mod) return "cannot mod double";
+    return {};
+  }
   if (l.is_str() && r.is_str()) {
     // Strings concatenate and compare; they do not subtract or divide.
     if (op == BinOp::Add || is_comparison(op)) return {};
   }
-  // Equality across types is a question ("is 1 == '1'?") a language answers,
-  // not the VM. Refusing it keeps the VM from baking in an answer that a
-  // front end would then have to work around.
+  if (l.is_bool() && r.is_bool()) {
+    if (op == BinOp::Eq || op == BinOp::Ne) return {};
+  }
+  if (l.is_nil() && r.is_nil()) {
+    if (op == BinOp::Eq || op == BinOp::Ne) return {};
+  }
+  // Comparing across types is a question ("is 1 == '1'?", "is nil == false?")
+  // a language answers, not the VM. Refusing it keeps the VM from baking in an
+  // answer a front end would then have to work around.
   return std::string("cannot ") + name_of(op) + " " + type_name(l.tag()) +
          " and " + type_name(r.tag());
+}
+
+// Comparisons produce Bool, not 0/1. PL/0 cannot tell the difference -- its
+// grammar only ever puts a comparison in a condition -- but a language with
+// a boolean type would have to undo an integer here.
+template <typename T>
+inline Value compare(BinOp op, const T& a, const T& b) {
+  switch (op) {
+    case BinOp::Eq: return Value::make_bool(a == b);
+    case BinOp::Ne: return Value::make_bool(a != b);
+    case BinOp::Lt: return Value::make_bool(a < b);
+    case BinOp::Le: return Value::make_bool(a <= b);
+    case BinOp::Gt: return Value::make_bool(a > b);
+    case BinOp::Ge: return Value::make_bool(a >= b);
+    default: return Value();
+  }
 }
 
 // Only valid when binop_error returned empty.
 inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
   if (l.is_str()) {
-    const std::string& a = l.as_str();
-    const std::string& b = r.as_str();
+    if (op == BinOp::Add) return Value::make_str(l.as_str() + r.as_str());
+    return compare(op, l.as_str(), r.as_str());
+  }
+  if (l.is_bool()) return compare(op, l.as_bool(), r.as_bool());
+  if (l.is_nil()) return Value::make_bool(op == BinOp::Eq);
+
+  if (l.is_int() && r.is_int()) {
+    const int64_t a = l.as_int();
+    const int64_t b = r.as_int();
     switch (op) {
-      case BinOp::Add: return Value::make_str(a + b);
-      case BinOp::Eq:  return Value::make_int(a == b ? 1 : 0);
-      case BinOp::Ne:  return Value::make_int(a != b ? 1 : 0);
-      case BinOp::Lt:  return Value::make_int(a < b ? 1 : 0);
-      case BinOp::Le:  return Value::make_int(a <= b ? 1 : 0);
-      case BinOp::Gt:  return Value::make_int(a > b ? 1 : 0);
-      case BinOp::Ge:  return Value::make_int(a >= b ? 1 : 0);
-      default: break;
+      case BinOp::Add: return Value::make_int(wrap_add(a, b));
+      case BinOp::Sub: return Value::make_int(wrap_sub(a, b));
+      case BinOp::Mul: return Value::make_int(wrap_mul(a, b));
+      case BinOp::Div: return Value::make_int(a / b);
+      case BinOp::Mod: return Value::make_int(a % b);
+      default: return compare(op, a, b);
     }
-    return Value();
   }
-  const int64_t a = l.as_int();
-  const int64_t b = r.as_int();
+
+  const double a = l.as_number();
+  const double b = r.as_number();
   switch (op) {
-    case BinOp::Add: return Value::make_int(wrap_add(a, b));
-    case BinOp::Sub: return Value::make_int(wrap_sub(a, b));
-    case BinOp::Mul: return Value::make_int(wrap_mul(a, b));
-    case BinOp::Div: return Value::make_int(a / b);
-    case BinOp::Mod: return Value::make_int(a % b);
-    case BinOp::Eq:  return Value::make_int(a == b ? 1 : 0);
-    case BinOp::Ne:  return Value::make_int(a != b ? 1 : 0);
-    case BinOp::Lt:  return Value::make_int(a < b ? 1 : 0);
-    case BinOp::Le:  return Value::make_int(a <= b ? 1 : 0);
-    case BinOp::Gt:  return Value::make_int(a > b ? 1 : 0);
-    case BinOp::Ge:  return Value::make_int(a >= b ? 1 : 0);
+    case BinOp::Add: return Value::make_double(a + b);
+    case BinOp::Sub: return Value::make_double(a - b);
+    case BinOp::Mul: return Value::make_double(a * b);
+    case BinOp::Div: return Value::make_double(a / b);  // inf/nan, not a trap
+    default: return compare(op, a, b);
   }
-  return Value();
 }
 
 inline std::string unop_error(UnOp op, const Value& v) {
-  if (op == UnOp::Neg && !v.is_int()) {
+  if (op == UnOp::Neg && !v.is_number()) {
     return std::string("cannot negate ") + type_name(v.tag());
   }
   return {};
 }
 
 inline Value apply_unop(UnOp, const Value& v) {
-  return Value::make_int(wrap_neg(v.as_int()));
+  return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
+                    : Value::make_double(-v.as_double());
+}
+
+// How a non-string scalar prints, when a front end has not formatted it
+// itself. Shortest round-trip for a double, so 3.5 is "3.5" and not
+// "3.500000", and 4.0 is "4" -- whether a whole double should show a decimal
+// point is a language's decision, and a front end that cares builds the
+// string rather than asking this to grow a mode.
+inline std::string to_display(const Value& v) {
+  switch (v.tag()) {
+    case ValueTag::Nil:  return "nil";
+    case ValueTag::Bool: return v.as_bool() ? "true" : "false";
+    case ValueTag::Int:  return std::to_string(v.as_int());
+    case ValueTag::Double: {
+      char buf[32];
+      auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v.as_double());
+      return ec == std::errc() ? std::string(buf, end) : std::string("?");
+    }
+    case ValueTag::Str:  return v.as_str();
+    default:             return std::string("<") + type_name(v.tag()) + ">";
+  }
 }
 
 // The one formatter for "read before assigned". A future backend that cannot
