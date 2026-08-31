@@ -1,6 +1,6 @@
 // coreir -- a closed intermediate representation.
 //
-// A front end lowers its own grammar into these ten node shapes; nothing in
+// A front end lowers its own grammar into these eleven node shapes; nothing in
 // this header, or in any backend that consumes it, knows what parser produced
 // them. That is the whole point: the tag set is closed, so a backend written
 // once serves every front end that can reach it.
@@ -38,13 +38,19 @@ enum class Tag : uint8_t {
   If,         // children: cond, then [, else]
   While,      // children: cond, body
   Block,      // children: stmts...  (zero children = the empty statement)
-  Call,       // a = func index, b = capture map index, children: args...
   Intrinsic,  // op = IntrinsicId, children: args...
-  // First-class functions. MakeClosure yields a callable value that
-  // owns the cells named by its capture map, resolved in the frame that
-  // builds it; CallValue calls whatever a value turns out to be. Together
-  // they are what Call cannot express -- a function that outlives the frame
-  // it was written in.
+  // Calling, in two halves. MakeClosure yields a callable value owning the
+  // cells its capture map names, resolved in the frame that builds it;
+  // CallValue calls whatever a value turns out to be.
+  //
+  // There is deliberately no third tag for "call this function by index".
+  // One existed, forwarding the caller's slots directly, and it was both
+  // faster and unable to express a function that outlives the frame it was
+  // written in. Keeping it would have meant two ownership rules in one
+  // Frame -- a borrowed slot pointer and an owned cell -- with the meaning of
+  // VarKind::Capture depending on which kind of call got you there. A front
+  // end that wants the old shape builds a closure and calls it immediately;
+  // examples/pl0 does exactly that.
   MakeClosure,  // a = func index, b = capture map index
   CallValue,    // children: callee, args...
 };
@@ -100,11 +106,11 @@ struct Const {
   int64_t bits = 0;
 };
 
-// Where a callee's capture comes from, expressed in the *caller's* frame. A
-// per-function list would not work: fib's captures live in the root frame, but
-// fib's own recursive call runs with fib's frame, and finding "the defining
-// frame" at run time is exactly the static link this design rejects. So the
-// forwarding table belongs to the call site.
+// Where a closure's capture comes from, expressed in the frame that builds
+// it. A per-function list would not work: fib's captures live in the root
+// frame, but fib's own recursive call runs with fib's frame, and finding "the
+// defining frame" at run time is exactly the static link this design rejects.
+// So the forwarding table belongs to the site that makes the closure.
 struct CaptureSrc {
   VarKind from = VarKind::Local;
   int32_t index = 0;
@@ -179,7 +185,6 @@ inline constexpr int arity_of(Tag t) {
     case Tag::If:        return -1;  // 2 or 3
     case Tag::While:     return 2;
     case Tag::Block:     return -1;
-    case Tag::Call:      return -1;
     case Tag::Intrinsic: return -1;  // per IntrinsicId
     case Tag::MakeClosure: return 0;
     case Tag::CallValue:   return -1;  // callee, then args
@@ -256,7 +261,7 @@ struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
 struct WhileView  { NodeId cond, body; };
-struct CallView   { int32_t func; int32_t capture_map; };
+struct ClosureView { int32_t func; int32_t capture_map; };
 struct IntrinsicView { IntrinsicId id; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
@@ -279,7 +284,7 @@ inline IfView view_if(const Module& m, NodeId n) {
 inline WhileView view_while(const Module& m, NodeId n) {
   return {m.child(n, 0), m.child(n, 1)};
 }
-inline CallView view_call(const Module& m, NodeId n) {
+inline ClosureView view_make_closure(const Module& m, NodeId n) {
   return {m.at(n).a, m.at(n).b};
 }
 inline IntrinsicView view_intrinsic(const Module& m, NodeId n) {
@@ -387,9 +392,6 @@ public:
   }
   NodeId block(const std::vector<NodeId>& stmts, SrcPos p) {
     return emit(Tag::Block, 0, p, 0, 0, stmts);
-  }
-  NodeId call(int32_t func, int32_t capture_map, SrcPos p) {
-    return emit(Tag::Call, 0, p, func, capture_map, {});
   }
   NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args, SrcPos p) {
     return emit(Tag::Intrinsic, static_cast<uint8_t>(id), p, 0, 0, args);

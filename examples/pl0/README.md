@@ -21,24 +21,29 @@ build/examples/pl0/pl0 [--dump-ir] [--dump-bc] PROGRAM.pas
 
 ## A worked example: captures across a call
 
-`--dump-ir examples/pl0/samples/fib.pas` shows the same function's two call
-sites resolving captures differently:
+A PL/0 procedure call is a closure built over the caller's cells and called
+immediately. `--dump-ir examples/pl0/samples/fib.pas` shows the same function
+built from two places, resolving its captures differently each time:
 
 ```
-func #1 fib  locals=3 captures=2 [x r]
-  call fib #1 cmap=1  @11:5    ; the recursive call, inside fib itself
-  call fib #1 cmap=2  @15:5
+makeclosure fib #1 cmap=0  @25:5   ; from main
+makeclosure fib #1 cmap=1  @11:5   ; the recursive one, inside fib itself
 
-cmap 0: local[1] local[2]      ; main -> fib
-cmap 1: capture[0] capture[1]  ; fib -> fib (self-recursion)
+cmap 0: cell[0] cell[1]            ; main -> fib
+cmap 1: capture[0] capture[1]      ; fib -> fib (self-recursion)
 ```
 
-The call from `main` forwards its own locals; the recursive call inside `fib`
-forwards its own captures through unchanged. A per-function capture list
+`main` hands over two of its own cells; the recursive site inside `fib` hands
+over the cells `fib` itself was given, unchanged. A per-function capture list
 (expressed in the frame where `fib` is defined) cannot express this -- the
 recursive call runs with `fib`'s own frame, not the frame that declared it, so
-"the defining frame" isn't something the callee can name at that call site.
-The forwarding table has to live on the call, not the function.
+"the defining frame" isn't something the callee can name there. The forwarding
+table has to live where the closure is built, not on the function.
+
+`x` and `r` are cells rather than locals in `main` because `fib` captures
+them; PL/0's other variables stay plain locals. Which ones need promoting is
+the binder's own analysis, and the IR refuses a closure over a local -- it
+would die with the frame.
 
 ## Testing
 

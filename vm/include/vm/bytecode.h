@@ -26,7 +26,6 @@ enum class Op : uint8_t {
   StoreVar,     // a = VarKind, b = index, c = src
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
-  Call,         // a = func index, b = capture map index
   Out,          // a = src
   In,           // a = dst
   Ret,          // a = result reg, b = 1 if there is one

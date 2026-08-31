@@ -33,14 +33,24 @@ formatting, error wording, error position and exit behavior have exactly one
 implementation per host. Divergence in those is not caught by a test; it is
 unavailable.
 
-**Variables are captures, not static links.** A variable reference names
-either a slot in the current frame or a slot borrowed from an enclosing one,
-and the forwarding table for a call's captures belongs to the call site, not
-the callee. A static link would assume the defining activation is still on the
-stack, which closures break, and a per-function capture list would break on
-self-recursion for the same reason. A design built around call-site forwarding
-survives both without `VarRef` -- which appears at every variable access --
-ever having to change what it means.
+**Variables are captures, not static links.** A variable reference names a
+slot in the current frame, a cell the frame owns, or a cell the closure being
+run brought with it -- and the forwarding table that fills the last of those
+belongs to the site building the closure, not to the function. A static link
+would assume the defining activation is still on the stack, which closures
+break, and a per-function capture list would break on self-recursion for the
+same reason. Forwarding from the build site survives both without `VarRef` --
+which appears at every variable access -- ever having to change what it means.
+
+**There is one way to call something.** `MakeClosure` builds a callable value
+over cells; `CallValue` calls a value. A second, faster form used to exist,
+naming a function by index and forwarding the caller's slots directly, and it
+could not express a function that outlives the frame it was written in.
+Keeping both would have meant two ownership rules inside one frame -- a
+borrowed slot pointer and an owned cell -- with the meaning of a capture
+depending on which kind of call got you there. A front end wanting the old
+shape builds a closure and calls it on the spot, which is what the PL/0
+example does.
 
 ## Building
 

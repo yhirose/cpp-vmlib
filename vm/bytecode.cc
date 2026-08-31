@@ -19,7 +19,6 @@ const char* name_of(Op op) {
     case Op::StoreVar:    return "storevar";
     case Op::Jump:        return "jump";
     case Op::JumpIfFalse: return "jumpiffalse";
-    case Op::Call:        return "call";
     case Op::Out:         return "out";
     case Op::In:          return "in";
     case Op::Ret:         return "ret";
@@ -81,9 +80,6 @@ std::string to_string(const Program& p) {
           break;
         case Op::JumpIfFalse:
           out << " r" << in.a << ", " << in.b;
-          break;
-        case Op::Call:
-          out << " #" << in.a << " cmap=" << in.b;
           break;
         case Op::Out:
         case Op::In:

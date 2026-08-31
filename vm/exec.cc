@@ -30,17 +30,14 @@ struct Frame {
   const Chunk* chunk = nullptr;
   size_t pc = 0;
   std::vector<Value> locals;
-  std::vector<Value*> captures;
   std::vector<Value> regs;
-  // Cells this frame owns, and cells it borrowed from whoever built
-  // the closure being run. Both are Cell values, so both are shared rather
-  // than pointed at -- which is the whole difference from `captures` above:
-  // a raw pointer dies with the frame it points into, a Cell does not.
+  // Cells this frame owns, and cells the closure being run brought with it.
+  // Both are Cell values -- shared, refcounted, and not tied to any frame's
+  // lifetime, which is what lets a closure be called after the frame that
+  // built it has returned.
   std::vector<Value> cells;
-  std::vector<Value> cell_captures;
-  // Where in the caller this frame's return value goes, and whether the
-  // caller is waiting for one at all (a static Call is not).
-  int32_t ret_reg = -1;
+  std::vector<Value> captures;
+  int32_t ret_reg = -1;  // where in the caller the result goes
 };
 
 struct Exec {
@@ -71,28 +68,9 @@ struct Exec {
     coreir_rt_poll();
   }
 
-  // The one place a call can fail before it starts. An explicit frame stack
-  // cannot overflow the host's C++ stack the way a recursive executor can,
-  // but an unbounded one would grow the heap until the allocator gave out --
-  // no better a diagnostic than the crash it replaced. The bound keeps a
-  // runaway call reported at its call site, the way a divide-by-zero is.
-  void push(int32_t func, const std::vector<CaptureSrc>& cmap, Frame& caller,
-            SrcPos pos) {
-    check_can_push(pos);
-    std::unique_ptr<Frame> f = make_frame(p.chunks[func]);
-    f->captures.reserve(cmap.size());
-    for (const CaptureSrc& src : cmap) {
-      f->captures.push_back(src.from == VarKind::Local
-                                ? &caller.locals[src.index]
-                                : caller.captures[src.index]);
-    }
-    frames.push_back(std::move(f));
-  }
-
-  // Calling a closure. Where push() forwards raw pointers into a
-  // caller that must still be alive, this hands over the closure's own cells
-  // -- which is why the closure can be called from anywhere, including after
-  // the frame that built it has returned.
+  // Calling a closure -- the only way a frame is entered. The callee gets the
+  // closure's cells, which are shared rather than pointed at, so nothing here
+  // depends on the caller still being alive.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
     if (!callee.is_func()) {
@@ -108,7 +86,7 @@ struct Exec {
     }
     check_can_push(pos);
     std::unique_ptr<Frame> f = make_frame(ch);
-    f->cell_captures = c->cells;  // shared, not copied: each is a Cell value
+    f->captures = c->cells;  // shared, not copied: each element is a Cell
     for (int32_t i = 0; i < argc; ++i) {
       f->locals[static_cast<size_t>(i)] = args[i];
     }
@@ -147,19 +125,10 @@ struct Exec {
   }
 
   // Reading and writing a variable, in whichever of the three storage classes
-  // it lives.
-  //
-  // Capture means two different things depending on how the frame was
-  // entered, and a frame is only ever entered one of the two ways. A static
-  // Call forwards raw pointers into a caller that must outlive it; a closure
-  // call hands over cells, which nothing has to outlive. Phase 1b retires the
-  // static form and this fork with it -- until then, `cell_captures` being
-  // non-empty is what says which kind of frame this is.
-  //
-  // A local starts out holding Uninit and a cell starts out holding nil, so
-  // "read before assigned" is observable through the first and not the
-  // second -- which is right: a cell is created by the frame, not by the
-  // source-level declaration a diagnostic would name.
+  // it lives. A local starts out Uninit and a cell starts out nil, so "read
+  // before assigned" is observable through the first and not the second --
+  // which is right: a cell is created by the frame, not by the source-level
+  // declaration a diagnostic would name.
   Value& var_ref(Frame& f, int32_t kind, int32_t index, const Chunk& ch) {
     switch (static_cast<VarKind>(kind)) {
       case VarKind::Local: {
@@ -167,35 +136,17 @@ struct Exec {
         if (v.is_uninit()) fail(f, format_uninit_var(ch.local_names[index]));
         return v;
       }
-      case VarKind::Capture: {
-        if (!f.cell_captures.empty()) {
-          return f.cell_captures[index].as_cell()->v;
-        }
-        Value& v = *f.captures[index];
-        if (v.is_uninit()) fail(f, format_uninit_var(ch.capture_names[index]));
-        return v;
-      }
-      case VarKind::Cell:
-        return f.cells[index].as_cell()->v;
+      case VarKind::Capture: return f.captures[index].as_cell()->v;
+      case VarKind::Cell:    return f.cells[index].as_cell()->v;
     }
     return f.regs[0];  // unreachable
   }
 
   void var_store(Frame& f, int32_t kind, int32_t index, const Value& v) {
     switch (static_cast<VarKind>(kind)) {
-      case VarKind::Local:
-        f.locals[index] = v;
-        break;
-      case VarKind::Capture:
-        if (!f.cell_captures.empty()) {
-          f.cell_captures[index].as_cell()->v = v;
-        } else {
-          *f.captures[index] = v;
-        }
-        break;
-      case VarKind::Cell:
-        f.cells[index].as_cell()->v = v;
-        break;
+      case VarKind::Local:   f.locals[index] = v; break;
+      case VarKind::Capture: f.captures[index].as_cell()->v = v; break;
+      case VarKind::Cell:    f.cells[index].as_cell()->v = v; break;
     }
   }
 
@@ -204,7 +155,7 @@ struct Exec {
   // with this frame -- so only these two cases exist.
   Value capture_cell(Frame& f, const CaptureSrc& src) {
     return src.from == VarKind::Cell ? f.cells[src.index]
-                                     : f.cell_captures[src.index];
+                                     : f.captures[src.index];
   }
 
   void run() {
@@ -260,14 +211,6 @@ struct Exec {
             continue;
           }
           break;
-        case Op::Call: {
-          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
-          // Advance before pushing: this is where the caller resumes, and a
-          // callee that never returns never reads it.
-          ++f.pc;
-          push(in.a, p.capture_maps[in.b], f, pos);
-          continue;
-        }
         case Op::Out: {
           const Value& v = f.regs[in.a];
           // An Int keeps the dedicated integer entry point: it is the one
@@ -312,6 +255,8 @@ struct Exec {
           const SrcPos pos = p.positions[ch.code_pos[f.pc]];
           // Copy the callee out first: the result register may be the callee's
           // own, and the frame this pushes outlives the read either way.
+          // Advance before pushing -- this is where the caller resumes, and a
+          // callee that never returns never reads it.
           const Value callee = f.regs[in.b];
           ++f.pc;
           push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);

@@ -91,26 +91,6 @@ struct Verifier {
           return fail("If takes 2 or 3 children");
         }
         break;
-      case Tag::Call: {
-        if (n.a < 0 || static_cast<size_t>(n.a) >= m.funcs.size()) {
-          return fail("call func index out of range");
-        }
-        if (n.b < 0 || static_cast<size_t>(n.b) >= m.capture_maps.size()) {
-          return fail("call capture map index out of range");
-        }
-        const auto& cmap = m.capture_maps[n.b];
-        const Func& callee = m.funcs[n.a];
-        if (cmap.size() != static_cast<size_t>(callee.num_captures)) {
-          return fail("capture map length does not match callee");
-        }
-        // Every forwarding entry must be resolvable in this frame.
-        for (const CaptureSrc& src : cmap) {
-          if (src.index < 0 || src.index >= slot_limit(f, src.from)) {
-            return fail("capture map entry out of range in caller frame");
-          }
-        }
-        break;
-      }
       // A closure's captures are cells, which outlive the frame that
       // built it. A plain Local cannot be one -- it dies with the frame -- so
       // naming one here is the mistake this rejects, and the front end's cue
@@ -162,9 +142,6 @@ struct Verifier {
       case Tag::Unary:
       case Tag::Binary:
       case Tag::Intrinsic:
-      case Tag::Call:  // args..., empty for PL/0 but part of the documented
-                       // shape (a future frontend with call arguments should
-                       // not need this switch touched to be checked).
       case Tag::CallValue:  // callee, then args -- all value positions
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
@@ -219,12 +196,6 @@ struct Dumper {
       case Tag::If:     out << "if"; break;
       case Tag::While:  out << "while"; break;
       case Tag::Block:  out << "block"; break;
-      case Tag::Call: {
-        auto v = view_call(m, id);
-        out << "call " << m.funcs[v.func].name << " #" << v.func
-            << " cmap=" << v.capture_map;
-        break;
-      }
       case Tag::Intrinsic:
         out << name_of(static_cast<IntrinsicId>(n.op));
         break;

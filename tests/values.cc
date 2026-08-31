@@ -144,11 +144,11 @@ int main() {
   {
     Module m;
     Builder b(m);
-    m.capture_maps.push_back({{VarKind::Local, 0}});  // main -> inner
+    m.capture_maps.push_back({{VarKind::Cell, 0}});  // main -> inner
 
     const NodeId main_body = b.block(
-        {b.assign(VarKind::Local, 0, b.str_literal("held by main", p), p),
-         b.call(1, 0, p)},
+        {b.assign(VarKind::Cell, 0, b.str_literal("held by main", p), p),
+         b.call_value(b.make_closure(1, 0, p), {}, p)},
         p);
 
     // inner: t = capture[0] + " and by inner"; print(1 / 0)
@@ -162,7 +162,9 @@ int main() {
              {b.binary(BinOp::Div, b.literal(1, p), b.literal(0, p), p)}, p)},
         p);
 
-    m.funcs.push_back({"main", 1, 0, main_body, {"s"}, {}});
+    Func main_fn{"main", 0, 0, main_body, {}, {}};
+    main_fn.num_cells = 1;
+    m.funcs.push_back(main_fn);
     m.funcs.push_back({"inner", 1, 1, inner_body, {"t"}, {"s"}});
     const std::string failed = run_module(m, "throw with live strings");
     check_eq(failed, "divide by zero", "throw: message");

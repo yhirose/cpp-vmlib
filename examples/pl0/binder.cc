@@ -57,6 +57,10 @@ struct Binder {
   std::vector<std::set<VarId>> free;
   std::vector<std::vector<int32_t>> calls;
   std::vector<std::map<VarId, int32_t>> capture_index;
+  // A variable some other block captures cannot stay a slot in this one: a
+  // closure over it may outlive the frame. Those get promoted to cells, which
+  // are shared and refcounted; everything else stays a plain local.
+  std::vector<std::map<VarId, int32_t>> cell_index;
 
   // -- Phase A: declarations ------------------------------------------------
   //
@@ -301,12 +305,31 @@ struct Binder {
       }
       m.funcs[f].num_captures = i;
     }
+
+    // Whatever anyone captures, its owner keeps in a cell rather than a local
+    // slot. Walking every block's free set rather than each block's own
+    // variables, because "is this captured" is a fact about the readers.
+    for (const auto& fs : free) {
+      for (const VarId& v : fs) {
+        auto& owner = cell_index[v.first];
+        if (!owner.count(v)) {
+          owner[v] = static_cast<int32_t>(owner.size());
+        }
+      }
+    }
+    for (size_t f = 0; f < blocks.size(); ++f) {
+      m.funcs[f].num_cells = static_cast<int32_t>(cell_index[f].size());
+    }
   }
 
   // -- Phase C: emit --------------------------------------------------------
 
   std::pair<VarKind, int32_t> access(int32_t f, VarId v) const {
-    if (v.first == f) return {VarKind::Local, v.second};
+    if (v.first == f) {
+      const auto it = cell_index[f].find(v);
+      if (it != cell_index[f].end()) return {VarKind::Cell, it->second};
+      return {VarKind::Local, v.second};
+    }
     return {VarKind::Capture, capture_index[f].at(v)};
   }
 
@@ -430,11 +453,16 @@ struct Binder {
         return bd.assign(kind, index, value, pos_of(a));
       }
       case "call"_: {
+        // A procedure call builds a closure over the caller's cells and calls
+        // it. PL/0 has no way to hold on to one, so the closure lives exactly
+        // as long as the call -- but it is the same mechanism a language with
+        // first-class functions uses, rather than a second one beside it.
         const Ast& nm = *a.nodes[0];
         const int32_t g = lookup_proc(f, std::string(nm.token));
         const int32_t cmap = make_capture_map(f, g);
         Builder bd(m);
-        return bd.call(g, cmap, pos_of(a));
+        return bd.call_value(bd.make_closure(g, cmap, pos_of(a)), {},
+                             pos_of(a));
       }
       case "if"_: {
         const NodeId c = emit_cond(*a.nodes[0], f);
@@ -475,6 +503,7 @@ struct Binder {
     free.resize(blocks.size());
     calls.resize(blocks.size());
     capture_index.resize(blocks.size());
+    cell_index.resize(blocks.size());
     scan_block(0);
     solve_captures();
     for (size_t f = 0; f < blocks.size(); ++f) {

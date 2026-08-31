@@ -42,7 +42,8 @@ coreir::Module build_program() {
       b.binary(BinOp::Div, b.literal(1, pos), b.literal(0, pos), pos);
   const NodeId inner_body = b.intrinsic(IntrinsicId::Print, {div}, pos);
 
-  const NodeId call = b.call(1, 0, pos);  // func #1 (inner), cmap #0
+  // func #1 (inner), over cmap #0 (no captures), called immediately
+  const NodeId call = b.call_value(b.make_closure(1, 0, pos), {}, pos);
 
   m.funcs.push_back({"main", 0, 0, call, {}, {}});
   m.funcs.push_back({"inner", 0, 0, inner_body, {}, {}});

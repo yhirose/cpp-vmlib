@@ -153,8 +153,9 @@ struct FnCompiler {
       }
 
       case Tag::MakeClosure: {
+        auto v = view_make_closure(m, id);
         const int32_t r = alloc();
-        emit(Op::MakeClosure, r, n.a, n.b, n.pos);
+        emit(Op::MakeClosure, r, v.func, v.capture_map, n.pos);
         return r;
       }
       case Tag::CallValue: {
@@ -225,12 +226,6 @@ struct FnCompiler {
         compile_stmt(v.body);
         emit(Op::Jump, start, 0, 0, n.pos);
         patch(jf, here());
-        break;
-      }
-
-      case Tag::Call: {
-        auto v = view_call(m, id);
-        emit(Op::Call, v.func, v.capture_map, 0, n.pos);
         break;
       }
 

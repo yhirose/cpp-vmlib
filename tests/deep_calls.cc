@@ -51,15 +51,16 @@ coreir::Module build(int64_t limit) {
   Builder b(m);
   const SrcPos call_pos{7, 3};
 
-  m.capture_maps.push_back({{VarKind::Local, 0}});    // cmap 0: main -> rec
+  // n is shared with rec, so it is a cell of main rather than a local.
+  m.capture_maps.push_back({{VarKind::Cell, 0}});     // cmap 0: main -> rec
   m.capture_maps.push_back({{VarKind::Capture, 0}});  // cmap 1: rec -> rec
 
   const SrcPos p{1, 1};
   const NodeId main_body =
-      b.block({b.assign(VarKind::Local, 0, b.literal(0, p), p),
-               b.call(1, 0, call_pos),
+      b.block({b.assign(VarKind::Cell, 0, b.literal(0, p), p),
+               b.call_value(b.make_closure(1, 0, call_pos), {}, call_pos),
                b.intrinsic(IntrinsicId::Print,
-                           {b.varref(VarKind::Local, 0, p)}, p)},
+                           {b.varref(VarKind::Cell, 0, p)}, p)},
               p);
 
   const NodeId n = b.varref(VarKind::Capture, 0, p);
@@ -67,10 +68,13 @@ coreir::Module build(int64_t limit) {
       {b.assign(VarKind::Capture, 0,
                 b.binary(BinOp::Add, n, b.literal(1, p), p), p),
        b.make_if(b.binary(BinOp::Lt, n, b.literal(limit, p), p),
-                 b.call(1, 1, call_pos), NodeId{}, p)},
+                 b.call_value(b.make_closure(1, 1, call_pos), {}, call_pos),
+                 NodeId{}, p)},
       p);
 
-  m.funcs.push_back({"main", 1, 0, main_body, {"n"}, {}});
+  Func main_fn{"main", 0, 0, main_body, {}, {}};
+  main_fn.num_cells = 1;
+  m.funcs.push_back(main_fn);
   m.funcs.push_back({"rec", 0, 1, rec_body, {}, {"n"}});
   return m;
 }
