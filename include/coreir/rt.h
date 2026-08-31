@@ -23,8 +23,11 @@ void coreir_rt_out(int64_t v);
 int64_t coreir_rt_in(int64_t line, int64_t col);
 
 // Report and terminate the running program. What "terminate" means is the
-// host's choice -- exit the process, throw a host-level exception, longjmp
-// out -- as long as it does not return.
+// host's choice -- exit the process, or throw a host-level exception -- as
+// long as it does not return. Every frame the executor has live across this
+// call (vm/exec.cc's Frame) holds non-trivial-destructor members, so a host
+// must not implement this with longjmp: unwinding past them without running
+// their destructors is undefined behavior, not merely wasteful.
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t line, int64_t col);
 
 // Called on every loop back-edge and call, so a host that wants to interrupt

@@ -27,11 +27,12 @@ int64_t coreir_rt_in(int64_t line, int64_t col) {
   if (!std::getline(std::cin, s)) coreir_rt_fail("invalid input", line, col);
 
   // One line, converted whole -- matching pl0.cul's `to_long(IO.input())`
-  // rather than scanf's whitespace-delimited token.
-  size_t b = s.find_first_not_of(" \t\r\n");
-  if (b == std::string::npos) coreir_rt_fail("invalid input", line, col);
-  size_t e = s.find_last_not_of(" \t\r\n");
-  s = s.substr(b, e - b + 1);
+  // rather than scanf's whitespace-delimited token. strtoll skips leading
+  // whitespace on its own; only trailing whitespace needs trimming so the
+  // full-consumption check below lands on the right end of the string.
+  const size_t e = s.find_last_not_of(" \t\r\n");
+  if (e == std::string::npos) coreir_rt_fail("invalid input", line, col);
+  s.resize(e + 1);
 
   errno = 0;
   char* end = nullptr;

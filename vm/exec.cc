@@ -11,18 +11,9 @@ using namespace coreir;
 namespace vm {
 namespace {
 
-// Every procedure call recurses through the host's own C++ stack (call() ->
-// run_chunk() -> call() -> ...), so nothing here can catch a runaway recursion
-// itself -- the host's process would simply overflow its stack, silently,
-// with no exception to catch. This counter turns that into the same kind of
-// reported failure as a divide-by-zero, at a limit conservative enough for an
-// 8 MB stack.
-constexpr int kMaxCallDepth = 10000;
-
-// Same shape and the same safety argument as an interpreter's frame would
-// need: a capture is a raw pointer into an enclosing frame's locals, sound
-// because `locals` is sized once at frame creation and PL/0 has no upward
-// funarg to outlive it.
+// A capture is a raw pointer into an enclosing frame's locals, sound because
+// `locals` is sized once at frame creation and PL/0 has no upward funarg to
+// outlive it.
 struct Frame {
   std::vector<Slot> locals;
   std::vector<Slot*> captures;
@@ -31,11 +22,30 @@ struct Frame {
 
 struct Exec {
   const Program& p;
+  int max_depth;
   int depth = 0;
+
+  // Every procedure call recurses through the host's own C++ stack (call() ->
+  // run_chunk() -> call() -> ...), so nothing here can catch a runaway
+  // recursion itself -- the host's process would simply overflow its stack,
+  // silently, with no exception to catch. This counter turns that into the
+  // same kind of reported failure as a divide-by-zero.
+  //
+  // An RAII guard, not a manual ++/--: coreir_rt_fail is documented to allow
+  // a host to throw rather than exit, and a throw from deeper in run_chunk
+  // (a divide-by-zero, say) must still leave `depth` correct for whichever
+  // frame catches it and keeps running -- a bare `--depth` after the
+  // recursive call would be skipped by that unwind.
+  struct DepthGuard {
+    int& depth;
+    explicit DepthGuard(int& d) : depth(d) { ++depth; }
+    ~DepthGuard() { --depth; }
+  };
 
   void call(int32_t func, const std::vector<CaptureSrc>& cmap, Frame* caller,
             SrcPos pos) {
-    if (++depth > kMaxCallDepth) {
+    DepthGuard guard(depth);
+    if (depth > max_depth) {
       coreir_rt::fail("recursion limit exceeded", pos.line, pos.col);
     }
     coreir_rt_poll();
@@ -50,7 +60,6 @@ struct Exec {
                                : caller->captures[src.index]);
     }
     run_chunk(ch, f);
-    --depth;
   }
 
   [[noreturn]] void fail(const Chunk& ch, size_t pc, const std::string& msg) {
@@ -135,8 +144,8 @@ struct Exec {
 
 }  // namespace
 
-void run(const Program& p) {
-  Exec e{p};
+void run(const Program& p, int max_call_depth) {
+  Exec e{p, max_call_depth};
   const Chunk& entry = p.chunks[0];
   Frame f;
   f.locals.resize(static_cast<size_t>(entry.num_locals));

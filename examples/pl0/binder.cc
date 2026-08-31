@@ -387,9 +387,10 @@ struct Binder {
   NodeId emit_cond(const Ast& a, int32_t f) {
     switch (a.tag) {
       case "odd"_: {
-        // ODD e is e mod 2 != 0. pl0.cc's two lanes both read it as e != 0,
-        // and agree with each other while disagreeing with the language --
-        // which is why three-lane cross-checking alone is not enough.
+        // ODD e is e mod 2 != 0. pl0.cc's interpreter and its JIT both read
+        // it as e != 0, agreeing with each other while disagreeing with the
+        // language -- which is why matching an independent implementation
+        // matters more than internal self-consistency.
         const NodeId e = emit_expr(*a.nodes[0], f);
         Builder bd(m);
         const SrcPos p = pos_of(a);
