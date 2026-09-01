@@ -1,5 +1,6 @@
 #include "vm/exec.h"
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -414,6 +415,58 @@ struct Exec {
         case Op::TypeOf:
           f.regs[in.a] = Value::make_str(type_name(f.regs[in.b].tag()));
           break;
+        case Op::ToInt: {
+          const Value& v = f.regs[in.b];
+          if (v.is_int()) {
+            f.regs[in.a] = v;
+            break;
+          }
+          if (!v.is_number()) {
+            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
+                        " to int");
+          }
+          const double d = v.as_double();
+          // The comparison is in double, where int64's max rounds up to
+          // 2^63 -- so >= on the top edge, > on the bottom.
+          if (std::isnan(d) || d >= 9223372036854775808.0 ||
+              d < -9223372036854775808.0) {
+            fail(f, "double value out of int range");
+          }
+          f.regs[in.a] = Value::make_int(static_cast<int64_t>(d));
+          break;
+        }
+        case Op::ToDouble: {
+          const Value& v = f.regs[in.b];
+          if (!v.is_number()) {
+            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
+                        " to double");
+          }
+          f.regs[in.a] = Value::make_double(v.as_number());
+          break;
+        }
+        case Op::FMod: {
+          const Value& l = f.regs[in.b];
+          const Value& r = f.regs[in.c];
+          if (!l.is_number() || !r.is_number()) {
+            fail(f, std::string("cannot fmod ") + type_name(l.tag()) +
+                        " and " + type_name(r.tag()));
+          }
+          if (r.as_number() == 0.0) fail(f, "divide by zero");
+          f.regs[in.a] =
+              Value::make_double(std::fmod(l.as_number(), r.as_number()));
+          break;
+        }
+        case Op::Pow: {
+          const Value& l = f.regs[in.b];
+          const Value& r = f.regs[in.c];
+          if (!l.is_number() || !r.is_number()) {
+            fail(f, std::string("cannot pow ") + type_name(l.tag()) +
+                        " and " + type_name(r.tag()));
+          }
+          f.regs[in.a] =
+              Value::make_double(std::pow(l.as_number(), r.as_number()));
+          break;
+        }
         case Op::CellNew:
           f.cells[in.a] = Value::make_cell();
           break;

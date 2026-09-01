@@ -111,7 +111,16 @@ enum class BinOp : uint8_t {
 // ("int", "double", "string", ...). A dynamic front end needs it for any
 // dispatch its own semantics do on a value's kind; its own type names are
 // its own mapping to write over this one.
-enum class IntrinsicId : uint8_t { Print, ReadInt, Len, ToStr, TypeOf };
+// The numeric conversions and the two float operations a front end cannot
+// write in-language: ToInt truncates a double toward zero (and traps on
+// NaN, an infinity, or a value outside int64's range); ToDouble widens an
+// int; FMod is IEEE fmod over doubles (int operands widen; a zero divisor
+// traps, like integer Mod); Pow is std::pow over doubles. Integer
+// exponentiation is deliberately absent -- a loop over wrapping Mul writes
+// it in-language, in whatever overflow discipline the language wants.
+enum class IntrinsicId : uint8_t {
+  Print, ReadInt, Len, ToStr, TypeOf, ToInt, ToDouble, FMod, Pow,
+};
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -272,6 +281,10 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::Len:     return 1;
     case IntrinsicId::ToStr:   return 1;
     case IntrinsicId::TypeOf:  return 1;
+    case IntrinsicId::ToInt:   return 1;
+    case IntrinsicId::ToDouble: return 1;
+    case IntrinsicId::FMod:    return 2;
+    case IntrinsicId::Pow:     return 2;
   }
   return 0;
 }

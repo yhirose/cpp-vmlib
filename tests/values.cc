@@ -403,6 +403,50 @@ int main() {
     check_eq(joined(), "42|4|0.75|true|nil|ab|", "tostr output");
   }
 
+  // --- 12b. Numeric conversions and the two float operations. ------------
+  {
+    Module m;
+    Builder b(m);
+    auto pr1 = [&](IntrinsicId id, NodeId v) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.intrinsic(IntrinsicId::ToStr,
+                                      {b.intrinsic(id, {v}, p)}, p)},
+                         p);
+    };
+    auto pr2 = [&](IntrinsicId id, NodeId l, NodeId r) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.intrinsic(IntrinsicId::ToStr,
+                                      {b.intrinsic(id, {l, r}, p)}, p)},
+                         p);
+    };
+    const NodeId body = b.block(
+        {pr1(IntrinsicId::ToInt, b.double_literal(-2.9, p)),
+         pr1(IntrinsicId::ToDouble, b.literal(3, p)),
+         pr2(IntrinsicId::FMod, b.double_literal(5.5, p), b.literal(2, p)),
+         pr2(IntrinsicId::Pow, b.double_literal(2.0, p),
+             b.double_literal(0.5, p))},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    const std::string failed = run_module(m, "numerics");
+    check_eq(failed, "", "numerics: unexpected failure");
+    check_eq(joined(), "-2|3|1.5|1.4142135623730951|",
+             "numerics output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::ToInt,
+                                  {b.double_literal(1e300, p)}, p)},
+                     p),
+         {},
+         {}});
+    check_eq(run_module(m, "toint range"), "double value out of int range",
+             "toint range: message");
+  }
+
   // --- 12. TypeOf: the tag, in type_name's vocabulary. --------------------
   {
     Module m;

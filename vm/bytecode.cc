@@ -42,6 +42,10 @@ const char* name_of(Op op) {
     case Op::Len:         return "len";
     case Op::ToStr:       return "tostr";
     case Op::TypeOf:      return "typeof";
+    case Op::ToInt:       return "toint";
+    case Op::ToDouble:    return "todouble";
+    case Op::FMod:        return "fmod";
+    case Op::Pow:         return "pow";
     case Op::NewObject:   return "newobject";
   }
   return "?";

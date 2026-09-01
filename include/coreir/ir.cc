@@ -124,6 +124,10 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::Len:     return "len";
     case IntrinsicId::ToStr:   return "tostr";
     case IntrinsicId::TypeOf:  return "typeof";
+    case IntrinsicId::ToInt:   return "toint";
+    case IntrinsicId::ToDouble: return "todouble";
+    case IntrinsicId::FMod:    return "fmod";
+    case IntrinsicId::Pow:     return "pow";
   }
   return "?";
 }

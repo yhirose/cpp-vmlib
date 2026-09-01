@@ -60,6 +60,10 @@ enum class Op : uint8_t {
   Len,          // a = dst, b = src
   ToStr,        // a = dst, b = src   (to_display's formatting)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
+  ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
+  ToDouble,     // a = dst, b = src
+  FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
+  Pow,          // a = dst, b = lhs, c = rhs   (std::pow over doubles)
   NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
 };
 
