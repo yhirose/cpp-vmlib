@@ -382,6 +382,27 @@ int main() {
              "bitnot on bool: message");
   }
 
+  // --- 11. ToStr: to_display's formatting, as a value. --------------------
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.intrinsic(IntrinsicId::ToStr, {v}, p)}, p);
+    };
+    const NodeId body = b.block(
+        {pr(b.literal(42, p)), pr(b.double_literal(4.0, p)),
+         pr(b.double_literal(0.75, p)), pr(b.bool_literal(true, p)),
+         pr(b.nil_literal(p)),
+         pr(b.binary(BinOp::Add, b.str_literal("a", p),
+                     b.str_literal("b", p), p))},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    const std::string failed = run_module(m, "tostr");
+    check_eq(failed, "", "tostr: unexpected failure");
+    check_eq(joined(), "42|4|0.75|true|nil|ab|", "tostr output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;

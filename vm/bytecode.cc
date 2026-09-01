@@ -40,6 +40,7 @@ const char* name_of(Op op) {
     case Op::Index:       return "index";
     case Op::SetIndex:    return "setindex";
     case Op::Len:         return "len";
+    case Op::ToStr:       return "tostr";
     case Op::NewObject:   return "newobject";
   }
   return "?";

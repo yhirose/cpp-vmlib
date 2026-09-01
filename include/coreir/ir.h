@@ -102,7 +102,12 @@ enum class BinOp : uint8_t {
   BitAnd, BitOr, BitXor, Shl, Shr,
 };
 
-enum class IntrinsicId : uint8_t { Print, ReadInt, Len };
+// ToStr formats any value the way to_display (coreir/semantics.h) does --
+// shortest-round-trip doubles included. A language whose display rules
+// differ (culebra prints whole doubles as "4.0") post-processes the result
+// rather than this growing a mode; what it cannot do in-language is produce
+// digits from a number at all, which is why this is an intrinsic.
+enum class IntrinsicId : uint8_t { Print, ReadInt, Len, ToStr };
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -261,6 +266,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::Print:   return 1;
     case IntrinsicId::ReadInt: return 0;
     case IntrinsicId::Len:     return 1;
+    case IntrinsicId::ToStr:   return 1;
   }
   return 0;
 }

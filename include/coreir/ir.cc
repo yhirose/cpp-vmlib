@@ -122,6 +122,7 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::Print:   return "print";
     case IntrinsicId::ReadInt: return "readint";
     case IntrinsicId::Len:     return "len";
+    case IntrinsicId::ToStr:   return "tostr";
   }
   return "?";
 }

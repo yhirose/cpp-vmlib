@@ -408,6 +408,9 @@ struct Exec {
           f.regs[in.a] = length_of(v);
           break;
         }
+        case Op::ToStr:
+          f.regs[in.a] = Value::make_str(to_display(f.regs[in.b]));
+          break;
         case Op::CellNew:
           f.cells[in.a] = Value::make_cell();
           break;

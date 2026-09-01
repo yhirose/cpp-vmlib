@@ -216,12 +216,13 @@ struct FnCompiler {
           emit(Op::In, r, 0, 0, n.pos);
           return r;
         }
-        if (v.id == IntrinsicId::Len) {
+        if (v.id == IntrinsicId::Len || v.id == IntrinsicId::ToStr) {
           const int32_t base = top;
           const int32_t s = compile_expr(m.child(id, 0));
           top = base;
           const int32_t r = alloc();
-          emit(Op::Len, r, s, 0, n.pos);
+          emit(v.id == IntrinsicId::Len ? Op::Len : Op::ToStr, r, s, 0,
+               n.pos);
           return r;
         }
         // Print is a statement; in value position it yields nil. This used to
