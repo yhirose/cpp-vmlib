@@ -246,13 +246,13 @@ struct Exec {
   }
 
   // The drop-contract hook (see Runtime::set_drop_fn): run the object's
-  // "\x01drop" closure with the object itself as the argument. A throwing
+  // "\x01" "drop" closure with the object itself as the argument. A throwing
   // destructor is reported and swallowed -- an object going away must not
   // fail the program that let go of it.
   static void drop_hook(void* ctx, HeapObj* h) {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
-    Value* dv = o->find("\x01drop");
+    Value* dv = o->find("\x01" "drop");
     if (!dv || !dv->is_func()) return;
     Value closure = *dv;
     Value arg = Value::make_ref(h);

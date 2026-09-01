@@ -143,7 +143,7 @@ void heap_release_to_zero(HeapObj* h) {
   if (h->kind == ValueTag::Object && h->owner && h->owner->drop_fn() &&
       !h->owner->in_collect()) {
     auto* o = static_cast<ObjectObj*>(h);
-    if (o->find("\x01drop")) {
+    if (o->find("\x01" "drop")) {
       ++h->rc;  // pin across the destructor
       h->owner->drop_fn()(h->owner->drop_ctx(), h);
       if (--h->rc != 0) return;  // resurrected

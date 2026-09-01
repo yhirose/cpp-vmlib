@@ -116,7 +116,7 @@ int main() {
     });
     {
       Value o = Value::make_object();
-      o.as_object()->set("\x01drop", Value::make_str("marker"));
+      o.as_object()->set("\x01" "drop", Value::make_str("marker"));
     }
     check(fired == 1, "hook fired at zero");
     check(rt.live_objects() == 2, "resurrected object still alive");
