@@ -12,6 +12,20 @@ struct FnCompiler {
   const Module& m;
   const Func& fn;
   Chunk& ch;
+
+  // The loops and scopes currently open at the point being compiled, so a
+  // non-local exit can leave each region it crosses the way the region's own
+  // exit would.
+  struct OpenLoop {
+    int32_t head;                    // where Continue re-enters (the test)
+    int32_t stmt_base;               // register floor of the While statement
+    size_t scope_depth;              // open_scopes.size() at loop entry
+    std::vector<size_t> break_jumps; // patched to the loop's exit
+  };
+  std::vector<OpenLoop> open_loops;
+  struct OpenScope { int32_t first_local, end_local; };
+  std::vector<OpenScope> open_scopes;
+
   int32_t top = 0;  // next free register
   // Highest register the statement being compiled has reached, so its end can
   // drop exactly the range it used rather than every register the function
@@ -42,6 +56,21 @@ struct FnCompiler {
   }
 
   int32_t here() const { return static_cast<int32_t>(ch.code.size()); }
+
+  // What a jump out of nested regions owes them: each Scope down to (not
+  // including) `scope_depth` releases its locals, and the registers above the
+  // target statement's floor -- temps of the abandoned regions -- are
+  // dropped. num_regs at this point bounds every register a region entered so
+  // far can have touched, so the clear cannot miss one.
+  void leave_down_to(size_t scope_depth, int32_t regs_floor, uint32_t pos) {
+    for (size_t i = open_scopes.size(); i > scope_depth; --i) {
+      const OpenScope& sc = open_scopes[i - 1];
+      emit(Op::ClearLocals, sc.first_local, sc.end_local, 0, pos);
+    }
+    if (ch.num_regs > regs_floor) {
+      emit(Op::ClearRegs, regs_floor, ch.num_regs, 0, pos);
+    }
+  }
 
   // "Whatever this node is, leave its value in a register." A statement --
   // an Assign, a static Call, a While -- has no value, so it runs and yields
@@ -94,7 +123,9 @@ struct FnCompiler {
         const Node& sn = m.at(id);
         const int32_t regs_base = top;
         const int32_t start = here();
+        open_scopes.push_back({sn.a, sn.b});
         const int32_t r = compile_value(m.child(id, 0));
+        open_scopes.pop_back();
         emit(Op::ClearLocals, sn.a, sn.b, 0, sn.pos);
         ch.cleanups.push_back(
             {start, here(), sn.a, sn.b, regs_base, -1, -1});
@@ -290,9 +321,12 @@ struct FnCompiler {
         const int32_t c = compile_expr(v.cond);
         top = base;
         const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
+        open_loops.push_back({start, base, open_scopes.size(), {}});
         compile_stmt(v.body);
         emit(Op::Jump, start, 0, 0, n.pos);
         patch(jf, here());
+        for (size_t j : open_loops.back().break_jumps) patch(j, here());
+        open_loops.pop_back();
         break;
       }
 
@@ -312,6 +346,32 @@ struct FnCompiler {
         const int32_t key = compile_expr(m.child(id, 1));
         const int32_t val = compile_expr(m.child(id, 2));
         emit(Op::SetIndex, recv, key, val, n.pos);
+        break;
+      }
+
+      case Tag::Return: {
+        // The frame's release is the Ret itself; no scope needs leaving one
+        // at a time when the whole frame goes at once.
+        int32_t r;
+        if (n.num_children == 1) {
+          r = compile_value(m.child(id, 0));
+        } else {
+          r = alloc();
+          emit(Op::LoadNil, r, 0, 0, n.pos);
+        }
+        emit(Op::Ret, r, 1, 0, n.pos);
+        break;
+      }
+
+      case Tag::Break:
+      case Tag::Continue: {
+        OpenLoop& loop = open_loops.back();  // verify(): inside a loop body
+        leave_down_to(loop.scope_depth, loop.stmt_base, n.pos);
+        if (n.tag == Tag::Continue) {
+          emit(Op::Jump, loop.head, 0, 0, n.pos);
+        } else {
+          loop.break_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+        }
         break;
       }
 
