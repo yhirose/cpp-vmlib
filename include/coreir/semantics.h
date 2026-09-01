@@ -204,6 +204,19 @@ inline Value apply_unop(UnOp op, const Value& v) {
 // fails rather than yielding nil: a language that wants nil can ask the
 // length first, while one that wants the error cannot recover it from a nil.
 inline std::string index_error(const Value& recv, const Value& key) {
+  if (recv.is_str()) {
+    if (!key.is_int()) {
+      return std::string("string index must be an int, not ") +
+             type_name(key.tag());
+    }
+    const int64_t i = key.as_int();
+    const auto n = static_cast<int64_t>(recv.as_str().size());
+    if (i < 0 || i >= n) {
+      return "string index " + std::to_string(i) +
+             " out of range for length " + std::to_string(n);
+    }
+    return {};
+  }
   if (recv.is_array()) {
     if (!key.is_int()) {
       return std::string("array index must be an int, not ") +
@@ -232,6 +245,13 @@ inline std::string index_error(const Value& recv, const Value& key) {
 // array index out of range is almost always a bug, while asking an object
 // whether it has a key is how you find out.
 inline Value index_get(const Value& recv, const Value& key) {
+  if (recv.is_str()) {
+    // One byte, as a string. Bytes, not code points: what a code point is
+    // belongs to the language's string model, and a front end with one
+    // builds it over this.
+    return Value::make_str(
+        std::string(1, recv.as_str()[static_cast<size_t>(key.as_int())]));
+  }
   if (recv.is_array()) {
     return recv.as_array()->items[static_cast<size_t>(key.as_int())];
   }

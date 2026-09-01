@@ -29,6 +29,7 @@ enum class Op : uint8_t {
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
   Out,          // a = src
+  OutRaw,       // a = src   (no trailing newline)
   In,           // a = dst
   Ret,          // a = result reg, b = 1 if there is one
   Throw,        // a = value reg; unwinds to the nearest handler

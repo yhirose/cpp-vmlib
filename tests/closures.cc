@@ -110,6 +110,9 @@ void coreir_rt_out(int64_t v) { g_out.push_back(std::to_string(v)); }
 void coreir_rt_out_str(const char* bytes, int64_t len) {
   g_out.emplace_back(bytes, static_cast<size_t>(len));
 }
+void coreir_rt_out_raw(const char* bytes, int64_t len) {
+  g_out.emplace_back(bytes, static_cast<size_t>(len));
+}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {

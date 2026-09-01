@@ -346,6 +346,11 @@ struct Exec {
             continue;
           }
           break;
+        case Op::OutRaw: {
+          const std::string s = to_display(f.regs[in.a]);
+          coreir_rt_out_raw(s.data(), static_cast<int64_t>(s.size()));
+          break;
+        }
         case Op::Out: {
           const Value& v = f.regs[in.a];
           // An Int keeps the dedicated integer entry point: it is the one
@@ -399,6 +404,9 @@ struct Exec {
         case Op::SetIndex: {
           const Value& recv = f.regs[in.a];
           const Value& key = f.regs[in.b];
+          // Strings read through Index but do not write: they are immutable
+          // values, not containers of cells.
+          if (recv.is_str()) fail(f, "cannot assign into a string");
           if (auto err = index_error(recv, key); !err.empty()) fail(f, err);
           index_set(recv, key, f.regs[in.c]);
           break;

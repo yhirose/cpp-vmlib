@@ -1,4 +1,4 @@
-// The contract every host implements: five C functions, nothing else.
+// The contract every host implements: six C functions, nothing else.
 //
 // vm/exec.cc calls these and links against nothing beyond this declaration --
 // it does not know or care whether the definitions come from
@@ -19,11 +19,15 @@ extern "C" {
 void coreir_rt_out(int64_t v);
 
 // Print one string, followed by a newline. Everything that is not an integer
-// arrives here, formatted by the executor. A fifth symbol rather than a
+// arrives here, formatted by the executor. A separate symbol rather than a
 // widened coreir_rt_out, deliberately: a host defines these itself, so
 // changing an existing signature breaks that host's build while adding one
 // does not.
 void coreir_rt_out_str(const char* bytes, int64_t len);
+
+// The same, without the newline -- a language's `print` next to its
+// `println`. Added as a sixth symbol under the same rule as the fifth.
+void coreir_rt_out_raw(const char* bytes, int64_t len);
 
 // Read one line and convert it to an integer. A line that is not an integer,
 // or end of input, fails at the position given.

@@ -412,9 +412,10 @@ struct FnCompiler {
 
       case Tag::Intrinsic: {
         auto v = view_intrinsic(m, id);
-        if (v.id == IntrinsicId::Print) {
+        if (v.id == IntrinsicId::Print || v.id == IntrinsicId::PrintRaw) {
           const int32_t s = compile_expr(m.child(id, 0));
-          emit(Op::Out, s, 0, 0, n.pos);
+          emit(v.id == IntrinsicId::Print ? Op::Out : Op::OutRaw, s, 0, 0,
+               n.pos);
         } else {
           compile_expr(id);  // value discarded
         }

@@ -23,6 +23,7 @@ const char* name_of(Op op) {
     case Op::Jump:        return "jump";
     case Op::JumpIfFalse: return "jumpiffalse";
     case Op::Out:         return "out";
+    case Op::OutRaw:      return "outraw";
     case Op::In:          return "in";
     case Op::Ret:         return "ret";
     case Op::Throw:       return "throw";
@@ -112,6 +113,7 @@ std::string to_string(const Program& p) {
           out << " r" << in.a << ", " << in.b;
           break;
         case Op::Out:
+        case Op::OutRaw:
         case Op::In:
         case Op::Throw:
         case Op::DeferPush:

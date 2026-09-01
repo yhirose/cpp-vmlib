@@ -56,6 +56,7 @@ extern "C" {
 
 void coreir_rt_out(int64_t) {}
 void coreir_rt_out_str(const char*, int64_t) {}
+void coreir_rt_out_raw(const char*, int64_t) {}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
 

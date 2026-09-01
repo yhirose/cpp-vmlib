@@ -75,6 +75,7 @@ void coreir_rt_out(int64_t) { g_live_at_step.push_back(g_rt->live_objects()); }
 void coreir_rt_out_str(const char*, int64_t) {
   g_live_at_step.push_back(g_rt->live_objects());
 }
+void coreir_rt_out_raw(const char*, int64_t) {}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* m, int64_t, int64_t) {

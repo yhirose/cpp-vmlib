@@ -128,6 +128,7 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::ToDouble: return "todouble";
     case IntrinsicId::FMod:    return "fmod";
     case IntrinsicId::Pow:     return "pow";
+    case IntrinsicId::PrintRaw: return "printraw";
   }
   return "?";
 }

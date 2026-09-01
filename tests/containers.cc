@@ -87,6 +87,7 @@ void coreir_rt_out(int64_t v) { g_out.push_back(std::to_string(v)); }
 void coreir_rt_out_str(const char* b, int64_t n) {
   g_out.emplace_back(b, static_cast<size_t>(n));
 }
+void coreir_rt_out_raw(const char*, int64_t) {}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* m, int64_t, int64_t) {
@@ -95,6 +96,7 @@ void coreir_rt_poll(void) {}
 }
 
 int main() {
+  // (string indexing cases are appended at the end; see the tail)
   using namespace coreir;
   const SrcPos p{1, 1};
 
@@ -237,6 +239,48 @@ int main() {
         {"main", 0, 0,
          b.intrinsic(IntrinsicId::Print, {c.build(b, p)}, p), {}, {}});
     check_eq(run_module(m, c.what), c.want, std::string(c.what) + ": message");
+  }
+
+  // --- Strings index like arrays, one byte out, and refuse writes. --------
+  {
+    Module m;
+    Builder b(m);
+    const NodeId s0 = b.str_literal("abc", p);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.block({b.intrinsic(IntrinsicId::Print,
+                              {b.index(s0, b.literal(1, p), p)}, p)},
+                 p),
+         {},
+         {}});
+    check_eq(run_module(m, "string index"), "", "string index: failure");
+    check_eq(joined(), "b|", "string index output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.index(b.str_literal("abc", p), b.literal(3, p), p)},
+                     p),
+         {},
+         {}});
+    check_eq(run_module(m, "string index range"),
+             "string index 3 out of range for length 3",
+             "string index range: message");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.set_index(b.str_literal("abc", p), b.literal(0, p),
+                     b.str_literal("z", p), p),
+         {},
+         {}});
+    check_eq(run_module(m, "string set_index"), "cannot assign into a string",
+             "string set_index: message");
   }
 
   if (g_failures != 0) {

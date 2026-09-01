@@ -22,6 +22,10 @@ extern "C" {
 
 void coreir_rt_out(int64_t v) { std::printf("%" PRId64 "\n", v); }
 
+void coreir_rt_out_raw(const char* bytes, int64_t len) {
+  std::fwrite(bytes, 1, static_cast<size_t>(len), stdout);
+}
+
 void coreir_rt_out_str(const char* bytes, int64_t len) {
   std::printf("%.*s\n", static_cast<int>(len), bytes);
 }

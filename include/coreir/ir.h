@@ -120,6 +120,9 @@ enum class BinOp : uint8_t {
 // it in-language, in whatever overflow discipline the language wants.
 enum class IntrinsicId : uint8_t {
   Print, ReadInt, Len, ToStr, TypeOf, ToInt, ToDouble, FMod, Pow,
+  // Print without the trailing newline, through coreir_rt_out_raw. The value
+  // is formatted the way ToStr formats it.
+  PrintRaw,
 };
 
 // A variable is either a slot in this frame or a slot borrowed from an
@@ -285,6 +288,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ToDouble: return 1;
     case IntrinsicId::FMod:    return 2;
     case IntrinsicId::Pow:     return 2;
+    case IntrinsicId::PrintRaw: return 1;
   }
   return 0;
 }
