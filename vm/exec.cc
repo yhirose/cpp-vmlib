@@ -62,6 +62,10 @@ struct Frame {
   std::vector<Value> defers;
   std::vector<std::pair<size_t, int32_t>> defer_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
+  // Non-nil exactly when this frame is a generator activation: the
+  // GeneratorObj it suspends back into. Owning, so the generator cannot be
+  // freed out from under its own running frame.
+  Value gen_self;
 };
 
 struct Exec {
@@ -103,6 +107,44 @@ struct Exec {
     coreir_rt_poll();
   }
 
+  // The {value, done} object both generator intrinsics answer with.
+  Value gen_result(Value v, bool done) {
+    Value o = Value::make_object();
+    o.as_object()->set("value", v);
+    o.as_object()->set("done", Value::make_bool(done));
+    return o;
+  }
+
+  // Move a frame's storage into a generator's keeping (suspend)...
+  void park_frame(GenFrame& gf, Frame& f) {
+    gf.locals = std::move(f.locals);
+    gf.regs = std::move(f.regs);
+    gf.cells = std::move(f.cells);
+    gf.captures = std::move(f.captures);
+    gf.defers = std::move(f.defers);
+    gf.defer_marks = std::move(f.defer_marks);
+  }
+
+  // ...and back onto the executor's stack (resume). The new frame owns the
+  // generator for as long as it runs.
+  std::unique_ptr<Frame> unpark_frame(const Value& gv, int32_t ret_reg) {
+    GeneratorObj* go = gv.as_generator();
+    GenFrame& gf = go->frame;
+    auto f = std::make_unique<Frame>();
+    f->chunk = &p.chunks[static_cast<size_t>(gf.func)];
+    f->pc = static_cast<size_t>(gf.pc);
+    f->locals = std::move(gf.locals);
+    f->regs = std::move(gf.regs);
+    f->cells = std::move(gf.cells);
+    f->captures = std::move(gf.captures);
+    f->defers = std::move(gf.defers);
+    f->defer_marks = std::move(gf.defer_marks);
+    f->ret_reg = ret_reg;
+    f->gen_self = gv;
+    go->state = GeneratorObj::State::Running;
+    return f;
+  }
+
   // Calling a closure -- the only way a frame is entered. The callee gets the
   // closure's cells, which are shared rather than pointed at, so nothing here
   // depends on the caller still being alive.
@@ -117,6 +159,25 @@ struct Exec {
       raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
                      " argument(s), given " + std::to_string(argc),
                  pos);
+    }
+    // Calling a generator function runs none of it: the arguments and
+    // captures are packaged into a Start-state activation and that is the
+    // call's value. No frame, so no depth check.
+    if (ch.is_generator) {
+      Value g = Value::make_generator();
+      GenFrame& gf = g.as_generator()->frame;
+      gf.func = c->func;
+      gf.locals.assign(static_cast<size_t>(ch.num_locals), Value::uninit());
+      for (int32_t i = 0; i < argc; ++i) {
+        gf.locals[static_cast<size_t>(i)] = args[i];
+      }
+      gf.regs.resize(static_cast<size_t>(ch.num_regs));
+      gf.cells.resize(static_cast<size_t>(ch.num_cells));
+      gf.captures = c->cells;
+      if (ret_reg >= 0 && !frames.empty()) {
+        frames.back()->regs[ret_reg] = std::move(g);
+      }
+      return;
     }
     check_can_push(pos);
     std::unique_ptr<Frame> f = make_frame(ch);
@@ -313,6 +374,11 @@ struct Exec {
           f.pc = static_cast<size_t>(cl.handler_pc);
           return true;
         }
+      }
+      // A generator frame unwound past is finished for good: the throw
+      // reaches whoever resumed it, and every later resume answers done.
+      if (f.gen_self.is_generator()) {
+        f.gen_self.as_generator()->state = GeneratorObj::State::Done;
       }
       frames.pop_back();
     }
@@ -588,6 +654,100 @@ struct Exec {
           const SrcPos sp = p.positions[ch.code_pos[f.pc]];
           throw Raise{f.regs[in.a], sp, {}};
         }
+        case Op::Yield: {
+          // Suspend: the frame's storage moves back into the generator, the
+          // frame pops, and the resumer gets {value, done: false} -- the
+          // same delivery shape as Ret, one level up.
+          if (!f.gen_self.is_generator()) {
+            fail(f, "yield outside a generator");  // verify() precludes this
+          }
+          Value self = std::move(f.gen_self);
+          GeneratorObj* go = self.as_generator();
+          Value out = f.regs[in.b];
+          go->frame.pc = static_cast<int64_t>(f.pc) + 1;
+          go->frame.yield_reg = in.a;
+          park_frame(go->frame, f);
+          go->state = GeneratorObj::State::Suspended;
+          const int32_t ret_reg = f.ret_reg;
+          frames.pop_back();
+          Value result = gen_result(std::move(out), false);
+          if (frames.size() <= floor) {
+            if (ret_reg >= 0 && !frames.empty()) {
+              frames.back()->regs[ret_reg] = std::move(result);
+            }
+            return;
+          }
+          if (ret_reg >= 0) frames.back()->regs[ret_reg] = std::move(result);
+          continue;
+        }
+        case Op::GenResume: {
+          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const Value gv = f.regs[in.b];
+          if (!gv.is_generator()) {
+            fail(f, std::string("cannot resume ") + type_name(gv.tag()));
+          }
+          GeneratorObj* go = gv.as_generator();
+          using St = GeneratorObj::State;
+          if (go->state == St::Running) fail(f, "generator already running");
+          if (go->state == St::Done) {
+            f.regs[in.a] = gen_result(Value(), true);
+            break;
+          }
+          const bool started = go->state == St::Suspended;
+          const int32_t yield_reg = go->frame.yield_reg;
+          check_can_push(pos);
+          auto nf = unpark_frame(gv, in.a);
+          // The sent value lands where the Yield's own result goes; a first
+          // resume has no yield in flight and its argument is ignored.
+          if (started && yield_reg >= 0) {
+            nf->regs[static_cast<size_t>(yield_reg)] = f.regs[in.c];
+          }
+          ++f.pc;
+          frames.push_back(std::move(nf));
+          continue;
+        }
+        case Op::GenReturn: {
+          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const Value gv = f.regs[in.b];
+          if (!gv.is_generator()) {
+            fail(f, std::string("cannot close ") + type_name(gv.tag()));
+          }
+          GeneratorObj* go = gv.as_generator();
+          using St = GeneratorObj::State;
+          if (go->state == St::Running) fail(f, "generator already running");
+          Value out = f.regs[in.c];
+          if (go->state == St::Suspended) {
+            // Close: restore the activation, run its pending defers --
+            // innermost first, as the yield point's own Return would --
+            // then discard the frame without executing any more of it. A
+            // defer that throws propagates to this call; the generator is
+            // done either way (the popped frame releases what it held).
+            check_can_push(pos);
+            frames.push_back(unpark_frame(gv, -1));
+            Frame& gf = *frames.back();
+            try {
+              while (!gf.defer_marks.empty()) {
+                const size_t mark = gf.defer_marks.back().first;
+                gf.defer_marks.pop_back();
+                run_defers_now(gf, mark, pos);
+              }
+            } catch (Raise&) {
+              go->state = St::Done;
+              frames.pop_back();
+              throw;
+            }
+            go->state = St::Done;
+            frames.pop_back();
+          } else {
+            // Start never ran (nothing registered, nothing to run); Done
+            // holds nothing either. Both just settle the state and drop
+            // whatever arguments a Start-state activation still packaged.
+            go->state = St::Done;
+            go->frame = GenFrame{};
+          }
+          f.regs[in.a] = gen_result(std::move(out), true);
+          break;
+        }
         case Op::DeferPush: {
           const Value& v = f.regs[in.a];
           if (!v.is_func()) {
@@ -616,6 +776,13 @@ struct Exec {
           // pop, the register it lives in is gone.
           Value result;
           if (in.b != 0) result = f.regs[in.a];
+          // A generator body's return finishes the generator; its resume
+          // caller sees {value, done: true} where a plain call would see
+          // the bare value.
+          if (f.gen_self.is_generator()) {
+            f.gen_self.as_generator()->state = GeneratorObj::State::Done;
+            result = gen_result(std::move(result), true);
+          }
           const int32_t ret_reg = f.ret_reg;
           frames.pop_back();
           if (frames.size() <= floor) {

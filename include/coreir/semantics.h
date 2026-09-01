@@ -40,6 +40,7 @@ inline const char* type_name(ValueTag t) {
     case ValueTag::Object: return "object";
     case ValueTag::Cell:   return "cell";
     case ValueTag::Func:   return "function";
+    case ValueTag::Generator: return "generator";
   }
   return "?";
 }

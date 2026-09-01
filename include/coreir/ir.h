@@ -96,6 +96,13 @@ enum class Tag : uint8_t {
   // scope entering now declares into the new one. A front end emits it at
   // the top of any region whose per-entry bindings are captured.
   CellFresh,  // a = cell index
+  // Suspends the enclosing generator function, handing its child's value to
+  // whoever resumed it, and yields -- when a later GenResume re-enters --
+  // the value that resume was called with. verify() requires the enclosing
+  // Func to carry is_generator; calling such a function builds a suspended
+  // activation instead of running the body, and the GenResume / GenReturn
+  // intrinsics drive it from there.
+  Yield,      // children: value
 };
 
 enum class UnOp : uint8_t { Neg, BitNot };
@@ -139,6 +146,19 @@ enum class IntrinsicId : uint8_t {
                 //  which cannot tell absent from nil-valued)
   ObjectKeys,   // (object) -> array of keys, insertion order
   ObjectRemove, // (object, key) -> nil; removing an absent key is a no-op
+  // Generators. Both answer with a fresh {value, done} object -- the JS
+  // result shape, chosen because it carries "finished" and "what came out"
+  // in one allocation a front end can destructure however its own protocol
+  // likes. Resume re-enters at the Yield (whose value becomes the sent
+  // argument; a first resume's is ignored) and runs to the next Yield
+  // ({value, done: false}) or to the body's return ({value, done: true}).
+  // A finished generator answers {value: nil, done: true}; resuming one
+  // that is already running traps. Return closes early: it runs the
+  // suspended frame's pending defers -- innermost first, as the yield
+  // point's own Return would -- then discards the frame and answers
+  // {value: <arg>, done: true}. A dropped generator runs nothing.
+  GenResume,    // (generator, sent) -> {value, done}
+  GenReturn,    // (generator, value) -> {value, done: true}
 };
 
 // A variable is either a slot in this frame or a slot borrowed from an
@@ -211,6 +231,10 @@ struct Func {
   // it did.
   int32_t num_cells = 0;
   int32_t num_params = 0;
+  // Calling this function packages an activation instead of running it; its
+  // body may Yield. Appended last, like the two above, for brace-init
+  // compatibility.
+  bool is_generator = false;
 };
 
 struct Node {
@@ -277,6 +301,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::TryCatch:    return 2;
     case Tag::Defer:       return 1;
     case Tag::CellFresh:   return 0;
+    case Tag::Yield:       return 1;
   }
   return -1;
 }
@@ -311,6 +336,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ObjectHas: return 2;
     case IntrinsicId::ObjectKeys: return 1;
     case IntrinsicId::ObjectRemove: return 2;
+    case IntrinsicId::GenResume: return 2;
+    case IntrinsicId::GenReturn: return 2;
   }
   return 0;
 }
@@ -344,6 +371,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Index:
     case Tag::Scope:
     case Tag::TryCatch:
+    case Tag::Yield:
       return true;
     default:
       return false;
@@ -516,6 +544,9 @@ public:
   }
   NodeId cell_fresh(int32_t cell, SrcPos p) {
     return emit(Tag::CellFresh, 0, p, cell, 0, {});
+  }
+  NodeId make_yield(NodeId value, SrcPos p) {
+    return emit(Tag::Yield, 0, p, 0, 0, {value});
   }
   NodeId make_try(int32_t caught_local, NodeId body, NodeId handler,
                   SrcPos p) {

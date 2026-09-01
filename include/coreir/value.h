@@ -38,7 +38,7 @@ namespace coreir {
 // Both are values because both are refcounted heap objects, and making them
 // ordinary tags means one lifetime rule covers everything.
 enum class ValueTag : uint8_t {
-  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func
+  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator
 };
 
 struct HeapObj;
@@ -185,6 +185,9 @@ struct CellObj;
 // shared with whatever frame or other closure also holds them -- that sharing
 // is the entire reason cells exist.
 struct ClosureObj;
+// A suspended generator activation, owning its frame's storage while no
+// executor frame exists for it. Defined out of line, like CellObj.
+struct GeneratorObj;
 
 class Value {
  public:
@@ -263,6 +266,7 @@ class Value {
   }
 
   static Value make_cell();                     // a fresh box holding nil
+  static Value make_generator();                // empty; the executor fills it
   static Value make_closure(int32_t func, std::vector<Value> cells);
   static Value make_array(std::vector<Value> items);
   static Value make_object();
@@ -278,7 +282,7 @@ class Value {
   bool is_heap() const {
     return tag_ == ValueTag::Str || tag_ == ValueTag::Array ||
            tag_ == ValueTag::Object || tag_ == ValueTag::Cell ||
-           tag_ == ValueTag::Func;
+           tag_ == ValueTag::Func || tag_ == ValueTag::Generator;
   }
   bool is_uninit() const { return tag_ == ValueTag::Uninit; }
   bool is_bool() const { return tag_ == ValueTag::Bool; }
@@ -291,6 +295,7 @@ class Value {
   bool is_nil() const { return tag_ == ValueTag::Nil; }
   bool is_cell() const { return tag_ == ValueTag::Cell; }
   bool is_func() const { return tag_ == ValueTag::Func; }
+  bool is_generator() const { return tag_ == ValueTag::Generator; }
 
   bool as_bool() const { return data_ != 0; }
   int64_t as_int() const { return data_; }
@@ -311,6 +316,9 @@ class Value {
   CellObj* as_cell() const { return reinterpret_cast<CellObj*>(data_); }
   ClosureObj* as_closure() const {
     return reinterpret_cast<ClosureObj*>(data_);
+  }
+  GeneratorObj* as_generator() const {
+    return reinterpret_cast<GeneratorObj*>(data_);
   }
 
   // nil, false and zero are false; everything else is true. A string's
@@ -391,6 +399,35 @@ struct ClosureObj : HeapObj {
   std::vector<Value> cells;  // every element is a Cell
 };
 
+// The storage a generator activation keeps between resumes: everything a
+// vm Frame owns, minus the chunk pointer (`func` re-finds it) and the
+// return register (each resume brings its own). The executor moves these
+// vectors out to run and back in to suspend, so a suspend costs six moves,
+// not a copy of the frame.
+struct GenFrame {
+  int32_t func = 0;         // chunk index
+  int64_t pc = 0;           // where the next resume re-enters
+  int32_t yield_reg = -1;   // register the resumed-with value lands in
+  std::vector<Value> locals;
+  std::vector<Value> regs;
+  std::vector<Value> cells;
+  std::vector<Value> captures;
+  std::vector<Value> defers;
+  std::vector<std::pair<size_t, int32_t>> defer_marks;
+};
+
+// Calling a generator function makes one of these instead of running the
+// body. Start holds the packaged arguments; Suspended holds the live frame;
+// Running means the frame is on the executor's stack (its storage here is
+// empty); Done frees the storage and answers every further resume with
+// {value: nil, done: true}.
+struct GeneratorObj : HeapObj {
+  GeneratorObj() : HeapObj(ValueTag::Generator) {}
+  enum class State : uint8_t { Start, Suspended, Running, Done };
+  State state = State::Start;
+  GenFrame frame;
+};
+
 inline Value Value::make_array(std::vector<Value> items) {
   auto* a = new ArrayObj();
   a->items = std::move(items);
@@ -413,6 +450,14 @@ inline Value Value::make_cell() {
   Value r;
   r.tag_ = ValueTag::Cell;
   r.data_ = reinterpret_cast<int64_t>(new CellObj());
+  gc_safepoint();
+  return r;
+}
+
+inline Value Value::make_generator() {
+  Value r;
+  r.tag_ = ValueTag::Generator;
+  r.data_ = reinterpret_cast<int64_t>(new GeneratorObj());
   gc_safepoint();
   return r;
 }

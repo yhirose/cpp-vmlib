@@ -53,6 +53,9 @@ const char* name_of(Op op) {
     case Op::FMod:        return "fmod";
     case Op::Pow:         return "pow";
     case Op::NewObject:   return "newobject";
+    case Op::Yield:       return "yield";
+    case Op::GenResume:   return "genresume";
+    case Op::GenReturn:   return "genreturn";
   }
   return "?";
 }

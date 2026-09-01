@@ -74,6 +74,15 @@ void visit_children(HeapObj* o, Fn fn) {
     case ValueTag::Func:
       for (const Value& v : static_cast<ClosureObj*>(o)->cells) visit(v);
       break;
+    case ValueTag::Generator: {
+      const GenFrame& gf = static_cast<GeneratorObj*>(o)->frame;
+      for (const Value& v : gf.locals) visit(v);
+      for (const Value& v : gf.regs) visit(v);
+      for (const Value& v : gf.cells) visit(v);
+      for (const Value& v : gf.captures) visit(v);
+      for (const Value& v : gf.defers) visit(v);
+      break;
+    }
     default:
       break;  // a string refers to nothing
   }
@@ -185,6 +194,9 @@ void clear_heap_object_refs(HeapObj* o) {
     case ValueTag::Func:
       static_cast<ClosureObj*>(o)->cells.clear();
       break;
+    case ValueTag::Generator:
+      static_cast<GeneratorObj*>(o)->frame = GenFrame{};
+      break;
     default:
       break;  // a string refers to nothing
   }
@@ -197,6 +209,7 @@ void destroy_heap_object(HeapObj* o) {
     case ValueTag::Object: delete static_cast<ObjectObj*>(o); break;
     case ValueTag::Cell:  delete static_cast<CellObj*>(o); break;
     case ValueTag::Func:  delete static_cast<ClosureObj*>(o); break;
+    case ValueTag::Generator: delete static_cast<GeneratorObj*>(o); break;
     default: break;  // no other tag names a heap object
   }
 }
@@ -245,6 +258,8 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::ObjectHas: return "objecthas";
     case IntrinsicId::ObjectKeys: return "objectkeys";
     case IntrinsicId::ObjectRemove: return "objectremove";
+    case IntrinsicId::GenResume: return "genresume";
+    case IntrinsicId::GenReturn: return "genreturn";
   }
   return "?";
 }
@@ -356,6 +371,11 @@ struct Verifier {
           return fail("cell index out of range");
         }
         break;
+      case Tag::Yield:
+        if (!f.is_generator) {
+          return fail("Yield outside a generator function");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -398,6 +418,7 @@ struct Verifier {
       case Tag::While:
       case Tag::Throw:
       case Tag::Defer:
+      case Tag::Yield:
         if (!operand(0)) return false;
         break;
       default:
@@ -461,6 +482,7 @@ struct Dumper {
       case Tag::CellFresh:
         out << "cellfresh cell[" << n.a << "]";
         break;
+      case Tag::Yield: out << "yield"; break;
       case Tag::TryCatch:
         out << "try caught=local[" << n.a << "]";
         break;
@@ -500,6 +522,9 @@ std::optional<std::string> verify(const Module& m) {
   }
   if (!m.funcs[0].capture_names.empty()) {
     return std::string("entry function must capture nothing");
+  }
+  if (m.funcs[0].is_generator) {
+    return std::string("entry function cannot be a generator");
   }
   return std::nullopt;
 }

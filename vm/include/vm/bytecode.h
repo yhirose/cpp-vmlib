@@ -71,6 +71,13 @@ enum class Op : uint8_t {
   FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
   Pow,          // a = dst, b = lhs, c = rhs   (std::pow over doubles)
   NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
+  // Generators. Yield suspends the frame back into its GeneratorObj and
+  // delivers {value, done: false} to whoever resumed it; the sent value of
+  // the next resume lands in `a`. GenResume and GenReturn are ir.h's
+  // intrinsics of the same names.
+  Yield,        // a = dst (sent value on re-entry), b = value reg
+  GenResume,    // a = dst, b = generator reg, c = sent reg
+  GenReturn,    // a = dst, b = generator reg, c = value reg
 };
 
 // vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own
@@ -133,6 +140,7 @@ struct Chunk {
   int32_t num_regs = 0;
   int32_t num_cells = 0;
   int32_t num_params = 0;
+  bool is_generator = false;
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;

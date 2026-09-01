@@ -232,15 +232,19 @@ struct FnCompiler {
           return r;
         }
         if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow ||
-            v.id == IntrinsicId::ObjectHas) {
+            v.id == IntrinsicId::ObjectHas ||
+            v.id == IntrinsicId::GenResume ||
+            v.id == IntrinsicId::GenReturn) {
           const int32_t base = top;
           const int32_t l = compile_expr(m.child(id, 0));
           const int32_t rr = compile_expr(m.child(id, 1));
           top = base;
           const int32_t r = alloc();
-          const Op op = v.id == IntrinsicId::FMod  ? Op::FMod
-                        : v.id == IntrinsicId::Pow ? Op::Pow
-                                                   : Op::ObjectHas;
+          const Op op = v.id == IntrinsicId::FMod        ? Op::FMod
+                        : v.id == IntrinsicId::Pow       ? Op::Pow
+                        : v.id == IntrinsicId::ObjectHas ? Op::ObjectHas
+                        : v.id == IntrinsicId::GenResume ? Op::GenResume
+                                                         : Op::GenReturn;
           emit(op, r, l, rr, n.pos);
           return r;
         }
@@ -317,6 +321,14 @@ struct FnCompiler {
         auto v = view_make_closure(m, id);
         const int32_t r = alloc();
         emit(Op::MakeClosure, r, v.func, v.capture_map, n.pos);
+        return r;
+      }
+      case Tag::Yield: {
+        const int32_t base = top;
+        const int32_t s = compile_expr(m.child(id, 0));
+        top = base;
+        const int32_t r = alloc();
+        emit(Op::Yield, r, s, 0, n.pos);
         return r;
       }
       case Tag::ArrayLit: {
@@ -538,6 +550,7 @@ Program compile(const Module& m) {
 
     ch.num_cells = fn.num_cells;
     ch.num_params = fn.num_params;
+    ch.is_generator = fn.is_generator;
 
     FnCompiler fc{m, fn, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
