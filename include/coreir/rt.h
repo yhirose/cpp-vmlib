@@ -1,4 +1,4 @@
-// The contract every host implements: four C functions, nothing else.
+// The contract every host implements: five C functions, nothing else.
 //
 // vm/exec.cc calls these and links against nothing beyond this declaration --
 // it does not know or care whether the definitions come from

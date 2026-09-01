@@ -24,7 +24,7 @@ the parser happened to produce".
 this library exists in part to rehearse a design culebra could grow into.
 
 **One host runtime, one contract.** A front end's I/O and error reporting go
-through four C functions declared in `include/coreir/rt.h` and implemented by
+through five C functions declared in `include/coreir/rt.h` and implemented by
 whatever host links the executor: the standalone CLI's stdio implementation
 (`runtime/coreir_rt_default.cc`), or a different host entirely -- a script
 that embeds this library as a VM-building toolkit, say, reporting errors
