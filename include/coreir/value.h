@@ -300,6 +300,17 @@ struct ObjectObj : HeapObj {
     }
     props.emplace_back(k, v);
   }
+
+  // Erases the key if present; absent is a no-op. Order of the survivors
+  // is preserved (props is the iteration order).
+  void remove(const std::string& k) {
+    for (auto it = props.begin(); it != props.end(); ++it) {
+      if (it->first == k) {
+        props.erase(it);
+        return;
+      }
+    }
+  }
 };
 
 struct CellObj : HeapObj {

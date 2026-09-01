@@ -283,6 +283,60 @@ int main() {
              "string set_index: message");
   }
 
+  // --- The five container intrinsics. -------------------------------------
+  // push/pop grow and shrink; has tells absent from nil-valued; keys come
+  // back in insertion order; remove erases (absent = no-op).
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const NodeId arr = b.varref(VarKind::Local, 0, p);
+    const NodeId obj = b.varref(VarKind::Local, 1, p);
+    const NodeId body = b.block(
+        {b.assign(VarKind::Local, 0, b.array_lit({b.literal(1, p)}, p), p),
+         b.intrinsic(IntrinsicId::ArrayPush, {arr, b.literal(2, p)}, p),
+         pr(b.intrinsic(IntrinsicId::Len, {arr}, p)),
+         pr(b.intrinsic(IntrinsicId::ArrayPop, {arr}, p)),
+         pr(b.intrinsic(IntrinsicId::Len, {arr}, p)),
+         b.assign(VarKind::Local, 1,
+                  b.object_lit({{b.str_literal("b", p), b.nil_literal(p)},
+                                {b.str_literal("a", p), b.literal(9, p)}},
+                               p),
+                  p),
+         pr(b.intrinsic(IntrinsicId::ObjectHas,
+                        {obj, b.str_literal("b", p)}, p)),
+         pr(b.index(obj, b.str_literal("b", p), p)),
+         pr(b.index(b.intrinsic(IntrinsicId::ObjectKeys, {obj}, p),
+                    b.literal(0, p), p)),
+         b.intrinsic(IntrinsicId::ObjectRemove,
+                     {obj, b.str_literal("b", p)}, p),
+         pr(b.intrinsic(IntrinsicId::ObjectHas,
+                        {obj, b.str_literal("b", p)}, p)),
+         pr(b.intrinsic(IntrinsicId::Len, {obj}, p))},
+        p);
+    m.funcs.push_back({"main", 2, 0, body, {"arr", "obj"}, {}});
+    check_eq(run_module(m, "container intrinsics"), "",
+             "container intrinsics: failure");
+    check_eq(joined(), "2|2|1|true|nil|b|false|1|",
+             "container intrinsics output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::ArrayPop,
+                                  {b.array_lit({}, p)}, p)},
+                     p),
+         {},
+         {}});
+    check_eq(run_module(m, "pop empty"), "pop from an empty array",
+             "pop empty: message");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;

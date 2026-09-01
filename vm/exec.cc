@@ -423,6 +423,61 @@ struct Exec {
         case Op::TypeOf:
           f.regs[in.a] = Value::make_str(type_name(f.regs[in.b].tag()));
           break;
+        case Op::ArrayPush: {
+          const Value& a = f.regs[in.a];
+          if (!a.is_array()) {
+            fail(f, std::string("cannot push into ") + type_name(a.tag()));
+          }
+          a.as_array()->items.push_back(f.regs[in.b]);
+          break;
+        }
+        case Op::ArrayPop: {
+          const Value& a = f.regs[in.b];
+          if (!a.is_array()) {
+            fail(f, std::string("cannot pop from ") + type_name(a.tag()));
+          }
+          auto& items = a.as_array()->items;
+          if (items.empty()) fail(f, "pop from an empty array");
+          // Move out before shrinking: dst may alias the array register.
+          Value out = std::move(items.back());
+          items.pop_back();
+          f.regs[in.a] = std::move(out);
+          break;
+        }
+        case Op::ObjectHas: {
+          const Value& o = f.regs[in.b];
+          const Value& k = f.regs[in.c];
+          if (!o.is_object() || !k.is_str()) {
+            fail(f, std::string("cannot ask ") + type_name(o.tag()) +
+                        " for a " + type_name(k.tag()) + " key");
+          }
+          f.regs[in.a] = Value::make_bool(o.as_object()->find(k.as_str()) !=
+                                          nullptr);
+          break;
+        }
+        case Op::ObjectKeys: {
+          const Value& o = f.regs[in.b];
+          if (!o.is_object()) {
+            fail(f, std::string("cannot list keys of ") + type_name(o.tag()));
+          }
+          std::vector<Value> keys;
+          keys.reserve(o.as_object()->props.size());
+          for (const auto& kv : o.as_object()->props) {
+            keys.push_back(Value::make_str(kv.first));
+          }
+          f.regs[in.a] = Value::make_array(std::move(keys));
+          break;
+        }
+        case Op::ObjectRemove: {
+          const Value& o = f.regs[in.a];
+          const Value& k = f.regs[in.b];
+          if (!o.is_object() || !k.is_str()) {
+            fail(f, std::string("cannot remove a ") + type_name(k.tag()) +
+                        " key from " + type_name(o.tag()));
+          }
+          o.as_object()->remove(k.as_str());
+          break;
+        }
         case Op::ToInt: {
           const Value& v = f.regs[in.b];
           if (v.is_int()) {

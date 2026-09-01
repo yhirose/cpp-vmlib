@@ -129,6 +129,11 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::FMod:    return "fmod";
     case IntrinsicId::Pow:     return "pow";
     case IntrinsicId::PrintRaw: return "printraw";
+    case IntrinsicId::ArrayPush: return "arraypush";
+    case IntrinsicId::ArrayPop: return "arraypop";
+    case IntrinsicId::ObjectHas: return "objecthas";
+    case IntrinsicId::ObjectKeys: return "objectkeys";
+    case IntrinsicId::ObjectRemove: return "objectremove";
   }
   return "?";
 }

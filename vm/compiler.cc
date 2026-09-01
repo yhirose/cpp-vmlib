@@ -231,14 +231,41 @@ struct FnCompiler {
           emit(op, r, s, 0, n.pos);
           return r;
         }
-        if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow) {
+        if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow ||
+            v.id == IntrinsicId::ObjectHas) {
           const int32_t base = top;
           const int32_t l = compile_expr(m.child(id, 0));
           const int32_t rr = compile_expr(m.child(id, 1));
           top = base;
           const int32_t r = alloc();
-          emit(v.id == IntrinsicId::FMod ? Op::FMod : Op::Pow, r, l, rr,
-               n.pos);
+          const Op op = v.id == IntrinsicId::FMod  ? Op::FMod
+                        : v.id == IntrinsicId::Pow ? Op::Pow
+                                                   : Op::ObjectHas;
+          emit(op, r, l, rr, n.pos);
+          return r;
+        }
+        if (v.id == IntrinsicId::ArrayPop || v.id == IntrinsicId::ObjectKeys) {
+          const int32_t base = top;
+          const int32_t s = compile_expr(m.child(id, 0));
+          top = base;
+          const int32_t r = alloc();
+          emit(v.id == IntrinsicId::ArrayPop ? Op::ArrayPop : Op::ObjectKeys,
+               r, s, 0, n.pos);
+          return r;
+        }
+        if (v.id == IntrinsicId::ArrayPush ||
+            v.id == IntrinsicId::ObjectRemove) {
+          // Statement-shaped: the value is nil. Compiled in value position
+          // anyway (compile_value hands statements a LoadNil).
+          const int32_t base = top;
+          const int32_t l = compile_expr(m.child(id, 0));
+          const int32_t rr = compile_expr(m.child(id, 1));
+          top = base;
+          emit(v.id == IntrinsicId::ArrayPush ? Op::ArrayPush
+                                              : Op::ObjectRemove,
+               l, rr, 0, n.pos);
+          const int32_t r = alloc();
+          emit(Op::LoadNil, r, 0, 0, n.pos);
           return r;
         }
         // Print is a statement; in value position it yields nil. This used to

@@ -42,6 +42,11 @@ const char* name_of(Op op) {
     case Op::SetIndex:    return "setindex";
     case Op::Len:         return "len";
     case Op::ToStr:       return "tostr";
+    case Op::ArrayPush:   return "arraypush";
+    case Op::ArrayPop:    return "arraypop";
+    case Op::ObjectHas:   return "objecthas";
+    case Op::ObjectKeys:  return "objectkeys";
+    case Op::ObjectRemove: return "objectremove";
     case Op::TypeOf:      return "typeof";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";

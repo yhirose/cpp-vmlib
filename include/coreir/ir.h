@@ -123,6 +123,16 @@ enum class IntrinsicId : uint8_t {
   // Print without the trailing newline, through coreir_rt_out_raw. The value
   // is formatted the way ToStr formats it.
   PrintRaw,
+  // The container primitives a front end cannot write over Index/SetIndex
+  // alone: growing and shrinking an array, and asking an object what it
+  // holds. Everything else -- insert, slices, maps, filters -- is a rebuild
+  // loop a front end writes in its own language.
+  ArrayPush,    // (array, value) -> nil, appends
+  ArrayPop,     // (array) -> last value, removed; an empty array fails
+  ObjectHas,    // (object, key) -> bool (Index reads a missing key as nil,
+                //  which cannot tell absent from nil-valued)
+  ObjectKeys,   // (object) -> array of keys, insertion order
+  ObjectRemove, // (object, key) -> nil; removing an absent key is a no-op
 };
 
 // A variable is either a slot in this frame or a slot borrowed from an
@@ -289,6 +299,11 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::FMod:    return 2;
     case IntrinsicId::Pow:     return 2;
     case IntrinsicId::PrintRaw: return 1;
+    case IntrinsicId::ArrayPush: return 2;
+    case IntrinsicId::ArrayPop: return 1;
+    case IntrinsicId::ObjectHas: return 2;
+    case IntrinsicId::ObjectKeys: return 1;
+    case IntrinsicId::ObjectRemove: return 2;
   }
   return 0;
 }
