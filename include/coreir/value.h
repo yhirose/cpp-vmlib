@@ -408,6 +408,7 @@ struct GenFrame {
   int32_t func = 0;         // chunk index
   int64_t pc = 0;           // where the next resume re-enters
   int32_t yield_reg = -1;   // register the resumed-with value lands in
+  int32_t argc = 0;         // what the activation's call supplied
   std::vector<Value> locals;
   std::vector<Value> regs;
   std::vector<Value> cells;

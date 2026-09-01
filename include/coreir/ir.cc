@@ -258,6 +258,7 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::ObjectHas: return "objecthas";
     case IntrinsicId::ObjectKeys: return "objectkeys";
     case IntrinsicId::ObjectRemove: return "objectremove";
+    case IntrinsicId::ArgCount: return "argcount";
     case IntrinsicId::GenResume: return "genresume";
     case IntrinsicId::GenReturn: return "genreturn";
   }

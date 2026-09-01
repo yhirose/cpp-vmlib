@@ -47,6 +47,7 @@ const char* name_of(Op op) {
     case Op::ObjectHas:   return "objecthas";
     case Op::ObjectKeys:  return "objectkeys";
     case Op::ObjectRemove: return "objectremove";
+    case Op::ArgCount:     return "argcount";
     case Op::TypeOf:      return "typeof";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";

@@ -146,6 +146,10 @@ enum class IntrinsicId : uint8_t {
                 //  which cannot tell absent from nil-valued)
   ObjectKeys,   // (object) -> array of keys, insertion order
   ObjectRemove, // (object, key) -> nil; removing an absent key is a no-op
+  // How many arguments the running function was called with -- the count
+  // the caller supplied, not num_params. Only interesting under
+  // Func::lenient_arity, where the two can differ; 0 at the entry point.
+  ArgCount,     // () -> int
   // Generators. Both answer with a fresh {value, done} object -- the JS
   // result shape, chosen because it carries "finished" and "what came out"
   // in one allocation a front end can destructure however its own protocol
@@ -232,9 +236,15 @@ struct Func {
   int32_t num_cells = 0;
   int32_t num_params = 0;
   // Calling this function packages an activation instead of running it; its
-  // body may Yield. Appended last, like the two above, for brace-init
+  // body may Yield. Appended after the two above, for brace-init
   // compatibility.
   bool is_generator = false;
+  // Calls tolerate any argument count: extras are dropped, missing params
+  // start as nil, and ArgCount tells the body how many were actually
+  // passed -- JavaScript's convention, so a front end can raise its own
+  // "missing argument" diagnostic (with the parameter's name, which the
+  // executor never knew) or fill a default. Off, a mismatch traps.
+  bool lenient_arity = false;
 };
 
 struct Node {
@@ -336,6 +346,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ObjectHas: return 2;
     case IntrinsicId::ObjectKeys: return 1;
     case IntrinsicId::ObjectRemove: return 2;
+    case IntrinsicId::ArgCount: return 0;
     case IntrinsicId::GenResume: return 2;
     case IntrinsicId::GenReturn: return 2;
   }

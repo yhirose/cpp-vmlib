@@ -216,6 +216,11 @@ struct FnCompiler {
           emit(Op::In, r, 0, 0, n.pos);
           return r;
         }
+        if (v.id == IntrinsicId::ArgCount) {
+          const int32_t r = alloc();
+          emit(Op::ArgCount, r, 0, 0, n.pos);
+          return r;
+        }
         if (v.id == IntrinsicId::Len || v.id == IntrinsicId::ToStr ||
             v.id == IntrinsicId::TypeOf || v.id == IntrinsicId::ToInt ||
             v.id == IntrinsicId::ToDouble) {
@@ -551,6 +556,7 @@ Program compile(const Module& m) {
     ch.num_cells = fn.num_cells;
     ch.num_params = fn.num_params;
     ch.is_generator = fn.is_generator;
+    ch.lenient_arity = fn.lenient_arity;
 
     FnCompiler fc{m, fn, ch};
     const uint32_t body_pos = m.at(fn.body).pos;

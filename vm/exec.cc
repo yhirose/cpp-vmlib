@@ -1,5 +1,6 @@
 #include "vm/exec.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -62,6 +63,7 @@ struct Frame {
   std::vector<Value> defers;
   std::vector<std::pair<size_t, int32_t>> defer_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
+  int32_t argc = 0;      // arguments the call supplied (Op::ArgCount)
   // Non-nil exactly when this frame is a generator activation: the
   // GeneratorObj it suspends back into. Owning, so the generator cannot be
   // freed out from under its own running frame.
@@ -140,6 +142,7 @@ struct Exec {
     f->defers = std::move(gf.defers);
     f->defer_marks = std::move(gf.defer_marks);
     f->ret_reg = ret_reg;
+    f->argc = gf.argc;
     f->gen_self = gv;
     go->state = GeneratorObj::State::Running;
     return f;
@@ -155,11 +158,16 @@ struct Exec {
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
-    if (argc != ch.num_params) {
+    if (argc != ch.num_params && !ch.lenient_arity) {
       raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
                      " argument(s), given " + std::to_string(argc),
                  pos);
     }
+    // Under lenient arity the params window takes what it can: extras stay
+    // with the caller, and a param nothing arrived for is nil rather than
+    // Uninit, so the body can test it without tripping the read-before-
+    // init check.
+    const int32_t taken = std::min(argc, ch.num_params);
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.
@@ -167,9 +175,13 @@ struct Exec {
       Value g = Value::make_generator();
       GenFrame& gf = g.as_generator()->frame;
       gf.func = c->func;
+      gf.argc = argc;
       gf.locals.assign(static_cast<size_t>(ch.num_locals), Value::uninit());
-      for (int32_t i = 0; i < argc; ++i) {
+      for (int32_t i = 0; i < taken; ++i) {
         gf.locals[static_cast<size_t>(i)] = args[i];
+      }
+      for (int32_t i = taken; i < ch.num_params; ++i) {
+        gf.locals[static_cast<size_t>(i)] = Value();
       }
       gf.regs.resize(static_cast<size_t>(ch.num_regs));
       gf.cells.resize(static_cast<size_t>(ch.num_cells));
@@ -182,9 +194,13 @@ struct Exec {
     check_can_push(pos);
     std::unique_ptr<Frame> f = make_frame(ch);
     f->captures = c->cells;  // shared, not copied: each element is a Cell
-    for (int32_t i = 0; i < argc; ++i) {
+    for (int32_t i = 0; i < taken; ++i) {
       f->locals[static_cast<size_t>(i)] = args[i];
     }
+    for (int32_t i = taken; i < ch.num_params; ++i) {
+      f->locals[static_cast<size_t>(i)] = Value();
+    }
+    f->argc = argc;
     f->ret_reg = ret_reg;
     frames.push_back(std::move(f));
   }
@@ -468,6 +484,9 @@ struct Exec {
           f.regs[in.a] = Value::make_int(coreir_rt_in(sp.line, sp.col));
           break;
         }
+        case Op::ArgCount:
+          f.regs[in.a] = Value::make_int(f.argc);
+          break;
         case Op::LoadNil:
           f.regs[in.a] = Value();
           break;

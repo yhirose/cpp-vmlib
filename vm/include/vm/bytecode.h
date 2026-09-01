@@ -65,6 +65,7 @@ enum class Op : uint8_t {
   ObjectHas,    // a = dst, b = object reg, c = key reg
   ObjectKeys,   // a = dst, b = object reg
   ObjectRemove, // a = object reg, b = key reg
+  ArgCount,     // a = dst   (the frame's supplied argument count)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
@@ -141,6 +142,7 @@ struct Chunk {
   int32_t num_cells = 0;
   int32_t num_params = 0;
   bool is_generator = false;
+  bool lenient_arity = false;
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
