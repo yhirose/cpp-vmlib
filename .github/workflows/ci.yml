@@ -37,7 +37,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build -j
-      - run: ctest --test-dir build --output-on-failure --timeout 900
+      # deep_calls is excluded: its hundred-thousand live frames each pin a
+      # closure, so an every-allocation collect scans O(depth) heap per call
+      # -- the quadratic blowup, not a bug the lane could catch. Everything
+      # else runs with a collect at every single allocation.
+      - run: ctest --test-dir build --output-on-failure --timeout 900 -E deep_calls
         env:
           COREIR_GC_STRESS: '1'
 
