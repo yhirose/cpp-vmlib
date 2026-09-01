@@ -90,6 +90,12 @@ enum class Tag : uint8_t {
   // Scope: a front end that wants function-level defers wraps the function
   // body in one.
   Defer,      // children: value (a callable)
+  // Replaces one of the frame's cells with a fresh, nil-holding box. What a
+  // "loop iteration's own binding" means is exactly this: closures built in
+  // earlier iterations keep the old cell (their captures own it), while the
+  // scope entering now declares into the new one. A front end emits it at
+  // the top of any region whose per-entry bindings are captured.
+  CellFresh,  // a = cell index
 };
 
 enum class UnOp : uint8_t { Neg, BitNot };
@@ -270,6 +276,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Throw:       return 1;
     case Tag::TryCatch:    return 2;
     case Tag::Defer:       return 1;
+    case Tag::CellFresh:   return 0;
   }
   return -1;
 }
@@ -506,6 +513,9 @@ public:
   }
   NodeId make_defer(NodeId value, SrcPos p) {
     return emit(Tag::Defer, 0, p, 0, 0, {value});
+  }
+  NodeId cell_fresh(int32_t cell, SrcPos p) {
+    return emit(Tag::CellFresh, 0, p, cell, 0, {});
   }
   NodeId make_try(int32_t caught_local, NodeId body, NodeId handler,
                   SrcPos p) {

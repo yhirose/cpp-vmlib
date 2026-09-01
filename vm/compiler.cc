@@ -489,6 +489,10 @@ struct FnCompiler {
         break;
       }
 
+      case Tag::CellFresh:
+        emit(Op::CellNew, n.a, 0, 0, n.pos);
+        break;
+
       case Tag::Break:
       case Tag::Continue: {
         OpenLoop& loop = open_loops.back();  // verify(): inside a loop body

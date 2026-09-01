@@ -240,6 +240,11 @@ struct Verifier {
           return fail("Defer outside a Scope; wrap the region in one");
         }
         break;
+      case Tag::CellFresh:
+        if (n.a < 0 || n.a >= f.num_cells) {
+          return fail("cell index out of range");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -342,6 +347,9 @@ struct Dumper {
       case Tag::Continue: out << "continue"; break;
       case Tag::Throw:    out << "throw"; break;
       case Tag::Defer:    out << "defer"; break;
+      case Tag::CellFresh:
+        out << "cellfresh cell[" << n.a << "]";
+        break;
       case Tag::TryCatch:
         out << "try caught=local[" << n.a << "]";
         break;

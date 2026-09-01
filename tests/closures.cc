@@ -313,6 +313,50 @@ int main() {
     }
   }
 
+  // --- CellFresh: each loop entry gets its own box; closures built in
+  //     earlier iterations keep the old one. --------------------------------
+  // i = 0; while i < 2 { cellfresh c0; c0 = i (as x); push closure(read x);
+  //                      i = i + 1 }; print f0(); print f1()
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});                     // cmap 0: empty
+    m.capture_maps.push_back({{VarKind::Cell, 0}});   // cmap 1: cell 0
+    // funcs[1]: () -> its captured x
+    m.funcs.push_back({"main", 3, 0, NodeId{}, {"i", "f0", "f1"}, {}});
+    m.funcs.push_back(
+        {"read", 0, 1, b.varref(VarKind::Capture, 0, p), {}, {"x"}});
+    const NodeId body = b.block(
+        {b.cell_fresh(0, p),
+         b.assign(VarKind::Cell, 0, b.varref(VarKind::Local, 0, p), p),
+         b.make_if(b.binary(BinOp::Eq, b.varref(VarKind::Local, 0, p),
+                            b.literal(0, p), p),
+                   b.assign(VarKind::Local, 1, b.make_closure(1, 1, p), p),
+                   b.assign(VarKind::Local, 2, b.make_closure(1, 1, p), p),
+                   p),
+         b.assign(VarKind::Local, 0,
+                  b.binary(BinOp::Add, b.varref(VarKind::Local, 0, p),
+                           b.literal(1, p), p),
+                  p)},
+        p);
+    m.funcs[0].body = b.block(
+        {b.assign(VarKind::Local, 0, b.literal(0, p), p),
+         b.make_while(b.binary(BinOp::Lt, b.varref(VarKind::Local, 0, p),
+                               b.literal(2, p), p),
+                      body, p),
+         b.intrinsic(IntrinsicId::Print,
+                     {b.call_value(b.varref(VarKind::Local, 1, p), {}, p)},
+                     p),
+         b.intrinsic(IntrinsicId::Print,
+                     {b.call_value(b.varref(VarKind::Local, 2, p), {}, p)},
+                     p)},
+        p);
+    m.funcs[0].num_cells = 1;
+    const RunResult r = run_module(m, "cellfresh");
+    expect_clean(r, "cellfresh");
+    check_eq(joined(), "0|1|", "cellfresh output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "closures: %d failure(s)\n", g_failures);
     return 1;
