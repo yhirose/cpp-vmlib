@@ -204,6 +204,11 @@ struct Verifier {
       case Tag::CallValue:
         if (n.num_children < 1) return fail("CallValue needs a callee");
         break;
+      case Tag::Scope:
+        if (n.a < 0 || n.a > n.b || n.b > f.num_locals) {
+          return fail("scope local range out of range");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -277,7 +282,7 @@ struct Dumper {
         break;
       }
       case Tag::Unary:
-        out << "neg";
+        out << (static_cast<UnOp>(n.op) == UnOp::BitNot ? "bitnot" : "neg");
         break;
       case Tag::Binary:
         out << name_of(static_cast<BinOp>(n.op));
@@ -288,6 +293,9 @@ struct Dumper {
         break;
       }
       case Tag::If:     out << "if"; break;
+      case Tag::Scope:
+        out << "scope local[" << n.a << ".." << n.b << ")";
+        break;
       case Tag::While:  out << "while"; break;
       case Tag::Block:  out << "block"; break;
       case Tag::Intrinsic:

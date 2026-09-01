@@ -90,6 +90,16 @@ struct FnCompiler {
         emit(v.op == UnOp::BitNot ? Op::BitNot : Op::Neg, r, s, 0, n.pos);
         return r;
       }
+      case Tag::Scope: {
+        const Node& sn = m.at(id);
+        const int32_t regs_base = top;
+        const int32_t start = here();
+        const int32_t r = compile_value(m.child(id, 0));
+        emit(Op::ClearLocals, sn.a, sn.b, 0, sn.pos);
+        ch.cleanups.push_back(
+            {start, here(), sn.a, sn.b, regs_base, -1, -1});
+        return r;
+      }
       case Tag::Binary: {
         auto v = view_binary(m, id);
         const int32_t base = top;

@@ -245,6 +245,9 @@ struct Exec {
         case Op::ClearRegs:
           for (int32_t i = in.a; i < in.b; ++i) f.regs[i] = Value();
           break;
+        case Op::ClearLocals:
+          for (int32_t i = in.a; i < in.b; ++i) f.locals[i] = Value::uninit();
+          break;
         case Op::NewArray: {
           std::vector<Value> items;
           items.reserve(static_cast<size_t>(in.c));

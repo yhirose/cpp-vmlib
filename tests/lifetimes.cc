@@ -149,11 +149,10 @@ int main() {
     run_case(m, "2,0,", "a frame's locals go when it returns");
   }
 
-  // The limit, stated as a test so that changing it is deliberate: a local
-  // that is never reassigned is held until the frame returns. Core-IR has no
-  // scope between "this statement" and "this function", so there is nowhere
-  // earlier to release it. A front end with block scopes will need the IR to
-  // carry them -- the same table Phase 5's unwinding wants.
+  // The default, stated as a test so that changing it is deliberate: a
+  // local that is never reassigned and belongs to no Scope is held until the
+  // frame returns. A front end that wants an earlier release states its
+  // block structure with Tag::Scope -- the next case.
   {
     Module m;
     Builder b(m);
@@ -166,6 +165,28 @@ int main() {
          {"s"},
          {}});
     run_case(m, "1,1,", "a live local is held to the end of its function");
+  }
+
+  // The same program with the declaration inside a Scope: the local is
+  // released where the scope ends, not where the frame does.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.block(
+             {b.scope(0, 1,
+                      b.block({b.assign(VarKind::Local, 0,
+                                        b.str_literal("held", p), p),
+                               b.intrinsic(IntrinsicId::Print,
+                                           {b.literal(1, p)}, p)},
+                              p),
+                      p),
+              b.intrinsic(IntrinsicId::Print, {b.literal(2, p)}, p)},
+             p),
+         {"s"},
+         {}});
+    run_case(m, "1,0,", "a scoped local is released where its scope ends");
   }
 
   if (g_failures != 0) {

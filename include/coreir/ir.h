@@ -61,6 +61,14 @@ enum class Tag : uint8_t {
   ObjectLit,  // children: key, value, key, value, ...
   Index,      // children: receiver, key
   SetIndex,   // children: receiver, key, value
+  // A lexical region and the local slots it owns: a = first local,
+  // b = one past last. Slot indices are the front end's to assign, so the
+  // scope structure they follow is too -- this is how it says it. The
+  // compiler releases the range when the region exits, however it exits
+  // (falling off the end, or the unwinding a later phase adds), which is
+  // what makes a value's lifetime end with its scope rather than with the
+  // whole frame. Yields its child's value, like Block.
+  Scope,      // a = first local, b = one past last; children: body
 };
 
 enum class UnOp : uint8_t { Neg, BitNot };
@@ -203,6 +211,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
     case Tag::Index:       return 2;
     case Tag::SetIndex:    return 3;
+    case Tag::Scope:       return 1;
   }
   return -1;
 }
@@ -256,6 +265,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::ArrayLit:
     case Tag::ObjectLit:
     case Tag::Index:
+    case Tag::Scope:
       return true;
     default:
       return false;
@@ -411,6 +421,9 @@ public:
   }
   NodeId block(const std::vector<NodeId>& stmts, SrcPos p) {
     return emit(Tag::Block, 0, p, 0, 0, stmts);
+  }
+  NodeId scope(int32_t first_local, int32_t end_local, NodeId body, SrcPos p) {
+    return emit(Tag::Scope, 0, p, first_local, end_local, {body});
   }
   NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args, SrcPos p) {
     return emit(Tag::Intrinsic, static_cast<uint8_t>(id), p, 0, 0, args);

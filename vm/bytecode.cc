@@ -31,6 +31,7 @@ const char* name_of(Op op) {
     case Op::LoadNil:     return "loadnil";
     case Op::Move:        return "move";
     case Op::ClearRegs:   return "clearregs";
+    case Op::ClearLocals: return "clearlocals";
     case Op::NewArray:    return "newarray";
     case Op::Index:       return "index";
     case Op::SetIndex:    return "setindex";
@@ -87,6 +88,9 @@ std::string to_string(const Program& p) {
         case Op::ClearRegs:
           out << " r" << in.a << ".." << in.b;
           break;
+        case Op::ClearLocals:
+          out << " local[" << in.a << ".." << in.b << ")";
+          break;
         case Op::NewArray:
           out << " r" << in.a << ", items r" << in.b << ".."
               << (in.b + in.c);
@@ -108,6 +112,15 @@ std::string to_string(const Program& p) {
           break;
       }
       out << "\t; " << sp.line << ":" << sp.col << "\n";
+    }
+    for (const Cleanup& cl : ch.cleanups) {
+      out << "  cleanup [" << cl.start_pc << ".." << cl.end_pc << ") local["
+          << cl.first_local << ".." << cl.end_local << ") regs>=" << cl.regs_base;
+      if (cl.handler_pc >= 0) {
+        out << " handler=" << cl.handler_pc << " caught=local["
+            << cl.caught_local << "]";
+      }
+      out << "\n";
     }
   }
   return out.str();

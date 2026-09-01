@@ -42,6 +42,10 @@ enum class Op : uint8_t {
   // register is reused or the frame returns, which for a value with a
   // release worth timing is too late.
   ClearRegs,    // a = first, b = one past last
+  // The same, for a scope's local slots as it exits. Back to Uninit, not
+  // nil: the slots are dead until something declares into them again, and a
+  // read before that is the same mistake as a read before first assignment.
+  ClearLocals,  // a = first, b = one past last
   NewArray,     // a = dst, b = first item reg, c = item count
   Index,        // a = dst, b = receiver reg, c = key reg
   SetIndex,     // a = receiver reg, b = key reg, c = value reg
@@ -74,6 +78,23 @@ struct Insn {
   int32_t d = 0;  // only CallValue needs a fourth operand (arg count)
 };
 
+// One record per lexical region the compiler closed. Children close before
+// their parent, so scanning the vector in order visits the regions holding a
+// given pc innermost first -- the order an unwinding walk wants -- with no
+// parent links to maintain.
+//
+// Nothing consumes these yet beyond their recording; the exception phase's
+// unwinder is the reader this shape is for.
+struct Cleanup {
+  int32_t start_pc = 0;      // half-open instruction range of the region,
+  int32_t end_pc = 0;        // including its own exit-time ClearLocals
+  int32_t first_local = 0;   // the local slots the region owns
+  int32_t end_local = 0;
+  int32_t regs_base = 0;     // registers >= this are the region's temps
+  int32_t handler_pc = -1;   // >= 0: a try region; where its handler starts
+  int32_t caught_local = -1; // the local slot a caught value lands in
+};
+
 struct Chunk {
   std::string name;
   std::vector<Insn> code;
@@ -88,6 +109,7 @@ struct Chunk {
   int32_t num_params = 0;
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
+  std::vector<Cleanup> cleanups;
 };
 
 struct Program {
