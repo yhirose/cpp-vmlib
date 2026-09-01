@@ -403,6 +403,25 @@ int main() {
     check_eq(joined(), "42|4|0.75|true|nil|ab|", "tostr output");
   }
 
+  // --- 12. TypeOf: the tag, in type_name's vocabulary. --------------------
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.intrinsic(IntrinsicId::TypeOf, {v}, p)}, p);
+    };
+    const NodeId body = b.block(
+        {pr(b.literal(1, p)), pr(b.double_literal(1.5, p)),
+         pr(b.str_literal("s", p)), pr(b.bool_literal(false, p)),
+         pr(b.nil_literal(p)), pr(b.array_lit({}, p))},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    const std::string failed = run_module(m, "typeof");
+    check_eq(failed, "", "typeof: unexpected failure");
+    check_eq(joined(), "int|double|string|bool|nil|array|", "typeof output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;

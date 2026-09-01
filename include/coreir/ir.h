@@ -107,7 +107,11 @@ enum class BinOp : uint8_t {
 // differ (culebra prints whole doubles as "4.0") post-processes the result
 // rather than this growing a mode; what it cannot do in-language is produce
 // digits from a number at all, which is why this is an intrinsic.
-enum class IntrinsicId : uint8_t { Print, ReadInt, Len, ToStr };
+// TypeOf yields the value's tag as a string -- type_name's vocabulary
+// ("int", "double", "string", ...). A dynamic front end needs it for any
+// dispatch its own semantics do on a value's kind; its own type names are
+// its own mapping to write over this one.
+enum class IntrinsicId : uint8_t { Print, ReadInt, Len, ToStr, TypeOf };
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -267,6 +271,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ReadInt: return 0;
     case IntrinsicId::Len:     return 1;
     case IntrinsicId::ToStr:   return 1;
+    case IntrinsicId::TypeOf:  return 1;
   }
   return 0;
 }

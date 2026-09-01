@@ -411,6 +411,9 @@ struct Exec {
         case Op::ToStr:
           f.regs[in.a] = Value::make_str(to_display(f.regs[in.b]));
           break;
+        case Op::TypeOf:
+          f.regs[in.a] = Value::make_str(type_name(f.regs[in.b].tag()));
+          break;
         case Op::CellNew:
           f.cells[in.a] = Value::make_cell();
           break;

@@ -59,6 +59,7 @@ enum class Op : uint8_t {
   SetIndex,     // a = receiver reg, b = key reg, c = value reg
   Len,          // a = dst, b = src
   ToStr,        // a = dst, b = src   (to_display's formatting)
+  TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
   NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
 };
 
