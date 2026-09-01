@@ -29,12 +29,19 @@ void coreir_rt_out_str(const char* bytes, int64_t len);
 // or end of input, fails at the position given.
 int64_t coreir_rt_in(int64_t line, int64_t col);
 
-// Report and terminate the running program. What "terminate" means is the
-// host's choice -- exit the process, or throw a host-level exception -- as
-// long as it does not return. The executor owns a stack of heap-allocated
-// frames across this call, freed by its own destructor as a throw leaves
-// vm::run, so a host must not implement this with longjmp: jumping past that
-// destructor is undefined behavior, and leaks every live frame besides.
+// Report and terminate the running program -- and only that. A failure a
+// running program can recover from never arrives here: a trap (divide by
+// zero, a wrong-typed operand) or a Throw unwinds the executor's own frame
+// stack first, and one a TryCatch guards resumes at its handler. What does
+// arrive is fatal by construction: an unguarded failure whose frames the
+// unwinder has already popped and released, reported with a trap's original
+// diagnostic or as "uncaught: <value>" for a Throw no handler took.
+//
+// What "terminate" means is the host's choice -- exit the process, or throw
+// a host-level exception -- as long as it does not return. A host must still
+// not implement this with longjmp: the throw's path out of vm::run runs
+// destructors (the executor and its containers among them), and jumping past
+// them is undefined behavior.
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t line, int64_t col);
 
 // Called on every loop back-edge and call, so a host that wants to interrupt

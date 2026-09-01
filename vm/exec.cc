@@ -14,6 +14,22 @@ using namespace coreir;
 namespace vm {
 namespace {
 
+// What a Throw (or a trap the executor raises itself) travels as, from the
+// raise to the unwinder in run(). Typed, so a host exception thrown out of a
+// coreir_rt_* hook passes through untouched -- only the VM's own failures
+// unwind to a script handler.
+//
+// `fatal_msg` is what coreir_rt_fail gets if no handler catches this: a
+// trap keeps its original diagnostic (so an unguarded program fails with
+// byte-identical output to the pre-exception executor), while a user Throw
+// leaves it empty and is formatted as "uncaught: <value>" at that point --
+// not eagerly, since a caught throw never needs it.
+struct Raise {
+  Value value;
+  SrcPos pos;
+  std::string fatal_msg;
+};
+
 // One activation record. A frame is a heap object owned by Exec's stack, not
 // a C++ stack frame, so its address is stable for as long as it is live --
 // which is what lets `captures` be raw pointers into the frame that declared
@@ -60,10 +76,21 @@ struct Exec {
     return f;
   }
 
+  // A trap: the executor's own failure, catchable like any Throw. The
+  // value a handler sees is an object {message, line, col} -- built here,
+  // once, rather than each front end inventing its own materialization.
+  [[noreturn]] void raise_trap(const std::string& msg, SrcPos pos) {
+    Value e = Value::make_object();
+    e.as_object()->set("message", Value::make_str(msg));
+    e.as_object()->set("line", Value::make_int(pos.line));
+    e.as_object()->set("col", Value::make_int(pos.col));
+    throw Raise{std::move(e), pos, msg};
+  }
+
   // Shared by both call forms: the depth bound and the interrupt point.
   void check_can_push(SrcPos pos) {
     if (frames.size() > max_frames) {
-      coreir_rt::fail("recursion limit exceeded", pos.line, pos.col);
+      raise_trap("recursion limit exceeded", pos);
     }
     coreir_rt_poll();
   }
@@ -74,15 +101,14 @@ struct Exec {
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
     if (!callee.is_func()) {
-      coreir_rt::fail(std::string("cannot call ") + type_name(callee.tag()),
-                      pos.line, pos.col);
+      raise_trap(std::string("cannot call ") + type_name(callee.tag()), pos);
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
     if (argc != ch.num_params) {
-      coreir_rt::fail(ch.name + " takes " + std::to_string(ch.num_params) +
-                          " argument(s), given " + std::to_string(argc),
-                      pos.line, pos.col);
+      raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
+                     " argument(s), given " + std::to_string(argc),
+                 pos);
     }
     check_can_push(pos);
     std::unique_ptr<Frame> f = make_frame(ch);
@@ -95,8 +121,7 @@ struct Exec {
   }
 
   [[noreturn]] void fail(const Frame& f, const std::string& msg) {
-    const SrcPos sp = p.positions[f.chunk->code_pos[f.pc]];
-    coreir_rt::fail(msg, sp.line, sp.col);
+    raise_trap(msg, p.positions[f.chunk->code_pos[f.pc]]);
   }
 
   // Scalars cost nothing to rebuild; a string literal allocates on every
@@ -159,6 +184,56 @@ struct Exec {
   }
 
   void run() {
+    while (!frames.empty()) {
+      try {
+        dispatch();
+        return;
+      } catch (Raise& r) {
+        if (!unwind(r)) {
+          const std::string msg =
+              r.fatal_msg.empty() ? "uncaught: " + to_display(r.value)
+                                  : r.fatal_msg;
+          coreir_rt::fail(msg, r.pos.line, r.pos.col);
+        }
+        // A handler took the value; dispatch resumes at its pc.
+      }
+    }
+  }
+
+  // Walks frames top-down, and within each the cleanup regions holding its
+  // pc innermost-out (the vector's own order -- children were recorded
+  // first). Every region crossed is left the way its own exit would leave
+  // it: temps above its register floor dropped, its scope locals back to
+  // Uninit. A region with a handler ends the walk: the carried value lands
+  // in the caught slot and the frame resumes there. Frames without one are
+  // popped, their values released by ~Frame.
+  bool unwind(const Raise& r) {
+    while (!frames.empty()) {
+      Frame& f = *frames.back();
+      for (const Cleanup& cl : f.chunk->cleanups) {
+        if (f.pc < static_cast<size_t>(cl.start_pc) ||
+            f.pc >= static_cast<size_t>(cl.end_pc)) {
+          continue;
+        }
+        for (size_t i = static_cast<size_t>(cl.regs_base); i < f.regs.size();
+             ++i) {
+          f.regs[i] = Value();
+        }
+        for (int32_t i = cl.first_local; i < cl.end_local; ++i) {
+          f.locals[i] = Value::uninit();
+        }
+        if (cl.handler_pc >= 0) {
+          f.locals[cl.caught_local] = r.value;
+          f.pc = static_cast<size_t>(cl.handler_pc);
+          return true;
+        }
+      }
+      frames.pop_back();
+    }
+    return false;
+  }
+
+  void dispatch() {
     while (true) {
       Frame& f = *frames.back();
       const Chunk& ch = *f.chunk;
@@ -301,6 +376,10 @@ struct Exec {
           ++f.pc;
           push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
           continue;
+        }
+        case Op::Throw: {
+          const SrcPos sp = p.positions[ch.code_pos[f.pc]];
+          throw Raise{f.regs[in.a], sp, {}};
         }
         case Op::Ret: {
           // Move the result into the caller before the frame goes: after the

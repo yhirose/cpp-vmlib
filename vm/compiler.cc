@@ -131,6 +131,24 @@ struct FnCompiler {
             {start, here(), sn.a, sn.b, regs_base, -1, -1});
         return r;
       }
+      case Tag::TryCatch: {
+        // dst sits below regs_base on purpose: the unwinder drops the
+        // region's temps, and the result register must not be one of them.
+        const int32_t dst = alloc();
+        const int32_t regs_base = top;
+        const int32_t start = here();
+        branch_into(dst, m.child(id, 0), n.pos);
+        const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
+        const int32_t handler_pc = here();
+        // The region ends where the handler starts: the jump over it still
+        // belongs to the guarded range (a callee's resume pc can point at
+        // it), while the handler itself must not be guarded by its own try.
+        ch.cleanups.push_back(
+            {start, handler_pc, 0, 0, regs_base, handler_pc, n.a});
+        branch_into(dst, m.child(id, 1), n.pos);
+        patch(jend, here());
+        return dst;
+      }
       case Tag::Binary: {
         auto v = view_binary(m, id);
         const int32_t base = top;
@@ -360,6 +378,12 @@ struct FnCompiler {
           emit(Op::LoadNil, r, 0, 0, n.pos);
         }
         emit(Op::Ret, r, 1, 0, n.pos);
+        break;
+      }
+
+      case Tag::Throw: {
+        const int32_t r = compile_expr(m.child(id, 0));
+        emit(Op::Throw, r, 0, 0, n.pos);
         break;
       }
 

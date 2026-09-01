@@ -31,6 +31,7 @@ enum class Op : uint8_t {
   Out,          // a = src
   In,           // a = dst
   Ret,          // a = result reg, b = 1 if there is one
+  Throw,        // a = value reg; unwinds to the nearest handler
   // First-class functions.
   MakeClosure,  // a = dst, b = func index, c = capture map index
   CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count

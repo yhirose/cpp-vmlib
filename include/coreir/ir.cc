@@ -218,6 +218,11 @@ struct Verifier {
       case Tag::Continue:
         if (loop_depth == 0) return fail("Continue outside a loop body");
         break;
+      case Tag::TryCatch:
+        if (n.a < 0 || n.a >= f.num_locals) {
+          return fail("caught local slot out of range");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -258,6 +263,7 @@ struct Verifier {
       case Tag::Assign:
       case Tag::If:
       case Tag::While:
+      case Tag::Throw:
         if (!operand(0)) return false;
         break;
       default:
@@ -312,6 +318,10 @@ struct Dumper {
       case Tag::Return:   out << "return"; break;
       case Tag::Break:    out << "break"; break;
       case Tag::Continue: out << "continue"; break;
+      case Tag::Throw:    out << "throw"; break;
+      case Tag::TryCatch:
+        out << "try caught=local[" << n.a << "]";
+        break;
       case Tag::While:  out << "while"; break;
       case Tag::Block:  out << "block"; break;
       case Tag::Intrinsic:

@@ -76,6 +76,14 @@ enum class Tag : uint8_t {
   Return,     // children: value (optional; none returns nil)
   Break,      // no children; verify() requires an enclosing While body
   Continue,   // no children; verify() requires an enclosing While body
+  // Exceptions. Throw raises any value; TryCatch guards its first child,
+  // lands what a throw (or a trap the executor raises itself -- divide by
+  // zero, a wrong-typed operand) carried in the local slot `a`, and resumes
+  // in its second. Yields the value of whichever child finished, like If.
+  // The handler is not guarded by its own try; a throw there unwinds to the
+  // next enclosing one.
+  Throw,      // children: value
+  TryCatch,   // a = caught local slot; children: body, handler
 };
 
 enum class UnOp : uint8_t { Neg, BitNot };
@@ -222,6 +230,8 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Return:      return -1;  // 0 or 1
     case Tag::Break:       return 0;
     case Tag::Continue:    return 0;
+    case Tag::Throw:       return 1;
+    case Tag::TryCatch:    return 2;
   }
   return -1;
 }
@@ -276,6 +286,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::ObjectLit:
     case Tag::Index:
     case Tag::Scope:
+    case Tag::TryCatch:
       return true;
     default:
       return false;
@@ -440,6 +451,13 @@ public:
     return emit(Tag::Return, 0, p, 0, 0, {});
   }
   NodeId make_break(SrcPos p) { return emit(Tag::Break, 0, p, 0, 0, {}); }
+  NodeId make_throw(NodeId value, SrcPos p) {
+    return emit(Tag::Throw, 0, p, 0, 0, {value});
+  }
+  NodeId make_try(int32_t caught_local, NodeId body, NodeId handler,
+                  SrcPos p) {
+    return emit(Tag::TryCatch, 0, p, caught_local, 0, {body, handler});
+  }
   NodeId make_continue(SrcPos p) {
     return emit(Tag::Continue, 0, p, 0, 0, {});
   }

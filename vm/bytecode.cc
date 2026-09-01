@@ -25,6 +25,7 @@ const char* name_of(Op op) {
     case Op::Out:         return "out";
     case Op::In:          return "in";
     case Op::Ret:         return "ret";
+    case Op::Throw:       return "throw";
     case Op::MakeClosure: return "makeclosure";
     case Op::CallValue:   return "callvalue";
     case Op::CellNew:     return "cellnew";
@@ -103,6 +104,7 @@ std::string to_string(const Program& p) {
           break;
         case Op::Out:
         case Op::In:
+        case Op::Throw:
           out << " r" << in.a;
           break;
         case Op::Ret:
