@@ -1,5 +1,8 @@
 #include "coreir/ir.h"
 
+#include <cstdlib>
+#include <vector>
+
 #include <sstream>
 
 #include "coreir/value.h"
@@ -41,6 +44,97 @@ void Runtime::unlink(HeapObj* o) {
 // then free the shells, which by that point refer to nothing. culebra's
 // collector separates the same two steps for the same reason (memory.md's
 // finalize-then-sweep), and this is where a tracing collector would hook in.
+Runtime::Runtime() {
+  const char* s = std::getenv("COREIR_GC_STRESS");
+  stress_ = s && *s && *s != '0';
+}
+
+namespace {
+
+// One place that knows each kind's outgoing references, shared by the edge
+// count and the mark. New heap kinds add their arm here in the same commit
+// that adds the type.
+template <typename Fn>
+void visit_children(HeapObj* o, Fn fn) {
+  auto visit = [&](const Value& v) {
+    if (v.is_heap()) fn(reinterpret_cast<HeapObj*>(v.raw_data()));
+  };
+  switch (o->kind) {
+    case ValueTag::Array:
+      for (const Value& v : static_cast<ArrayObj*>(o)->items) visit(v);
+      break;
+    case ValueTag::Object:
+      for (const auto& kv : static_cast<ObjectObj*>(o)->props) {
+        visit(kv.second);
+      }
+      break;
+    case ValueTag::Cell:
+      visit(static_cast<CellObj*>(o)->v);
+      break;
+    case ValueTag::Func:
+      for (const Value& v : static_cast<ClosureObj*>(o)->cells) visit(v);
+      break;
+    default:
+      break;  // a string refers to nothing
+  }
+}
+
+}  // namespace
+
+void Runtime::collect() {
+  if (in_collect_) return;
+  in_collect_ = true;
+
+  // Count internal edges, so external handles show as rc > gc_refs.
+  for (HeapObj* o = head_; o; o = o->next) {
+    o->gc_refs = 0;
+    o->gc_marked = false;
+  }
+  for (HeapObj* o = head_; o; o = o->next) {
+    visit_children(o, [](HeapObj* c) { ++c->gc_refs; });
+  }
+
+  // Mark everything reachable from an externally-held object. A worklist,
+  // not recursion: a deep structure must not become a C++ stack problem.
+  std::vector<HeapObj*> work;
+  for (HeapObj* o = head_; o; o = o->next) {
+    if (o->rc > o->gc_refs) {
+      o->gc_marked = true;
+      work.push_back(o);
+    }
+  }
+  while (!work.empty()) {
+    HeapObj* o = work.back();
+    work.pop_back();
+    visit_children(o, [&](HeapObj* c) {
+      if (!c->gc_marked) {
+        c->gc_marked = true;
+        work.push_back(c);
+      }
+    });
+  }
+
+  // Condemn the rest: finalize first (while every member is still whole),
+  // then ~Runtime's pin / strip / free, on just this set.
+  std::vector<HeapObj*> dead;
+  for (HeapObj* o = head_; o; o = o->next) {
+    if (!o->gc_marked) dead.push_back(o);
+  }
+  if (finalize_) {
+    for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
+  }
+  for (HeapObj* o : dead) ++o->rc;
+  for (HeapObj* o : dead) clear_heap_object_refs(o);
+  for (HeapObj* o : dead) {
+    unlink(o);
+    o->owner = nullptr;
+    destroy_heap_object(o);
+  }
+
+  next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
+  in_collect_ = false;
+}
+
 Runtime::~Runtime() {
   for (HeapObj* o = head_; o; o = o->next) ++o->rc;
   for (HeapObj* o = head_; o; o = o->next) clear_heap_object_refs(o);

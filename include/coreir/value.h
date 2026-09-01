@@ -57,13 +57,39 @@ struct HeapObj;
 // Runtime::current(), the way culebra's runtime reaches its own.
 class Runtime {
  public:
-  Runtime() = default;
+  Runtime();
   ~Runtime();
   Runtime(const Runtime&) = delete;
   Runtime& operator=(const Runtime&) = delete;
 
   int64_t live_objects() const { return live_; }
   HeapObj* first_object() const { return head_; }
+
+  // The tracing backstop: frees the reference cycles counting cannot. An
+  // object is a root exactly when its refcount exceeds the number of
+  // references other heap objects hold on it -- the remainder are handles
+  // on the C++ side (frame registers and locals, a defer stack, an executor
+  // temporary halfway through an instruction), which no registration scheme
+  // could enumerate. Everything unreachable from those roots is condemned,
+  // handed to the finalize hook, then pinned, stripped of its references,
+  // and freed -- ~Runtime's own two-step, run early. Runs automatically
+  // from the allocators once the heap outgrows a doubling threshold, on
+  // every allocation under COREIR_GC_STRESS=1, and on demand here.
+  void collect();
+
+  // Called by the Value allocators after each fully-constructed object --
+  // never during construction, when a half-built object cannot answer for
+  // its children.
+  void maybe_collect() {
+    if ((stress_ || live_ >= next_gc_) && !in_collect_) collect();
+  }
+
+  // One call per condemned object, before any of them is freed. What it
+  // does with an object must not allocate on this runtime.
+  void set_finalize_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
+    finalize_ctx_ = ctx;
+    finalize_ = fn;
+  }
 
   static Runtime* current() { return current_; }
 
@@ -88,11 +114,20 @@ class Runtime {
 
   HeapObj* head_ = nullptr;
   int64_t live_ = 0;
+  int64_t next_gc_ = 4096;
+  bool stress_ = false;
+  bool in_collect_ = false;
+  void* finalize_ctx_ = nullptr;
+  void (*finalize_)(void*, HeapObj*) = nullptr;
   static thread_local Runtime* current_;
 };
 
 struct HeapObj {
   int64_t rc;  // offset zero, as in culebra's refcounted structs
+  // Collector scratch: how many references other heap objects hold on this
+  // one (recomputed per collect), and the reachability mark.
+  int64_t gc_refs = 0;
+  bool gc_marked = false;
   // Which concrete object this is. A tag rather than a vtable: ir.h's own
   // rule is that nothing here has virtual functions or RTTI, because that is
   // what survives --gc-sections as residue in a binary that never uses it.
@@ -173,7 +208,15 @@ class Value {
     Value r;
     r.tag_ = ValueTag::Str;
     r.data_ = reinterpret_cast<int64_t>(new StrObj(std::move(s)));
+    gc_safepoint();
     return r;
+  }
+
+  // The allocators' collection point. The fresh object is complete and held
+  // by a C++ handle (rc above its zero internal references), so a stress
+  // collect right here cannot take it.
+  static void gc_safepoint() {
+    if (Runtime* rt = Runtime::current()) rt->maybe_collect();
   }
 
   Value(const Value& o) : tag_(o.tag_), data_(o.data_) { retain(); }
@@ -208,6 +251,9 @@ class Value {
   static Value make_object();
 
   ValueTag tag() const { return tag_; }
+  // The raw payload, for the collector's child walk only.
+  int64_t raw_data() const { return data_; }
+
   bool is_heap() const {
     return tag_ == ValueTag::Str || tag_ == ValueTag::Array ||
            tag_ == ValueTag::Object || tag_ == ValueTag::Cell ||
@@ -330,6 +376,7 @@ inline Value Value::make_array(std::vector<Value> items) {
   Value r;
   r.tag_ = ValueTag::Array;
   r.data_ = reinterpret_cast<int64_t>(a);
+  gc_safepoint();
   return r;
 }
 
@@ -337,6 +384,7 @@ inline Value Value::make_object() {
   Value r;
   r.tag_ = ValueTag::Object;
   r.data_ = reinterpret_cast<int64_t>(new ObjectObj());
+  gc_safepoint();
   return r;
 }
 
@@ -344,6 +392,7 @@ inline Value Value::make_cell() {
   Value r;
   r.tag_ = ValueTag::Cell;
   r.data_ = reinterpret_cast<int64_t>(new CellObj());
+  gc_safepoint();
   return r;
 }
 
@@ -354,6 +403,7 @@ inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
   Value r;
   r.tag_ = ValueTag::Func;
   r.data_ = reinterpret_cast<int64_t>(c);
+  gc_safepoint();
   return r;
 }
 

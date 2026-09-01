@@ -28,6 +28,19 @@ jobs:
   # assert those exist rather than pretending otherwise -- ~Runtime sweeps
   # them at the end of a run, which is what keeps this lane honest instead of
   # suppressed.
+  # Every allocation collects. What this catches is the collector taking an
+  # object some C++ handle still holds -- the premature-sweep class of bug --
+  # anywhere in the whole suite, not only in gc.cc's arranged scenes.
+  gc-stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure --timeout 900
+        env:
+          COREIR_GC_STRESS: '1'
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:
