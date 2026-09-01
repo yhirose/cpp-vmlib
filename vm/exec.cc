@@ -487,6 +487,13 @@ struct Exec {
         case Op::ArgCount:
           f.regs[in.a] = Value::make_int(f.argc);
           break;
+        case Op::Same: {
+          const Value& l = f.regs[in.b];
+          const Value& r = f.regs[in.c];
+          f.regs[in.a] = Value::make_bool(l.tag() == r.tag() &&
+                                          l.raw_data() == r.raw_data());
+          break;
+        }
         case Op::LoadNil:
           f.regs[in.a] = Value();
           break;

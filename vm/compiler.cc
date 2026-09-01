@@ -239,7 +239,7 @@ struct FnCompiler {
         if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow ||
             v.id == IntrinsicId::ObjectHas ||
             v.id == IntrinsicId::GenResume ||
-            v.id == IntrinsicId::GenReturn) {
+            v.id == IntrinsicId::GenReturn || v.id == IntrinsicId::Same) {
           const int32_t base = top;
           const int32_t l = compile_expr(m.child(id, 0));
           const int32_t rr = compile_expr(m.child(id, 1));
@@ -249,6 +249,7 @@ struct FnCompiler {
                         : v.id == IntrinsicId::Pow       ? Op::Pow
                         : v.id == IntrinsicId::ObjectHas ? Op::ObjectHas
                         : v.id == IntrinsicId::GenResume ? Op::GenResume
+                        : v.id == IntrinsicId::Same      ? Op::Same
                                                          : Op::GenReturn;
           emit(op, r, l, rr, n.pos);
           return r;

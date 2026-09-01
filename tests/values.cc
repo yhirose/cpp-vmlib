@@ -469,6 +469,40 @@ int main() {
     check_eq(joined(), "int|double|string|bool|nil|array|", "typeof output");
   }
 
+  // --- 13. Same: identity, where Eq refuses to answer. --------------------
+  // a = [1]; b = [1]; c = a; print(same(a, b)); print(same(a, c));
+  // print(same(1, 1)); print(same(1, 1.0)); print(same(nil, nil))
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    auto same = [&](NodeId l, NodeId r) {
+      return b.intrinsic(IntrinsicId::Same, {l, r}, p);
+    };
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    auto local = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    m.funcs.push_back(
+        {"main", 3, 0,
+         b.block({b.assign(VarKind::Local, 0,
+                           b.array_lit({b.literal(1, p)}, p), p),
+                  b.assign(VarKind::Local, 1,
+                           b.array_lit({b.literal(1, p)}, p), p),
+                  b.assign(VarKind::Local, 2, local(0), p),
+                  print(same(local(0), local(1))),
+                  print(same(local(0), local(2))),
+                  print(same(b.literal(1, p), b.literal(1, p))),
+                  print(same(b.literal(1, p), b.double_literal(1.0, p))),
+                  print(same(b.nil_literal(p), b.nil_literal(p)))},
+                 p),
+         {"a", "b", "c"},
+         {}});
+    const std::string failed = run_module(m, "same");
+    check_eq(failed, "", "same: unexpected failure");
+    check_eq(joined(), "false|true|true|false|true|", "same output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;

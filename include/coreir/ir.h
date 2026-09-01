@@ -150,6 +150,11 @@ enum class IntrinsicId : uint8_t {
   // the caller supplied, not num_params. Only interesting under
   // Func::lenient_arity, where the two can differ; 0 at the entry point.
   ArgCount,     // () -> int
+  // Reference identity: whether two values are the same heap object (or,
+  // for scalars, the same tag and payload). Eq deliberately refuses two
+  // objects -- what "equal" means for them is the language's call -- but
+  // every language needs this one primitive underneath its answer.
+  Same,         // (a, b) -> bool
   // Generators. Both answer with a fresh {value, done} object -- the JS
   // result shape, chosen because it carries "finished" and "what came out"
   // in one allocation a front end can destructure however its own protocol
@@ -347,6 +352,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ObjectKeys: return 1;
     case IntrinsicId::ObjectRemove: return 2;
     case IntrinsicId::ArgCount: return 0;
+    case IntrinsicId::Same: return 2;
     case IntrinsicId::GenResume: return 2;
     case IntrinsicId::GenReturn: return 2;
   }
