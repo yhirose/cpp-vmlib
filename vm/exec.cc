@@ -53,6 +53,12 @@ struct Frame {
   // built it has returned.
   std::vector<Value> cells;
   std::vector<Value> captures;
+  // The frame's pending defers (owned closure values, LIFO) and the marks
+  // its open defer-scopes took: {stack height, the DeferMark's pc}. The pc
+  // is what lets the unwinder pair a mark with a Cleanup region, and skip
+  // regions whose exit-time run already popped theirs.
+  std::vector<Value> defers;
+  std::vector<std::pair<size_t, int32_t>> defer_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
 };
 
@@ -186,16 +192,48 @@ struct Exec {
   void run() {
     while (!frames.empty()) {
       try {
-        dispatch();
+        dispatch(0);
         return;
       } catch (Raise& r) {
-        if (!unwind(r)) {
+        if (!unwind(r, 0)) {
           const std::string msg =
               r.fatal_msg.empty() ? "uncaught: " + to_display(r.value)
                                   : r.fatal_msg;
           coreir_rt::fail(msg, r.pos.line, r.pos.col);
         }
         // A handler took the value; dispatch resumes at its pc.
+      }
+    }
+  }
+
+  // Run one frame's pending defers back to `mark`, LIFO, each as a normal
+  // 0-arity call driven to completion by a nested, floor-bounded dispatch.
+  // The nesting recurses through the host stack once per defer *run* (not
+  // per call -- calls inside the defer stay flat), so only pathological
+  // defers-spawning-defers chains deepen it.
+  //
+  // A defer whose own throw is not handled within its frames aborts the
+  // run: the remaining defers of the same mark are dropped unrun (their
+  // values released), and the throw replaces whatever was unwinding --
+  // culebra's rule, minus its quirk of skipping the aborting frame's own
+  // remaining handlers.
+  void run_defers_now(Frame& f, size_t mark, SrcPos pos) {
+    while (f.defers.size() > mark) {
+      Value d = std::move(f.defers.back());
+      f.defers.pop_back();
+      const size_t floor = frames.size();
+      try {
+        push_closure(d, nullptr, 0, -1, pos);
+        while (frames.size() > floor) {
+          try {
+            dispatch(floor);
+          } catch (Raise& r) {
+            if (!unwind(r, floor)) throw;
+          }
+        }
+      } catch (Raise&) {
+        while (f.defers.size() > mark) f.defers.pop_back();
+        throw;
       }
     }
   }
@@ -207,13 +245,30 @@ struct Exec {
   // Uninit. A region with a handler ends the walk: the carried value lands
   // in the caught slot and the frame resumes there. Frames without one are
   // popped, their values released by ~Frame.
-  bool unwind(const Raise& r) {
-    while (!frames.empty()) {
+  bool unwind(Raise& r, size_t floor) {
+    while (frames.size() > floor) {
       Frame& f = *frames.back();
       for (const Cleanup& cl : f.chunk->cleanups) {
         if (f.pc < static_cast<size_t>(cl.start_pc) ||
             f.pc >= static_cast<size_t>(cl.end_pc)) {
           continue;
+        }
+        // The region's pending defers run first (culebra's order: defers,
+        // then the scope's own releases), and only while its mark is still
+        // outstanding -- a throw out of the region's exit-time DeferRunTo
+        // arrives here with the mark already popped, and must not run them
+        // twice. A defer throwing *here* replaces the in-flight value and
+        // the walk continues with it: the rest of this region still tears
+        // down, and the enclosing regions' handlers stay eligible.
+        if (cl.defer_mark_pc >= 0 && !f.defer_marks.empty() &&
+            f.defer_marks.back().second == cl.defer_mark_pc) {
+          const size_t mark = f.defer_marks.back().first;
+          f.defer_marks.pop_back();
+          try {
+            run_defers_now(f, mark, r.pos);
+          } catch (Raise& replacement) {
+            r = std::move(replacement);
+          }
         }
         for (size_t i = static_cast<size_t>(cl.regs_base); i < f.regs.size();
              ++i) {
@@ -233,7 +288,7 @@ struct Exec {
     return false;
   }
 
-  void dispatch() {
+  void dispatch(size_t floor) {
     while (true) {
       Frame& f = *frames.back();
       const Chunk& ch = *f.chunk;
@@ -242,7 +297,7 @@ struct Exec {
       // the same belt and braces the old loop condition was.
       if (f.pc >= ch.code.size()) {
         frames.pop_back();
-        if (frames.empty()) return;
+        if (frames.size() <= floor) return;
         continue;
       }
 
@@ -381,6 +436,29 @@ struct Exec {
           const SrcPos sp = p.positions[ch.code_pos[f.pc]];
           throw Raise{f.regs[in.a], sp, {}};
         }
+        case Op::DeferPush: {
+          const Value& v = f.regs[in.a];
+          if (!v.is_func()) {
+            fail(f, std::string("defer needs a function, not ") +
+                        type_name(v.tag()));
+          }
+          f.defers.push_back(v);
+          break;
+        }
+        case Op::DeferMark:
+          f.defer_marks.push_back(
+              {f.defers.size(), static_cast<int32_t>(f.pc)});
+          break;
+        case Op::DeferRunTo: {
+          const size_t mark = f.defer_marks.back().first;
+          f.defer_marks.pop_back();
+          const SrcPos sp = p.positions[ch.code_pos[f.pc]];
+          // Advance first: the nested run pushes frames, and this is where
+          // execution resumes when the last defer returns.
+          ++f.pc;
+          run_defers_now(f, mark, sp);
+          continue;
+        }
         case Op::Ret: {
           // Move the result into the caller before the frame goes: after the
           // pop, the register it lives in is gone.
@@ -388,7 +466,12 @@ struct Exec {
           if (in.b != 0) result = f.regs[in.a];
           const int32_t ret_reg = f.ret_reg;
           frames.pop_back();
-          if (frames.empty()) return;
+          if (frames.size() <= floor) {
+            if (ret_reg >= 0 && !frames.empty()) {
+              frames.back()->regs[ret_reg] = std::move(result);
+            }
+            return;
+          }
           if (ret_reg >= 0) frames.back()->regs[ret_reg] = std::move(result);
           continue;
         }

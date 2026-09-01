@@ -23,8 +23,13 @@ struct FnCompiler {
     std::vector<size_t> break_jumps; // patched to the loop's exit
   };
   std::vector<OpenLoop> open_loops;
-  struct OpenScope { int32_t first_local, end_local; };
+  struct OpenScope { int32_t first_local, end_local; bool has_defers; };
   std::vector<OpenScope> open_scopes;
+  // Where the most recently closed Scope's exit-time DeferRunTo sits, so a
+  // TryCatch whose body is that scope can end its guarded region before it
+  // (a defer throwing at the body's fall-through exit escapes its own catch,
+  // the way culebra's does). -1 when the last scope had no defers.
+  int32_t last_scope_defer_run_pc = -1;
 
   int32_t top = 0;  // next free register
   // Highest register the statement being compiled has reached, so its end can
@@ -57,6 +62,19 @@ struct FnCompiler {
 
   int32_t here() const { return static_cast<int32_t>(ch.code.size()); }
 
+  // Whether this subtree registers a Defer with the scope being compiled.
+  // Nested Scopes own their own defers, so the walk does not descend into
+  // them; function literals are separate funcs and never reached.
+  bool declares_defers(NodeId id) const {
+    const Node& n = m.at(id);
+    if (n.tag == Tag::Defer) return true;
+    if (n.tag == Tag::Scope) return false;
+    for (uint32_t i = 0; i < n.num_children; ++i) {
+      if (declares_defers(m.child(id, i))) return true;
+    }
+    return false;
+  }
+
   // What a jump out of nested regions owes them: each Scope down to (not
   // including) `scope_depth` releases its locals, and the registers above the
   // target statement's floor -- temps of the abandoned regions -- are
@@ -65,6 +83,7 @@ struct FnCompiler {
   void leave_down_to(size_t scope_depth, int32_t regs_floor, uint32_t pos) {
     for (size_t i = open_scopes.size(); i > scope_depth; --i) {
       const OpenScope& sc = open_scopes[i - 1];
+      if (sc.has_defers) emit(Op::DeferRunTo, 0, 0, 0, pos);
       emit(Op::ClearLocals, sc.first_local, sc.end_local, 0, pos);
     }
     if (ch.num_regs > regs_floor) {
@@ -121,14 +140,30 @@ struct FnCompiler {
       }
       case Tag::Scope: {
         const Node& sn = m.at(id);
+        const bool defers = declares_defers(m.child(id, 0));
         const int32_t regs_base = top;
+        const int32_t mark_pc = defers ? here() : -1;
+        if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
         const int32_t start = here();
-        open_scopes.push_back({sn.a, sn.b});
-        const int32_t r = compile_value(m.child(id, 0));
+        open_scopes.push_back({sn.a, sn.b, defers});
+        int32_t r = compile_value(m.child(id, 0));
         open_scopes.pop_back();
+        int32_t defer_run_pc = -1;
+        if (defers) {
+          // The Move puts one instruction between the body's last call and
+          // the exit-time defer run: a callee's resume pc then still sits
+          // inside every region that must see its throw, while the
+          // DeferRunTo's own pc sits outside a fused try's (below).
+          const int32_t held = alloc();
+          emit(Op::Move, held, r, 0, sn.pos);
+          r = held;
+          defer_run_pc = here();
+          emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
+        }
         emit(Op::ClearLocals, sn.a, sn.b, 0, sn.pos);
         ch.cleanups.push_back(
-            {start, here(), sn.a, sn.b, regs_base, -1, -1});
+            {start, here(), sn.a, sn.b, regs_base, -1, -1, mark_pc});
+        last_scope_defer_run_pc = defer_run_pc;
         return r;
       }
       case Tag::TryCatch: {
@@ -137,14 +172,24 @@ struct FnCompiler {
         const int32_t dst = alloc();
         const int32_t regs_base = top;
         const int32_t start = here();
+        last_scope_defer_run_pc = -1;
         branch_into(dst, m.child(id, 0), n.pos);
+        // A body that is a defer-declaring Scope runs those defers at its
+        // fall-through exit; the guarded region ends before that run, so a
+        // defer throwing there escapes its own catch (culebra's rule: a try
+        // ends its region before the body's fall-through defer run).
+        const int32_t body_end =
+            (m.at(m.child(id, 0)).tag == Tag::Scope &&
+             last_scope_defer_run_pc >= 0)
+                ? last_scope_defer_run_pc
+                : -1;
         const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
         const int32_t handler_pc = here();
-        // The region ends where the handler starts: the jump over it still
-        // belongs to the guarded range (a callee's resume pc can point at
-        // it), while the handler itself must not be guarded by its own try.
-        ch.cleanups.push_back(
-            {start, handler_pc, 0, 0, regs_base, handler_pc, n.a});
+        // Otherwise the region ends where the handler starts: the jump over
+        // it still belongs to the guarded range (a callee's resume pc can
+        // point at it), while the handler must not be guarded by its own try.
+        ch.cleanups.push_back({start, body_end >= 0 ? body_end : handler_pc,
+                               0, 0, regs_base, handler_pc, n.a});
         branch_into(dst, m.child(id, 1), n.pos);
         patch(jend, here());
         return dst;
@@ -368,14 +413,20 @@ struct FnCompiler {
       }
 
       case Tag::Return: {
-        // The frame's release is the Ret itself; no scope needs leaving one
-        // at a time when the whole frame goes at once.
+        // Slots need no one-at-a-time release -- the Ret frees the whole
+        // frame -- but pending defers of every open scope still run, after
+        // the return value is computed, innermost first.
         int32_t r;
         if (n.num_children == 1) {
           r = compile_value(m.child(id, 0));
         } else {
           r = alloc();
           emit(Op::LoadNil, r, 0, 0, n.pos);
+        }
+        for (size_t i = open_scopes.size(); i > 0; --i) {
+          if (open_scopes[i - 1].has_defers) {
+            emit(Op::DeferRunTo, 0, 0, 0, n.pos);
+          }
         }
         emit(Op::Ret, r, 1, 0, n.pos);
         break;
@@ -384,6 +435,12 @@ struct FnCompiler {
       case Tag::Throw: {
         const int32_t r = compile_expr(m.child(id, 0));
         emit(Op::Throw, r, 0, 0, n.pos);
+        break;
+      }
+
+      case Tag::Defer: {
+        const int32_t r = compile_expr(m.child(id, 0));
+        emit(Op::DeferPush, r, 0, 0, n.pos);
         break;
       }
 

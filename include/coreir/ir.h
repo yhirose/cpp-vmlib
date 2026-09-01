@@ -84,6 +84,12 @@ enum class Tag : uint8_t {
   // next enclosing one.
   Throw,      // children: value
   TryCatch,   // a = caught local slot; children: body, handler
+  // Registers a 0-arity callable to run when the enclosing Scope exits --
+  // however it exits: falling through, Break, Continue, Return, or an
+  // unwinding throw. LIFO within the scope. verify() requires an enclosing
+  // Scope: a front end that wants function-level defers wraps the function
+  // body in one.
+  Defer,      // children: value (a callable)
 };
 
 enum class UnOp : uint8_t { Neg, BitNot };
@@ -232,6 +238,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Continue:    return 0;
     case Tag::Throw:       return 1;
     case Tag::TryCatch:    return 2;
+    case Tag::Defer:       return 1;
   }
   return -1;
 }
@@ -453,6 +460,9 @@ public:
   NodeId make_break(SrcPos p) { return emit(Tag::Break, 0, p, 0, 0, {}); }
   NodeId make_throw(NodeId value, SrcPos p) {
     return emit(Tag::Throw, 0, p, 0, 0, {value});
+  }
+  NodeId make_defer(NodeId value, SrcPos p) {
+    return emit(Tag::Defer, 0, p, 0, 0, {value});
   }
   NodeId make_try(int32_t caught_local, NodeId body, NodeId handler,
                   SrcPos p) {

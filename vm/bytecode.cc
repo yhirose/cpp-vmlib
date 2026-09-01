@@ -26,6 +26,9 @@ const char* name_of(Op op) {
     case Op::In:          return "in";
     case Op::Ret:         return "ret";
     case Op::Throw:       return "throw";
+    case Op::DeferPush:   return "deferpush";
+    case Op::DeferMark:   return "defermark";
+    case Op::DeferRunTo:  return "deferrunto";
     case Op::MakeClosure: return "makeclosure";
     case Op::CallValue:   return "callvalue";
     case Op::CellNew:     return "cellnew";
@@ -105,7 +108,11 @@ std::string to_string(const Program& p) {
         case Op::Out:
         case Op::In:
         case Op::Throw:
+        case Op::DeferPush:
           out << " r" << in.a;
+          break;
+        case Op::DeferMark:
+        case Op::DeferRunTo:
           break;
         case Op::Ret:
           break;
@@ -122,6 +129,7 @@ std::string to_string(const Program& p) {
         out << " handler=" << cl.handler_pc << " caught=local["
             << cl.caught_local << "]";
       }
+      if (cl.defer_mark_pc >= 0) out << " defer_mark=" << cl.defer_mark_pc;
       out << "\n";
     }
   }

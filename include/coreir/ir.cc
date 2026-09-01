@@ -144,7 +144,7 @@ struct Verifier {
     return false;
   }
 
-  bool check_node(NodeId id, const Func& f, int loop_depth) {
+  bool check_node(NodeId id, const Func& f, int loop_depth, int scope_depth) {
     if (!id.valid() || id.v >= m.nodes.size()) return fail("dangling NodeId");
     const Node& n = m.at(id);
 
@@ -223,6 +223,11 @@ struct Verifier {
           return fail("caught local slot out of range");
         }
         break;
+      case Tag::Defer:
+        if (scope_depth == 0) {
+          return fail("Defer outside a Scope; wrap the region in one");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -264,6 +269,7 @@ struct Verifier {
       case Tag::If:
       case Tag::While:
       case Tag::Throw:
+      case Tag::Defer:
         if (!operand(0)) return false;
         break;
       default:
@@ -275,7 +281,11 @@ struct Verifier {
       // not part of the body, so a Break there names the loop outside it.
       const int child_depth =
           (n.tag == Tag::While && i == 1) ? loop_depth + 1 : loop_depth;
-      if (!check_node(m.child(id, i), f, child_depth)) return false;
+      const int child_scope =
+          n.tag == Tag::Scope ? scope_depth + 1 : scope_depth;
+      if (!check_node(m.child(id, i), f, child_depth, child_scope)) {
+        return false;
+      }
     }
     return true;
   }
@@ -319,6 +329,7 @@ struct Dumper {
       case Tag::Break:    out << "break"; break;
       case Tag::Continue: out << "continue"; break;
       case Tag::Throw:    out << "throw"; break;
+      case Tag::Defer:    out << "defer"; break;
       case Tag::TryCatch:
         out << "try caught=local[" << n.a << "]";
         break;
@@ -354,7 +365,7 @@ std::optional<std::string> verify(const Module& m) {
         static_cast<size_t>(f.num_captures) != f.capture_names.size()) {
       return std::string("func name table does not match its slot count");
     }
-    if (!v.check_node(f.body, f, 0)) return v.err;
+    if (!v.check_node(f.body, f, 0, 0)) return v.err;
   }
   if (!m.funcs[0].capture_names.empty()) {
     return std::string("entry function must capture nothing");

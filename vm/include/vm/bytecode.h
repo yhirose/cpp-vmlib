@@ -32,6 +32,13 @@ enum class Op : uint8_t {
   In,           // a = dst
   Ret,          // a = result reg, b = 1 if there is one
   Throw,        // a = value reg; unwinds to the nearest handler
+  // Defers. Push registers a callable to run at the owning scope's exit;
+  // Mark records the defer-stack height (and its own pc -- the unwinder
+  // matches marks to regions by it); RunTo pops the innermost mark and runs
+  // the defers above it, LIFO, each as a normal 0-arity call.
+  DeferPush,    // a = value reg
+  DeferMark,    // no operands
+  DeferRunTo,   // no operands
   // First-class functions.
   MakeClosure,  // a = dst, b = func index, c = capture map index
   CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count
@@ -94,6 +101,12 @@ struct Cleanup {
   int32_t regs_base = 0;     // registers >= this are the region's temps
   int32_t handler_pc = -1;   // >= 0: a try region; where its handler starts
   int32_t caught_local = -1; // the local slot a caught value lands in
+  // >= 0: the region declares defers, and this is its DeferMark's pc. The
+  // unwinder runs the region's pending defers only while the mark is still
+  // outstanding (top of the frame's mark stack carries the same pc), which
+  // is what keeps a throw out of the region's own exit-time defer run from
+  // running them twice.
+  int32_t defer_mark_pc = -1;
 };
 
 struct Chunk {
