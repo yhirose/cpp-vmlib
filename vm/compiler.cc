@@ -87,7 +87,7 @@ struct FnCompiler {
         const int32_t s = compile_expr(v.operand);
         top = base;
         const int32_t r = alloc();
-        emit(Op::Neg, r, s, 0, n.pos);
+        emit(v.op == UnOp::BitNot ? Op::BitNot : Op::Neg, r, s, 0, n.pos);
         return r;
       }
       case Tag::Binary: {

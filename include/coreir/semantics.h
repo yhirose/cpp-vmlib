@@ -62,6 +62,16 @@ inline int64_t wrap_neg(int64_t a) {
   return static_cast<int64_t>(0u - static_cast<uint64_t>(a));
 }
 
+inline bool is_bitop(BinOp op) {
+  switch (op) {
+    case BinOp::BitAnd: case BinOp::BitOr: case BinOp::BitXor:
+    case BinOp::Shl: case BinOp::Shr:
+      return true;
+    default:
+      return false;
+  }
+}
+
 inline bool is_comparison(BinOp op) {
   switch (op) {
     case BinOp::Eq: case BinOp::Ne: case BinOp::Lt:
@@ -94,7 +104,7 @@ inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
     }
     return {};
   }
-  if (l.is_number() && r.is_number()) {
+  if (l.is_number() && r.is_number() && !is_bitop(op)) {
     if (op == BinOp::Mod) return "cannot mod double";
     return {};
   }
@@ -149,6 +159,15 @@ inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
       case BinOp::Mul: return Value::make_int(wrap_mul(a, b));
       case BinOp::Div: return Value::make_int(a / b);
       case BinOp::Mod: return Value::make_int(a % b);
+      case BinOp::BitAnd: return Value::make_int(a & b);
+      case BinOp::BitOr:  return Value::make_int(a | b);
+      case BinOp::BitXor: return Value::make_int(a ^ b);
+      // Through uint64_t like wrap_add: a left shift that overflows is
+      // wrapping, not UB. Shr stays signed -- C++20 defines it arithmetic.
+      case BinOp::Shl:
+        return Value::make_int(static_cast<int64_t>(
+            static_cast<uint64_t>(a) << (b & 63)));
+      case BinOp::Shr: return Value::make_int(a >> (b & 63));
       default: return compare(op, a, b);
     }
   }
@@ -168,10 +187,14 @@ inline std::string unop_error(UnOp op, const Value& v) {
   if (op == UnOp::Neg && !v.is_number()) {
     return std::string("cannot negate ") + type_name(v.tag());
   }
+  if (op == UnOp::BitNot && !v.is_int()) {
+    return std::string("cannot bitwise-not ") + type_name(v.tag());
+  }
   return {};
 }
 
-inline Value apply_unop(UnOp, const Value& v) {
+inline Value apply_unop(UnOp op, const Value& v) {
+  if (op == UnOp::BitNot) return Value::make_int(~v.as_int());
   return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
                     : Value::make_double(-v.as_double());
 }

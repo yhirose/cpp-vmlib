@@ -176,15 +176,19 @@ struct Exec {
         case Op::LoadConst:
           f.regs[in.a] = const_value(in.b);
           break;
-        case Op::Neg: {
+        case Op::Neg:
+        case Op::BitNot: {
+          const UnOp uop = in.op == Op::BitNot ? UnOp::BitNot : UnOp::Neg;
           const Value& v = f.regs[in.b];
-          if (auto err = unop_error(UnOp::Neg, v); !err.empty()) fail(f, err);
-          f.regs[in.a] = apply_unop(UnOp::Neg, v);
+          if (auto err = unop_error(uop, v); !err.empty()) fail(f, err);
+          f.regs[in.a] = apply_unop(uop, v);
           break;
         }
         case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
         case Op::Eq:  case Op::Ne:  case Op::Lt:  case Op::Le:
-        case Op::Gt:  case Op::Ge: {
+        case Op::Gt:  case Op::Ge:
+        case Op::BitAnd: case Op::BitOr: case Op::BitXor:
+        case Op::Shl: case Op::Shr: {
           const BinOp op = binop_of(in.op);
           const Value& l = f.regs[in.b];
           const Value& r = f.regs[in.c];

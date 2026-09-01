@@ -329,6 +329,59 @@ int main() {
     check_eq(failed, c.want, std::string(c.what) + ": message");
   }
 
+  // --- 10. Bit operations: int-only, masked shift counts. -----------------
+  {
+    Module m;
+    Builder b(m);
+    auto bin = [&](BinOp op, int64_t l, int64_t r) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.binary(op, b.literal(l, p), b.literal(r, p), p)},
+                         p);
+    };
+    const NodeId body = b.block(
+        {bin(BinOp::BitAnd, 6, 3), bin(BinOp::BitOr, 6, 3),
+         bin(BinOp::BitXor, 6, 3),
+         b.intrinsic(IntrinsicId::Print,
+                     {b.unary(UnOp::BitNot, b.literal(7, p), p)}, p),
+         // The masked count, on both edges: 64 wraps to 0, -1 wraps to 63,
+         // and Shr on a negative int stays arithmetic.
+         bin(BinOp::Shl, 1, 2), bin(BinOp::Shl, 1, 64), bin(BinOp::Shl, 1, -1),
+         bin(BinOp::Shr, -5, 1), bin(BinOp::Shr, 1, -2)},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    const std::string failed = run_module(m, "bitops");
+    check_eq(failed, "", "bitops: unexpected failure");
+    check_eq(joined(), "2|7|5|-8|4|1|-9223372036854775808|-3|0|",
+             "bitops output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back({"main", 0, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.binary(BinOp::BitAnd,
+                                             b.double_literal(1.5, p),
+                                             b.literal(1, p), p)},
+                                   p),
+                       {},
+                       {}});
+    check_eq(run_module(m, "bitand on double"),
+             "cannot bitand double and int", "bitand on double: message");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back({"main", 0, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.unary(UnOp::BitNot,
+                                            b.bool_literal(true, p), p)},
+                                   p),
+                       {},
+                       {}});
+    check_eq(run_module(m, "bitnot on bool"), "cannot bitwise-not bool",
+             "bitnot on bool: message");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;

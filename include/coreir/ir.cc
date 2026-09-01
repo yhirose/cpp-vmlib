@@ -106,6 +106,11 @@ const char* name_of(BinOp op) {
     case BinOp::Le:  return "le";
     case BinOp::Gt:  return "gt";
     case BinOp::Ge:  return "ge";
+    case BinOp::BitAnd: return "bitand";
+    case BinOp::BitOr:  return "bitor";
+    case BinOp::BitXor: return "bitxor";
+    case BinOp::Shl:    return "shl";
+    case BinOp::Shr:    return "shr";
   }
   return "?";
 }

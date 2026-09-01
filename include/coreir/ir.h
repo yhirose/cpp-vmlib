@@ -63,11 +63,14 @@ enum class Tag : uint8_t {
   SetIndex,   // children: receiver, key, value
 };
 
-enum class UnOp : uint8_t { Neg };
+enum class UnOp : uint8_t { Neg, BitNot };
 
 enum class BinOp : uint8_t {
   Add, Sub, Mul, Div, Mod,
   Eq, Ne, Lt, Le, Gt, Ge,
+  // Int-only. Shift counts are masked to the low six bits (1 << 64 == 1),
+  // matching the hardware and Java rather than trapping; Shr is arithmetic.
+  BitAnd, BitOr, BitXor, Shl, Shr,
 };
 
 enum class IntrinsicId : uint8_t { Print, ReadInt, Len };

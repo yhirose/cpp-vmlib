@@ -20,8 +20,10 @@ namespace vm {
 enum class Op : uint8_t {
   LoadConst,    // a = dst, b = const index
   Neg,          // a = dst, b = src
+  BitNot,       // a = dst, b = src
   Add, Sub, Mul, Div, Mod,   // a = dst, b = lhs, c = rhs
   Eq, Ne, Lt, Le, Gt, Ge,    // a = dst, b = lhs, c = rhs   (writes 0 or 1)
+  BitAnd, BitOr, BitXor, Shl, Shr,  // a = dst, b = lhs, c = rhs
   LoadVar,      // a = dst, b = VarKind, c = index   (rejects Uninit)
   StoreVar,     // a = VarKind, b = index, c = src
   Jump,         // a = target
@@ -62,6 +64,7 @@ inline constexpr coreir::BinOp binop_of(Op op) {
 }
 static_assert(op_of(coreir::BinOp::Add) == Op::Add);
 static_assert(op_of(coreir::BinOp::Ge) == Op::Ge);
+static_assert(op_of(coreir::BinOp::Shr) == Op::Shr);
 
 struct Insn {
   Op op;
