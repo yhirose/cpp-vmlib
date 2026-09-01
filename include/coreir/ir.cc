@@ -135,6 +135,23 @@ void Runtime::collect() {
   in_collect_ = false;
 }
 
+// The refcount just hit zero. An Object carrying the drop contract's key
+// runs its destructor first, pinned so the closure can read the fields; a
+// destructor that stores the object somewhere resurrects it and the free is
+// skipped. Everything else -- and every non-Object -- frees directly.
+void heap_release_to_zero(HeapObj* h) {
+  if (h->kind == ValueTag::Object && h->owner && h->owner->drop_fn() &&
+      !h->owner->in_collect()) {
+    auto* o = static_cast<ObjectObj*>(h);
+    if (o->find("\x01drop")) {
+      ++h->rc;  // pin across the destructor
+      h->owner->drop_fn()(h->owner->drop_ctx(), h);
+      if (--h->rc != 0) return;  // resurrected
+    }
+  }
+  destroy_heap_object(h);
+}
+
 Runtime::~Runtime() {
   for (HeapObj* o = head_; o; o = o->next) ++o->rc;
   for (HeapObj* o = head_; o; o = o->next) clear_heap_object_refs(o);

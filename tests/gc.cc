@@ -100,6 +100,32 @@ int main() {
     check(rt.live_objects() == 0, "and they were freed");
   }
 
+  // --- 6. The drop hook fires at refcount zero, pinned; a resurrecting
+  //        hook skips the free and the object drops again later. ----------
+  {
+    Runtime rt;
+    Runtime::Scope scope(rt);
+    static int fired = 0;
+    static Value* keeper = nullptr;
+    Value kv = Value();
+    keeper = &kv;
+    fired = 0;
+    rt.set_drop_fn(nullptr, [](void*, HeapObj* h) {
+      ++fired;
+      if (fired == 1) *keeper = Value::make_ref(h);  // resurrect once
+    });
+    {
+      Value o = Value::make_object();
+      o.as_object()->set("\x01drop", Value::make_str("marker"));
+    }
+    check(fired == 1, "hook fired at zero");
+    check(rt.live_objects() == 2, "resurrected object still alive");
+    kv = Value();
+    check(fired == 2, "hook fired again on re-release");
+    rt.set_drop_fn(nullptr, nullptr);
+    keeper = nullptr;
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "gc: %d failure(s)\n", g_failures);
     return 1;

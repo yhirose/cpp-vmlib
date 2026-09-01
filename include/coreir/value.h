@@ -91,6 +91,21 @@ class Runtime {
     finalize_ = fn;
   }
 
+  // Deterministic destructors: an Object whose "\x01drop" key holds a
+  // closure gets it called -- with the object as its one argument -- at the
+  // moment its refcount reaches zero, before the object is freed. The hook
+  // is how: the executor installs one for the lifetime of a run (it is what
+  // can call a closure), and release() hands it each zero-count Object that
+  // carries the key. The hook runs over a pinned object; if it stores the
+  // object somewhere (a resurrection), the free is skipped.
+  void set_drop_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
+    drop_ctx_ = ctx;
+    drop_ = fn;
+  }
+  void* drop_ctx() const { return drop_ctx_; }
+  void (*drop_fn() const)(void*, HeapObj*) { return drop_; }
+  bool in_collect() const { return in_collect_; }
+
   static Runtime* current() { return current_; }
 
   // Makes `rt` current for its own lifetime and restores whatever was current
@@ -119,6 +134,8 @@ class Runtime {
   bool in_collect_ = false;
   void* finalize_ctx_ = nullptr;
   void (*finalize_)(void*, HeapObj*) = nullptr;
+  void* drop_ctx_ = nullptr;
+  void (*drop_)(void*, HeapObj*) = nullptr;
   static thread_local Runtime* current_;
 };
 
@@ -253,6 +270,10 @@ class Value {
   ValueTag tag() const { return tag_; }
   // The raw payload, for the collector's child walk only.
   int64_t raw_data() const { return data_; }
+
+  // A retained reference to an already-live heap object -- what the drop
+  // hook hands the destructor as its argument.
+  static Value make_ref(HeapObj* h);
 
   bool is_heap() const {
     return tag_ == ValueTag::Str || tag_ == ValueTag::Array ||
@@ -414,6 +435,18 @@ inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
 // g_live_heap_objects. That count is what the tracing backstop will drive to
 // zero; tests/closures.cc asserts the leak rather than its absence, so that
 // collecting it later shows up as a change rather than as silence.
+// Out of line (ir.cc): the zero-count path consults the runtime's drop
+// hook for Objects before freeing.
+void heap_release_to_zero(HeapObj* h);
+
+inline Value Value::make_ref(HeapObj* h) {
+  Value r;
+  r.tag_ = h->kind;
+  r.data_ = reinterpret_cast<int64_t>(h);
+  ++h->rc;
+  return r;
+}
+
 inline void Value::release() {
   if (!is_heap()) return;
   HeapObj* h = reinterpret_cast<HeapObj*>(data_);
@@ -422,7 +455,7 @@ inline void Value::release() {
   // object.
   tag_ = ValueTag::Nil;
   data_ = 0;
-  if (--h->rc == 0) destroy_heap_object(h);
+  if (--h->rc == 0) heap_release_to_zero(h);
 }
 
 }  // namespace coreir

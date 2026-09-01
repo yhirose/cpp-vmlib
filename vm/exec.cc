@@ -1,6 +1,7 @@
 #include "vm/exec.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -225,17 +226,46 @@ struct Exec {
       const size_t floor = frames.size();
       try {
         push_closure(d, nullptr, 0, -1, pos);
-        while (frames.size() > floor) {
-          try {
-            dispatch(floor);
-          } catch (Raise& r) {
-            if (!unwind(r, floor)) throw;
-          }
-        }
+        run_nested(floor);
       } catch (Raise&) {
         while (f.defers.size() > mark) f.defers.pop_back();
         throw;
       }
+    }
+  }
+
+  // Drive whatever was just pushed to completion, unwinding within it.
+  void run_nested(size_t floor) {
+    while (frames.size() > floor) {
+      try {
+        dispatch(floor);
+      } catch (Raise& r) {
+        if (!unwind(r, floor)) throw;
+      }
+    }
+  }
+
+  // The drop-contract hook (see Runtime::set_drop_fn): run the object's
+  // "\x01drop" closure with the object itself as the argument. A throwing
+  // destructor is reported and swallowed -- an object going away must not
+  // fail the program that let go of it.
+  static void drop_hook(void* ctx, HeapObj* h) {
+    auto* self = static_cast<Exec*>(ctx);
+    auto* o = static_cast<ObjectObj*>(h);
+    Value* dv = o->find("\x01drop");
+    if (!dv || !dv->is_func()) return;
+    Value closure = *dv;
+    Value arg = Value::make_ref(h);
+    const size_t floor = self->frames.size();
+    try {
+      self->push_closure(closure, &arg, 1, -1, SrcPos{0, 0});
+      self->run_nested(floor);
+    } catch (Raise& r) {
+      const std::string what = r.fatal_msg.empty()
+                                   ? "uncaught: " + to_display(r.value)
+                                   : r.fatal_msg;
+      std::fprintf(stderr, "drop: %s\n", what.c_str());
+      while (self->frames.size() > floor) self->frames.pop_back();
     }
   }
 
@@ -608,8 +638,15 @@ struct Exec {
 void run(const Program& p, Runtime& rt, int max_call_depth) {
   Runtime::Scope scope(rt);
   Exec e{p, max_call_depth < 0 ? 0 : static_cast<size_t>(max_call_depth), {}};
+  rt.set_drop_fn(&e, &Exec::drop_hook);
   e.frames.push_back(e.make_frame(p.chunks[0]));
-  e.run();
+  try {
+    e.run();
+  } catch (...) {
+    rt.set_drop_fn(nullptr, nullptr);
+    throw;
+  }
+  rt.set_drop_fn(nullptr, nullptr);
 }
 
 void run(const Program& p, int max_call_depth) {
