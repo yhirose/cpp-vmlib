@@ -79,19 +79,22 @@ struct FnCompiler {
     return false;
   }
 
-  // What a jump out of nested regions owes them: each Scope down to (not
-  // including) `scope_depth` releases its locals, and the registers above the
-  // target statement's floor -- temps of the abandoned regions -- are
-  // dropped. num_regs at this point bounds every register a region entered so
-  // far can have touched, so the clear cannot miss one.
+  // What a jump out of nested regions owes them: the registers above the
+  // target statement's floor -- temps of the abandoned regions, dead once
+  // the jump is taken -- are dropped, and then each Scope down to (not
+  // including) `scope_depth` is left the way its own exit leaves it. The
+  // temps go first so that a scope's owned resolution does not count them
+  // as holders: a condition's register still names the local it tested.
+  // num_regs at this point bounds every register a region entered so far
+  // can have touched, so the clear cannot miss one.
   void leave_down_to(size_t scope_depth, int32_t regs_floor, uint32_t pos) {
+    if (ch.num_regs > regs_floor) {
+      emit(Op::ClearRegs, regs_floor, ch.num_regs, 0, pos);
+    }
     for (size_t i = open_scopes.size(); i > scope_depth; --i) {
       const OpenScope& sc = open_scopes[i - 1];
       if (sc.has_defers) emit(Op::DeferRunTo, 0, 0, 0, pos);
       emit_scope_release(sc, pos);
-    }
-    if (ch.num_regs > regs_floor) {
-      emit(Op::ClearRegs, regs_floor, ch.num_regs, 0, pos);
     }
   }
 
@@ -115,6 +118,55 @@ struct FnCompiler {
     }
     ch.release_lists.push_back(std::move(slots));
     return static_cast<int32_t>(ch.release_lists.size() - 1);
+  }
+
+  // A Scope, in value position (its body's value lands in the register
+  // returned) or as a statement (`want_value` false: the body is compiled
+  // as one and nothing is returned). The distinction matters at the exit:
+  // a value held in a register across the scope's release would count as
+  // an outside holder in the owned resolution, keeping a cycle the block
+  // merely named last -- `{ ...; a }` as a statement -- from dropping.
+  int32_t compile_scope(NodeId id, bool want_value) {
+    const Node& sn = m.at(id);
+    const bool defers = declares_defers(m.child(id, 0));
+    const int32_t regs_base = top;
+    // Every Scope takes an owned-stack mark on entry; its exit resolves
+    // the drop-bearing cycles bound under it. The mark's pc is the
+    // region's identity for the unwinder, as the DeferMark's is.
+    const int32_t owned_pc = here();
+    emit(Op::OwnedMark, 0, 0, 0, sn.pos);
+    const int32_t mark_pc = defers ? here() : -1;
+    if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
+    const int32_t start = here();
+    const OpenScope sc{sn.a, sn.b, defers, compile_release_list(id)};
+    open_scopes.push_back(sc);
+    int32_t r = -1;
+    if (want_value) {
+      r = compile_value(m.child(id, 0));
+    } else {
+      compile_stmt(m.child(id, 0));
+    }
+    open_scopes.pop_back();
+    int32_t defer_run_pc = -1;
+    if (defers) {
+      // The Move puts one instruction between the body's last call and
+      // the exit-time defer run: a callee's resume pc then still sits
+      // inside every region that must see its throw, while the
+      // DeferRunTo's own pc sits outside a fused try's (below). A
+      // statement body ends in its own ClearRegs, which does the same.
+      if (want_value) {
+        const int32_t held = alloc();
+        emit(Op::Move, held, r, 0, sn.pos);
+        r = held;
+      }
+      defer_run_pc = here();
+      emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
+    }
+    emit_scope_release(sc, sn.pos);
+    ch.cleanups.push_back({start, here(), sn.a, sn.b, regs_base, -1, -1,
+                           mark_pc, owned_pc, sc.release_list});
+    last_scope_defer_run_pc = defer_run_pc;
+    return r;
   }
 
   // "Whatever this node is, leave its value in a register." A statement --
@@ -164,40 +216,8 @@ struct FnCompiler {
         emit(v.op == UnOp::BitNot ? Op::BitNot : Op::Neg, r, s, 0, n.pos);
         return r;
       }
-      case Tag::Scope: {
-        const Node& sn = m.at(id);
-        const bool defers = declares_defers(m.child(id, 0));
-        const int32_t regs_base = top;
-        // Every Scope takes an owned-stack mark on entry; its exit resolves
-        // the drop-bearing cycles bound under it. The mark's pc is the
-        // region's identity for the unwinder, as the DeferMark's is.
-        const int32_t owned_pc = here();
-        emit(Op::OwnedMark, 0, 0, 0, sn.pos);
-        const int32_t mark_pc = defers ? here() : -1;
-        if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
-        const int32_t start = here();
-        const OpenScope sc{sn.a, sn.b, defers, compile_release_list(id)};
-        open_scopes.push_back(sc);
-        int32_t r = compile_value(m.child(id, 0));
-        open_scopes.pop_back();
-        int32_t defer_run_pc = -1;
-        if (defers) {
-          // The Move puts one instruction between the body's last call and
-          // the exit-time defer run: a callee's resume pc then still sits
-          // inside every region that must see its throw, while the
-          // DeferRunTo's own pc sits outside a fused try's (below).
-          const int32_t held = alloc();
-          emit(Op::Move, held, r, 0, sn.pos);
-          r = held;
-          defer_run_pc = here();
-          emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
-        }
-        emit_scope_release(sc, sn.pos);
-        ch.cleanups.push_back({start, here(), sn.a, sn.b, regs_base, -1, -1,
-                               mark_pc, owned_pc, sc.release_list});
-        last_scope_defer_run_pc = defer_run_pc;
-        return r;
-      }
+      case Tag::Scope:
+        return compile_scope(id, true);
       case Tag::TryCatch: {
         // dst sits below regs_base on purpose: the unwinder drops the
         // region's temps, and the result register must not be one of them.
@@ -558,6 +578,10 @@ struct FnCompiler {
         }
         break;
       }
+
+      case Tag::Scope:
+        compile_scope(id, false);
+        break;
 
       default: {
         // An expression used as a statement: evaluate it and drop the result.

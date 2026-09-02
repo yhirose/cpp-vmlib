@@ -12,7 +12,8 @@
 // last held it; one merely hanging off a plain cycle waits for the
 // collector; and a destructor runs at most once, resurrection included.
 // Then a scope's explicit release list, which puts a captured local (a
-// cell) back into declaration order with the plain ones.
+// cell) back into declaration order with the plain ones; and the frame's
+// dead temporaries, which must not keep a scope's cycle alive.
 
 #include <cstdio>
 #include <stdexcept>
@@ -629,6 +630,86 @@ int main() {
     refused("a non-VarRef entry", [](Prog& g) {
       return g.b.scope(0, 2, g.b.block({}, g.p), {g.b.literal(1, g.p)}, g.p);
     });
+  }
+
+  // --- 16. A scope's cycle must not be kept alive by the frame's dead
+  //         temporaries: the block's own value when it stands as a
+  //         statement, a condition's register at a Break, or nothing at
+  //         all in a function body -- and a self-cycle. ----------------
+  {
+    // { a; b; a.peer = b; b.peer = a; a }  (statement position; the
+    // trailing `a` is the block's discarded value)
+    Prog g;
+    g.main(g.b.block({g.bind_drop(),
+                      g.b.scope(1, 3,
+                                g.b.block({g.mk(1, "a"), g.mk(2, "b"),
+                                           g.set(1, "peer", g.local(2)),
+                                           g.set(2, "peer", g.local(1)),
+                                           g.local(1)},
+                                          g.p),
+                                g.p),
+                      g.print_str("after")},
+                     g.p),
+           {"a", "b"});
+    expect_clean(run_module(g.m, "temps: block value"), "temps: block value");
+    check_eq(joined(), "b|a|after|", "temps: block value output");
+  }
+  {
+    // f = fn () { { d; a; b; a.peer = b; b.peer = a } }; f(); print("after")
+    Prog g;
+    Func f{"f", 3, 0, NodeId{}, {"d", "a", "b"}, {}};
+    f.body = g.b.scope(0, 3,
+                       g.b.block({g.bind_drop(), g.mk(1, "a"), g.mk(2, "b"),
+                                  g.set(1, "peer", g.local(2)),
+                                  g.set(2, "peer", g.local(1))},
+                                 g.p),
+                       g.p);
+    g.m.funcs.push_back(f);
+    g.main(g.b.block({g.b.call_value(g.b.make_closure(2, 0, g.p), {}, g.p),
+                      g.print_str("after")},
+                     g.p),
+           {});
+    expect_clean(run_module(g.m, "temps: body"), "temps: body");
+    check_eq(joined(), "b|a|after|", "temps: body output");
+  }
+  {
+    // while true { { a; b; cycle; if a { break } } }; print("after")
+    // -- the condition's register holds a across the Break.
+    Prog g;
+    g.main(g.b.block(
+               {g.bind_drop(),
+                g.b.make_while(
+                    g.b.bool_literal(true, g.p),
+                    g.b.scope(1, 3,
+                              g.b.block({g.mk(1, "a"), g.mk(2, "b"),
+                                         g.cycle(1, 2),
+                                         g.b.make_if(g.local(1),
+                                                     g.b.make_break(g.p),
+                                                     NodeId{}, g.p)},
+                                        g.p),
+                              g.p),
+                    g.p),
+                g.print_str("after")},
+               g.p),
+           {"a", "b"});
+    expect_clean(run_module(g.m, "temps: break"), "temps: break");
+    check_eq(joined(), "b|a|after|", "temps: break output");
+  }
+  {
+    // { a = mk("a"); a.me = a; a }; print("after")
+    Prog g;
+    g.main(g.b.block({g.bind_drop(),
+                      g.b.scope(1, 2,
+                                g.b.block({g.mk(1, "a"),
+                                           g.set(1, "me", g.local(1)),
+                                           g.local(1)},
+                                          g.p),
+                                g.p),
+                      g.print_str("after")},
+                     g.p),
+           {"a"});
+    expect_clean(run_module(g.m, "temps: self-cycle"), "temps: self-cycle");
+    check_eq(joined(), "a|after|", "temps: self-cycle output");
   }
 
   if (g_failures != 0) {
