@@ -481,9 +481,12 @@ struct FnCompiler {
       }
 
       case Tag::Return: {
-        // Slots need no one-at-a-time release -- the Ret frees the whole
-        // frame -- but pending defers of every open scope still run, after
-        // the return value is computed, innermost first.
+        // Every open scope is left the way its own exit leaves it --
+        // innermost first, its defers and then its locals -- after the
+        // return value is computed, exactly as Break leaves the scopes it
+        // crosses. The Ret could free the frame in one go, but then every
+        // defer would precede every drop, and the locals would die in slot
+        // order rather than the scoped, last-declared-first order.
         int32_t r;
         if (n.num_children == 1) {
           r = compile_value(m.child(id, 0));
@@ -491,11 +494,7 @@ struct FnCompiler {
           r = alloc();
           emit(Op::LoadNil, r, 0, 0, n.pos);
         }
-        for (size_t i = open_scopes.size(); i > 0; --i) {
-          if (open_scopes[i - 1].has_defers) {
-            emit(Op::DeferRunTo, 0, 0, 0, n.pos);
-          }
-        }
+        leave_down_to(0, r + 1, n.pos);
         emit(Op::Ret, r, 1, 0, n.pos);
         break;
       }

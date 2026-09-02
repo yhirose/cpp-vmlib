@@ -324,8 +324,9 @@ struct Exec {
 
   // The drop-contract hook (see Runtime::set_drop_fn): run the object's
   // "\x01" "drop" closure with the object itself as the argument. A throwing
-  // destructor is reported and swallowed -- an object going away must not
-  // fail the program that let go of it.
+  // destructor is reported on stderr as "drop: <value>" (a trap: its own
+  // message) and swallowed -- an object going away must not fail the
+  // program that let go of it.
   static void drop_hook(void* ctx, HeapObj* h) {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
@@ -338,9 +339,8 @@ struct Exec {
       self->push_closure(closure, &arg, 1, -1, SrcPos{0, 0});
       self->run_nested(floor);
     } catch (Raise& r) {
-      const std::string what = r.fatal_msg.empty()
-                                   ? "uncaught: " + to_display(r.value)
-                                   : r.fatal_msg;
+      const std::string what =
+          r.fatal_msg.empty() ? to_display(r.value) : r.fatal_msg;
       std::fprintf(stderr, "drop: %s\n", what.c_str());
       while (self->frames.size() > floor) self->frames.pop_back();
     }
@@ -382,8 +382,8 @@ struct Exec {
              ++i) {
           f.regs[i] = Value();
         }
-        for (int32_t i = cl.first_local; i < cl.end_local; ++i) {
-          f.locals[i] = Value::uninit();
+        for (int32_t i = cl.end_local; i-- > cl.first_local;) {
+          f.locals[i] = Value::uninit();  // last declared, first released
         }
         if (cl.handler_pc >= 0) {
           f.locals[cl.caught_local] = r.value;
@@ -396,9 +396,18 @@ struct Exec {
       if (f.gen_self.is_generator()) {
         f.gen_self.as_generator()->state = GeneratorObj::State::Done;
       }
-      frames.pop_back();
+      pop_frame();
     }
     return false;
+  }
+
+  // Releases the top frame: its locals last-declared-first -- the order a
+  // scope's own exit uses, so a function's unscoped locals (its parameters,
+  // say) go the same way -- and the rest with the Frame.
+  void pop_frame() {
+    Frame& f = *frames.back();
+    for (size_t i = f.locals.size(); i-- > 0;) f.locals[i] = Value::uninit();
+    frames.pop_back();
   }
 
   void dispatch(size_t floor) {
@@ -839,7 +848,7 @@ struct Exec {
             result = gen_result(std::move(result), true);
           }
           const int32_t ret_reg = f.ret_reg;
-          frames.pop_back();
+          pop_frame();
           if (frames.size() <= floor) {
             if (ret_reg >= 0 && !frames.empty()) {
               frames.back()->regs[ret_reg] = std::move(result);
