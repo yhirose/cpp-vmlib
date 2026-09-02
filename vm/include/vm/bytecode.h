@@ -60,6 +60,10 @@ enum class Op : uint8_t {
   // nil: the slots are dead until something declares into them again, and a
   // read before that is the same mistake as a read before first assignment.
   ClearLocals,  // a = first, b = one past last
+  // The same for a scope that spelled its release order out
+  // (Chunk::release_lists[a]): each slot in list order, a local back to
+  // Uninit, a cell replaced by a fresh one.
+  ReleaseSlots, // a = release list index
   NewArray,     // a = dst, b = first item reg, c = item count
   Index,        // a = dst, b = receiver reg, c = key reg
   SetIndex,     // a = receiver reg, b = key reg, c = value reg
@@ -141,6 +145,15 @@ struct Cleanup {
   // resolved (a Break's ClearLocals, before a later exit-time throw) is not
   // resolved twice.
   int32_t owned_mark_pc = -1;
+  // >= 0: the region releases Chunk::release_lists[release_list] instead
+  // of its local range.
+  int32_t release_list = -1;
+};
+
+// One entry of a scope's release order: a local slot or a cell.
+struct SlotRef {
+  coreir::VarKind kind;
+  int32_t index;
 };
 
 struct Chunk {
@@ -160,6 +173,7 @@ struct Chunk {
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
+  std::vector<std::vector<SlotRef>> release_lists;
 };
 
 struct Program {

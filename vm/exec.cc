@@ -319,6 +319,23 @@ struct Exec {
     }
   }
 
+  // A scope's release, the two forms: its local range last-slot-first, or
+  // the list it spelled out in list order. A released cell is replaced by
+  // a fresh one -- what CellFresh does -- so the slot always holds a cell
+  // and a closure that captured the old one keeps it, value and all.
+  void release_range(Frame& f, int32_t first, int32_t end) {
+    for (int32_t i = end; i-- > first;) f.locals[i] = Value::uninit();
+  }
+  void release_list(Frame& f, int32_t list) {
+    for (const SlotRef& s : f.chunk->release_lists[static_cast<size_t>(list)]) {
+      if (s.kind == VarKind::Local) {
+        f.locals[s.index] = Value::uninit();
+      } else {
+        f.cells[s.index] = Value::make_cell();
+      }
+    }
+  }
+
   // A Scope's exit, after its locals are gone: pop the mark it took and
   // resolve the owned stack above it (Runtime::owned_scope_exit). The entry
   // frame's outermost scope is the program's end, and under
@@ -407,8 +424,10 @@ struct Exec {
              ++i) {
           f.regs[i] = Value();
         }
-        for (int32_t i = cl.end_local; i-- > cl.first_local;) {
-          f.locals[i] = Value::uninit();  // last declared, first released
+        if (cl.release_list >= 0) {
+          release_list(f, cl.release_list);
+        } else {
+          release_range(f, cl.first_local, cl.end_local);
         }
         if (cl.owned_mark_pc >= 0 && !f.owned_marks.empty() &&
             f.owned_marks.back().second == cl.owned_mark_pc) {
@@ -578,7 +597,11 @@ struct Exec {
           // destructor sees the ones declared after it already gone, the
           // order a language with scoped destructors promises. Then what
           // the releases could not free -- the scope's cycles.
-          for (int32_t i = in.b - 1; i >= in.a; --i) f.locals[i] = Value::uninit();
+          release_range(f, in.a, in.b);
+          leave_scope_owned(f);
+          break;
+        case Op::ReleaseSlots:
+          release_list(f, in.a);
           leave_scope_owned(f);
           break;
         case Op::OwnedMark:

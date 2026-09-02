@@ -71,7 +71,17 @@ enum class Tag : uint8_t {
   // scope resolves the drop-bearing objects bound under it that a cycle
   // kept alive (Runtime::owned_scope_exit). Yields its child's value,
   // like Block.
-  Scope,      // a = first local, b = one past last; children: body
+  //
+  // A captured local lives in a Cell, not in its slot, and cells are not
+  // in the range -- so a front end that needs reverse declaration order
+  // across the two hands the scope its release list as an optional second
+  // child: a Block of VarRef nodes (Local or Cell, no duplicates, the
+  // locals within the range), in the order they are to be released. The
+  // scope then releases exactly that list, on every exit; a released cell
+  // is replaced by a fresh one, as CellFresh would. Without it the range
+  // is released last-slot-first and the cells stay the frame's.
+  Scope,      // a = first local, b = one past last;
+              // children: body [, release order: Block of VarRef]
   // Non-local exits. Statements, like PL/0's: nothing reads their value.
   // Each one leaves every Scope between it and its target the way the
   // scope's own exit would -- locals released -- which is what earns them a
@@ -332,7 +342,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
     case Tag::Index:       return 2;
     case Tag::SetIndex:    return 3;
-    case Tag::Scope:       return 1;
+    case Tag::Scope:       return -1;  // body, or body + release list
     case Tag::Return:      return -1;  // 0 or 1
     case Tag::Break:       return 0;
     case Tag::Continue:    return 0;
@@ -574,6 +584,13 @@ public:
   }
   NodeId scope(int32_t first_local, int32_t end_local, NodeId body, SrcPos p) {
     return emit(Tag::Scope, 0, p, first_local, end_local, {body});
+  }
+  // The same with the release order spelled out: `release` is VarRef nodes
+  // (Local or Cell), released in that order at every exit.
+  NodeId scope(int32_t first_local, int32_t end_local, NodeId body,
+               const std::vector<NodeId>& release, SrcPos p) {
+    return emit(Tag::Scope, 0, p, first_local, end_local,
+                {body, block(release, p)});
   }
   NodeId make_return(NodeId value, SrcPos p) {
     if (value.valid()) return emit(Tag::Return, 0, p, 0, 0, {value});

@@ -23,7 +23,11 @@ struct FnCompiler {
     std::vector<size_t> break_jumps; // patched to the loop's exit
   };
   std::vector<OpenLoop> open_loops;
-  struct OpenScope { int32_t first_local, end_local; bool has_defers; };
+  struct OpenScope {
+    int32_t first_local, end_local;
+    bool has_defers;
+    int32_t release_list;  // -1: release the range
+  };
   std::vector<OpenScope> open_scopes;
   // Where the most recently closed Scope's exit-time DeferRunTo sits, so a
   // TryCatch whose body is that scope can end its guarded region before it
@@ -84,11 +88,33 @@ struct FnCompiler {
     for (size_t i = open_scopes.size(); i > scope_depth; --i) {
       const OpenScope& sc = open_scopes[i - 1];
       if (sc.has_defers) emit(Op::DeferRunTo, 0, 0, 0, pos);
-      emit(Op::ClearLocals, sc.first_local, sc.end_local, 0, pos);
+      emit_scope_release(sc, pos);
     }
     if (ch.num_regs > regs_floor) {
       emit(Op::ClearRegs, regs_floor, ch.num_regs, 0, pos);
     }
+  }
+
+  // A scope's release: the list it spelled out, or its local range.
+  void emit_scope_release(const OpenScope& sc, uint32_t pos) {
+    if (sc.release_list >= 0) {
+      emit(Op::ReleaseSlots, sc.release_list, 0, 0, pos);
+    } else {
+      emit(Op::ClearLocals, sc.first_local, sc.end_local, 0, pos);
+    }
+  }
+
+  // Scope's optional second child, as a Chunk::release_lists entry.
+  int32_t compile_release_list(NodeId scope) {
+    if (m.num_children(scope) < 2) return -1;
+    const NodeId list = m.child(scope, 1);
+    std::vector<SlotRef> slots;
+    for (uint32_t i = 0; i < m.num_children(list); ++i) {
+      const auto v = view_varref(m, m.child(list, i));
+      slots.push_back({v.kind, v.index});
+    }
+    ch.release_lists.push_back(std::move(slots));
+    return static_cast<int32_t>(ch.release_lists.size() - 1);
   }
 
   // "Whatever this node is, leave its value in a register." A statement --
@@ -150,7 +176,8 @@ struct FnCompiler {
         const int32_t mark_pc = defers ? here() : -1;
         if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
         const int32_t start = here();
-        open_scopes.push_back({sn.a, sn.b, defers});
+        const OpenScope sc{sn.a, sn.b, defers, compile_release_list(id)};
+        open_scopes.push_back(sc);
         int32_t r = compile_value(m.child(id, 0));
         open_scopes.pop_back();
         int32_t defer_run_pc = -1;
@@ -165,9 +192,9 @@ struct FnCompiler {
           defer_run_pc = here();
           emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
         }
-        emit(Op::ClearLocals, sn.a, sn.b, 0, sn.pos);
-        ch.cleanups.push_back(
-            {start, here(), sn.a, sn.b, regs_base, -1, -1, mark_pc, owned_pc});
+        emit_scope_release(sc, sn.pos);
+        ch.cleanups.push_back({start, here(), sn.a, sn.b, regs_base, -1, -1,
+                               mark_pc, owned_pc, sc.release_list});
         last_scope_defer_run_pc = defer_run_pc;
         return r;
       }

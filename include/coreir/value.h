@@ -180,6 +180,7 @@ class Runtime {
 
  private:
   friend struct HeapObj;
+  friend void heap_release_to_zero(HeapObj* h);
   void link(HeapObj* o);
   void unlink(HeapObj* o);
   void mark();

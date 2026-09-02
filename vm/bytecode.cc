@@ -38,6 +38,7 @@ const char* name_of(Op op) {
     case Op::Move:        return "move";
     case Op::ClearRegs:   return "clearregs";
     case Op::ClearLocals: return "clearlocals";
+    case Op::ReleaseSlots: return "releaseslots";
     case Op::NewArray:    return "newarray";
     case Op::Index:       return "index";
     case Op::SetIndex:    return "setindex";
@@ -116,6 +117,9 @@ std::string to_string(const Program& p) {
         case Op::ClearLocals:
           out << " local[" << in.a << ".." << in.b << ")";
           break;
+        case Op::ReleaseSlots:
+          out << " list#" << in.a;
+          break;
         case Op::NewArray:
           out << " r" << in.a << ", items r" << in.b << ".."
               << (in.b + in.c);
@@ -154,6 +158,7 @@ std::string to_string(const Program& p) {
       }
       if (cl.defer_mark_pc >= 0) out << " defer_mark=" << cl.defer_mark_pc;
       if (cl.owned_mark_pc >= 0) out << " owned_mark=" << cl.owned_mark_pc;
+      if (cl.release_list >= 0) out << " release=list#" << cl.release_list;
       out << "\n";
     }
   }

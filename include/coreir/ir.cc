@@ -387,6 +387,14 @@ void heap_release_to_zero(HeapObj* h) {
     h->owner->run_drop(h);
     if (--h->rc != 0) return;  // resurrected
   }
+  // Off the heap list before its children go: releasing them can run a
+  // destructor, which can allocate, which can collect -- and a collection
+  // must not find a zero-count object mid-destruction and free it a second
+  // time. The same order collect() and ~Runtime use.
+  if (h->owner) {
+    h->owner->unlink(h);
+    h->owner = nullptr;
+  }
   destroy_heap_object(h);
 }
 
@@ -576,11 +584,46 @@ struct Verifier {
       case Tag::CallValue:
         if (n.num_children < 1) return fail("CallValue needs a callee");
         break;
-      case Tag::Scope:
+      case Tag::Scope: {
         if (n.a < 0 || n.a > n.b || n.b > f.num_locals) {
           return fail("scope local range out of range");
         }
+        if (n.num_children != 1 && n.num_children != 2) {
+          return fail("Scope takes a body and an optional release list");
+        }
+        if (n.num_children == 2) {
+          const NodeId list = m.child(id, 1);
+          if (!list.valid() || list.v >= m.nodes.size() ||
+              m.at(list).tag != Tag::Block) {
+            return fail("scope release list must be a Block of VarRef");
+          }
+          std::vector<std::pair<VarKind, int32_t>> seen;
+          for (uint32_t i = 0; i < m.num_children(list); ++i) {
+            const NodeId e = m.child(list, i);
+            if (!e.valid() || e.v >= m.nodes.size() ||
+                m.at(e).tag != Tag::VarRef) {
+              return fail("scope release list must be a Block of VarRef");
+            }
+            const auto v = view_varref(m, e);
+            if (v.kind == VarKind::Capture) {
+              return fail("scope release list cannot name a capture");
+            }
+            if (v.index < 0 || v.index >= slot_limit(f, v.kind)) {
+              return fail("scope release list entry out of range");
+            }
+            if (v.kind == VarKind::Local && (v.index < n.a || v.index >= n.b)) {
+              return fail("scope release list names a local outside its range");
+            }
+            for (const auto& s : seen) {
+              if (s.first == v.kind && s.second == v.index) {
+                return fail("scope release list repeats an entry");
+              }
+            }
+            seen.emplace_back(v.kind, v.index);
+          }
+        }
         break;
+      }
       case Tag::Return:
         if (n.num_children > 1) return fail("Return takes 0 or 1 children");
         break;
@@ -707,6 +750,7 @@ struct Dumper {
       case Tag::If:     out << "if"; break;
       case Tag::Scope:
         out << "scope local[" << n.a << ".." << n.b << ")";
+        if (n.num_children == 2) out << " +release";
         break;
       case Tag::Return:   out << "return"; break;
       case Tag::Break:    out << "break"; break;

@@ -11,6 +11,8 @@
 // exit, newest first; one still held from outside waits for the scope that
 // last held it; one merely hanging off a plain cycle waits for the
 // collector; and a destructor runs at most once, resurrection included.
+// Then a scope's explicit release list, which puts a captured local (a
+// cell) back into declaration order with the plain ones.
 
 #include <cstdio>
 #include <stdexcept>
@@ -543,6 +545,90 @@ int main() {
     r = run_module(g.m, "top-level cycle: default");
     expect_clean(r, "top-level cycle: default");
     check_eq(joined(), "end|b|a|", "top-level cycle: default output");
+  }
+
+  // --- 14. A release list puts a captured local back in declaration
+  //         order: second-declared first, whether it is the cell or the
+  //         plain local -- at the fall-through and under a throw. -------
+  // { first = mk("first"); second = mk("second"); (fn () { print("use") })()
+  //   [; throw "x"] }        -- one of the two lives in a cell
+  {
+    for (int captured_second = 0; captured_second < 2; ++captured_second) {
+      for (int throws = 0; throws < 2; ++throws) {
+        Prog g;
+        g.m.capture_maps.push_back({{VarKind::Cell, 0}});
+        Func use{"use", 0, 1, NodeId{}, {}, {"c"}};
+        use.body = g.print_str("use");
+        g.m.funcs.push_back(use);
+        // The plain one is local 1; the captured one is cell 0.
+        auto mk_cell = [&](const char* name) {
+          return g.b.assign(VarKind::Cell, 0,
+                            g.b.object_lit({{g.str("name"), g.str(name)},
+                                            {g.str("\x01" "drop"), g.local(0)}},
+                                           g.p),
+                            g.p);
+        };
+        std::vector<NodeId> body;
+        std::vector<NodeId> release;
+        if (captured_second) {
+          body = {g.mk(1, "first"), mk_cell("second")};
+          release = {g.b.varref(VarKind::Cell, 0, g.p), g.local(1)};
+        } else {
+          body = {mk_cell("first"), g.mk(1, "second")};
+          release = {g.local(1), g.b.varref(VarKind::Cell, 0, g.p)};
+        }
+        body.push_back(g.b.call_value(g.b.make_closure(2, 1, g.p), {}, g.p));
+        if (throws) body.push_back(g.b.make_throw(g.str("x"), g.p));
+        NodeId scope = g.b.scope(1, 2, g.b.block(body, g.p), release, g.p);
+        g.main(g.b.block({g.b.cell_fresh(0, g.p), g.bind_drop(),
+                          throws ? g.b.make_try(2, scope, g.print(g.local(2)),
+                                                g.p)
+                                 : scope,
+                          g.print_str("after")},
+                         g.p),
+               {"plain", "e"});
+        g.m.funcs[0].num_cells = 1;
+        const std::string what = std::string("release list: ") +
+                                 (captured_second ? "cell second" : "cell first") +
+                                 (throws ? ", throw" : "");
+        expect_clean(run_module(g.m, what), what);
+        check_eq(joined(),
+                 throws ? "use|second|first|x|after|"
+                        : "use|second|first|after|",
+                 what + " output");
+      }
+    }
+  }
+
+  // --- 15. What verify() refuses in a release list. ---------------------
+  {
+    auto refused = [&](const char* what, auto build) {
+      Prog g;
+      Func main{"main", 2, 0, NodeId{}, {"a", "b"}, {}};
+      main.num_cells = 1;
+      main.body = build(g);
+      g.m.funcs[0] = main;
+      const auto err = verify(g.m);
+      check(err.has_value(), std::string("verify accepted: ") + what);
+    };
+    refused("a capture", [](Prog& g) {
+      return g.b.scope(0, 2, g.b.block({}, g.p),
+                       {g.b.varref(VarKind::Capture, 0, g.p)}, g.p);
+    });
+    refused("a local outside the range", [](Prog& g) {
+      return g.b.scope(1, 2, g.b.block({}, g.p), {g.local(0)}, g.p);
+    });
+    refused("a cell out of range", [](Prog& g) {
+      return g.b.scope(0, 2, g.b.block({}, g.p),
+                       {g.b.varref(VarKind::Cell, 1, g.p)}, g.p);
+    });
+    refused("a duplicate", [](Prog& g) {
+      return g.b.scope(0, 2, g.b.block({}, g.p), {g.local(1), g.local(1)},
+                       g.p);
+    });
+    refused("a non-VarRef entry", [](Prog& g) {
+      return g.b.scope(0, 2, g.b.block({}, g.p), {g.b.literal(1, g.p)}, g.p);
+    });
   }
 
   if (g_failures != 0) {
