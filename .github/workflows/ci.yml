@@ -30,7 +30,7 @@ jobs:
   # suppressed.
   # Every allocation collects. What this catches is the collector taking an
   # object some C++ handle still holds -- the premature-sweep class of bug --
-  # anywhere in the whole suite, not only in gc.cc's arranged scenes.
+  # anywhere in the whole suite, not only in test_gc.cc's arranged scenes.
   gc-stress:
     runs-on: ubuntu-latest
     steps:

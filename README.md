@@ -24,11 +24,11 @@ the parser happened to produce".
 this library exists in part to rehearse a design culebra could grow into.
 
 **One host runtime, one contract.** A front end's I/O and error reporting go
-through five C functions declared in `include/coreir/rt.h` and implemented by
-whatever host links the executor: the standalone CLI's stdio implementation
-(`runtime/coreir_rt_default.cc`), or a different host entirely -- a script
-that embeds this library as a VM-building toolkit, say, reporting errors
-through its own exception mechanism instead of exiting a process. Output
+through six C functions declared in the `coreir/rt.h` section of `vmlib.h`
+and implemented by whatever host links the executor: the stdio implementation
+the header itself carries (see [Using](#using)), or a different host entirely
+-- a script that embeds this library as a VM-building toolkit, say, reporting
+errors through its own exception mechanism instead of exiting a process. Output
 formatting, error wording, error position and exit behavior have exactly one
 implementation per host. Divergence in those is not caught by a test; it is
 unavailable.
@@ -52,6 +52,29 @@ depending on which kind of call got you there. A front end wanting the old
 shape builds a closure and calls it on the spot, which is what the PL/0
 example does.
 
+## Using
+
+The library is one header. Copy `vmlib.h` into your project, or add this
+directory to the include path:
+
+```cpp
+#include "vmlib.h"
+```
+
+Every translation unit that includes it gets the `coreir` and `vm`
+namespaces; a program also needs one definition of the six `coreir_rt_*`
+functions. A host supplies its own, or takes the stdio implementation the
+header carries by defining `VMLIB_DEFAULT_RUNTIME` in exactly one
+translation unit before the include:
+
+```cpp
+#define VMLIB_DEFAULT_RUNTIME
+#include "vmlib.h"
+```
+
+With CMake, `add_subdirectory` this repository and link the `vmlib`
+interface target. No external dependencies beyond a C++20 compiler.
+
 ## Building
 
 ```
@@ -60,19 +83,19 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-No external dependencies beyond a C++20 compiler. `-DCPP_VMLIB_BUILD_EXAMPLES=OFF`
-skips the example front end (and its own dependency on a vendored PEG parser)
-for a build that only wants the `coreir`/`vm` libraries.
+`VMLIB_BUILD_TESTS` (default `ON`) builds the tests, and with them the PL/0
+front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
+(default `OFF`) builds the example front ends on their own.
 
 ## Front ends
 
 | Front end | Parser | Notes |
 |---|---|---|
-| [PL/0](examples/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [examples/pl0/README.md](examples/pl0/README.md). |
+| [PL/0](example/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [example/pl0/README.md](example/pl0/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
--- under `examples/<name>/`, plus that front end's own implementation of the
-`coreir_rt.h` contract and CLI if it needs them. Nothing in `coreir` or `vm`
+-- under `example/<name>/`, plus that front end's own implementation of the
+`coreir_rt_*` contract and CLI if it needs them. Nothing in `coreir` or `vm`
 changes, or even has to know the front end exists.
 
 ## Testing
@@ -85,8 +108,8 @@ matching the language -- see a front end's own README for what its oracle is.
 ## Scope
 
 The IR and the compiler/executor pair are meant to grow only by adding tags,
-never by special-casing an existing one -- see each header's own design notes
-(`include/coreir/ir.h`, `include/coreir/semantics.h`) for what is deliberately
+never by special-casing an existing one -- see the design notes in `vmlib.h`
+(the `coreir/ir.h` and `coreir/semantics.h` sections) for what is deliberately
 fixed. What a given front end exercises is necessarily narrower than that;
 see its own README for what it does and does not rehearse.
 
