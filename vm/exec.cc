@@ -504,7 +504,10 @@ struct Exec {
           for (int32_t i = in.a; i < in.b; ++i) f.regs[i] = Value();
           break;
         case Op::ClearLocals:
-          for (int32_t i = in.a; i < in.b; ++i) f.locals[i] = Value::uninit();
+          // Last declared, first released: a value whose release runs a
+          // destructor sees the ones declared after it already gone, the
+          // order a language with scoped destructors promises.
+          for (int32_t i = in.b - 1; i >= in.a; --i) f.locals[i] = Value::uninit();
           break;
         case Op::NewArray: {
           std::vector<Value> items;
