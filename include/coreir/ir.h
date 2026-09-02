@@ -155,6 +155,27 @@ enum class IntrinsicId : uint8_t {
   // objects -- what "equal" means for them is the language's call -- but
   // every language needs this one primitive underneath its answer.
   Same,         // (a, b) -> bool
+  // A function value's declared parameter count -- Func::num_params, which
+  // is every parameter (there are no hidden ones: captures travel as cells,
+  // and a generator's parameters are the same locals). The one fact a front
+  // end needs to check "this callback takes two arguments" before calling
+  // it; anything but a Func traps.
+  FnArity,      // (f) -> int
+  // The tracing collector, on demand: a full collection right now, on top
+  // of the ones the allocators run on their own (Runtime::collect). Answers
+  // how many objects it freed. What happens to a condemned object is the
+  // collector's existing contract, not a second one: the finalize hook if
+  // the host installed it, then pin, strip, free -- the refcount-zero drop
+  // hook does not run for an object that dies here, because a cycle's
+  // members reach zero only while the collector is tearing all of them
+  // down together.
+  Collect,      // () -> int (objects freed)
+  // The heap's current size, as a fresh {live_objects, heap_bytes} object:
+  // live_objects is Runtime::live_objects(), heap_bytes is
+  // Runtime::heap_bytes(). Both are read before the result object is
+  // allocated, so it does not count itself. The keys are the contract; a
+  // host may add to them but not rename them.
+  HeapStats,    // () -> {live_objects: int, heap_bytes: int}
   // Generators. Both answer with a fresh {value, done} object -- the JS
   // result shape, chosen because it carries "finished" and "what came out"
   // in one allocation a front end can destructure however its own protocol
@@ -353,6 +374,9 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ObjectRemove: return 2;
     case IntrinsicId::ArgCount: return 0;
     case IntrinsicId::Same: return 2;
+    case IntrinsicId::FnArity: return 1;
+    case IntrinsicId::Collect: return 0;
+    case IntrinsicId::HeapStats: return 0;
     case IntrinsicId::GenResume: return 2;
     case IntrinsicId::GenReturn: return 2;
   }

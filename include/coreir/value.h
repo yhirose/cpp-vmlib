@@ -74,8 +74,14 @@ class Runtime {
   // handed to the finalize hook, then pinned, stripped of its references,
   // and freed -- ~Runtime's own two-step, run early. Runs automatically
   // from the allocators once the heap outgrows a doubling threshold, on
-  // every allocation under COREIR_GC_STRESS=1, and on demand here.
-  void collect();
+  // every allocation under COREIR_GC_STRESS=1, and on demand here. Answers
+  // how many objects it freed (0 when re-entered from a hook).
+  int64_t collect();
+
+  // Bytes the live objects hold: each one's own struct plus the storage its
+  // containers have reserved. Computed by a walk over the heap -- O(live)
+  // -- so that the allocation path carries no accounting for it.
+  int64_t heap_bytes() const;
 
   // Called by the Value allocators after each fully-constructed object --
   // never during construction, when a half-built object cannot answer for

@@ -90,8 +90,8 @@ void visit_children(HeapObj* o, Fn fn) {
 
 }  // namespace
 
-void Runtime::collect() {
-  if (in_collect_) return;
+int64_t Runtime::collect() {
+  if (in_collect_) return 0;
   in_collect_ = true;
 
   // Count internal edges, so external handles show as rc > gc_refs.
@@ -142,6 +142,50 @@ void Runtime::collect() {
 
   next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
   in_collect_ = false;
+  return static_cast<int64_t>(dead.size());
+}
+
+// A walk rather than a counter kept on the allocation path: nothing here
+// makes an allocation or a container growth pay for a number only a
+// diagnostic asks for. Per object, its own struct plus what its containers
+// have reserved -- capacity, not size, since that is what is held.
+int64_t Runtime::heap_bytes() const {
+  int64_t bytes = 0;
+  auto vec = [](const auto& v) {
+    return static_cast<int64_t>(v.capacity() * sizeof(v[0]));
+  };
+  for (HeapObj* o = head_; o; o = o->next) {
+    switch (o->kind) {
+      case ValueTag::Str:
+        bytes += sizeof(StrObj) + vec(static_cast<StrObj*>(o)->s);
+        break;
+      case ValueTag::Array:
+        bytes += sizeof(ArrayObj) + vec(static_cast<ArrayObj*>(o)->items);
+        break;
+      case ValueTag::Object: {
+        auto* obj = static_cast<ObjectObj*>(o);
+        bytes += sizeof(ObjectObj) + vec(obj->props);
+        for (const auto& kv : obj->props) bytes += vec(kv.first);
+        break;
+      }
+      case ValueTag::Cell:
+        bytes += sizeof(CellObj);
+        break;
+      case ValueTag::Func:
+        bytes += sizeof(ClosureObj) + vec(static_cast<ClosureObj*>(o)->cells);
+        break;
+      case ValueTag::Generator: {
+        const GenFrame& gf = static_cast<GeneratorObj*>(o)->frame;
+        bytes += sizeof(GeneratorObj) + vec(gf.locals) + vec(gf.regs) +
+                 vec(gf.cells) + vec(gf.captures) + vec(gf.defers) +
+                 vec(gf.defer_marks);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return bytes;
 }
 
 // The refcount just hit zero. An Object carrying the drop contract's key
@@ -260,6 +304,9 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::ObjectRemove: return "objectremove";
     case IntrinsicId::ArgCount: return "argcount";
     case IntrinsicId::Same: return "same";
+    case IntrinsicId::FnArity: return "fnarity";
+    case IntrinsicId::Collect: return "collect";
+    case IntrinsicId::HeapStats: return "heapstats";
     case IntrinsicId::GenResume: return "genresume";
     case IntrinsicId::GenReturn: return "genreturn";
   }

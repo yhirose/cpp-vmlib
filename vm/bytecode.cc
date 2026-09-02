@@ -49,6 +49,9 @@ const char* name_of(Op op) {
     case Op::ObjectRemove: return "objectremove";
     case Op::ArgCount:     return "argcount";
     case Op::Same:         return "same";
+    case Op::FnArity:      return "fnarity";
+    case Op::Collect:      return "collect";
+    case Op::HeapStats:    return "heapstats";
     case Op::TypeOf:      return "typeof";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";

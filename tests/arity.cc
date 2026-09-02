@@ -3,6 +3,8 @@
 // accepted under the lenient one -- extras dropped, missing params nil --
 // with ArgCount reporting what the caller actually passed. The generator
 // path packages its arguments separately, so it is pinned separately.
+// FnArity is the other side of the same count: what a function value
+// declares, read without calling it.
 
 #include <cstdio>
 #include <stdexcept>
@@ -222,6 +224,53 @@ int main() {
     const RunResult r = run_module(m, "generator");
     expect_clean(r, "generator");
     check_eq(joined(), "1|nil|", "generator output");
+  }
+
+  // --- 6. FnArity: num_params, and nothing else. --------------------------
+  // A capture is not a parameter, a generator's params count the same way,
+  // the entry point has none, and a non-function traps -- catchably.
+  // print(fnarity(f)); print(fnarity(main)); print(fnarity(g));
+  // try { fnarity(7) } catch e { print(e.message) }
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.capture_maps.push_back({{VarKind::Cell, 0}});
+    auto arity = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::FnArity, {v}, p);
+    };
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    Func main{"main", 1, 0, NodeId{}, {"e"}, {}};
+    main.num_cells = 1;
+    main.body = b.block(
+        {b.cell_fresh(0, p),
+         print(arity(b.make_closure(1, 1, p))),
+         print(arity(b.make_closure(0, 0, p))),
+         print(arity(b.make_closure(2, 0, p))),
+         b.make_try(0, arity(b.literal(7, p)),
+                    print(b.index(b.varref(VarKind::Local, 0, p),
+                                  b.str_literal("message", p), p)),
+                    p)},
+        p);
+    m.funcs.push_back(main);
+
+    Func f{"f", 2, 1, NodeId{}, {"a", "b"}, {"c"}};
+    f.num_params = 2;
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+
+    Func g{"g", 1, 0, NodeId{}, {"a"}, {}};
+    g.num_params = 1;
+    g.is_generator = true;
+    g.body = b.make_yield(b.literal(0, p), p);
+    m.funcs.push_back(g);
+
+    const RunResult r = run_module(m, "fnarity");
+    expect_clean(r, "fnarity");
+    check_eq(joined(), "2|0|1|cannot take the arity of int|",
+             "fnarity output");
   }
 
   if (g_failures != 0) {

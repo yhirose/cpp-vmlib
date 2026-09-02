@@ -67,6 +67,9 @@ enum class Op : uint8_t {
   ObjectRemove, // a = object reg, b = key reg
   ArgCount,     // a = dst   (the frame's supplied argument count)
   Same,         // a = dst, b = lhs, c = rhs   (reference identity)
+  FnArity,      // a = dst, b = src   (a Func's num_params; else traps)
+  Collect,      // a = dst   (runs Runtime::collect; the count it freed)
+  HeapStats,    // a = dst   (fresh {live_objects, heap_bytes} object)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src

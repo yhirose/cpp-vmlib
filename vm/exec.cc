@@ -494,6 +494,32 @@ struct Exec {
                                           l.raw_data() == r.raw_data());
           break;
         }
+        case Op::FnArity: {
+          const Value& v = f.regs[in.b];
+          if (!v.is_func()) {
+            fail(f, std::string("cannot take the arity of ") +
+                        type_name(v.tag()));
+          }
+          const size_t fi = static_cast<size_t>(v.as_closure()->func);
+          f.regs[in.a] = Value::make_int(p.chunks[fi].num_params);
+          break;
+        }
+        case Op::Collect:
+          // Safe mid-instruction for the same reason a stress collect at
+          // every allocation is: every register and local is a C++ handle,
+          // and a handle is a root.
+          f.regs[in.a] = Value::make_int(Runtime::current()->collect());
+          break;
+        case Op::HeapStats: {
+          const Runtime& rt = *Runtime::current();
+          const int64_t live = rt.live_objects();
+          const int64_t bytes = rt.heap_bytes();
+          Value o = Value::make_object();
+          o.as_object()->set("live_objects", Value::make_int(live));
+          o.as_object()->set("heap_bytes", Value::make_int(bytes));
+          f.regs[in.a] = std::move(o);
+          break;
+        }
         case Op::LoadNil:
           f.regs[in.a] = Value();
           break;

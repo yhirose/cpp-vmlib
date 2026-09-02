@@ -216,14 +216,18 @@ struct FnCompiler {
           emit(Op::In, r, 0, 0, n.pos);
           return r;
         }
-        if (v.id == IntrinsicId::ArgCount) {
+        if (v.id == IntrinsicId::ArgCount || v.id == IntrinsicId::Collect ||
+            v.id == IntrinsicId::HeapStats) {
           const int32_t r = alloc();
-          emit(Op::ArgCount, r, 0, 0, n.pos);
+          const Op op = v.id == IntrinsicId::ArgCount ? Op::ArgCount
+                        : v.id == IntrinsicId::Collect ? Op::Collect
+                                                        : Op::HeapStats;
+          emit(op, r, 0, 0, n.pos);
           return r;
         }
         if (v.id == IntrinsicId::Len || v.id == IntrinsicId::ToStr ||
             v.id == IntrinsicId::TypeOf || v.id == IntrinsicId::ToInt ||
-            v.id == IntrinsicId::ToDouble) {
+            v.id == IntrinsicId::ToDouble || v.id == IntrinsicId::FnArity) {
           const int32_t base = top;
           const int32_t s = compile_expr(m.child(id, 0));
           top = base;
@@ -232,6 +236,7 @@ struct FnCompiler {
                         : v.id == IntrinsicId::ToStr  ? Op::ToStr
                         : v.id == IntrinsicId::TypeOf ? Op::TypeOf
                         : v.id == IntrinsicId::ToInt  ? Op::ToInt
+                        : v.id == IntrinsicId::FnArity ? Op::FnArity
                                                       : Op::ToDouble;
           emit(op, r, s, 0, n.pos);
           return r;
