@@ -3,6 +3,9 @@
 // scope runs its defers (LIFO) and then releases its locals last-declared-
 // first, innermost scope first. Locals a then b, both carrying a drop hook
 // that prints their name, must therefore print "b" then "a" in every case.
+// Then the program's end: under RunOptions::entry_frame_drops == false the
+// entry frame's bindings are released without their destructors, whether
+// the program returns or throws -- only its defers run.
 
 #include <cstdio>
 #include <stdexcept>
@@ -103,7 +106,8 @@ struct RunResult {
   int64_t left = 0;  // live objects after the run, before ~Runtime
 };
 
-RunResult run_module(const coreir::Module& m, const std::string& what) {
+RunResult run_module(const coreir::Module& m, const std::string& what,
+                     vm::RunOptions opts = {}) {
   g_out.clear();
   RunResult r;
   if (auto err = coreir::verify(m)) {
@@ -116,7 +120,7 @@ RunResult run_module(const coreir::Module& m, const std::string& what) {
     coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     try {
-      vm::run(p, rt);
+      vm::run(p, rt, opts);
     } catch (const Failure& e) {
       r.failure = e.what();
     }
@@ -293,6 +297,61 @@ int main() {
       check_eq(joined(), with_return ? "defer|b|a|" : "defer|b|a|after|",
                what + " output");
     }
+  }
+
+  // --- 7. The entry frame at program exit: with entry_frame_drops off, a
+  //        top-level binding's destructor does not run -- on a normal end,
+  //        on an uncaught throw -- while a top-level defer (a Scope over
+  //        no locals) still does. On by default, which drops as ever. ----
+  {
+    vm::RunOptions quiet;
+    quiet.entry_frame_drops = false;
+    // a = mk("a"); print("end")
+    Prog g;
+    g.main(g.b.block({g.bind_drop(), g.mk(1, "a"), g.print_str("end")}, g.p),
+           {"a"});
+    expect_clean(run_module(g.m, "exit: default"), "exit: default");
+    check_eq(joined(), "end|a|", "exit: default output");
+    expect_clean(run_module(g.m, "exit: quiet", quiet), "exit: quiet");
+    check_eq(joined(), "end|", "exit: quiet output");
+  }
+  {
+    vm::RunOptions quiet;
+    quiet.entry_frame_drops = false;
+    // a = mk("a"); throw "boom"
+    Prog g;
+    g.main(g.b.block({g.bind_drop(), g.mk(1, "a"),
+                      g.b.make_throw(g.str("boom"), g.p)},
+                     g.p),
+           {"a"});
+    RunResult r = run_module(g.m, "uncaught: default");
+    check_eq(r.failure, "uncaught: boom", "uncaught: default failure");
+    check(r.left == 0, "uncaught: default leaked");
+    check_eq(joined(), "a|", "uncaught: default output");
+    r = run_module(g.m, "uncaught: quiet", quiet);
+    check_eq(r.failure, "uncaught: boom", "uncaught: quiet failure");
+    check(r.left == 0, "uncaught: quiet leaked");
+    check_eq(joined(), "", "uncaught: quiet output");
+  }
+  {
+    vm::RunOptions quiet;
+    quiet.entry_frame_drops = false;
+    // { defer fn () { print("defer") }; a = mk("a"); print("end") }
+    // -- a Scope over [0, 0): the defer is the scope's, the local is not.
+    Prog g;
+    Func df{"deferred", 0, 0, NodeId{}, {}, {}};
+    df.body = g.print_str("defer");
+    g.m.funcs.push_back(df);
+    g.main(g.b.scope(0, 0,
+                     g.b.block({g.bind_drop(),
+                                g.b.make_defer(g.b.make_closure(2, 0, g.p),
+                                               g.p),
+                                g.mk(1, "a"), g.print_str("end")},
+                               g.p),
+                     g.p),
+           {"a"});
+    expect_clean(run_module(g.m, "exit: defer", quiet), "exit: defer");
+    check_eq(joined(), "end|defer|", "exit: defer output");
   }
 
   if (g_failures != 0) {

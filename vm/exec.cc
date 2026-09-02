@@ -73,6 +73,8 @@ struct Frame {
 struct Exec {
   const Program& p;
   size_t max_frames;
+  Runtime& rt;
+  bool entry_frame_drops;  // RunOptions::entry_frame_drops
 
   // unique_ptr rather than a vector<Frame> or a deque<Frame>: a vector moves
   // its elements as it grows, which would invalidate every `captures` pointer
@@ -403,9 +405,15 @@ struct Exec {
 
   // Releases the top frame: its locals last-declared-first -- the order a
   // scope's own exit uses, so a function's unscoped locals (its parameters,
-  // say) go the same way -- and the rest with the Frame.
+  // say) go the same way -- and the rest with the Frame. Popping the entry
+  // frame is the program's end, and under RunOptions::entry_frame_drops ==
+  // false its values go with the drop hook disarmed; nothing runs after it
+  // that could want the hook back.
   void pop_frame() {
     Frame& f = *frames.back();
+    if (frames.size() == 1 && !entry_frame_drops) {
+      rt.set_drop_fn(nullptr, nullptr);
+    }
     for (size_t i = f.locals.size(); i-- > 0;) f.locals[i] = Value::uninit();
     frames.pop_back();
   }
@@ -866,9 +874,11 @@ struct Exec {
 
 }  // namespace
 
-void run(const Program& p, Runtime& rt, int max_call_depth) {
+void run(const Program& p, Runtime& rt, const RunOptions& opts) {
   Runtime::Scope scope(rt);
-  Exec e{p, max_call_depth < 0 ? 0 : static_cast<size_t>(max_call_depth), {}};
+  const int depth = opts.max_call_depth;
+  Exec e{p, depth < 0 ? 0 : static_cast<size_t>(depth), rt,
+         opts.entry_frame_drops, {}};
   rt.set_drop_fn(&e, &Exec::drop_hook);
   e.frames.push_back(e.make_frame(p.chunks[0]));
   try {
@@ -878,6 +888,12 @@ void run(const Program& p, Runtime& rt, int max_call_depth) {
     throw;
   }
   rt.set_drop_fn(nullptr, nullptr);
+}
+
+void run(const Program& p, Runtime& rt, int max_call_depth) {
+  RunOptions opts;
+  opts.max_call_depth = max_call_depth;
+  run(p, rt, opts);
 }
 
 void run(const Program& p, int max_call_depth) {
