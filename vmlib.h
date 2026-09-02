@@ -61,6 +61,11 @@ enum class ValueTag : uint8_t {
   Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator
 };
 
+// The immediates come first and the heap tags last, so Value::is_heap is a
+// single comparison against Str. Order is load-bearing, not cosmetic.
+static_assert(ValueTag::Str > ValueTag::Double);
+static_assert(ValueTag::Generator > ValueTag::Str);
+
 struct HeapObj;
 struct ObjectObj;
 
@@ -312,9 +317,7 @@ class Value {
 
   // Takes ownership of the +1 a fresh StrObj is born with.
   static Value make_str(std::string s) {
-    Value r;
-    r.tag_ = ValueTag::Str;
-    r.data_ = reinterpret_cast<int64_t>(new StrObj(std::move(s)));
+    Value r = adopt(new StrObj(std::move(s)));
     gc_safepoint();
     return r;
   }
@@ -366,11 +369,11 @@ class Value {
   // hook hands the destructor as its argument.
   static Value make_ref(HeapObj* h);
 
-  bool is_heap() const {
-    return tag_ == ValueTag::Str || tag_ == ValueTag::Array ||
-           tag_ == ValueTag::Object || tag_ == ValueTag::Cell ||
-           tag_ == ValueTag::Func || tag_ == ValueTag::Generator;
-  }
+  // Every refcounted tag sorts after every immediate one, so the predicate
+  // retain and release consult on every Value copy is one comparison rather
+  // than a six-arm chain. The static_assert is what keeps that true: a new
+  // heap tag belongs at the end, a new immediate one before Str.
+  bool is_heap() const { return tag_ >= ValueTag::Str; }
   bool is_uninit() const { return tag_ == ValueTag::Uninit; }
   bool is_bool() const { return tag_ == ValueTag::Bool; }
   bool is_int() const { return tag_ == ValueTag::Int; }
@@ -425,6 +428,17 @@ class Value {
   }
 
  private:
+  // The one place a heap pointer becomes a Value. Every object already
+  // carries its own tag, so no allocator has to restate which tag it built,
+  // and whatever the allocation path grows next -- accounting, an owner
+  // assertion -- has a single site to grow in rather than six.
+  static Value adopt(HeapObj* h) {
+    Value r;
+    r.tag_ = h->kind;
+    r.data_ = reinterpret_cast<int64_t>(h);
+    return r;
+  }
+
   StrObj* str_obj() const { return reinterpret_cast<StrObj*>(data_); }
 
   void retain() {
@@ -462,11 +476,14 @@ struct ObjectObj : HeapObj {
   // Binding the drop key is what puts an object on the owned stack;
   // removing it takes it off. Both go through here, so the two cannot
   // drift apart.
-  void set(const std::string& k, const Value& v) {
+  // By value: a caller with a value to spare (a freshly built result object,
+  // say) hands it over instead of paying a retain/release pair, and one with
+  // a live one pays exactly the copy it paid before.
+  void set(const std::string& k, Value v) {
     if (Value* slot = find(k)) {
-      *slot = v;
+      *slot = std::move(v);
     } else {
-      props.emplace_back(k, v);
+      props.emplace_back(k, std::move(v));
     }
     if (owner && k == kDropKey) owner->owned_register(this);
   }
@@ -529,33 +546,25 @@ struct GeneratorObj : HeapObj {
 inline Value Value::make_array(std::vector<Value> items) {
   auto* a = new ArrayObj();
   a->items = std::move(items);
-  Value r;
-  r.tag_ = ValueTag::Array;
-  r.data_ = reinterpret_cast<int64_t>(a);
+  Value r = adopt(a);
   gc_safepoint();
   return r;
 }
 
 inline Value Value::make_object() {
-  Value r;
-  r.tag_ = ValueTag::Object;
-  r.data_ = reinterpret_cast<int64_t>(new ObjectObj());
+  Value r = adopt(new ObjectObj());
   gc_safepoint();
   return r;
 }
 
 inline Value Value::make_cell() {
-  Value r;
-  r.tag_ = ValueTag::Cell;
-  r.data_ = reinterpret_cast<int64_t>(new CellObj());
+  Value r = adopt(new CellObj());
   gc_safepoint();
   return r;
 }
 
 inline Value Value::make_generator() {
-  Value r;
-  r.tag_ = ValueTag::Generator;
-  r.data_ = reinterpret_cast<int64_t>(new GeneratorObj());
+  Value r = adopt(new GeneratorObj());
   gc_safepoint();
   return r;
 }
@@ -564,9 +573,7 @@ inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
   auto* c = new ClosureObj();
   c->func = func;
   c->cells = std::move(cells);
-  Value r;
-  r.tag_ = ValueTag::Func;
-  r.data_ = reinterpret_cast<int64_t>(c);
+  Value r = adopt(c);
   gc_safepoint();
   return r;
 }
@@ -574,20 +581,17 @@ inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
 // Reference counting alone cannot free a cycle, and closures make cycles
 // reachable in one line of source -- a recursive closure stored in the cell
 // it captured is cell -> closure -> cell. Nothing here pretends otherwise:
-// this releases what it can, and a cycle stays counted in
-// g_live_heap_objects. That count is what the tracing backstop will drive to
-// zero; test/test_closures.cc asserts the leak rather than its absence, so that
-// collecting it later shows up as a change rather than as silence.
+// this releases what it can, and a cycle stays counted in Runtime::live_.
+// Runtime::collect is the tracing backstop that drives that count to zero --
+// test/test_gc.cc asserts it does -- but only when it runs; until then the
+// cycle is live, which is what test/test_closures.cc measures.
 // Out of line (ir.cc): the zero-count path consults the runtime's drop
 // hook for Objects before freeing.
 void heap_release_to_zero(HeapObj* h);
 
 inline Value Value::make_ref(HeapObj* h) {
-  Value r;
-  r.tag_ = h->kind;
-  r.data_ = reinterpret_cast<int64_t>(h);
   ++h->rc;
-  return r;
+  return adopt(h);
 }
 
 inline void Value::release() {
@@ -1001,7 +1005,7 @@ struct Module {
 // Arity
 //
 // -1 means variadic, or -- for If and Intrinsic -- "constrained, but not by a
-// single number." The six fixed-arity tags have their shape stated exactly
+// single number." The fixed-arity tags have their shape stated exactly
 // once, here. If's 2-or-3 and Intrinsic's per-id count are still centralized,
 // just in Verifier::check_node and intrinsic_arity() respectively rather than
 // in this table. Call's shape (capture map length against the callee) has no
@@ -1092,10 +1096,6 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Unary:
     case Tag::Binary:
     case Tag::Intrinsic:
-    // Unlike Call, these produce a value. Call is left alone rather
-    // than widened to match, so PL/0 keeps compiling to exactly the bytecode
-    // it did; unifying the two call forms is Phase 1b's job.
-    //
     // Block and If were always documented as producing one -- "Block is the
     // value of its last child, If the value of the branch taken" at the top
     // of this header -- and were only false here because PL/0 has no way to
@@ -1188,16 +1188,9 @@ public:
   }
 
   // Same tradeoff as intern_pos, once per numeric literal rather than per
-  // node.
-  int32_t intern_int(int64_t v) {
-    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
-      if (m_.consts[i].kind == ConstKind::Int && m_.consts[i].bits == v) {
-        return static_cast<int32_t>(i);
-      }
-    }
-    m_.consts.push_back({ConstKind::Int, v});
-    return static_cast<int32_t>(m_.consts.size() - 1);
-  }
+  // node. Kept as its own name because callers spell integers this way; the
+  // policy itself is intern_scalar's.
+  int32_t intern_int(int64_t v) { return intern_scalar(ConstKind::Int, v); }
 
   // Same interning shape as intern_int, over the string pool.
   int32_t intern_str(const std::string& s) {
@@ -1363,8 +1356,10 @@ std::optional<std::string> verify(const Module& m);
 std::string to_string(const Module& m);
 
 // Public so vm's own instruction-name table can share it instead of
-// restating the same eleven strings.
+// restating the same eleven strings. Same for the var kinds, which vm's
+// bytecode dump names in exactly the same words.
 const char* name_of(BinOp op);
+const char* name_of(VarKind k);
 
 }  // namespace coreir
 
@@ -1783,6 +1778,60 @@ static_assert(op_of(coreir::BinOp::Add) == Op::Add);
 static_assert(op_of(coreir::BinOp::Ge) == Op::Ge);
 static_assert(op_of(coreir::BinOp::Shr) == Op::Shr);
 
+// The intrinsics have no such offset -- their opcodes were not laid out to
+// have one -- so the correspondence is a table. It is still one table: with
+// this and coreir::intrinsic_arity, lowering an intrinsic needs no knowledge
+// of which intrinsic it is, and a new one is a case here rather than a new
+// arm in the compiler. The switch is exhaustive on purpose: -Wswitch reports
+// an id added to coreir without an opcode.
+inline constexpr Op op_of(coreir::IntrinsicId id) {
+  using I = coreir::IntrinsicId;
+  switch (id) {
+    case I::Print:        return Op::Out;
+    case I::PrintRaw:     return Op::OutRaw;
+    case I::ReadInt:      return Op::In;
+    case I::Len:          return Op::Len;
+    case I::ToStr:        return Op::ToStr;
+    case I::TypeOf:       return Op::TypeOf;
+    case I::ToInt:        return Op::ToInt;
+    case I::ToDouble:     return Op::ToDouble;
+    case I::FMod:         return Op::FMod;
+    case I::Pow:          return Op::Pow;
+    case I::ArrayPush:    return Op::ArrayPush;
+    case I::ArrayPop:     return Op::ArrayPop;
+    case I::ObjectHas:    return Op::ObjectHas;
+    case I::ObjectKeys:   return Op::ObjectKeys;
+    case I::ObjectRemove: return Op::ObjectRemove;
+    case I::ArgCount:     return Op::ArgCount;
+    case I::Same:         return Op::Same;
+    case I::FnArity:      return Op::FnArity;
+    case I::Collect:      return Op::Collect;
+    case I::HeapStats:    return Op::HeapStats;
+    case I::GenResume:    return Op::GenResume;
+    case I::GenReturn:    return Op::GenReturn;
+    case I::GenThrow:     return Op::GenThrow;
+    case I::Enqueue:      return Op::Enqueue;
+  }
+  return Op::LoadNil;
+}
+
+// Whether the opcode writes a destination register. The statement-shaped
+// intrinsics take their operands in a and b and produce nothing; in value
+// position the compiler follows them with a LoadNil.
+inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
+  using I = coreir::IntrinsicId;
+  switch (id) {
+    case I::Print:
+    case I::PrintRaw:
+    case I::ArrayPush:
+    case I::ObjectRemove:
+    case I::Enqueue:
+      return false;
+    default:
+      return true;
+  }
+}
+
 struct Insn {
   Op op;
   int32_t a = 0;
@@ -1796,8 +1845,8 @@ struct Insn {
 // given pc innermost first -- the order an unwinding walk wants -- with no
 // parent links to maintain.
 //
-// Nothing consumes these yet beyond their recording; the exception phase's
-// unwinder is the reader this shape is for.
+// Exec::unwind is the reader this shape is for: it walks the vector in
+// order, and every field here answers something it has to ask.
 struct Cleanup {
   int32_t start_pc = 0;      // half-open instruction range of the region,
   int32_t end_pc = 0;        // including its own exit-time ClearLocals
@@ -2370,6 +2419,17 @@ inline const char* name_of(BinOp op) {
   return "?";
 }
 
+// Public for the same reason name_of(BinOp) is: the bytecode dumper names
+// var kinds too, and one vocabulary beats two that can drift.
+inline const char* name_of(VarKind k) {
+  switch (k) {
+    case VarKind::Local:   return "local";
+    case VarKind::Capture: return "capture";
+    case VarKind::Cell:    return "cell";
+  }
+  return "?";
+}
+
 namespace detail {
 
 inline const char* name_of(IntrinsicId id) {
@@ -2398,15 +2458,6 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::GenReturn: return "genreturn";
     case IntrinsicId::GenThrow: return "genthrow";
     case IntrinsicId::Enqueue: return "enqueue";
-  }
-  return "?";
-}
-
-inline const char* name_of(VarKind k) {
-  switch (k) {
-    case VarKind::Local:   return "local";
-    case VarKind::Capture: return "capture";
-    case VarKind::Cell:    return "cell";
   }
   return "?";
 }
@@ -2722,7 +2773,7 @@ inline std::string to_string(const Module& m) {
   for (size_t i = 0; i < m.capture_maps.size(); ++i) {
     d.out << "cmap " << i << ":";
     for (const CaptureSrc& s : m.capture_maps[i]) {
-      d.out << " " << detail::name_of(s.from) << "[" << s.index << "]";
+      d.out << " " << name_of(s.from) << "[" << s.index << "]";
     }
     d.out << "\n";
   }
@@ -2800,13 +2851,10 @@ inline const char* name_of(Op op) {
   return "?";
 }
 
+// A VarKind reaches bytecode as a plain operand word; naming it is coreir's
+// job, the same way the arithmetic opcode names above are.
 inline const char* kind_name(int32_t k) {
-  switch (static_cast<coreir::VarKind>(k)) {
-    case coreir::VarKind::Local:   return "local";
-    case coreir::VarKind::Capture: return "capture";
-    case coreir::VarKind::Cell:    return "cell";
-  }
-  return "?";
+  return coreir::name_of(static_cast<coreir::VarKind>(k));
 }
 
 }  // namespace detail
@@ -2913,7 +2961,6 @@ using namespace coreir;
 
 struct FnCompiler {
   const Module& m;
-  const Func& fn;
   Chunk& ch;
 
   // The loops and scopes currently open at the point being compiled, so a
@@ -3165,96 +3212,46 @@ struct FnCompiler {
         return r;
       }
       case Tag::Intrinsic: {
+        // Every intrinsic lowers the same way, because the three facts that
+        // distinguish them are all stated elsewhere exactly once: how many
+        // operands (coreir::intrinsic_arity), which opcode (op_of), and
+        // whether it writes a result (intrinsic_has_dst). A new intrinsic
+        // needs no case here.
         auto v = view_intrinsic(m, id);
-        if (v.id == IntrinsicId::ReadInt) {
-          const int32_t r = alloc();
-          emit(Op::In, r, 0, 0, n.pos);
-          return r;
-        }
-        if (v.id == IntrinsicId::ArgCount || v.id == IntrinsicId::Collect ||
-            v.id == IntrinsicId::HeapStats) {
-          const int32_t r = alloc();
-          const Op op = v.id == IntrinsicId::ArgCount ? Op::ArgCount
-                        : v.id == IntrinsicId::Collect ? Op::Collect
-                                                        : Op::HeapStats;
-          emit(op, r, 0, 0, n.pos);
-          return r;
-        }
-        if (v.id == IntrinsicId::Len || v.id == IntrinsicId::ToStr ||
-            v.id == IntrinsicId::TypeOf || v.id == IntrinsicId::ToInt ||
-            v.id == IntrinsicId::ToDouble || v.id == IntrinsicId::FnArity) {
-          const int32_t base = top;
-          const int32_t s = compile_expr(m.child(id, 0));
-          top = base;
-          const int32_t r = alloc();
-          const Op op = v.id == IntrinsicId::Len      ? Op::Len
-                        : v.id == IntrinsicId::ToStr  ? Op::ToStr
-                        : v.id == IntrinsicId::TypeOf ? Op::TypeOf
-                        : v.id == IntrinsicId::ToInt  ? Op::ToInt
-                        : v.id == IntrinsicId::FnArity ? Op::FnArity
-                                                      : Op::ToDouble;
-          emit(op, r, s, 0, n.pos);
-          return r;
-        }
-        if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow ||
-            v.id == IntrinsicId::ObjectHas ||
-            v.id == IntrinsicId::GenResume ||
-            v.id == IntrinsicId::GenReturn ||
-            v.id == IntrinsicId::GenThrow || v.id == IntrinsicId::Same) {
-          const int32_t base = top;
-          const int32_t l = compile_expr(m.child(id, 0));
-          const int32_t rr = compile_expr(m.child(id, 1));
-          top = base;
-          const int32_t r = alloc();
-          const Op op = v.id == IntrinsicId::FMod        ? Op::FMod
-                        : v.id == IntrinsicId::Pow       ? Op::Pow
-                        : v.id == IntrinsicId::ObjectHas ? Op::ObjectHas
-                        : v.id == IntrinsicId::GenResume ? Op::GenResume
-                        : v.id == IntrinsicId::GenThrow  ? Op::GenThrow
-                        : v.id == IntrinsicId::Same      ? Op::Same
-                                                         : Op::GenReturn;
-          emit(op, r, l, rr, n.pos);
-          return r;
-        }
-        if (v.id == IntrinsicId::ArrayPop || v.id == IntrinsicId::ObjectKeys) {
-          const int32_t base = top;
-          const int32_t s = compile_expr(m.child(id, 0));
-          top = base;
-          const int32_t r = alloc();
-          emit(v.id == IntrinsicId::ArrayPop ? Op::ArrayPop : Op::ObjectKeys,
-               r, s, 0, n.pos);
-          return r;
-        }
-        if (v.id == IntrinsicId::Enqueue) {
-          // Statement-shaped too: the job is queued, the value is nil.
-          const int32_t base = top;
-          const int32_t s = compile_expr(m.child(id, 0));
-          top = base;
-          emit(Op::Enqueue, s, 0, 0, n.pos);
+        // Print and PrintRaw are the two intrinsics that also have a
+        // statement lowering, and it does more than emit the opcode: the
+        // statement path ends by clearing the registers the operand used,
+        // so what was printed is not held live by a stale register. Going
+        // through it keeps that; the value position then yields nil.
+        if (v.id == IntrinsicId::Print || v.id == IntrinsicId::PrintRaw) {
+          compile_stmt(id);
           const int32_t r = alloc();
           emit(Op::LoadNil, r, 0, 0, n.pos);
           return r;
         }
-        if (v.id == IntrinsicId::ArrayPush ||
-            v.id == IntrinsicId::ObjectRemove) {
-          // Statement-shaped: the value is nil. Compiled in value position
-          // anyway (compile_value hands statements a LoadNil).
-          const int32_t base = top;
-          const int32_t l = compile_expr(m.child(id, 0));
-          const int32_t rr = compile_expr(m.child(id, 1));
-          top = base;
-          emit(v.id == IntrinsicId::ArrayPush ? Op::ArrayPush
-                                              : Op::ObjectRemove,
-               l, rr, 0, n.pos);
+        // Two, because an Insn has three operand fields and the widest
+        // intrinsic spends one of them on its destination. An intrinsic
+        // wanting more would need a different instruction shape, not a
+        // bigger array here.
+        constexpr uint32_t kMaxArgs = 2;
+        const uint32_t argc = std::min(intrinsic_arity(v.id), kMaxArgs);
+        const int32_t base = top;
+        int32_t a[kMaxArgs] = {0, 0};
+        for (uint32_t i = 0; i < argc; ++i) {
+          a[i] = compile_expr(m.child(id, i));
+        }
+        top = base;
+        if (intrinsic_has_dst(v.id)) {
           const int32_t r = alloc();
-          emit(Op::LoadNil, r, 0, 0, n.pos);
+          emit(op_of(v.id), r, a[0], a[1], n.pos);
           return r;
         }
-        // Print is a statement; in value position it yields nil. This used to
-        // emit LoadConst 0, which read the first entry of a const pool that
-        // a program need not have -- latent until Block became a value-
-        // producing tag and put Print in value position for the first time.
-        compile_stmt(id);
+        // Statement-shaped: the operands are a and b, and the value is nil.
+        // Print used to emit LoadConst 0 here, which read the first entry of
+        // a const pool that a program need not have -- latent until Block
+        // became a value-producing tag and put Print in value position for
+        // the first time.
+        emit(op_of(v.id), a[0], a[1], 0, n.pos);
         const int32_t r = alloc();
         emit(Op::LoadNil, r, 0, 0, n.pos);
         return r;
@@ -3431,8 +3428,7 @@ struct FnCompiler {
         auto v = view_intrinsic(m, id);
         if (v.id == IntrinsicId::Print || v.id == IntrinsicId::PrintRaw) {
           const int32_t s = compile_expr(m.child(id, 0));
-          emit(v.id == IntrinsicId::Print ? Op::Out : Op::OutRaw, s, 0, 0,
-               n.pos);
+          emit(op_of(v.id), s, 0, 0, n.pos);
         } else {
           compile_expr(id);  // value discarded
         }
@@ -3534,7 +3530,7 @@ inline Program compile(const coreir::Module& m) {
     ch.is_generator = fn.is_generator;
     ch.lenient_arity = fn.lenient_arity;
 
-    detail::FnCompiler fc{m, fn, ch};
+    detail::FnCompiler fc{m, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
 
     // Cells are boxes, and a fresh frame needs fresh ones -- sharing
@@ -3668,12 +3664,30 @@ struct Exec {
     coreir_rt_poll();
   }
 
-  // The {value, done} object both generator intrinsics answer with.
+  // The {value, done} object both generator intrinsics answer with. The
+  // property count is known, so the object is sized once rather than grown
+  // twice -- this runs on every step of every generator loop.
   Value gen_result(Value v, bool done) {
     Value o = Value::make_object();
-    o.as_object()->set("value", v);
-    o.as_object()->set("done", Value::make_bool(done));
+    ObjectObj* obj = o.as_object();
+    obj->props.reserve(2);
+    obj->set("value", std::move(v));
+    obj->set("done", Value::make_bool(done));
     return o;
+  }
+
+  // What GenResume, GenReturn and GenThrow all establish before they
+  // diverge: the operand is a generator, and it is not the activation
+  // already running. The verb naming the attempt is the only difference.
+  GeneratorObj* gen_operand(Frame& f, const Value& gv, const char* verb) {
+    if (!gv.is_generator()) {
+      fail(f, std::string("cannot ") + verb + " " + type_name(gv.tag()));
+    }
+    GeneratorObj* go = gv.as_generator();
+    if (go->state == GeneratorObj::State::Running) {
+      fail(f, "generator already running");
+    }
+    return go;
   }
 
   // Move a frame's storage into a generator's keeping (suspend)...
@@ -3766,8 +3780,15 @@ struct Exec {
     frames.push_back(std::move(f));
   }
 
+  // Where an instruction came from. Two side tables deep -- a chunk's
+  // code_pos indexes the program's shared position pool -- so the walk is
+  // written once here rather than at each of the arms that report a trap.
+  SrcPos pos_at(const Chunk& ch, size_t pc) const {
+    return p.positions[ch.code_pos[pc]];
+  }
+
   [[noreturn]] void fail(const Frame& f, const std::string& msg) {
-    raise_trap(msg, p.positions[f.chunk->code_pos[f.pc]]);
+    raise_trap(msg, pos_at(*f.chunk, f.pc));
   }
 
   // Scalars cost nothing to rebuild; a string literal allocates on every
@@ -4035,9 +4056,19 @@ struct Exec {
     Frame& f = *frames.back();
     const bool bare = f.entry && !entry_frame_drops;
     if (bare) rt.set_drop_fn(nullptr, nullptr);
-    for (size_t i = f.locals.size(); i-- > 0;) f.locals[i] = Value::uninit();
+    release_range(f, 0, static_cast<int32_t>(f.locals.size()));
     frames.pop_back();
     if (bare) rt.set_drop_fn(this, &Exec::drop_hook);
+  }
+
+  // Hands a popped frame's result to whoever asked for it. Ret and Yield
+  // both end this way, and both can pop the last frame there is -- a call
+  // that wanted no result (ret_reg -1) and an empty stack are the two cases
+  // that mean "nobody is listening".
+  void deliver(int32_t ret_reg, Value result) {
+    if (ret_reg >= 0 && !frames.empty()) {
+      frames.back()->regs[ret_reg] = std::move(result);
+    }
   }
 
   void dispatch(size_t floor) {
@@ -4119,7 +4150,7 @@ struct Exec {
           break;
         }
         case Op::In: {
-          const SrcPos sp = p.positions[ch.code_pos[f.pc]];
+          const SrcPos sp = pos_at(ch, f.pc);
           f.regs[in.a] = Value::make_int(coreir_rt_in(sp.line, sp.col));
           break;
         }
@@ -4343,7 +4374,7 @@ struct Exec {
           break;
         }
         case Op::CallValue: {
-          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const SrcPos pos = pos_at(ch, f.pc);
           // Copy the callee out first: the result register may be the callee's
           // own, and the frame this pushes outlives the read either way.
           // Advance before pushing -- this is where the caller resumes, and a
@@ -4354,7 +4385,7 @@ struct Exec {
           continue;
         }
         case Op::Throw: {
-          const SrcPos sp = p.positions[ch.code_pos[f.pc]];
+          const SrcPos sp = pos_at(ch, f.pc);
           throw Raise{f.regs[in.a], sp, {}};
         }
         case Op::Yield: {
@@ -4373,25 +4404,15 @@ struct Exec {
           go->state = GeneratorObj::State::Suspended;
           const int32_t ret_reg = f.ret_reg;
           frames.pop_back();
-          Value result = gen_result(std::move(out), false);
-          if (frames.size() <= floor) {
-            if (ret_reg >= 0 && !frames.empty()) {
-              frames.back()->regs[ret_reg] = std::move(result);
-            }
-            return;
-          }
-          if (ret_reg >= 0) frames.back()->regs[ret_reg] = std::move(result);
+          deliver(ret_reg, gen_result(std::move(out), false));
+          if (frames.size() <= floor) return;
           continue;
         }
         case Op::GenResume: {
-          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const SrcPos pos = pos_at(ch, f.pc);
           const Value gv = f.regs[in.b];
-          if (!gv.is_generator()) {
-            fail(f, std::string("cannot resume ") + type_name(gv.tag()));
-          }
-          GeneratorObj* go = gv.as_generator();
+          GeneratorObj* go = gen_operand(f, gv, "resume");
           using St = GeneratorObj::State;
-          if (go->state == St::Running) fail(f, "generator already running");
           if (go->state == St::Done) {
             f.regs[in.a] = gen_result(Value(), true);
             break;
@@ -4410,14 +4431,10 @@ struct Exec {
           continue;
         }
         case Op::GenReturn: {
-          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const SrcPos pos = pos_at(ch, f.pc);
           const Value gv = f.regs[in.b];
-          if (!gv.is_generator()) {
-            fail(f, std::string("cannot close ") + type_name(gv.tag()));
-          }
-          GeneratorObj* go = gv.as_generator();
+          GeneratorObj* go = gen_operand(f, gv, "close");
           using St = GeneratorObj::State;
-          if (go->state == St::Running) fail(f, "generator already running");
           Value out = f.regs[in.c];
           if (go->state == St::Suspended) {
             // Close: restore the activation, run its pending defers --
@@ -4452,14 +4469,10 @@ struct Exec {
           break;
         }
         case Op::GenThrow: {
-          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const SrcPos pos = pos_at(ch, f.pc);
           const Value gv = f.regs[in.b];
-          if (!gv.is_generator()) {
-            fail(f, std::string("cannot throw into ") + type_name(gv.tag()));
-          }
-          GeneratorObj* go = gv.as_generator();
+          GeneratorObj* go = gen_operand(f, gv, "throw into");
           using St = GeneratorObj::State;
-          if (go->state == St::Running) fail(f, "generator already running");
           Value v = f.regs[in.c];
           if (go->state != St::Suspended) {
             // No frame for it to land in: the generator is done (a Start
@@ -4477,7 +4490,7 @@ struct Exec {
           const size_t at = static_cast<size_t>(go->frame.pc) - 1;
           auto nf = unpark_frame(gv, in.a);
           nf->pc = at;
-          const SrcPos yp = p.positions[nf->chunk->code_pos[at]];
+          const SrcPos yp = pos_at(*nf->chunk, at);
           ++f.pc;
           frames.push_back(std::move(nf));
           throw Raise{std::move(v), yp, {}};
@@ -4507,7 +4520,7 @@ struct Exec {
         case Op::DeferRunTo: {
           const size_t mark = f.defer_marks.back().first;
           f.defer_marks.pop_back();
-          const SrcPos sp = p.positions[ch.code_pos[f.pc]];
+          const SrcPos sp = pos_at(ch, f.pc);
           // Advance first: the nested run pushes frames, and this is where
           // execution resumes when the last defer returns.
           ++f.pc;
@@ -4528,13 +4541,8 @@ struct Exec {
           }
           const int32_t ret_reg = f.ret_reg;
           pop_frame();
-          if (frames.size() <= floor) {
-            if (ret_reg >= 0 && !frames.empty()) {
-              frames.back()->regs[ret_reg] = std::move(result);
-            }
-            return;
-          }
-          if (ret_reg >= 0) frames.back()->regs[ret_reg] = std::move(result);
+          deliver(ret_reg, std::move(result));
+          if (frames.size() <= floor) return;
           continue;
         }
       }
