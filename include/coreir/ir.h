@@ -163,12 +163,12 @@ enum class IntrinsicId : uint8_t {
   FnArity,      // (f) -> int
   // The tracing collector, on demand: a full collection right now, on top
   // of the ones the allocators run on their own (Runtime::collect). Answers
-  // how many objects it freed. What happens to a condemned object is the
-  // collector's existing contract, not a second one: the finalize hook if
-  // the host installed it, then pin, strip, free -- the refcount-zero drop
-  // hook does not run for an object that dies here, because a cycle's
-  // members reach zero only while the collector is tearing all of them
-  // down together.
+  // how many objects it freed. A condemned Object carrying the drop key
+  // gets its destructor -- the same closure call a refcount death makes,
+  // over a still-whole cycle, newest object first -- and one that stores
+  // itself somewhere reachable is spared (Runtime::collect has the rule).
+  // Called from inside a destructor it answers 0: one collection at a
+  // time.
   Collect,      // () -> int (objects freed)
   // The heap's current size, as a fresh {live_objects, heap_bytes} object:
   // live_objects is Runtime::live_objects(), heap_bytes is

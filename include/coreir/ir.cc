@@ -90,11 +90,12 @@ void visit_children(HeapObj* o, Fn fn) {
 
 }  // namespace
 
-int64_t Runtime::collect() {
-  if (in_collect_) return 0;
-  in_collect_ = true;
-
-  // Count internal edges, so external handles show as rc > gc_refs.
+// Marks everything reachable from an externally-held object. An object is
+// held externally when its refcount exceeds the references other heap
+// objects hold on it -- less the collection's own pin, on an object it has
+// condemned. A worklist, not recursion: a deep structure must not become a
+// C++ stack problem.
+void Runtime::mark() {
   for (HeapObj* o = head_; o; o = o->next) {
     o->gc_refs = 0;
     o->gc_marked = false;
@@ -102,12 +103,9 @@ int64_t Runtime::collect() {
   for (HeapObj* o = head_; o; o = o->next) {
     visit_children(o, [](HeapObj* c) { ++c->gc_refs; });
   }
-
-  // Mark everything reachable from an externally-held object. A worklist,
-  // not recursion: a deep structure must not become a C++ stack problem.
   std::vector<HeapObj*> work;
   for (HeapObj* o = head_; o; o = o->next) {
-    if (o->rc > o->gc_refs) {
+    if (o->rc - (o->gc_condemned ? 1 : 0) > o->gc_refs) {
       o->gc_marked = true;
       work.push_back(o);
     }
@@ -122,23 +120,68 @@ int64_t Runtime::collect() {
       }
     });
   }
+}
 
-  // Condemn the rest: finalize first (while every member is still whole),
-  // then ~Runtime's pin / strip / free, on just this set.
+int64_t Runtime::collect() {
+  if (in_collect_) return 0;
+  in_collect_ = true;
+
+  // Condemn what nothing reaches, and pin it: a destructor about to run
+  // may drop the last reference between two condemned objects, and that
+  // must not free one of them out from under the sweep.
+  mark();
   std::vector<HeapObj*> dead;
   for (HeapObj* o = head_; o; o = o->next) {
-    if (!o->gc_marked) dead.push_back(o);
+    if (!o->gc_marked) {
+      o->gc_condemned = true;
+      ++o->rc;
+      dead.push_back(o);
+    }
   }
+
+  // Destructors, while every condemned object is still whole: newest first
+  // (the heap list's order), the way a scope releases its locals in reverse.
+  // One may store a condemned object somewhere reachable -- so if any ran,
+  // reachability is recomputed and what it resurrected is unpinned and
+  // spared. Its destructor runs again when it next dies, like the refcount
+  // path's. Allocation here is ordinary: a nested collect is refused by
+  // in_collect_, and an object dying by refcount gets its own destructor.
+  bool ran = false;
+  if (drop_) {
+    for (HeapObj* o : dead) {
+      if (o->kind != ValueTag::Object) continue;
+      if (!static_cast<ObjectObj*>(o)->find("\x01" "drop")) continue;
+      drop_(drop_ctx_, o);
+      ran = true;
+    }
+  }
+  if (ran) {
+    mark();
+    std::vector<HeapObj*> still;
+    for (HeapObj* o : dead) {
+      if (o->gc_marked) {
+        o->gc_condemned = false;
+        --o->rc;  // the pin; a reachable object holds at least one more
+      } else {
+        still.push_back(o);
+      }
+    }
+    dead.swap(still);
+  }
+
+  // The host's last look (while every member is still whole), then
+  // ~Runtime's strip / free on just this set.
   if (finalize_) {
     for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
   }
-  for (HeapObj* o : dead) ++o->rc;
+  sweeping_ = true;
   for (HeapObj* o : dead) clear_heap_object_refs(o);
   for (HeapObj* o : dead) {
     unlink(o);
     o->owner = nullptr;
     destroy_heap_object(o);
   }
+  sweeping_ = false;
 
   next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
   in_collect_ = false;
@@ -194,7 +237,7 @@ int64_t Runtime::heap_bytes() const {
 // skipped. Everything else -- and every non-Object -- frees directly.
 void heap_release_to_zero(HeapObj* h) {
   if (h->kind == ValueTag::Object && h->owner && h->owner->drop_fn() &&
-      !h->owner->in_collect()) {
+      !h->owner->sweeping()) {
     auto* o = static_cast<ObjectObj*>(h);
     if (o->find("\x01" "drop")) {
       ++h->rc;  // pin across the destructor

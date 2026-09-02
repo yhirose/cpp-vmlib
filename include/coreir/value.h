@@ -71,11 +71,21 @@ class Runtime {
   // on the C++ side (frame registers and locals, a defer stack, an executor
   // temporary halfway through an instruction), which no registration scheme
   // could enumerate. Everything unreachable from those roots is condemned,
-  // handed to the finalize hook, then pinned, stripped of its references,
-  // and freed -- ~Runtime's own two-step, run early. Runs automatically
-  // from the allocators once the heap outgrows a doubling threshold, on
-  // every allocation under COREIR_GC_STRESS=1, and on demand here. Answers
-  // how many objects it freed (0 when re-entered from a hook).
+  // pinned, given its destructor (the drop hook, for each condemned Object
+  // carrying the drop key -- newest object first, the heap list's order),
+  // handed to the finalize hook, then stripped of its references and freed
+  // -- ~Runtime's own two-step, run early. Runs automatically from the
+  // allocators once the heap outgrows a doubling threshold, on every
+  // allocation under COREIR_GC_STRESS=1, and on demand here. Answers how
+  // many objects it freed (0 when re-entered: a destructor asking for a
+  // collection while one is running gets nothing).
+  //
+  // A destructor runs over whole objects -- the cycle it belongs to is
+  // still intact -- and may store its object, or any other condemned one,
+  // somewhere reachable. That resurrects it: reachability is recomputed
+  // after the destructors, only what is still unreachable is freed, and a
+  // resurrected object keeps its drop key, so its destructor runs again
+  // the next time it dies -- the refcount path's rule as well.
   int64_t collect();
 
   // Bytes the live objects hold: each one's own struct plus the storage its
@@ -90,8 +100,9 @@ class Runtime {
     if ((stress_ || live_ >= next_gc_) && !in_collect_) collect();
   }
 
-  // One call per condemned object, before any of them is freed. What it
-  // does with an object must not allocate on this runtime.
+  // One call per object about to be freed, after the destructors have run
+  // and before any of them is freed. What it does with an object must not
+  // allocate on this runtime.
   void set_finalize_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
     finalize_ctx_ = ctx;
     finalize_ = fn;
@@ -99,11 +110,13 @@ class Runtime {
 
   // Deterministic destructors: an Object whose "\x01drop" key holds a
   // closure gets it called -- with the object as its one argument -- at the
-  // moment its refcount reaches zero, before the object is freed. The hook
+  // moment its refcount reaches zero, before the object is freed -- or,
+  // for an object the collector condemns, during that collection. The hook
   // is how: the executor installs one for the lifetime of a run (it is what
-  // can call a closure), and release() hands it each zero-count Object that
-  // carries the key. The hook runs over a pinned object; if it stores the
-  // object somewhere (a resurrection), the free is skipped.
+  // can call a closure), release() hands it each zero-count Object that
+  // carries the key, and collect() hands it each condemned one. The hook
+  // runs over a pinned object; if it stores the object somewhere (a
+  // resurrection), the free is skipped.
   void set_drop_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
     drop_ctx_ = ctx;
     drop_ = fn;
@@ -111,6 +124,10 @@ class Runtime {
   void* drop_ctx() const { return drop_ctx_; }
   void (*drop_fn() const)(void*, HeapObj*) { return drop_; }
   bool in_collect() const { return in_collect_; }
+  // The sweep proper: condemned objects being stripped and freed. The one
+  // window in which a refcount reaching zero must not run a destructor --
+  // every object that could is pinned, so it cannot happen anyway.
+  bool sweeping() const { return sweeping_; }
 
   static Runtime* current() { return current_; }
 
@@ -132,12 +149,14 @@ class Runtime {
   friend struct HeapObj;
   void link(HeapObj* o);
   void unlink(HeapObj* o);
+  void mark();
 
   HeapObj* head_ = nullptr;
   int64_t live_ = 0;
   int64_t next_gc_ = 4096;
   bool stress_ = false;
   bool in_collect_ = false;
+  bool sweeping_ = false;
   void* finalize_ctx_ = nullptr;
   void (*finalize_)(void*, HeapObj*) = nullptr;
   void* drop_ctx_ = nullptr;
@@ -148,9 +167,11 @@ class Runtime {
 struct HeapObj {
   int64_t rc;  // offset zero, as in culebra's refcounted structs
   // Collector scratch: how many references other heap objects hold on this
-  // one (recomputed per collect), and the reachability mark.
+  // one (recomputed per collect), the reachability mark, and whether the
+  // running collection has condemned -- and so pinned -- it.
   int64_t gc_refs = 0;
   bool gc_marked = false;
+  bool gc_condemned = false;
   // Which concrete object this is. A tag rather than a vtable: ir.h's own
   // rule is that nothing here has virtual functions or RTTI, because that is
   // what survives --gc-sections as residue in a binary that never uses it.

@@ -271,13 +271,16 @@ int main() {
     check_eq(joined(), "true|0|", "heap_bytes output");
   }
 
-  // --- 9. What Collect does to a drop hook is the collector's existing
-  //        contract, not a new one: the refcount-zero path runs the
-  //        destructor, a collection does not (its condemned set goes to
-  //        the finalize hook, which the executor does not install). Pinned
-  //        so that changing it shows up as a change rather than silence. -
-  // o = {}; o["\x01drop"] = fn (self) { print("dropped") }; o = nil
-  // o = {}; o["\x01drop"] = <same>; o["self"] = o; o = nil
+  // --- 9. A destructor runs however its object dies: at refcount zero on
+  //        the spot, or in the collection that condemns its cycle -- each
+  //        member exactly once, newest object first, over a still-whole
+  //        cycle (b's destructor still reads b.other.name). --------------
+  // d = fn (self) { print(self.name); print(self.other.name) }
+  // o = {}; o.name = "solo"; o.other = {name: "-"}; o["\x01drop"] = d
+  // o = nil                                   -> solo, - (refcount path)
+  // a = {}; a.name = "a"; a["\x01drop"] = d
+  // b = {}; b.name = "b"; b["\x01drop"] = d
+  // a.other = b; b.other = a; a = nil; b = nil
   // print(collect())
   {
     const SrcPos p{1, 1};
@@ -288,32 +291,107 @@ int main() {
       return b.intrinsic(IntrinsicId::Print, {v}, p);
     };
     auto local = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
-    auto set_drop = [&]() {
-      return b.set_index(local(0), b.str_literal("\x01" "drop", p),
-                         b.make_closure(1, 0, p), p);
+    auto field = [&](NodeId o, const char* k) {
+      return b.index(o, b.str_literal(k, p), p);
     };
+    auto set = [&](int32_t slot, const char* k, NodeId v) {
+      return b.set_index(local(slot), b.str_literal(k, p), v, p);
+    };
+    // Slots: 0 = d, 1 = o, 2 = a, 3 = b.
     m.funcs.push_back(
-        {"main", 1, 0,
-         b.block({b.assign(VarKind::Local, 0, b.object_lit({}, p), p),
-                  set_drop(),
-                  b.assign(VarKind::Local, 0, b.nil_literal(p), p),
-                  print(b.str_literal("--", p)),
-                  b.assign(VarKind::Local, 0, b.object_lit({}, p), p),
-                  set_drop(),
-                  b.set_index(local(0), b.str_literal("self", p), local(0),
-                              p),
-                  b.assign(VarKind::Local, 0, b.nil_literal(p), p),
+        {"main", 4, 0,
+         b.block({b.assign(VarKind::Local, 0, b.make_closure(1, 0, p), p),
+                  b.assign(VarKind::Local, 1, b.object_lit({}, p), p),
+                  set(1, "name", b.str_literal("solo", p)),
+                  set(1, "other",
+                      b.object_lit({{b.str_literal("name", p),
+                                     b.str_literal("-", p)}},
+                                   p)),
+                  set(1, "\x01" "drop", local(0)),
+                  b.assign(VarKind::Local, 1, b.nil_literal(p), p),
+                  b.assign(VarKind::Local, 2, b.object_lit({}, p), p),
+                  set(2, "name", b.str_literal("a", p)),
+                  set(2, "\x01" "drop", local(0)),
+                  b.assign(VarKind::Local, 3, b.object_lit({}, p), p),
+                  set(3, "name", b.str_literal("b", p)),
+                  set(3, "\x01" "drop", local(0)),
+                  set(2, "other", local(3)),
+                  set(3, "other", local(2)),
+                  b.assign(VarKind::Local, 2, b.nil_literal(p), p),
+                  b.assign(VarKind::Local, 3, b.nil_literal(p), p),
                   print(b.intrinsic(IntrinsicId::Collect, {}, p))},
                  p),
-         {"o"},
+         {"d", "o", "a", "b"},
          {}});
     Func d{"drop", 1, 0, NodeId{}, {"self"}, {}};
     d.num_params = 1;
-    d.body = print(b.str_literal("dropped", p));
+    d.body = b.block({print(field(local(0), "name")),
+                      print(field(field(local(0), "other"), "name"))},
+                     p);
     m.funcs.push_back(d);
     check_eq(run_module(m, "collect+drop: heap not empty"), "",
              "collect+drop: unexpected failure");
-    check_eq(joined(), "dropped|--|2|", "collect+drop output");
+    // Freed: a, b, and their two name strings. d is still in its slot.
+    check_eq(joined(), "solo|-|b|a|a|b|4|", "collect+drop output");
+  }
+
+  // --- 10. Resurrection from a collection: a destructor that stores its
+  //         object somewhere reachable spares it (and, through it, the
+  //         rest of its cycle); it dies for real, destructor and all, the
+  //         next time nothing reaches it. -------------------------------
+  // keep = []; n = 0
+  // d = fn (self) { n = n + 1; if n == 1 { arraypush(keep, self) } }
+  // o = {}; o["\x01drop"] = d; o.self = o; o = nil
+  // print(collect()); print(len(keep)); print(n)
+  // keep = []; print(collect()); print(n)
+  {
+    const SrcPos p{1, 1};
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.capture_maps.push_back({{VarKind::Cell, 0}, {VarKind::Cell, 1}});
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    auto local = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    auto cell = [&](int32_t i) { return b.varref(VarKind::Cell, i, p); };
+    auto collect = [&]() {
+      return print(b.intrinsic(IntrinsicId::Collect, {}, p));
+    };
+    Func main{"main", 1, 0, NodeId{}, {"o"}, {}};
+    main.num_cells = 2;
+    main.body = b.block(
+        {b.cell_fresh(0, p), b.cell_fresh(1, p),
+         b.assign(VarKind::Cell, 0, b.array_lit({}, p), p),
+         b.assign(VarKind::Cell, 1, b.literal(0, p), p),
+         b.assign(VarKind::Local, 0, b.object_lit({}, p), p),
+         b.set_index(local(0), b.str_literal("\x01" "drop", p),
+                     b.make_closure(1, 1, p), p),
+         b.set_index(local(0), b.str_literal("self", p), local(0), p),
+         b.assign(VarKind::Local, 0, b.nil_literal(p), p),
+         collect(), print(b.intrinsic(IntrinsicId::Len, {cell(0)}, p)),
+         print(cell(1)),
+         b.assign(VarKind::Cell, 0, b.array_lit({}, p), p),
+         collect(), print(cell(1))},
+        p);
+    m.funcs.push_back(main);
+    Func d{"drop", 1, 2, NodeId{}, {"self"}, {"keep", "n"}};
+    d.num_params = 1;
+    auto cap = [&](int32_t i) { return b.varref(VarKind::Capture, i, p); };
+    d.body = b.block(
+        {b.assign(VarKind::Capture, 1,
+                  b.binary(BinOp::Add, cap(1), b.literal(1, p), p), p),
+         b.make_if(b.binary(BinOp::Eq, cap(1), b.literal(1, p), p),
+                   b.intrinsic(IntrinsicId::ArrayPush, {cap(0), local(0)},
+                               p),
+                   NodeId{}, p)},
+        p);
+    m.funcs.push_back(d);
+    check_eq(run_module(m, "resurrect: heap not empty"), "",
+             "resurrect: unexpected failure");
+    // First collect: o and its closure condemned, o resurrected into keep
+    // (its closure with it), nothing freed. Second: both go.
+    check_eq(joined(), "0|1|1|2|2|", "resurrect output");
   }
 
   if (g_failures != 0) {
