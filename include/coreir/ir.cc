@@ -502,6 +502,8 @@ const char* name_of(IntrinsicId id) {
     case IntrinsicId::HeapStats: return "heapstats";
     case IntrinsicId::GenResume: return "genresume";
     case IntrinsicId::GenReturn: return "genreturn";
+    case IntrinsicId::GenThrow: return "genthrow";
+    case IntrinsicId::Enqueue: return "enqueue";
   }
   return "?";
 }

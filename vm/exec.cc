@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -68,6 +69,10 @@ struct Frame {
   std::vector<std::pair<uint64_t, int32_t>> owned_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
   int32_t argc = 0;      // arguments the call supplied (Op::ArgCount)
+  // The program's own frame -- vm::run's first -- as opposed to a job's,
+  // which sits at the same stack depth after it: RunOptions::
+  // entry_frame_drops is about this one only.
+  bool entry = false;
   // Non-nil exactly when this frame is a generator activation: the
   // GeneratorObj it suspends back into. Owning, so the generator cannot be
   // freed out from under its own running frame.
@@ -86,6 +91,11 @@ struct Exec {
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
   std::vector<std::unique_ptr<Frame>> frames;
+
+  // The job queue (IntrinsicId::Enqueue): closures waiting to run after the
+  // entry frame, FIFO. C++-side handles, so the collector sees them as
+  // roots the way it sees a frame's registers.
+  std::deque<Value> jobs;
 
   std::unique_ptr<Frame> make_frame(const Chunk& ch) {
     auto f = std::make_unique<Frame>();
@@ -276,21 +286,47 @@ struct Exec {
                                      : f.captures[src.index];
   }
 
+  // The entry frame to its end, then the job queue: each job a fresh
+  // 0-argument call driven to completion before the next is taken, so the
+  // jobs it enqueues run after every one already waiting. A job whose call
+  // itself traps (a parameter it cannot be given) fails the run the way an
+  // uncaught throw does.
   void run() {
+    drive();
+    while (!jobs.empty()) {
+      Value job = std::move(jobs.front());
+      jobs.pop_front();
+      try {
+        push_closure(job, nullptr, 0, -1, SrcPos{0, 0});
+      } catch (Raise& r) {
+        report_uncaught(r);
+        return;
+      }
+      drive();
+    }
+  }
+
+  // Drive the frame stack to empty; an uncaught throw is the run's failure.
+  void drive() {
     while (!frames.empty()) {
       try {
         dispatch(0);
         return;
       } catch (Raise& r) {
         if (!unwind(r, 0)) {
-          const std::string msg =
-              r.fatal_msg.empty() ? "uncaught: " + to_display(r.value)
-                                  : r.fatal_msg;
-          coreir_rt::fail(msg, r.pos.line, r.pos.col);
+          report_uncaught(r);
+          return;
         }
         // A handler took the value; dispatch resumes at its pc.
       }
     }
+  }
+
+  void report_uncaught(const Raise& r) {
+    const std::string msg = r.fatal_msg.empty()
+                                ? "uncaught: " + to_display(r.value)
+                                : r.fatal_msg;
+    coreir_rt::fail(msg, r.pos.line, r.pos.col);
   }
 
   // Run one frame's pending defers back to `mark`, LIFO, each as a normal
@@ -346,10 +382,7 @@ struct Exec {
     if (f.owned_marks.empty()) return;  // every ClearLocals has its OwnedMark
     const uint64_t mark = f.owned_marks.back().first;
     f.owned_marks.pop_back();
-    if (!entry_frame_drops && &f == frames.front().get() &&
-        f.owned_marks.empty()) {
-      return;
-    }
+    if (!entry_frame_drops && f.entry && f.owned_marks.empty()) return;
     rt.owned_scope_exit(mark);
   }
 
@@ -453,15 +486,15 @@ struct Exec {
   // scope's own exit uses, so a function's unscoped locals (its parameters,
   // say) go the same way -- and the rest with the Frame. Popping the entry
   // frame is the program's end, and under RunOptions::entry_frame_drops ==
-  // false its values go with the drop hook disarmed; nothing runs after it
-  // that could want the hook back.
+  // false its values go with the drop hook disarmed; the jobs that may run
+  // after it get the hook back.
   void pop_frame() {
     Frame& f = *frames.back();
-    if (frames.size() == 1 && !entry_frame_drops) {
-      rt.set_drop_fn(nullptr, nullptr);
-    }
+    const bool bare = f.entry && !entry_frame_drops;
+    if (bare) rt.set_drop_fn(nullptr, nullptr);
     for (size_t i = f.locals.size(); i-- > 0;) f.locals[i] = Value::uninit();
     frames.pop_back();
+    if (bare) rt.set_drop_fn(this, &Exec::drop_hook);
   }
 
   void dispatch(size_t floor) {
@@ -875,6 +908,46 @@ struct Exec {
           f.regs[in.a] = gen_result(std::move(out), true);
           break;
         }
+        case Op::GenThrow: {
+          const SrcPos pos = p.positions[ch.code_pos[f.pc]];
+          const Value gv = f.regs[in.b];
+          if (!gv.is_generator()) {
+            fail(f, std::string("cannot throw into ") + type_name(gv.tag()));
+          }
+          GeneratorObj* go = gv.as_generator();
+          using St = GeneratorObj::State;
+          if (go->state == St::Running) fail(f, "generator already running");
+          Value v = f.regs[in.c];
+          if (go->state != St::Suspended) {
+            // No frame for it to land in: the generator is done (a Start
+            // activation drops what it packaged) and the throw is this
+            // instruction's own, at its own pc like a Throw.
+            go->state = St::Done;
+            go->frame = GenFrame{};
+            throw Raise{std::move(v), pos, {}};
+          }
+          // Re-enter at the Yield itself rather than after it, so the
+          // regions enclosing the yield -- its handlers, its defers -- are
+          // the ones the throw crosses; the resumer's pc advances as for a
+          // call, which is where the throw lands if the body lets it out.
+          check_can_push(pos);
+          const size_t at = static_cast<size_t>(go->frame.pc) - 1;
+          auto nf = unpark_frame(gv, in.a);
+          nf->pc = at;
+          const SrcPos yp = p.positions[nf->chunk->code_pos[at]];
+          ++f.pc;
+          frames.push_back(std::move(nf));
+          throw Raise{std::move(v), yp, {}};
+        }
+        case Op::Enqueue: {
+          const Value& v = f.regs[in.a];
+          if (!v.is_func()) {
+            fail(f, std::string("enqueue needs a function, not ") +
+                        type_name(v.tag()));
+          }
+          jobs.push_back(v);
+          break;
+        }
         case Op::DeferPush: {
           const Value& v = f.regs[in.a];
           if (!v.is_func()) {
@@ -936,6 +1009,7 @@ void run(const Program& p, Runtime& rt, const RunOptions& opts) {
          opts.entry_frame_drops, {}};
   rt.set_drop_fn(&e, &Exec::drop_hook);
   e.frames.push_back(e.make_frame(p.chunks[0]));
+  e.frames.back()->entry = true;
   try {
     e.run();
   } catch (...) {

@@ -202,6 +202,24 @@ enum class IntrinsicId : uint8_t {
   // {value: <arg>, done: true}. A dropped generator runs nothing.
   GenResume,    // (generator, sent) -> {value, done}
   GenReturn,    // (generator, value) -> {value, done: true}
+  // Throw delivers a value into a suspended generator at its Yield, as if
+  // the yield expression had thrown it: the body's own handlers get the
+  // first look, its defers run as the throw crosses them, and one the body
+  // does not catch reaches this call with the generator done. A body that
+  // catches it and yields again answers {value, done: false} like any
+  // resume. A generator that never started or already finished has no
+  // frame for the value to land in, so it is thrown here directly (and a
+  // Start-state one is done, its arguments dropped).
+  GenThrow,     // (generator, value) -> {value, done}
+  // The job queue: a FIFO of 0-argument closures the run drains once the
+  // entry frame has returned, each driven to completion before the next,
+  // so a job's own enqueues run after every job already waiting. The
+  // primitive a language's microtasks are made of -- a Promise reaction,
+  // a queued callback -- with the language's own queue discipline (which
+  // settles what, in what order) written on top of it. A job's uncaught
+  // throw ends the run the way the entry frame's would; the queue is
+  // never drained inside a job (it is not re-entrant), only between them.
+  Enqueue,      // (closure) -> nil
 };
 
 // A variable is either a slot in this frame or a slot borrowed from an
@@ -392,6 +410,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::HeapStats: return 0;
     case IntrinsicId::GenResume: return 2;
     case IntrinsicId::GenReturn: return 2;
+    case IntrinsicId::GenThrow: return 2;
+    case IntrinsicId::Enqueue: return 1;
   }
   return 0;
 }

@@ -87,11 +87,14 @@ enum class Op : uint8_t {
   NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
   // Generators. Yield suspends the frame back into its GeneratorObj and
   // delivers {value, done: false} to whoever resumed it; the sent value of
-  // the next resume lands in `a`. GenResume and GenReturn are ir.h's
-  // intrinsics of the same names.
+  // the next resume lands in `a`. GenResume, GenReturn and GenThrow are
+  // ir.h's intrinsics of the same names.
   Yield,        // a = dst (sent value on re-entry), b = value reg
   GenResume,    // a = dst, b = generator reg, c = sent reg
   GenReturn,    // a = dst, b = generator reg, c = value reg
+  GenThrow,     // a = dst, b = generator reg, c = value reg
+  // The job queue (ir.h's Enqueue): the closure joins the run's FIFO.
+  Enqueue,      // a = closure reg
 };
 
 // vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own

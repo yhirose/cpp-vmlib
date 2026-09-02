@@ -296,7 +296,8 @@ struct FnCompiler {
         if (v.id == IntrinsicId::FMod || v.id == IntrinsicId::Pow ||
             v.id == IntrinsicId::ObjectHas ||
             v.id == IntrinsicId::GenResume ||
-            v.id == IntrinsicId::GenReturn || v.id == IntrinsicId::Same) {
+            v.id == IntrinsicId::GenReturn ||
+            v.id == IntrinsicId::GenThrow || v.id == IntrinsicId::Same) {
           const int32_t base = top;
           const int32_t l = compile_expr(m.child(id, 0));
           const int32_t rr = compile_expr(m.child(id, 1));
@@ -306,6 +307,7 @@ struct FnCompiler {
                         : v.id == IntrinsicId::Pow       ? Op::Pow
                         : v.id == IntrinsicId::ObjectHas ? Op::ObjectHas
                         : v.id == IntrinsicId::GenResume ? Op::GenResume
+                        : v.id == IntrinsicId::GenThrow  ? Op::GenThrow
                         : v.id == IntrinsicId::Same      ? Op::Same
                                                          : Op::GenReturn;
           emit(op, r, l, rr, n.pos);
@@ -318,6 +320,16 @@ struct FnCompiler {
           const int32_t r = alloc();
           emit(v.id == IntrinsicId::ArrayPop ? Op::ArrayPop : Op::ObjectKeys,
                r, s, 0, n.pos);
+          return r;
+        }
+        if (v.id == IntrinsicId::Enqueue) {
+          // Statement-shaped too: the job is queued, the value is nil.
+          const int32_t base = top;
+          const int32_t s = compile_expr(m.child(id, 0));
+          top = base;
+          emit(Op::Enqueue, s, 0, 0, n.pos);
+          const int32_t r = alloc();
+          emit(Op::LoadNil, r, 0, 0, n.pos);
           return r;
         }
         if (v.id == IntrinsicId::ArrayPush ||

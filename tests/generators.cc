@@ -1,7 +1,7 @@
 // Generators: calling an is_generator function packages a suspended
 // activation instead of running it; GenResume drives it yield to yield,
 // each answer a fresh {value, done} object; GenReturn closes one early,
-// running its pending defers first. The frame parks its storage inside the
+// running its pending defers first; GenThrow delivers a value at the yield. The frame parks its storage inside the
 // GeneratorObj between resumes, so the collector sees everything a
 // suspended generator holds -- the last two cases pin that. Zero live heap
 // objects after every case, as everywhere else.
@@ -505,6 +505,123 @@ int main() {
         ++g_failures;
       }
     }
+  }
+
+  // --- 9. GenThrow lands at the yield; a handler there catches it. -------
+  // gen() { try { yield 1 } catch e { print e; yield 2 }; return 3 }
+  // resume -> 1; throw(g, 99) prints 99 and yields 2 (not done); resume -> 3.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back(
+        {"gen", 1, 0,
+         b.block({b.make_try(0, b.make_yield(b.literal(1, p), p),
+                             b.block({b.intrinsic(IntrinsicId::Print,
+                                                  {b.varref(VarKind::Local, 0, p)},
+                                                  p),
+                                      b.make_yield(b.literal(2, p), p)},
+                                     p),
+                             p),
+                  b.make_return(b.literal(3, p), p)},
+                 p),
+         {"e"},
+         {}});
+    m.funcs.back().is_generator = true;
+    auto resume = [&]() {
+      return b.assign(VarKind::Local, 1,
+                      b.intrinsic(IntrinsicId::GenResume,
+                                  {b.varref(VarKind::Local, 0, p),
+                                   b.nil_literal(p)},
+                                  p),
+                      p);
+    };
+    m.funcs[0] = {
+        "main", 2, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.call_value(b.make_closure(1, 0, p), {}, p), p),
+                 resume(), print_field(b, 1, "value"),
+                 b.assign(VarKind::Local, 1,
+                          b.intrinsic(IntrinsicId::GenThrow,
+                                      {b.varref(VarKind::Local, 0, p),
+                                       b.literal(99, p)},
+                                      p),
+                          p),
+                 print_field(b, 1, "value"), print_field(b, 1, "done"),
+                 resume(), print_field(b, 1, "value"),
+                 print_field(b, 1, "done")},
+                p),
+        {"g", "r"},
+        {}};
+    check_eq(run_module(m, "throw-caught"), "", "throw-caught: failure");
+    check_eq(joined(), "1|99|2|false|3|true|", "throw-caught output");
+  }
+
+  // --- 10. Not caught inside: it reaches the thrower, generator done. -----
+  // gen() { scope { defer print "D"; yield 1 } return 2 }
+  // resume; try { throw(g, "x") } catch e { print e }  -> D then x
+  // resume -> done (nothing more runs).
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"deferD", 0, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.str_literal("D", p)}, p),
+                       {},
+                       {}});
+    m.funcs.push_back(
+        {"gen", 0, 0,
+         b.block({b.scope(0, 0,
+                          b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                                   b.make_yield(b.literal(1, p), p)},
+                                  p),
+                          p),
+                  b.make_return(b.literal(2, p), p)},
+                 p),
+         {},
+         {}});
+    m.funcs.back().is_generator = true;
+    auto resume = [&]() {
+      return b.assign(VarKind::Local, 1,
+                      b.intrinsic(IntrinsicId::GenResume,
+                                  {b.varref(VarKind::Local, 0, p),
+                                   b.nil_literal(p)},
+                                  p),
+                      p);
+    };
+    auto throw_into = [&](NodeId v) {
+      return b.make_try(
+          2,
+          b.assign(VarKind::Local, 1,
+                   b.intrinsic(IntrinsicId::GenThrow,
+                               {b.varref(VarKind::Local, 0, p), v}, p),
+                   p),
+          b.intrinsic(IntrinsicId::Print, {b.varref(VarKind::Local, 2, p)},
+                      p),
+          p);
+    };
+    m.funcs[0] = {
+        "main", 3, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.call_value(b.make_closure(2, 0, p), {}, p), p),
+                 resume(), print_field(b, 1, "value"),
+                 throw_into(b.str_literal("x", p)), resume(),
+                 print_field(b, 1, "done"),
+                 // Done now: the value is thrown at the caller directly.
+                 throw_into(b.literal(6, p)),
+                 // Never started: the same, and it is done afterwards.
+                 b.assign(VarKind::Local, 0,
+                          b.call_value(b.make_closure(2, 0, p), {}, p), p),
+                 throw_into(b.literal(5, p)), resume(),
+                 print_field(b, 1, "done")},
+                p),
+        {"g", "r", "e"},
+        {}};
+    check_eq(run_module(m, "throw-out"), "", "throw-out: failure");
+    check_eq(joined(), "1|D|x|true|6|5|true|", "throw-out output");
   }
 
   if (g_failures != 0) {

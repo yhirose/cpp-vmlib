@@ -63,6 +63,8 @@ const char* name_of(Op op) {
     case Op::Yield:       return "yield";
     case Op::GenResume:   return "genresume";
     case Op::GenReturn:   return "genreturn";
+    case Op::GenThrow:    return "genthrow";
+    case Op::Enqueue:     return "enqueue";
   }
   return "?";
 }
