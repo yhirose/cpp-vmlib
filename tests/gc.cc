@@ -173,7 +173,8 @@ int main() {
   }
 
   // --- 6. The drop hook fires at refcount zero, pinned; a resurrecting
-  //        hook skips the free and the object drops again later. ----------
+  //        hook skips the free, and the object is not dropped again when
+  //        it dies for good -- at most once, whichever path gets there. --
   {
     Runtime rt;
     Runtime::Scope scope(rt);
@@ -193,7 +194,8 @@ int main() {
     check(fired == 1, "hook fired at zero");
     check(rt.live_objects() == 2, "resurrected object still alive");
     kv = Value();
-    check(fired == 2, "hook fired again on re-release");
+    check(fired == 1, "no second drop on re-release");
+    check(rt.live_objects() == 0, "and the re-release frees it");
     rt.set_drop_fn(nullptr, nullptr);
     keeper = nullptr;
   }
@@ -337,8 +339,8 @@ int main() {
 
   // --- 10. Resurrection from a collection: a destructor that stores its
   //         object somewhere reachable spares it (and, through it, the
-  //         rest of its cycle); it dies for real, destructor and all, the
-  //         next time nothing reaches it. -------------------------------
+  //         rest of its cycle), intact; it goes for real the next time
+  //         nothing reaches it, without a second destructor. -----------
   // keep = []; n = 0
   // d = fn (self) { n = n + 1; if n == 1 { arraypush(keep, self) } }
   // o = {}; o["\x01drop"] = d; o.self = o; o = nil
@@ -390,8 +392,8 @@ int main() {
     check_eq(run_module(m, "resurrect: heap not empty"), "",
              "resurrect: unexpected failure");
     // First collect: o and its closure condemned, o resurrected into keep
-    // (its closure with it), nothing freed. Second: both go.
-    check_eq(joined(), "0|1|1|2|2|", "resurrect output");
+    // (its closure with it), nothing freed. Second: both go, n still 1.
+    check_eq(joined(), "0|1|1|2|1|", "resurrect output");
   }
 
   if (g_failures != 0) {

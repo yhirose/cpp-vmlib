@@ -42,6 +42,12 @@ enum class ValueTag : uint8_t {
 };
 
 struct HeapObj;
+struct ObjectObj;
+
+// The key under which an Object carries its destructor (Runtime::set_drop_fn
+// has the contract). Unspellable from a language whose identifiers are
+// printable, which is the point.
+inline constexpr char kDropKey[] = "\x01" "drop";
 
 // Everything a running program's heap consists of, owned by an object rather
 // than by file-scope state.
@@ -84,8 +90,8 @@ class Runtime {
   // still intact -- and may store its object, or any other condemned one,
   // somewhere reachable. That resurrects it: reachability is recomputed
   // after the destructors, only what is still unreachable is freed, and a
-  // resurrected object keeps its drop key, so its destructor runs again
-  // the next time it dies -- the refcount path's rule as well.
+  // resurrected object lives on intact -- already dropped, so it is not
+  // dropped again when it next dies (run_drop's rule).
   int64_t collect();
 
   // Bytes the live objects hold: each one's own struct plus the storage its
@@ -108,21 +114,48 @@ class Runtime {
     finalize_ = fn;
   }
 
-  // Deterministic destructors: an Object whose "\x01drop" key holds a
-  // closure gets it called -- with the object as its one argument -- at the
-  // moment its refcount reaches zero, before the object is freed -- or,
-  // for an object the collector condemns, during that collection. The hook
-  // is how: the executor installs one for the lifetime of a run (it is what
-  // can call a closure), release() hands it each zero-count Object that
-  // carries the key, and collect() hands it each condemned one. The hook
-  // runs over a pinned object; if it stores the object somewhere (a
-  // resurrection), the free is skipped.
+  // Deterministic destructors: an Object whose kDropKey holds a closure
+  // gets it called -- with the object as its one argument -- at the moment
+  // its refcount reaches zero, before the object is freed; at the exit of
+  // the scope that owns the cycle it is in (owned_scope_exit); or, last,
+  // in the collection that condemns it. The hook is how: the executor
+  // installs one for the lifetime of a run (it is what can call a
+  // closure), and every one of those paths reaches it through run_drop.
+  // The hook runs over a pinned object; if it stores the object somewhere
+  // (a resurrection), the free is skipped.
   void set_drop_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
     drop_ctx_ = ctx;
     drop_ = fn;
   }
   void* drop_ctx() const { return drop_ctx_; }
   void (*drop_fn() const)(void*, HeapObj*) { return drop_; }
+
+  // The drop chokepoint: hands `o` to the hook if it is an Object carrying
+  // kDropKey that has not been dropped yet, marking it dropped first -- so
+  // a destructor runs at most once per object, whatever its own body
+  // releases and whichever of the three paths gets there first. Answers
+  // whether it ran.
+  bool run_drop(HeapObj* o);
+
+  // Deterministic drop for cycles: the owned stack (culebra's design).
+  // Every Object goes on it the moment its drop key is bound, and a Scope
+  // resolves, at its exit, the entries registered since it was entered --
+  // dynamically, so what a callee bound counts. An entry every reference
+  // to which comes from objects reachable only from itself -- a member of
+  // a cycle, through plain objects, closures or cells -- gets its
+  // destructor, newest first, and is then freed; one still reachable from
+  // outside stays for an outer scope. An object merely hanging off a cycle
+  // it is not a member of is not the scope's to resolve: the collector's
+  // backstop takes it. A destructor that stores a condemned object
+  // somewhere reachable spares it, intact and already dropped. The
+  // analysis is a trial deletion over the candidates' own subgraph, so a
+  // scope that bound nothing costs one comparison; past kOwnedNodeBudget
+  // nodes every candidate survives to the backstop.
+  uint64_t owned_mark() const { return owned_next_id_; }
+  void owned_scope_exit(uint64_t mark);
+  // ObjectObj::set / remove's chokepoints for the drop key.
+  void owned_register(ObjectObj* o);
+  void owned_unregister(ObjectObj* o);
   bool in_collect() const { return in_collect_; }
   // The sweep proper: condemned objects being stripped and freed. The one
   // window in which a refcount reaching zero must not run a destructor --
@@ -157,6 +190,12 @@ class Runtime {
   bool stress_ = false;
   bool in_collect_ = false;
   bool sweeping_ = false;
+  struct OwnedEntry {
+    ObjectObj* obj;  // null: a tombstone (the object died by another path)
+    uint64_t id;     // monotonic: a scope's mark is the next id at entry
+  };
+  std::vector<OwnedEntry> owned_;
+  uint64_t owned_next_id_ = 0;
   void* finalize_ctx_ = nullptr;
   void (*finalize_)(void*, HeapObj*) = nullptr;
   void* drop_ctx_ = nullptr;
@@ -388,6 +427,10 @@ struct ArrayObj : HeapObj {
 struct ObjectObj : HeapObj {
   ObjectObj() : HeapObj(ValueTag::Object) {}
   std::vector<std::pair<std::string, Value>> props;
+  // The owned stack's back-pointer (-1: not on it) and the at-most-once
+  // flag Runtime::run_drop sets.
+  int64_t owned_idx = -1;
+  bool dropped = false;
 
   Value* find(const std::string& k) {
     for (auto& kv : props) {
@@ -395,12 +438,16 @@ struct ObjectObj : HeapObj {
     }
     return nullptr;
   }
+  // Binding the drop key is what puts an object on the owned stack;
+  // removing it takes it off. Both go through here, so the two cannot
+  // drift apart.
   void set(const std::string& k, const Value& v) {
     if (Value* slot = find(k)) {
       *slot = v;
-      return;
+    } else {
+      props.emplace_back(k, v);
     }
-    props.emplace_back(k, v);
+    if (owner && k == kDropKey) owner->owned_register(this);
   }
 
   // Erases the key if present; absent is a no-op. Order of the survivors
@@ -409,6 +456,7 @@ struct ObjectObj : HeapObj {
     for (auto it = props.begin(); it != props.end(); ++it) {
       if (it->first == k) {
         props.erase(it);
+        if (owner && k == kDropKey) owner->owned_unregister(this);
         return;
       }
     }
@@ -442,6 +490,7 @@ struct GenFrame {
   std::vector<Value> captures;
   std::vector<Value> defers;
   std::vector<std::pair<size_t, int32_t>> defer_marks;
+  std::vector<std::pair<uint64_t, int32_t>> owned_marks;
 };
 
 // Calling a generator function makes one of these instead of running the

@@ -67,7 +67,10 @@ enum class Tag : uint8_t {
   // compiler releases the range when the region exits, however it exits
   // (falling off the end, or the unwinding a later phase adds), which is
   // what makes a value's lifetime end with its scope rather than with the
-  // whole frame. Yields its child's value, like Block.
+  // whole frame. The release is last-declared-first, and after it the
+  // scope resolves the drop-bearing objects bound under it that a cycle
+  // kept alive (Runtime::owned_scope_exit). Yields its child's value,
+  // like Block.
   Scope,      // a = first local, b = one past last; children: body
   // Non-local exits. Statements, like PL/0's: nothing reads their value.
   // Each one leaves every Scope between it and its target the way the

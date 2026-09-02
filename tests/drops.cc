@@ -6,6 +6,11 @@
 // Then the program's end: under RunOptions::entry_frame_drops == false the
 // entry frame's bindings are released without their destructors, whether
 // the program returns or throws -- only its defers run.
+// Then the owned stack (Runtime::owned_scope_exit): a cycle of drop-bearing
+// objects that a scope's releases could not free drops at that scope's
+// exit, newest first; one still held from outside waits for the scope that
+// last held it; one merely hanging off a plain cycle waits for the
+// collector; and a destructor runs at most once, resurrection included.
 
 #include <cstdio>
 #include <stdexcept>
@@ -80,6 +85,16 @@ struct Prog {
   coreir::NodeId print_str(const char* s) { return print(str(s)); }
   coreir::NodeId set(int32_t slot, const char* k, coreir::NodeId v) {
     return b.set_index(local(slot), str(k), v, p);
+  }
+  // a.o = b; b.o = a
+  coreir::NodeId cycle(int32_t a, int32_t b) {
+    return b_pair(set(a, "o", local(b)), set(b, "o", local(a)));
+  }
+  coreir::NodeId b_pair(coreir::NodeId x, coreir::NodeId y) {
+    return b.block({x, y}, p);
+  }
+  coreir::NodeId collect() {
+    return print(b.intrinsic(coreir::IntrinsicId::Collect, {}, p));
   }
   coreir::NodeId mk(int32_t slot, const char* name) {
     return b.block({b.assign(coreir::VarKind::Local, slot,
@@ -352,6 +367,182 @@ int main() {
            {"a"});
     expect_clean(run_module(g.m, "exit: defer", quiet), "exit: defer");
     check_eq(joined(), "end|defer|", "exit: defer output");
+  }
+
+  // --- 8. A two-member cycle bound in a scope drops at the scope's exit,
+  //        newest first, and is freed. -----------------------------------
+  // { a = mk("a"); b = mk("b"); a.o = b; b.o = a }; print("after")
+  {
+    Prog g;
+    g.main(g.b.block({g.bind_drop(),
+                      g.b.scope(1, 3,
+                                g.b.block({g.mk(1, "a"), g.mk(2, "b"),
+                                           g.cycle(1, 2)},
+                                          g.p),
+                                g.p),
+                      g.print_str("after")},
+                     g.p),
+           {"a", "b"});
+    expect_clean(run_module(g.m, "owned cycle"), "owned cycle");
+    check_eq(joined(), "b|a|after|", "owned cycle output");
+  }
+
+  // --- 9. Pushed into an outer array, the cycle is the outer scope's:
+  //        nothing at the inner exit, b then a at the outer one. ---------
+  // { keep = []; { a; b; cycle; arraypush(keep, a) }; print("inner") }
+  // print("outer")
+  {
+    Prog g;
+    g.main(g.b.block(
+               {g.bind_drop(),
+                g.b.scope(
+                    1, 2,
+                    g.b.block(
+                        {g.b.assign(VarKind::Local, 1, g.b.array_lit({}, g.p),
+                                    g.p),
+                         g.b.scope(2, 4,
+                                   g.b.block({g.mk(2, "a"), g.mk(3, "b"),
+                                              g.cycle(2, 3),
+                                              g.b.intrinsic(
+                                                  IntrinsicId::ArrayPush,
+                                                  {g.local(1), g.local(2)},
+                                                  g.p)},
+                                             g.p),
+                                   g.p),
+                         g.print_str("inner")},
+                        g.p),
+                    g.p),
+                g.print_str("outer")},
+               g.p),
+           {"keep", "a", "b"});
+    expect_clean(run_module(g.m, "owned escape"), "owned escape");
+    check_eq(joined(), "inner|b|a|outer|", "owned escape output");
+  }
+
+  // --- 10. Hanging off a plain-object cycle it is not a member of: not
+  //         the scope's to resolve; the collector drops it. -------------
+  // { p = {}; p.self = p; r = mk("r"); p.r = r }; print(collect());
+  // print("after")
+  {
+    Prog g;
+    g.main(g.b.block(
+               {g.bind_drop(),
+                g.b.scope(1, 3,
+                          g.b.block({g.b.assign(VarKind::Local, 1,
+                                                g.b.object_lit({}, g.p), g.p),
+                                     g.set(1, "self", g.local(1)),
+                                     g.mk(2, "r"), g.set(1, "r", g.local(2))},
+                                    g.p),
+                          g.p),
+                g.collect(), g.print_str("after")},
+               g.p),
+           {"p", "r"});
+    expect_clean(run_module(g.m, "owned hanger"), "owned hanger");
+    // The collection frees p, r and r's name string.
+    check_eq(joined(), "r|3|after|", "owned hanger output");
+  }
+
+  // --- 11. A cycle built in a callee and returned drops at the caller's
+  //         scope exit, once the caller lets go. ------------------------
+  // f = fn () { { d = ...; a = mk("a"); b = mk("b"); cycle; return a } }
+  // { x = f(); print("got") }; print("after")
+  {
+    Prog g;
+    Func f{"f", 3, 0, NodeId{}, {"d", "a", "b"}, {}};
+    f.body = g.b.scope(
+        0, 3,
+        g.b.block({g.bind_drop(), g.mk(1, "a"), g.mk(2, "b"), g.cycle(1, 2),
+                   g.b.make_return(g.local(1), g.p)},
+                  g.p),
+        g.p);
+    g.m.funcs.push_back(f);
+    g.main(g.b.block(
+               {g.b.scope(1, 2,
+                          g.b.block({g.b.assign(VarKind::Local, 1,
+                                                g.b.call_value(
+                                                    g.b.make_closure(2, 0, g.p),
+                                                    {}, g.p),
+                                                g.p),
+                                     g.print_str("got")},
+                                    g.p),
+                          g.p),
+                g.print_str("after")},
+               g.p),
+           {"x"});
+    expect_clean(run_module(g.m, "owned returned"), "owned returned");
+    check_eq(joined(), "got|b|a|after|", "owned returned output");
+  }
+
+  // --- 12. Resurrection at a scope exit: a destructor that stores its
+  //         object into an outer array keeps it, intact; when that array
+  //         goes, the collector frees the cycle without dropping again. -
+  // keep = []; d = fn (self) { print(self.name); arraypush(keep, self) }
+  // { a = mk("a"); b = mk("b"); cycle }
+  // print(len(keep)); print(keep[0].name); keep = []; print(collect())
+  {
+    Prog g;
+    g.m.capture_maps.push_back({{VarKind::Cell, 0}});
+    Func d2{"drop2", 1, 1, NodeId{}, {"self"}, {"keep"}};
+    d2.num_params = 1;
+    d2.body = g.b.block(
+        {g.print(g.b.index(g.local(0), g.str("name"), g.p)),
+         g.b.intrinsic(IntrinsicId::ArrayPush,
+                       {g.b.varref(VarKind::Capture, 0, g.p), g.local(0)},
+                       g.p)},
+        g.p);
+    g.m.funcs.push_back(d2);
+    auto keep = [&]() { return g.b.varref(VarKind::Cell, 0, g.p); };
+    g.main(g.b.block(
+               {g.b.cell_fresh(0, g.p),
+                g.b.assign(VarKind::Cell, 0, g.b.array_lit({}, g.p), g.p),
+                g.b.assign(VarKind::Local, 0, g.b.make_closure(2, 1, g.p),
+                           g.p),
+                g.b.scope(1, 3,
+                          g.b.block({g.mk(1, "a"), g.mk(2, "b"),
+                                     g.cycle(1, 2)},
+                                    g.p),
+                          g.p),
+                g.print(g.b.intrinsic(IntrinsicId::Len, {keep()}, g.p)),
+                g.print(g.b.index(g.b.index(keep(), g.b.literal(0, g.p), g.p),
+                                  g.str("name"), g.p)),
+                g.b.assign(VarKind::Cell, 0, g.b.array_lit({}, g.p), g.p),
+                g.collect()},
+               g.p),
+           {"a", "b"});
+    g.m.funcs[0].num_cells = 1;
+    expect_clean(run_module(g.m, "owned resurrect"), "owned resurrect");
+    // The collection frees a, b and their two name strings; d2, the cell
+    // and the new array are live.
+    check_eq(joined(), "b|a|2|b|4|", "owned resurrect output");
+  }
+
+  // --- 13. The entry frame's outermost scope is the program's end: under
+  //         entry_frame_drops == false it resolves nothing (the cycle is
+  //         reclaimed with the heap, undropped); by default it resolves
+  //         like any other scope. --------------------------------------
+  // { a = mk("a"); b = mk("b"); cycle; print("end"); a = nil; b = nil }
+  {
+    vm::RunOptions quiet;
+    quiet.entry_frame_drops = false;
+    Prog g;
+    g.main(g.b.scope(0, 0,
+                     g.b.block({g.bind_drop(), g.mk(1, "a"), g.mk(2, "b"),
+                                g.cycle(1, 2), g.print_str("end"),
+                                g.b.assign(VarKind::Local, 1,
+                                           g.b.nil_literal(g.p), g.p),
+                                g.b.assign(VarKind::Local, 2,
+                                           g.b.nil_literal(g.p), g.p)},
+                               g.p),
+                     g.p),
+           {"a", "b"});
+    RunResult r = run_module(g.m, "top-level cycle: quiet", quiet);
+    check_eq(r.failure, "", "top-level cycle: quiet failure");
+    check_eq(joined(), "end|", "top-level cycle: quiet output");
+    // a, b, their two name strings, and the drop closure they hold.
+    check(r.left == 5, "top-level cycle: quiet leaves the cycle to ~Runtime");
+    r = run_module(g.m, "top-level cycle: default");
+    expect_clean(r, "top-level cycle: default");
+    check_eq(joined(), "end|b|a|", "top-level cycle: default output");
   }
 
   if (g_failures != 0) {

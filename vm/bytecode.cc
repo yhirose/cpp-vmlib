@@ -30,6 +30,7 @@ const char* name_of(Op op) {
     case Op::DeferPush:   return "deferpush";
     case Op::DeferMark:   return "defermark";
     case Op::DeferRunTo:  return "deferrunto";
+    case Op::OwnedMark:   return "ownedmark";
     case Op::MakeClosure: return "makeclosure";
     case Op::CallValue:   return "callvalue";
     case Op::CellNew:     return "cellnew";
@@ -134,6 +135,7 @@ std::string to_string(const Program& p) {
           break;
         case Op::DeferMark:
         case Op::DeferRunTo:
+        case Op::OwnedMark:
           break;
         case Op::Ret:
           break;
@@ -151,6 +153,7 @@ std::string to_string(const Program& p) {
             << cl.caught_local << "]";
       }
       if (cl.defer_mark_pc >= 0) out << " defer_mark=" << cl.defer_mark_pc;
+      if (cl.owned_mark_pc >= 0) out << " owned_mark=" << cl.owned_mark_pc;
       out << "\n";
     }
   }

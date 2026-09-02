@@ -1,6 +1,7 @@
 #include "coreir/ir.h"
 
 #include <cstdlib>
+#include <unordered_map>
 #include <vector>
 
 #include <sstream>
@@ -29,6 +30,9 @@ void Runtime::unlink(HeapObj* o) {
   if (o->next) o->next->prev = o->prev;
   o->prev = o->next = nullptr;
   --live_;
+  // Every path that frees an object comes through here, which makes it the
+  // one place an owned-stack entry is tombstoned.
+  if (o->kind == ValueTag::Object) owned_unregister(static_cast<ObjectObj*>(o));
 }
 
 // A Runtime outliving its objects is the normal case -- everything a program
@@ -88,7 +92,153 @@ void visit_children(HeapObj* o, Fn fn) {
   }
 }
 
+// The owned stack's trial deletion, over the subgraph the candidates reach:
+// every reference occurrence found inside it is explained, a node with
+// references beyond that is held from outside (a frame, an outer scope's
+// binding), and so is everything it reaches. Answers, per candidate,
+// whether nothing outside holds it. Each candidate carries one pin,
+// credited as the seed's own occurrence. Nothing runs during the walk, so
+// the counts it reads hold. A worklist, not recursion, like mark().
+constexpr size_t kOwnedNodeBudget = 4096;
+
+std::vector<char> owned_unreachable(const std::vector<ObjectObj*>& cand) {
+  struct Node {
+    HeapObj* obj;
+    int64_t explained;
+    std::vector<size_t> out;
+  };
+  constexpr size_t npos = static_cast<size_t>(-1);
+  std::vector<Node> nodes;
+  std::unordered_map<HeapObj*, size_t> index;
+  std::vector<size_t> work;
+  bool overflow = false;
+  auto occurrence = [&](HeapObj* h, size_t from) {
+    auto [it, fresh] = index.try_emplace(h, nodes.size());
+    if (fresh) {
+      nodes.push_back({h, 0, {}});
+      work.push_back(it->second);
+      if (nodes.size() > kOwnedNodeBudget) overflow = true;
+    }
+    ++nodes[it->second].explained;
+    if (from != npos) nodes[from].out.push_back(it->second);
+  };
+  for (ObjectObj* c : cand) occurrence(c, npos);
+  while (!work.empty() && !overflow) {
+    const size_t id = work.back();
+    work.pop_back();
+    visit_children(nodes[id].obj, [&](HeapObj* c) { occurrence(c, id); });
+  }
+
+  std::vector<char> held(nodes.size(), 0);
+  std::vector<size_t> q;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    if (overflow || nodes[i].obj->rc > nodes[i].explained) {
+      held[i] = 1;
+      q.push_back(i);
+    }
+  }
+  while (!q.empty()) {
+    const size_t i = q.back();
+    q.pop_back();
+    for (size_t t : nodes[i].out) {
+      if (!held[t]) {
+        held[t] = 1;
+        q.push_back(t);
+      }
+    }
+  }
+  std::vector<char> gone(cand.size());
+  for (size_t i = 0; i < cand.size(); ++i) gone[i] = !held[index[cand[i]]];
+  return gone;
+}
+
 }  // namespace
+
+bool Runtime::run_drop(HeapObj* h) {
+  if (h->kind != ValueTag::Object || !drop_) return false;
+  auto* o = static_cast<ObjectObj*>(h);
+  if (o->dropped || !o->find(kDropKey)) return false;
+  o->dropped = true;  // before the call: re-entrant, and at most once
+  drop_(drop_ctx_, h);
+  return true;
+}
+
+void Runtime::owned_register(ObjectObj* o) {
+  if (o->owned_idx >= 0) return;
+  o->owned_idx = static_cast<int64_t>(owned_.size());
+  owned_.push_back({o, owned_next_id_++});
+  // Tombstones pile up under a scope that never exits (the entry frame's);
+  // prune now and then, keeping every back-pointer right.
+  if ((owned_next_id_ & 1023) == 0) {
+    std::erase_if(owned_, [](const OwnedEntry& e) { return !e.obj; });
+    for (size_t i = 0; i < owned_.size(); ++i) {
+      owned_[i].obj->owned_idx = static_cast<int64_t>(i);
+    }
+  }
+}
+
+void Runtime::owned_unregister(ObjectObj* o) {
+  if (o->owned_idx < 0) return;
+  owned_[static_cast<size_t>(o->owned_idx)].obj = nullptr;
+  o->owned_idx = -1;
+}
+
+void Runtime::owned_scope_exit(uint64_t mark) {
+  // The common case: nothing was bound under this scope.
+  if (owned_.empty() || owned_.back().id < mark) return;
+
+  // The candidates, newest first: the entries above the mark, less the
+  // tombstones and the already dropped. Pinned, since a destructor below
+  // may drop the last edge between two of them, and neither may go before
+  // the sweep at the end decides.
+  std::vector<OwnedEntry> cand;
+  while (!owned_.empty() && owned_.back().id >= mark) {
+    const OwnedEntry e = owned_.back();
+    owned_.pop_back();
+    if (!e.obj) continue;
+    e.obj->owned_idx = -1;
+    if (e.obj->dropped) continue;
+    ++e.obj->rc;
+    cand.push_back(e);
+  }
+  if (cand.empty()) return;
+
+  std::vector<ObjectObj*> objs;
+  objs.reserve(cand.size());
+  for (const OwnedEntry& e : cand) objs.push_back(e.obj);
+  const std::vector<char> gone = owned_unreachable(objs);
+
+  // Survivors go back first, oldest first and with their ids, so the
+  // outer scope whose mark they are above resolves them -- and before any
+  // destructor runs, since one may bind new entries, which must sit above.
+  for (size_t i = cand.size(); i-- > 0;) {
+    if (gone[i]) continue;
+    cand[i].obj->owned_idx = static_cast<int64_t>(owned_.size());
+    owned_.push_back(cand[i]);
+  }
+
+  // Destructors, newest first, each over a still-whole cycle.
+  std::vector<ObjectObj*> dropped;
+  for (size_t i = 0; i < cand.size(); ++i) {
+    if (!gone[i]) continue;
+    run_drop(cand[i].obj);
+    dropped.push_back(cand[i].obj);
+  }
+
+  // A destructor may have stored one of them somewhere reachable. Decide
+  // again, and strip only what is still nobody's: with its references gone
+  // the cycle is broken, and the pins coming off free it -- the plain
+  // members with it. What was resurrected stays intact, dropped already.
+  if (!dropped.empty()) {
+    const std::vector<char> still = owned_unreachable(dropped);
+    for (size_t i = 0; i < dropped.size(); ++i) {
+      if (still[i]) clear_heap_object_refs(dropped[i]);
+    }
+  }
+  for (const OwnedEntry& e : cand) {
+    if (--e.obj->rc == 0) heap_release_to_zero(e.obj);
+  }
+}
 
 // Marks everything reachable from an externally-held object. An object is
 // held externally when its refcount exceeds the references other heap
@@ -143,17 +293,12 @@ int64_t Runtime::collect() {
   // (the heap list's order), the way a scope releases its locals in reverse.
   // One may store a condemned object somewhere reachable -- so if any ran,
   // reachability is recomputed and what it resurrected is unpinned and
-  // spared. Its destructor runs again when it next dies, like the refcount
-  // path's. Allocation here is ordinary: a nested collect is refused by
-  // in_collect_, and an object dying by refcount gets its own destructor.
+  // spared, dropped already. Allocation here is ordinary: a nested collect
+  // is refused by in_collect_, and an object dying by refcount gets its
+  // own destructor.
   bool ran = false;
-  if (drop_) {
-    for (HeapObj* o : dead) {
-      if (o->kind != ValueTag::Object) continue;
-      if (!static_cast<ObjectObj*>(o)->find("\x01" "drop")) continue;
-      drop_(drop_ctx_, o);
-      ran = true;
-    }
+  for (HeapObj* o : dead) {
+    if (run_drop(o)) ran = true;
   }
   if (ran) {
     mark();
@@ -221,7 +366,7 @@ int64_t Runtime::heap_bytes() const {
         const GenFrame& gf = static_cast<GeneratorObj*>(o)->frame;
         bytes += sizeof(GeneratorObj) + vec(gf.locals) + vec(gf.regs) +
                  vec(gf.cells) + vec(gf.captures) + vec(gf.defers) +
-                 vec(gf.defer_marks);
+                 vec(gf.defer_marks) + vec(gf.owned_marks);
         break;
       }
       default:
@@ -232,18 +377,15 @@ int64_t Runtime::heap_bytes() const {
 }
 
 // The refcount just hit zero. An Object carrying the drop contract's key
-// runs its destructor first, pinned so the closure can read the fields; a
-// destructor that stores the object somewhere resurrects it and the free is
-// skipped. Everything else -- and every non-Object -- frees directly.
+// runs its destructor first (unless it already has), pinned so the closure
+// can read the fields; a destructor that stores the object somewhere
+// resurrects it and the free is skipped. Everything else -- and every
+// non-Object -- frees directly.
 void heap_release_to_zero(HeapObj* h) {
-  if (h->kind == ValueTag::Object && h->owner && h->owner->drop_fn() &&
-      !h->owner->sweeping()) {
-    auto* o = static_cast<ObjectObj*>(h);
-    if (o->find("\x01" "drop")) {
-      ++h->rc;  // pin across the destructor
-      h->owner->drop_fn()(h->owner->drop_ctx(), h);
-      if (--h->rc != 0) return;  // resurrected
-    }
+  if (h->kind == ValueTag::Object && h->owner && !h->owner->sweeping()) {
+    ++h->rc;  // pin across the destructor
+    h->owner->run_drop(h);
+    if (--h->rc != 0) return;  // resurrected
   }
   destroy_heap_object(h);
 }

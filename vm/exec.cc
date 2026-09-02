@@ -62,6 +62,10 @@ struct Frame {
   // regions whose exit-time run already popped theirs.
   std::vector<Value> defers;
   std::vector<std::pair<size_t, int32_t>> defer_marks;
+  // The owned-stack marks of the frame's open scopes: {Runtime::owned_mark
+  // at entry, the OwnedMark's pc} -- the same pairing with Cleanup regions
+  // as defer_marks.
+  std::vector<std::pair<uint64_t, int32_t>> owned_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
   int32_t argc = 0;      // arguments the call supplied (Op::ArgCount)
   // Non-nil exactly when this frame is a generator activation: the
@@ -127,6 +131,7 @@ struct Exec {
     gf.captures = std::move(f.captures);
     gf.defers = std::move(f.defers);
     gf.defer_marks = std::move(f.defer_marks);
+    gf.owned_marks = std::move(f.owned_marks);
   }
 
   // ...and back onto the executor's stack (resume). The new frame owns the
@@ -143,6 +148,7 @@ struct Exec {
     f->captures = std::move(gf.captures);
     f->defers = std::move(gf.defers);
     f->defer_marks = std::move(gf.defer_marks);
+    f->owned_marks = std::move(gf.owned_marks);
     f->ret_reg = ret_reg;
     f->argc = gf.argc;
     f->gen_self = gv;
@@ -313,6 +319,23 @@ struct Exec {
     }
   }
 
+  // A Scope's exit, after its locals are gone: pop the mark it took and
+  // resolve the owned stack above it (Runtime::owned_scope_exit). The entry
+  // frame's outermost scope is the program's end, and under
+  // entry_frame_drops == false resolves nothing: a cycle discarded at the
+  // top level is the collector's, and at exit not even that -- the rule
+  // pop_frame applies to the frame's own values.
+  void leave_scope_owned(Frame& f) {
+    if (f.owned_marks.empty()) return;  // every ClearLocals has its OwnedMark
+    const uint64_t mark = f.owned_marks.back().first;
+    f.owned_marks.pop_back();
+    if (!entry_frame_drops && &f == frames.front().get() &&
+        f.owned_marks.empty()) {
+      return;
+    }
+    rt.owned_scope_exit(mark);
+  }
+
   // Drive whatever was just pushed to completion, unwinding within it.
   void run_nested(size_t floor) {
     while (frames.size() > floor) {
@@ -332,7 +355,7 @@ struct Exec {
   static void drop_hook(void* ctx, HeapObj* h) {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
-    Value* dv = o->find("\x01" "drop");
+    Value* dv = o->find(kDropKey);
     if (!dv || !dv->is_func()) return;
     Value closure = *dv;
     Value arg = Value::make_ref(h);
@@ -386,6 +409,10 @@ struct Exec {
         }
         for (int32_t i = cl.end_local; i-- > cl.first_local;) {
           f.locals[i] = Value::uninit();  // last declared, first released
+        }
+        if (cl.owned_mark_pc >= 0 && !f.owned_marks.empty() &&
+            f.owned_marks.back().second == cl.owned_mark_pc) {
+          leave_scope_owned(f);
         }
         if (cl.handler_pc >= 0) {
           f.locals[cl.caught_local] = r.value;
@@ -549,8 +576,13 @@ struct Exec {
         case Op::ClearLocals:
           // Last declared, first released: a value whose release runs a
           // destructor sees the ones declared after it already gone, the
-          // order a language with scoped destructors promises.
+          // order a language with scoped destructors promises. Then what
+          // the releases could not free -- the scope's cycles.
           for (int32_t i = in.b - 1; i >= in.a; --i) f.locals[i] = Value::uninit();
+          leave_scope_owned(f);
+          break;
+        case Op::OwnedMark:
+          f.owned_marks.push_back({rt.owned_mark(), static_cast<int32_t>(f.pc)});
           break;
         case Op::NewArray: {
           std::vector<Value> items;

@@ -142,6 +142,11 @@ struct FnCompiler {
         const Node& sn = m.at(id);
         const bool defers = declares_defers(m.child(id, 0));
         const int32_t regs_base = top;
+        // Every Scope takes an owned-stack mark on entry; its exit resolves
+        // the drop-bearing cycles bound under it. The mark's pc is the
+        // region's identity for the unwinder, as the DeferMark's is.
+        const int32_t owned_pc = here();
+        emit(Op::OwnedMark, 0, 0, 0, sn.pos);
         const int32_t mark_pc = defers ? here() : -1;
         if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
         const int32_t start = here();
@@ -162,7 +167,7 @@ struct FnCompiler {
         }
         emit(Op::ClearLocals, sn.a, sn.b, 0, sn.pos);
         ch.cleanups.push_back(
-            {start, here(), sn.a, sn.b, regs_base, -1, -1, mark_pc});
+            {start, here(), sn.a, sn.b, regs_base, -1, -1, mark_pc, owned_pc});
         last_scope_defer_run_pc = defer_run_pc;
         return r;
       }

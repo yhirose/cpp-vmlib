@@ -40,6 +40,11 @@ enum class Op : uint8_t {
   DeferPush,    // a = value reg
   DeferMark,    // no operands
   DeferRunTo,   // no operands
+  // A Scope's entry: records the owned stack's mark (and its own pc, the
+  // region's identity for the unwinder). The scope's ClearLocals -- at its
+  // own exit, or emitted for it by a Break / Return -- pops the mark and
+  // resolves the entries above it (Runtime::owned_scope_exit).
+  OwnedMark,    // no operands
   // First-class functions.
   MakeClosure,  // a = dst, b = func index, c = capture map index
   CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count
@@ -131,6 +136,11 @@ struct Cleanup {
   // is what keeps a throw out of the region's own exit-time defer run from
   // running them twice.
   int32_t defer_mark_pc = -1;
+  // >= 0 for a Scope region: its OwnedMark's pc, matched against the top of
+  // the frame's mark stack the same way, so a region whose exit already
+  // resolved (a Break's ClearLocals, before a later exit-time throw) is not
+  // resolved twice.
+  int32_t owned_mark_pc = -1;
 };
 
 struct Chunk {
