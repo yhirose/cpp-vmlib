@@ -23,7 +23,7 @@ add_test(NAME errors
 # deep_calls: call chains deeper than the machine stack, which the executor
 # survives because its frames are heap objects rather than C++ activations.
 foreach(t throw_safety deep_calls values closures lifetimes containers
-        control_flow exceptions defers gc generators arity drops jobs)
+        control_flow exceptions defers gc generators arity drops jobs names)
   add_executable(test_${t} test_${t}.cc)
   target_link_libraries(test_${t} PRIVATE vmlib)
   add_test(NAME ${t} COMMAND test_${t})

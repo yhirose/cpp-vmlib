@@ -20,6 +20,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1356,10 +1357,22 @@ std::optional<std::string> verify(const Module& m);
 std::string to_string(const Module& m);
 
 // Public so vm's own instruction-name table can share it instead of
-// restating the same eleven strings. Same for the var kinds, which vm's
-// bytecode dump names in exactly the same words.
+// restating the same eleven strings, and so a front end resolving its own
+// vocabulary (codegen.h's builders, for one) has one table to call rather
+// than a copy of these strings of its own.
+const char* name_of(Tag t);
+const char* name_of(UnOp op);
 const char* name_of(BinOp op);
 const char* name_of(VarKind k);
+const char* name_of(IntrinsicId id);
+const char* name_of(ConstKind k);
+
+// The inverse: a string a front end holds (a builder call's `op:`/`kind:`
+// argument, say), resolved back to the enumerator name_of prints for it, or
+// nullopt for anything else. Defined per enum in ir.cc, each by scanning
+// name_of over that enum's own range, so the two directions can never name
+// the same value differently.
+template <class E> std::optional<E> from_name(std::string_view s);
 
 }  // namespace coreir
 
@@ -2394,6 +2407,48 @@ inline void destroy_heap_object(HeapObj* o) {
   }
 }
 
+// Extracted from the Dumper's node() switch below, so dump_ir()'s vocabulary
+// and this one are the same table read two ways: Unary/Binary/Intrinsic are
+// the exceptions, since the Dumper prints their *operator* name there
+// instead of the tag's.
+inline const char* name_of(Tag t) {
+  switch (t) {
+    case Tag::Literal:     return "literal";
+    case Tag::VarRef:      return "varref";
+    case Tag::Unary:       return "unary";
+    case Tag::Binary:      return "binary";
+    case Tag::Assign:      return "assign";
+    case Tag::If:          return "if";
+    case Tag::While:       return "while";
+    case Tag::Block:       return "block";
+    case Tag::Intrinsic:   return "intrinsic";
+    case Tag::MakeClosure: return "makeclosure";
+    case Tag::CallValue:   return "callvalue";
+    case Tag::ArrayLit:    return "arraylit";
+    case Tag::ObjectLit:   return "objectlit";
+    case Tag::Index:       return "index";
+    case Tag::SetIndex:    return "setindex";
+    case Tag::Scope:       return "scope";
+    case Tag::Return:      return "return";
+    case Tag::Break:       return "break";
+    case Tag::Continue:    return "continue";
+    case Tag::Throw:       return "throw";
+    case Tag::TryCatch:    return "try";
+    case Tag::Defer:       return "defer";
+    case Tag::CellFresh:   return "cellfresh";
+    case Tag::Yield:       return "yield";
+  }
+  return "?";
+}
+
+inline const char* name_of(UnOp op) {
+  switch (op) {
+    case UnOp::Neg:    return "neg";
+    case UnOp::BitNot: return "bitnot";
+  }
+  return "?";
+}
+
 // Declared in ir.h and public: vm/bytecode.cc's own instruction-name table
 // shares this rather than repeating the eleven arithmetic/compare names in a
 // second switch of its own.
@@ -2430,8 +2485,9 @@ inline const char* name_of(VarKind k) {
   return "?";
 }
 
-namespace detail {
-
+// Declared in ir.h and public, same as BinOp/VarKind above: a front end
+// resolving its own intrinsic name (codegen.h's `intrinsic(name:)`, say)
+// shares this rather than typing the 24 names a second time.
 inline const char* name_of(IntrinsicId id) {
   switch (id) {
     case IntrinsicId::Print:   return "print";
@@ -2461,6 +2517,78 @@ inline const char* name_of(IntrinsicId id) {
   }
   return "?";
 }
+
+inline const char* name_of(ConstKind k) {
+  switch (k) {
+    case ConstKind::Nil:    return "nil";
+    case ConstKind::Int:    return "int";
+    case ConstKind::Bool:   return "bool";
+    case ConstKind::Double: return "double";
+    case ConstKind::Str:    return "str";
+  }
+  return "?";
+}
+
+// The inverse of each name_of above: name_of, run over every value the enum
+// holds, until one matches -- so the two directions can never name the same
+// value differently by construction. Each enum's values are contiguous from
+// 0 (a plain enum class with no explicit initializers), so the scan's upper
+// bound is just its last enumerator.
+template <>
+inline std::optional<Tag> from_name<Tag>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(Tag::Yield); ++i) {
+    const auto t = static_cast<Tag>(i);
+    if (name_of(t) == s) return t;
+  }
+  return std::nullopt;
+}
+
+template <>
+inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::BitNot); ++i) {
+    const auto op = static_cast<UnOp>(i);
+    if (name_of(op) == s) return op;
+  }
+  return std::nullopt;
+}
+
+template <>
+inline std::optional<BinOp> from_name<BinOp>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::Shr); ++i) {
+    const auto op = static_cast<BinOp>(i);
+    if (name_of(op) == s) return op;
+  }
+  return std::nullopt;
+}
+
+template <>
+inline std::optional<VarKind> from_name<VarKind>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(VarKind::Cell); ++i) {
+    const auto k = static_cast<VarKind>(i);
+    if (name_of(k) == s) return k;
+  }
+  return std::nullopt;
+}
+
+template <>
+inline std::optional<IntrinsicId> from_name<IntrinsicId>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::Enqueue); ++i) {
+    const auto id = static_cast<IntrinsicId>(i);
+    if (name_of(id) == s) return id;
+  }
+  return std::nullopt;
+}
+
+template <>
+inline std::optional<ConstKind> from_name<ConstKind>(std::string_view s) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(ConstKind::Str); ++i) {
+    const auto k = static_cast<ConstKind>(i);
+    if (name_of(k) == s) return k;
+  }
+  return std::nullopt;
+}
+
+namespace detail {
 
 struct Verifier {
   const Module& m;
@@ -2684,7 +2812,7 @@ struct Dumper {
         break;
       }
       case Tag::Unary:
-        out << (static_cast<UnOp>(n.op) == UnOp::BitNot ? "bitnot" : "neg");
+        out << name_of(static_cast<UnOp>(n.op));
         break;
       case Tag::Binary:
         out << name_of(static_cast<BinOp>(n.op));
