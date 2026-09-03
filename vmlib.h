@@ -1000,6 +1000,20 @@ struct Module {
   uint32_t num_children(NodeId id) const { return nodes[id.v].num_children; }
   SrcPos pos_of(NodeId id) const { return positions[nodes[id.v].pos]; }
   int64_t int_const(NodeId id) const { return consts[nodes[id.v].a].bits; }
+  // The other four literal kinds int_const doesn't cover: what a Literal
+  // node actually holds is (kind, bits), and only the caller who already
+  // knows the kind should decode bits -- const_kind is how it finds out.
+  ConstKind const_kind(NodeId id) const { return consts[nodes[id.v].a].kind; }
+  bool bool_const(NodeId id) const { return consts[nodes[id.v].a].bits != 0; }
+  double double_const(NodeId id) const {
+    double d;
+    const int64_t bits = consts[nodes[id.v].a].bits;
+    std::memcpy(&d, &bits, sizeof(double));
+    return d;
+  }
+  const std::string& str_const(NodeId id) const {
+    return str_consts[static_cast<size_t>(consts[nodes[id.v].a].bits)];
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1152,12 @@ struct IfView     { NodeId cond, then_, els; };  // els may be invalid
 struct WhileView  { NodeId cond, body; };
 struct ClosureView { int32_t func; int32_t capture_map; };
 struct IntrinsicView { IntrinsicId id; };
+// release_order is invalid when the Scope has no explicit release list (the
+// range releases last-slot-first instead) -- the same optional-child shape
+// IfView's `els` uses.
+struct ScopeView { int32_t first_local, end_local; NodeId body, release_order; };
+struct TryView { int32_t caught_local; NodeId body, handler; };
+struct CellFreshView { int32_t cell; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
   return {static_cast<UnOp>(m.at(n).op), m.child(n, 0)};
@@ -1164,6 +1184,17 @@ inline ClosureView view_make_closure(const Module& m, NodeId n) {
 }
 inline IntrinsicView view_intrinsic(const Module& m, NodeId n) {
   return {static_cast<IntrinsicId>(m.at(n).op)};
+}
+inline ScopeView view_scope(const Module& m, NodeId n) {
+  ScopeView v{m.at(n).a, m.at(n).b, m.child(n, 0), NodeId{}};
+  if (m.num_children(n) > 1) v.release_order = m.child(n, 1);
+  return v;
+}
+inline TryView view_try(const Module& m, NodeId n) {
+  return {m.at(n).a, m.child(n, 0), m.child(n, 1)};
+}
+inline CellFreshView view_cellfresh(const Module& m, NodeId n) {
+  return {m.at(n).a};
 }
 
 // ---------------------------------------------------------------------------
@@ -2823,21 +2854,23 @@ struct Dumper {
         break;
       }
       case Tag::If:     out << "if"; break;
-      case Tag::Scope:
-        out << "scope local[" << n.a << ".." << n.b << ")";
-        if (n.num_children == 2) out << " +release";
+      case Tag::Scope: {
+        const auto v = view_scope(m, id);
+        out << "scope local[" << v.first_local << ".." << v.end_local << ")";
+        if (v.release_order.valid()) out << " +release";
         break;
+      }
       case Tag::Return:   out << "return"; break;
       case Tag::Break:    out << "break"; break;
       case Tag::Continue: out << "continue"; break;
       case Tag::Throw:    out << "throw"; break;
       case Tag::Defer:    out << "defer"; break;
       case Tag::CellFresh:
-        out << "cellfresh cell[" << n.a << "]";
+        out << "cellfresh cell[" << view_cellfresh(m, id).cell << "]";
         break;
       case Tag::Yield: out << "yield"; break;
       case Tag::TryCatch:
-        out << "try caught=local[" << n.a << "]";
+        out << "try caught=local[" << view_try(m, id).caught_local << "]";
         break;
       case Tag::While:  out << "while"; break;
       case Tag::Block:  out << "block"; break;
@@ -3185,10 +3218,10 @@ struct FnCompiler {
     }
   }
 
-  // Scope's optional second child, as a Chunk::release_lists entry.
-  int32_t compile_release_list(NodeId scope) {
-    if (m.num_children(scope) < 2) return -1;
-    const NodeId list = m.child(scope, 1);
+  // Scope's optional release list, as a Chunk::release_lists entry.
+  int32_t compile_release_list(const ScopeView& sv) {
+    if (!sv.release_order.valid()) return -1;
+    const NodeId list = sv.release_order;
     std::vector<SlotRef> slots;
     for (uint32_t i = 0; i < m.num_children(list); ++i) {
       const auto v = view_varref(m, m.child(list, i));
@@ -3206,7 +3239,8 @@ struct FnCompiler {
   // merely named last -- `{ ...; a }` as a statement -- from dropping.
   int32_t compile_scope(NodeId id, bool want_value) {
     const Node& sn = m.at(id);
-    const bool defers = declares_defers(m.child(id, 0));
+    const ScopeView sv = view_scope(m, id);
+    const bool defers = declares_defers(sv.body);
     const int32_t regs_base = top;
     // Every Scope takes an owned-stack mark on entry; its exit resolves
     // the drop-bearing cycles bound under it. The mark's pc is the
@@ -3216,13 +3250,14 @@ struct FnCompiler {
     const int32_t mark_pc = defers ? here() : -1;
     if (defers) emit(Op::DeferMark, 0, 0, 0, sn.pos);
     const int32_t start = here();
-    const OpenScope sc{sn.a, sn.b, defers, compile_release_list(id)};
+    const OpenScope sc{sv.first_local, sv.end_local, defers,
+                       compile_release_list(sv)};
     open_scopes.push_back(sc);
     int32_t r = -1;
     if (want_value) {
-      r = compile_value(m.child(id, 0));
+      r = compile_value(sv.body);
     } else {
-      compile_stmt(m.child(id, 0));
+      compile_stmt(sv.body);
     }
     open_scopes.pop_back();
     int32_t defer_run_pc = -1;
@@ -3241,8 +3276,9 @@ struct FnCompiler {
       emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
     }
     emit_scope_release(sc, sn.pos);
-    ch.cleanups.push_back({start, here(), sn.a, sn.b, regs_base, -1, -1,
-                           mark_pc, owned_pc, sc.release_list});
+    ch.cleanups.push_back({start, here(), sv.first_local, sv.end_local,
+                           regs_base, -1, -1, mark_pc, owned_pc,
+                           sc.release_list});
     last_scope_defer_run_pc = defer_run_pc;
     return r;
   }
@@ -3299,18 +3335,18 @@ struct FnCompiler {
       case Tag::TryCatch: {
         // dst sits below regs_base on purpose: the unwinder drops the
         // region's temps, and the result register must not be one of them.
+        auto v = view_try(m, id);
         const int32_t dst = alloc();
         const int32_t regs_base = top;
         const int32_t start = here();
         last_scope_defer_run_pc = -1;
-        branch_into(dst, m.child(id, 0), n.pos);
+        branch_into(dst, v.body, n.pos);
         // A body that is a defer-declaring Scope runs those defers at its
         // fall-through exit; the guarded region ends before that run, so a
         // defer throwing there escapes its own catch (culebra's rule: a try
         // ends its region before the body's fall-through defer run).
         const int32_t body_end =
-            (m.at(m.child(id, 0)).tag == Tag::Scope &&
-             last_scope_defer_run_pc >= 0)
+            (m.at(v.body).tag == Tag::Scope && last_scope_defer_run_pc >= 0)
                 ? last_scope_defer_run_pc
                 : -1;
         const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
@@ -3319,8 +3355,8 @@ struct FnCompiler {
         // it still belongs to the guarded range (a callee's resume pc can
         // point at it), while the handler must not be guarded by its own try.
         ch.cleanups.push_back({start, body_end >= 0 ? body_end : handler_pc,
-                               0, 0, regs_base, handler_pc, n.a});
-        branch_into(dst, m.child(id, 1), n.pos);
+                               0, 0, regs_base, handler_pc, v.caught_local});
+        branch_into(dst, v.handler, n.pos);
         patch(jend, here());
         return dst;
       }
@@ -3603,7 +3639,7 @@ struct FnCompiler {
       }
 
       case Tag::CellFresh:
-        emit(Op::CellNew, n.a, 0, 0, n.pos);
+        emit(Op::CellNew, view_cellfresh(m, id).cell, 0, 0, n.pos);
         break;
 
       case Tag::Break:

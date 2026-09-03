@@ -1,4 +1,5 @@
-// name_of / from_name -- the IR's vocabulary, both ways.
+// name_of / from_name -- the IR's vocabulary, both ways -- plus the Literal
+// accessors that round out Module::int_const to the other four kinds.
 //
 // Each enum's names live in exactly one place (the name_of switch); from_name
 // is nothing but a scan over name_of. This test pins the property a second
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "vmlib.h"
@@ -91,6 +93,42 @@ int main() {
   if (std::string_view(name_of(Tag::Unary)) != "unary") {
     std::fprintf(stderr, "FAIL: name_of(Tag::Unary) is not \"unary\"\n");
     ++g_failures;
+  }
+
+  // Module's Literal accessors: const_kind says which of the four payloads a
+  // Literal actually holds, and int_const's three new siblings decode it.
+  // Nothing in this library calls them yet (int_const is the only kind pl0
+  // ever needs), so this is their one exercise.
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    const NodeId i = b.literal(42, p);
+    const NodeId bo = b.bool_literal(true, p);
+    const NodeId d = b.double_literal(3.5, p);
+    const NodeId n = b.nil_literal(p);
+    const NodeId s = b.str_literal("hi", p);
+
+    if (m.const_kind(i) != ConstKind::Int || m.int_const(i) != 42) {
+      std::fprintf(stderr, "FAIL: int literal accessors\n");
+      ++g_failures;
+    }
+    if (m.const_kind(bo) != ConstKind::Bool || !m.bool_const(bo)) {
+      std::fprintf(stderr, "FAIL: bool literal accessors\n");
+      ++g_failures;
+    }
+    if (m.const_kind(d) != ConstKind::Double || m.double_const(d) != 3.5) {
+      std::fprintf(stderr, "FAIL: double literal accessors\n");
+      ++g_failures;
+    }
+    if (m.const_kind(n) != ConstKind::Nil) {
+      std::fprintf(stderr, "FAIL: nil literal accessor\n");
+      ++g_failures;
+    }
+    if (m.const_kind(s) != ConstKind::Str || m.str_const(s) != "hi") {
+      std::fprintf(stderr, "FAIL: str literal accessors\n");
+      ++g_failures;
+    }
   }
 
   if (g_failures != 0) {
