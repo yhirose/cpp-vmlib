@@ -60,10 +60,10 @@ int main() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastTag); ++i) {
     check_round_trip(static_cast<Tag>(i), "Tag");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::WrapU32); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastUnOp); ++i) {
     check_round_trip(static_cast<UnOp>(i), "UnOp");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::UGe); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastBinOp); ++i) {
     check_round_trip(static_cast<BinOp>(i), "BinOp");
   }
   for (uint8_t i = 0; i <= static_cast<uint8_t>(VarKind::Cell); ++i) {

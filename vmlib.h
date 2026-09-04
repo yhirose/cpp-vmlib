@@ -1074,6 +1074,11 @@ enum class BinOp : uint8_t {
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,
 };
 
+// The last enumerator of each, for the scans (from_name, test_names) that
+// walk the enum's range -- kLastTag's own reason, one enum further.
+inline constexpr UnOp kLastUnOp = UnOp::WrapU32;
+inline constexpr BinOp kLastBinOp = BinOp::UGe;
+
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
 // shortest-round-trip doubles included. A language whose display rules
 // differ (culebra prints whole doubles as "4.0") post-processes the result
@@ -1573,6 +1578,10 @@ struct TryView { int32_t caught_local; NodeId body, handler; };
 struct CellFreshView { int32_t cell; };
 struct FieldView { int32_t slot, name_const; NodeId receiver; };
 struct FieldSetView { int32_t slot, name_const; NodeId receiver, value; };
+// Break and Continue carry the same one field, so they share a view: how
+// many enclosing loops to skip, 0 being the innermost.
+struct LoopJumpView { int32_t depth; };
+struct NativeRefView { int32_t index; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
   return {static_cast<UnOp>(m.at(n).op), m.child(n, 0)};
@@ -1632,6 +1641,15 @@ inline FieldView view_field_get(const Module& m, NodeId n) {
 }
 inline FieldSetView view_field_set(const Module& m, NodeId n) {
   return {m.at(n).a, m.at(n).b, m.child(n, 0), m.child(n, 1)};
+}
+inline LoopJumpView view_break(const Module& m, NodeId n) {
+  return {m.at(n).a};
+}
+inline LoopJumpView view_continue(const Module& m, NodeId n) {
+  return {m.at(n).a};
+}
+inline NativeRefView view_native_ref(const Module& m, NodeId n) {
+  return {m.at(n).a};
 }
 
 // ---------------------------------------------------------------------------
@@ -3435,7 +3453,7 @@ inline std::optional<Tag> from_name<Tag>(std::string_view s) {
 
 template <>
 inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::WrapU32); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastUnOp); ++i) {
     const auto op = static_cast<UnOp>(i);
     if (name_of(op) == s) return op;
   }
@@ -3444,7 +3462,7 @@ inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
 
 template <>
 inline std::optional<BinOp> from_name<BinOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::UGe); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastBinOp); ++i) {
     const auto op = static_cast<BinOp>(i);
     if (name_of(op) == s) return op;
   }
@@ -3640,13 +3658,15 @@ struct Verifier {
         break;
       case Tag::Break:
         if (loop_depth == 0) return fail("Break outside a loop body");
-        if (n.a < 0 || n.a >= loop_depth) {
+        if (view_break(m, id).depth < 0 ||
+            view_break(m, id).depth >= loop_depth) {
           return fail("Break names a loop that is not open");
         }
         break;
       case Tag::Continue:
         if (loop_depth == 0) return fail("Continue outside a loop body");
-        if (n.a < 0 || n.a >= loop_depth) {
+        if (view_continue(m, id).depth < 0 ||
+            view_continue(m, id).depth >= loop_depth) {
           return fail("Continue names a loop that is not open");
         }
         break;
@@ -3670,11 +3690,13 @@ struct Verifier {
           return fail("Yield outside a generator function");
         }
         break;
-      case Tag::NativeRef:
-        if (n.a < 0 || static_cast<size_t>(n.a) >= m.natives.size()) {
+      case Tag::NativeRef: {
+        const int32_t idx = view_native_ref(m, id).index;
+        if (idx < 0 || static_cast<size_t>(idx) >= m.natives.size()) {
           return fail("native index out of range");
         }
         break;
+      }
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -3807,10 +3829,13 @@ struct Dumper {
       }
       case Tag::Return:   out << "return"; break;
       case Tag::Break:
-      case Tag::Continue:
+      case Tag::Continue: {
         out << name_of(n.tag);
-        if (n.a > 0) out << " ^" << n.a;  // how many loops it skips
+        const int32_t depth = n.tag == Tag::Break ? view_break(m, id).depth
+                                                  : view_continue(m, id).depth;
+        if (depth > 0) out << " ^" << depth;  // how many loops it skips
         break;
+      }
       case Tag::Throw:    out << "throw"; break;
       case Tag::Defer:    out << "defer"; break;
       case Tag::CellFresh:
@@ -3848,10 +3873,12 @@ struct Dumper {
             << "]=" << m.str_const_at(v.name_const);
         break;
       }
-      case Tag::NativeRef:
-        out << "nativeref " << m.natives[static_cast<size_t>(n.a)] << " #"
-            << n.a;
+      case Tag::NativeRef: {
+        const int32_t idx = view_native_ref(m, id).index;
+        out << "nativeref " << m.natives[static_cast<size_t>(idx)] << " #"
+            << idx;
         break;
+      }
     }
     out << "  @" << p.line << ":" << p.col << "\n";
     for (uint32_t i = 0; i < n.num_children; ++i) node(m.child(id, i), d + 1);
@@ -4641,7 +4668,7 @@ struct FnCompiler {
       }
       case Tag::NativeRef: {
         const int32_t r = alloc();
-        emit(Op::NativeRef, r, n.a, 0, n.pos);
+        emit(Op::NativeRef, r, view_native_ref(m, id).index, 0, n.pos);
         return r;
       }
       case Tag::Yield: {
@@ -4849,12 +4876,14 @@ struct FnCompiler {
 
       case Tag::Break:
       case Tag::Continue: {
-        // verify(): inside a loop body, and n.a names one that is open.
-        // leave_down_to already leaves every scope between here and the
-        // target loop, however many loops lie in between, so a labeled
+        // verify(): inside a loop body, and the depth names one that is
+        // open. leave_down_to already leaves every scope between here and
+        // the target loop, however many loops lie in between, so a labeled
         // exit costs nothing the plain one did not.
+        const int32_t depth = n.tag == Tag::Break ? view_break(m, id).depth
+                                                  : view_continue(m, id).depth;
         OpenLoop& loop =
-            open_loops[open_loops.size() - 1 - static_cast<size_t>(n.a)];
+            open_loops[open_loops.size() - 1 - static_cast<size_t>(depth)];
         leave_down_to(loop.scope_depth, loop.stmt_base, n.pos);
         if (n.tag == Tag::Continue) {
           emit(Op::Jump, loop.head, 0, 0, n.pos);
