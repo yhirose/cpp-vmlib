@@ -283,6 +283,61 @@ int main() {
            "drop order off: failure");
   check_eq(joined(), "f|drop|end|", "drop order off: callee first");
 
+  // --- 4b. A scope that named its own release order keeps it. ---------------
+  // The one thing tail_calls is allowed to change is *when* the frame exits
+  // (case 4). A Scope built with an explicit release list also fixes *what
+  // order* its slots go in -- ascending here, the opposite of the default
+  // last-slot-first -- and TailCall's own exit is a blanket release_range
+  // that knows neither that order nor a cell refresh. So a scope naming one
+  // keeps the ordinary call: same order on and off, only the exit moves.
+  // g() { scope[release a, b] { a = {drop:d1}; b = {drop:d2}; return f() } }
+  auto release_order = [&](bool tail) {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.capture_maps.push_back(
+        {{VarKind::Cell, 0}, {VarKind::Cell, 1}, {VarKind::Cell, 2}});
+    m.funcs.push_back({});
+    m.funcs.push_back({"f", 0, 0, pr(b, b.str_literal("f", p)), {}, {}});
+    m.funcs.push_back({"d1", 1, 0, pr(b, b.str_literal("dropA", p)), {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.push_back({"d2", 1, 0, pr(b, b.str_literal("dropB", p)), {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    // captures: 0 = f, 1 = d1, 2 = d2. Locals: 0 = a, 1 = b.
+    auto hook = [&](Builder& bb, int32_t cap_i) {
+      return bb.object_lit({{bb.str_literal("\x01" "drop", p), cap(bb, cap_i)}}, p);
+    };
+    m.funcs.push_back(
+        {"g", 2, 3,
+         b.scope(0, 2,
+                 b.block({b.assign(VarKind::Local, 0, hook(b, 1), p),
+                          b.assign(VarKind::Local, 1, hook(b, 2), p),
+                          b.make_return(b.call_value(cap(b, 0), {}, p), p)},
+                         p),
+                 {loc(b, 0), loc(b, 1)},  // ascending: a then b
+                 p),
+         {"a", "b"}, {"f", "d1", "d2"}});
+    m.funcs.back().tail_calls = tail;
+    m.funcs[0] = {"main", 0, 0,
+                  b.block({b.assign(VarKind::Cell, 0, b.make_closure(1, 0, p), p),
+                           b.assign(VarKind::Cell, 1, b.make_closure(2, 0, p), p),
+                           b.assign(VarKind::Cell, 2, b.make_closure(3, 0, p), p),
+                           b.call_value(b.make_closure(4, 1, p), {}, p),
+                           pr(b, b.str_literal("end", p))},
+                          p),
+                  {}, {}};
+    m.funcs[0].num_cells = 3;
+    return m;
+  };
+  check_eq(run_module(release_order(true), "release order"), "",
+           "release order: failure");
+  check_eq(joined(), "f|dropA|dropB|end|",
+           "release order: the declared order, tail_calls on");
+  check_eq(run_module(release_order(false), "release order off"), "",
+           "release order off: failure");
+  check_eq(joined(), "f|dropA|dropB|end|",
+           "release order off: the same declared order");
+
   // --- 5. Left alone inside a try body: the handler survives the call. ---
   // h() { try { return thrower() } catch e { print "caught " + e } }
   {

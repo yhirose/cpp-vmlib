@@ -4193,11 +4193,15 @@ struct FnCompiler {
 
   // Whether a CallValue here may be emitted as a TailCall: the function
   // asked for them (Func::tail_calls), no try body is open, and no open
-  // Scope declares defers -- Func::tail_calls' comment has the reasons.
+  // Scope declares defers or a release order -- Func::tail_calls' comment
+  // has the reasons for the first two. The third is the same shape: TailCall
+  // exits the frame with a blanket release_range over the locals, which is
+  // neither the declared order nor a cell refresh, so a scope that named one
+  // keeps the ordinary call rather than silently getting the default order.
   bool tail_call_ok() const {
     if (!ch.tail_calls || try_depth > 0) return false;
     for (const OpenScope& sc : open_scopes) {
-      if (sc.has_defers) return false;
+      if (sc.has_defers || sc.release_list >= 0) return false;
     }
     return true;
   }
