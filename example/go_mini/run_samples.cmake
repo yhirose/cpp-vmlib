@@ -10,7 +10,7 @@
 # side in one directory would both declare `func main`, which `go build`
 # (though not the single-file `go run` this script itself uses) rejects.
 
-set(SAMPLES ints floats structs switch)
+set(SAMPLES ints floats structs switch goroutines)
 
 set(dir ${SRC}/samples)
 set(failed 0)

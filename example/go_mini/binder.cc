@@ -35,14 +35,21 @@
 //     Switch's; `case a, b:` shares one compiled body NodeId between both
 //     keys rather than compiling it twice.
 //
+//   * goroutines are coroutines on vmlib's scheduler (`go f(args)` is
+//     Enqueue(CoroCreate(wrapper)), main itself runs as the first one --
+//     see emit_bootstrap), and an unbuffered channel is an object whose
+//     two operations are funcs this binder writes in IR once per module
+//     (emit_channel_runtime) over CoroCurrent / CoroYield / Enqueue.
+//
 // What is deliberately absent, because it is not what this front end is
-// for: control flow beyond switch (no if/for), methods, multiple return
-// values, and a struct as a func parameter or return type (structs here
-// are local-only). A source file here is real Go, though a narrow slice of
+// for: methods, multiple return values, `select`, buffered channels, and
+// a struct as a func parameter or return type (structs here are
+// local-only). A source file here is real Go, though a narrow slice of
 // it -- every sample also runs unmodified under `go run`.
 
 #include "binder.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -62,11 +69,14 @@ using namespace coreir;
 namespace go_mini {
 namespace {
 
-// Struct is deliberately last and outside type_from_name's vocabulary: a
-// struct's identity is its name in the struct table (Binder::structs), not
-// a fixed word this front end knows ahead of time, so resolving one needs
-// the table (Binder::resolve_type) rather than this free function.
-enum class Type { I32, I64, U32, F32, F64, Bool, Struct };
+// Struct and Chan are deliberately last and outside type_from_name's
+// vocabulary: a struct's identity is its name in the struct table
+// (Binder::structs), a channel's is its element type, and neither is a
+// fixed word this front end knows ahead of time, so resolving either needs
+// more than this free function (Binder::resolve_type). Both carry their
+// second half in the `struct_id` field beside them: the structs index for
+// a Struct, the element Type (one of the six scalars) for a Chan.
+enum class Type { I32, I64, U32, F32, F64, Bool, Struct, Chan };
 
 const char* type_name(Type t) {
   switch (t) {
@@ -77,6 +87,7 @@ const char* type_name(Type t) {
     case Type::F64: return "float64";
     case Type::Bool: return "bool";
     case Type::Struct: return "struct";
+    case Type::Chan: return "chan";
   }
   return "?";
 }
@@ -98,11 +109,6 @@ SrcPos pos_of(const Ast& a) {
 [[noreturn]] void fail(const Ast& a, const std::string& msg) {
   coreir_rt::fail(msg, static_cast<uint32_t>(a.line),
               static_cast<uint32_t>(a.column));
-}
-
-Type parse_type(const std::string& s, const Ast& at) {
-  if (auto t = type_from_name(s)) return *t;
-  fail(at, "unknown type '" + s + "'");
 }
 
 int64_t parse_int(const std::string& s, const Ast& at) {
@@ -129,55 +135,78 @@ BinOp binop_of(std::string_view t, const Ast& at) {
   if (t == "/") return BinOp::Div;
   if (t == "==") return BinOp::Eq;
   if (t == "!=") return BinOp::Ne;
+  if (t == "<") return BinOp::Lt;
+  if (t == "<=") return BinOp::Le;
+  if (t == ">") return BinOp::Gt;
+  if (t == ">=") return BinOp::Ge;
   fail(at, "unknown operator '" + std::string(t) + "'");
 }
 
+// Whether a Type needs its struct_id to be fully described: a Struct (which
+// struct) and a Chan (which element type). Every other Type is
+// self-describing.
+bool has_second_half(Type t) { return t == Type::Struct || t == Type::Chan; }
+
 // Two Struct-typed values (or hints) are the same type only if they name
-// the same struct -- the one comparison Type alone, a plain enum, cannot
-// make; every other Type is self-describing.
+// the same struct, two Chan-typed ones only if they carry the same element
+// -- the one comparison Type alone, a plain enum, cannot make.
 bool same_type(Type t1, int32_t struct_id1, Type t2, int32_t struct_id2) {
-  return t1 == t2 && (t1 != Type::Struct || struct_id1 == struct_id2);
+  return t1 == t2 && (!has_second_half(t1) || struct_id1 == struct_id2);
 }
 
-// A struct-typed target gives a literal nothing to take on. Hints exist for
-// Go's untyped constants -- `var x int32 = 1` is what narrows the 1 -- and
-// no literal syntax here can ever become a struct, so a struct target hands
-// down nullopt and lets the assignment's own same_type check produce the
-// message rather than literal_as's cruder "cannot use an integer literal as
-// a struct". Four positions want exactly this (vardecl, a plain assign, a
-// field assign and a structlit's fieldinit), which is why it is a function
-// rather than the same ternary spelled out four times.
+// A struct- or chan-typed target gives a literal nothing to take on. Hints
+// exist for Go's untyped constants -- `var x int32 = 1` is what narrows the
+// 1 -- and no literal syntax here can ever become a struct or a channel, so
+// such a target hands down nullopt and lets the assignment's own same_type
+// check produce the message rather than literal_as's cruder "cannot use an
+// integer literal as a struct". Four positions want exactly this (vardecl,
+// a plain assign, a field assign and a structlit's fieldinit), which is why
+// it is a function rather than the same ternary spelled out four times.
 std::optional<Type> hint_for(Type t) {
-  if (t == Type::Struct) return std::nullopt;
+  if (has_second_half(t)) return std::nullopt;
   return t;
 }
 
+// A resolved `type` token: a fixed scalar, or Type::Struct plus which entry
+// of Binder::structs it names, or Type::Chan plus its element Type (as an
+// int, in the same field).
+struct TypeRef { Type type; int32_t struct_id = -1; };
+
 // A variable's slot and static type; a function's own call-target cells
 // (README's Static calls recipe) and, while its body is being compiled,
-// how many locals it has declared so far. struct_id is only meaningful
-// when type == Type::Struct.
+// how many locals and cells it has claimed so far. struct_id is only
+// meaningful when type is a Struct or a Chan (TypeRef's rule).
 struct LocalInfo { int32_t slot; Type type; int32_t struct_id = -1; };
 
 struct FuncCtx {
   std::map<std::string, LocalInfo> locals;
   std::vector<std::string> local_names;  // parallel to Func::num_locals
   int32_t next_local = 0;
+  // The Static calls recipe's cells: one per distinct callee this body
+  // reaches, claimed the first time a call to it is emitted and filled by
+  // the preamble build() puts ahead of the body. A `go` statement claims
+  // further cells of its own for the arguments it evaluates.
   std::map<std::string, int32_t> call_cells;  // callee name -> cell index
-  std::optional<Type> ret_type;
+  int32_t next_cell = 0;
+  std::optional<TypeRef> ret_type;
+
+  int32_t cell_for(const std::string& callee) {
+    auto it = call_cells.find(callee);
+    if (it != call_cells.end()) return it->second;
+    const int32_t c = next_cell++;
+    call_cells[callee] = c;
+    return c;
+  }
 };
 
 struct FuncInfo {
   int32_t index = 0;
   bool has_ret = false;
-  Type ret = Type::I64;
-  std::vector<Type> param_types;
+  TypeRef ret{Type::I64, -1};
+  std::vector<TypeRef> param_types;
 };
 
 struct TypedExpr { NodeId node; Type type; int32_t struct_id = -1; };
-
-// A resolved `type` token: either a fixed scalar, or Type::Struct plus
-// which entry of Binder::structs it names.
-struct TypeRef { Type type; int32_t struct_id = -1; };
 
 // One struct field: its static type (README's Struct fields section) and
 // the props slot ObjectLit/FieldGet/FieldSet agree on -- declaration order,
@@ -191,24 +220,50 @@ struct Binder {
   std::map<std::string, int32_t> struct_ids;  // struct name -> structs index
   std::vector<StructDef> structs;
 
-  // Struct(struct_id).name when t == Type::Struct, else type_name(t) -- the
-  // one place a diagnostic needs a struct's own name rather than the word
-  // "struct".
+  // Struct(struct_id).name when t == Type::Struct, "chan <elem>" for a
+  // Chan, else type_name(t) -- the one place a diagnostic needs a type's
+  // own spelling rather than the bare word "struct" or "chan".
   std::string describe_type(Type t, int32_t struct_id) const {
     if (t == Type::Struct) return structs[static_cast<size_t>(struct_id)].name;
+    if (t == Type::Chan) {
+      return std::string("chan ") + type_name(static_cast<Type>(struct_id));
+    }
     return type_name(t);
   }
 
-  // A `type` token as either of the two things it can name: one of
-  // type_from_name's six fixed words, or a struct declared by an earlier
-  // (in source order -- this front end resolves field and var types in one
-  // linear pass, so a struct's own fields may only name structs declared
-  // above it) structdecl.
+  // A `type` token as any of the three things it can name: one of
+  // type_from_name's six fixed words; `chan T` for one of those six (the
+  // grammar captures the two words as one token, whitespace and all); or a
+  // struct declared by an earlier (in source order -- this front end
+  // resolves field and var types in one linear pass, so a struct's own
+  // fields may only name structs declared above it) structdecl.
   TypeRef resolve_type(const std::string& s, const Ast& at) {
     if (auto t = type_from_name(s)) return {*t, -1};
+    if (s.size() > 4 && s.compare(0, 4, "chan") == 0 &&
+        std::isspace(static_cast<unsigned char>(s[4]))) {
+      std::string elem = s.substr(4);
+      const size_t b = elem.find_first_not_of(" \t\r\n");
+      const size_t e = elem.find_last_not_of(" \t\r\n");
+      elem = b == std::string::npos ? "" : elem.substr(b, e - b + 1);
+      auto t = type_from_name(elem);
+      if (!t) fail(at, "unsupported channel element type '" + elem + "'");
+      return {Type::Chan, static_cast<int32_t>(*t)};
+    }
     auto it = struct_ids.find(s);
     if (it == struct_ids.end()) fail(at, "unknown type '" + s + "'");
     return {Type::Struct, it->second};
+  }
+
+  // A type in a func signature: resolve_type, minus structs -- a struct as
+  // a param or return raises value-semantics questions (does the callee's
+  // copy alias the caller's?) this front end does not take on. A channel
+  // is a reference in Go itself, so it passes through unchanged.
+  TypeRef resolve_sig_type(const std::string& s, const Ast& at) {
+    const TypeRef t = resolve_type(s, at);
+    if (t.type == Type::Struct) {
+      fail(at, "a struct cannot be a parameter or return type here");
+    }
+    return t;
   }
 
   // A field's index within its struct (== its ObjectLit/FieldGet/FieldSet
@@ -441,12 +496,12 @@ struct Binder {
       info.index = static_cast<int32_t>(m.funcs.size());
       if (const Ast* rt = find_child(*fn, "type")) {
         info.has_ret = true;
-        info.ret = parse_type(std::string(rt->token), *rt);
+        info.ret = resolve_sig_type(std::string(rt->token), *rt);
       }
       const Ast* params = find_child(*fn, "params");
       for (const auto& p : params->nodes) {
         info.param_types.push_back(
-            parse_type(std::string(find_child(*p, "type")->token), *p));
+            resolve_sig_type(std::string(find_child(*p, "type")->token), *p));
       }
       funcs[name] = info;
 
@@ -457,15 +512,126 @@ struct Binder {
     }
   }
 
-  // Every "call" node anywhere under `a` whose callee names a declared
-  // func (not a type-conversion keyword) -- what the caller must reserve
-  // one Cell for, per the Static calls recipe.
-  void collect_call_targets(const Ast& a, std::set<std::string>& out) {
-    if (a.tag == "call"_) {
-      const std::string callee(find_child(a, "ident")->token);
-      if (!type_from_name(callee) && funcs.count(callee)) out.insert(callee);
+  // -- The runtime this front end writes in its own IR --------------------
+  //
+  // An unbuffered channel is an object {recvq: [...], sendq: [...]} whose
+  // queues hold waiters, each a {co, value} object: the coroutine parked
+  // on the channel and the value it is sending or (once woken) received.
+  // $chan_send and $chan_recv are the two operations, as ordinary funcs
+  // built here once and called through the same Static calls cells any
+  // user func is; the `$` keeps them out of the source language's reach.
+  // The library supplies only the primitives -- CoroCurrent, CoroYield,
+  // Enqueue -- and Go's own rendezvous rule (a sender with a receiver
+  // waiting hands off and goes on; one without parks until a receiver
+  // takes the value and wakes it; symmetrically for a receiver) is
+  // written here, not in vmlib.h, because it is Go's rule and not every
+  // language's.
+  void emit_channel_runtime() {
+    Builder b(m);
+    const SrcPos p{0, 0};
+    auto L = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    auto S = [&](const char* s) { return b.str_literal(s, p); };
+    auto len = [&](NodeId v) { return b.intrinsic(IntrinsicId::Len, {v}, p); };
+    // queue[0], and queue = queue[1:] -- the take-the-first step both
+    // directions share; `w` is the local the waiter lands in.
+    auto take_first = [&](NodeId ch, const char* q, int32_t w) {
+      const NodeId queue = b.index(ch, S(q), p);
+      return std::vector<NodeId>{
+          b.assign(VarKind::Local, w, b.index(queue, b.literal(0, p), p), p),
+          b.set_index(ch, S(q),
+                      b.intrinsic(IntrinsicId::ArraySlice,
+                                  {queue, b.literal(1, p), len(queue)}, p),
+                      p)};
+    };
+    auto waiting = [&](NodeId ch, const char* q) {
+      return b.binary(BinOp::Gt, len(b.index(ch, S(q), p)), b.literal(0, p),
+                      p);
+    };
+    auto park = [&](NodeId ch, const char* q, int32_t w, NodeId value) {
+      return std::vector<NodeId>{
+          b.assign(VarKind::Local, w,
+                   b.object_lit({{S("co"),
+                                  b.intrinsic(IntrinsicId::CoroCurrent, {}, p)},
+                                 {S("value"), value}},
+                                p),
+                   p),
+          b.intrinsic(IntrinsicId::ArrayPush, {b.index(ch, S(q), p), L(w)}, p),
+          b.intrinsic(IntrinsicId::CoroYield, {b.nil_literal(p)}, p)};
+    };
+    auto wake = [&](int32_t w) {
+      return b.intrinsic(IntrinsicId::Enqueue,
+                         {b.index(L(w), S("co"), p)}, p);
+    };
+
+    // $chan_send(ch, v): locals ch, v, w.
+    {
+      std::vector<NodeId> handoff = take_first(L(0), "recvq", 2);
+      handoff.push_back(b.set_index(L(2), S("value"), L(1), p));
+      handoff.push_back(wake(2));
+      Func f;
+      f.name = "$chan_send";
+      f.num_params = 2;
+      f.num_locals = 3;
+      f.local_names = {"ch", "v", "w"};
+      f.body = b.scope(0, 3,
+                       b.make_if(waiting(L(0), "recvq"), b.block(handoff, p),
+                                 b.block(park(L(0), "sendq", 2, L(1)), p), p),
+                       p);
+      funcs["$chan_send"].index = static_cast<int32_t>(m.funcs.size());
+      m.funcs.push_back(f);
     }
-    for (const auto& c : a.nodes) collect_call_targets(*c, out);
+    // $chan_recv(ch) -> value: locals ch, w.
+    {
+      std::vector<NodeId> take = take_first(L(0), "sendq", 1);
+      take.push_back(wake(1));
+      take.push_back(b.make_return(b.index(L(1), S("value"), p), p));
+      std::vector<NodeId> wait = park(L(0), "recvq", 1, b.nil_literal(p));
+      wait.push_back(b.make_return(b.index(L(1), S("value"), p), p));
+      Func f;
+      f.name = "$chan_recv";
+      f.num_params = 1;
+      f.num_locals = 2;
+      f.local_names = {"ch", "w"};
+      f.body = b.scope(0, 2,
+                       b.make_if(waiting(L(0), "sendq"), b.block(take, p),
+                                 b.block(wait, p), p),
+                       p);
+      funcs["$chan_recv"].index = static_cast<int32_t>(m.funcs.size());
+      m.funcs.push_back(f);
+    }
+  }
+
+  // Go's main is a goroutine: it can block on a channel, and a program
+  // whose every goroutine is blocked is a deadlock rather than a hang.
+  // vmlib's entry frame is neither (a CoroYield there has no coroutine to
+  // suspend), so funcs[0] is a bootstrap that spawns main as the first
+  // goroutine -- Enqueue(CoroCreate(wrapper)) -- and returns; the
+  // scheduler drains the queue from there, and its end-of-run deadlock
+  // check is Go's "all goroutines are asleep". The wrapper takes the one
+  // argument the scheduler passes (nil) leniently and calls main with
+  // none. One consequence to know: where Go ends the program when main
+  // returns, this scheduler runs the goroutines still runnable to their
+  // own ends, so a sample that wants Go's output must not leave any with
+  // output pending -- the samples synchronize through channels instead.
+  void emit_bootstrap() {
+    Builder b(m);
+    const SrcPos p{0, 0};
+    const int32_t empty_cmap = static_cast<int32_t>(m.capture_maps.size());
+    m.capture_maps.push_back({});
+    Func w;
+    w.name = "$main";
+    w.lenient_arity = true;
+    w.body = b.call_value(b.make_closure(funcs.at("main").index, empty_cmap, p),
+                          {}, p);
+    const int32_t widx = static_cast<int32_t>(m.funcs.size());
+    m.funcs.push_back(w);
+    Func& entry = m.funcs[0];
+    entry.name = "$entry";
+    entry.body = b.intrinsic(
+        IntrinsicId::Enqueue,
+        {b.intrinsic(IntrinsicId::CoroCreate,
+                     {b.make_closure(widx, empty_cmap, p)}, p)},
+        p);
   }
 
   // -- Literals -----------------------------------------------------------
@@ -509,28 +675,34 @@ struct Binder {
       case Type::Bool: fail(at, std::string("cannot ") + verb + " bool");
       case Type::Struct:
         fail(at, std::string("cannot ") + verb + " a struct");
+      case Type::Chan:
+        fail(at, std::string("cannot ") + verb + " a channel");
     }
     fail(at, "unreachable");
   }
 
   // -- Arithmetic, per README's Fixed-width integers and `float` recipes -
   TypedExpr emit_binary(BinOp op, TypedExpr l, TypedExpr r, const Ast& at) {
-    if (l.type != r.type) {
-      fail(at, std::string("cannot combine ") + type_name(l.type) + " and " +
-                  type_name(r.type));
+    if (!same_type(l.type, l.struct_id, r.type, r.struct_id)) {
+      fail(at, "cannot combine " + describe_type(l.type, l.struct_id) +
+                   " and " + describe_type(r.type, r.struct_id));
     }
     const SrcPos p = pos_of(at);
     Builder b(m);
-    if (op == BinOp::Eq || op == BinOp::Ne) {
+    if (is_comparison(op)) {
       // Go compares two structs field by field; Eq/Ne here is ObjectObj
       // identity, which would answer a different question -- so refuse it
       // at bind time rather than let the executor's own "cannot eq object
       // and object" stand in for a diagnostic, the same way printing a
-      // struct is refused in "print" below.
-      if (l.type == Type::Struct) {
+      // struct is refused in "print" below. Channels the same, and an
+      // ordering of bools is not Go either.
+      if (has_second_half(l.type) ||
+          (l.type == Type::Bool && op != BinOp::Eq && op != BinOp::Ne)) {
         fail(at, "cannot compare " + describe_type(l.type, l.struct_id) +
                      " values");
       }
+      // A normalized operand compares correctly at every width without a
+      // wrap or an unsigned form (README's Fixed-width integers section).
       return {b.binary(op, l.node, r.node, p), Type::Bool};
     }
     const NodeId raw = b.binary(op, l.node, r.node, p);
@@ -618,6 +790,8 @@ struct Binder {
         fail(at, "cannot convert to bool");
       case Type::Struct:
         fail(at, "cannot convert to a struct");
+      case Type::Chan:
+        fail(at, "cannot convert to a channel");
     }
     fail(at, "unreachable");
   }
@@ -703,46 +877,49 @@ struct Binder {
       // never required that receiver to be one.
       case "fieldaccess"_:
         return walk_fields(a, ctx, a.nodes.size(), p);
+      // <-ch: the element the channel hands over, through $chan_recv. Its
+      // type is the channel's element type, which is what makes
+      // `var v int32 = <-in` check and `fmt.Println(<-out)` print an int.
+      case "recv"_: {
+        const LocalInfo& li = channel_local(*a.nodes[0], ctx);
+        const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
+        return {b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p),
+                static_cast<Type>(li.struct_id)};
+      }
+      // make(chan T): a fresh channel object. Its two queues start empty;
+      // emit_channel_runtime's two funcs are the only things that read or
+      // write them.
+      case "makechan"_: {
+        const TypeRef t = resolve_type(std::string(a.nodes[0]->token), a);
+        if (t.type != Type::Chan) fail(a, "make takes a channel type here");
+        const NodeId ch = b.object_lit(
+            {{b.str_literal("recvq", p), b.array_lit({}, p)},
+             {b.str_literal("sendq", p), b.array_lit({}, p)}},
+            p);
+        return {ch, Type::Chan, t.struct_id};
+      }
       case "call"_: {
         const std::string callee(find_child(a, "ident")->token);
-        const Ast* argsNode = find_child(a, "args");
-        std::vector<const Ast*> argAsts;
-        if (argsNode != nullptr) {
-          for (const auto& n : argsNode->nodes) argAsts.push_back(n.get());
-        }
-
         if (auto conv = type_from_name(callee)) {
-          if (argAsts.size() != 1) {
+          const Ast* argsNode = find_child(a, "args");
+          if (argsNode == nullptr || argsNode->nodes.size() != 1) {
             fail(a, "conversion takes exactly one argument");
           }
-          TypedExpr v = emit_expr(*argAsts[0], ctx, std::nullopt);
+          TypedExpr v = emit_expr(*argsNode->nodes[0], ctx, std::nullopt);
           return emit_convert(*conv, v, a);
         }
-
-        auto fit = funcs.find(callee);
-        if (fit == funcs.end()) fail(a, "undefined: " + callee);
-        const FuncInfo& info = fit->second;
-        if (argAsts.size() != info.param_types.size()) {
-          fail(a, "wrong argument count calling " + callee);
-        }
-        std::vector<NodeId> args;
-        args.reserve(argAsts.size());
-        for (size_t i = 0; i < argAsts.size(); ++i) {
-          TypedExpr v = emit_expr(*argAsts[i], ctx, info.param_types[i]);
-          if (v.type != info.param_types[i]) {
-            fail(*argAsts[i], "argument type mismatch calling " + callee);
-          }
-          args.push_back(v.node);
-        }
+        const FuncInfo& info = func_of(a, callee);
+        const std::vector<NodeId> args = emit_call_args(a, ctx, info, callee);
         if (!info.has_ret) fail(a, callee + " does not return a value");
-        // The recipe: read the closure register_funcs's caller already
-        // built once (see collect_call_targets/the preamble in build()),
-        // rather than a fresh MakeClosure at every call site.
-        const int32_t cell = ctx.call_cells.at(callee);
-        const NodeId closure = b.varref(VarKind::Cell, cell, p);
-        return {b.call_value(closure, args, p), info.ret};
+        // The recipe: read the closure this function's preamble built once
+        // (the cell claimed here, filled in build()), rather than a fresh
+        // MakeClosure at every call site.
+        const NodeId closure = b.varref(VarKind::Cell, ctx.cell_for(callee), p);
+        return {b.call_value(closure, args, p), info.ret.type,
+                info.ret.struct_id};
       }
       case "equality"_:
+      case "relational"_:
       case "additive"_:
       case "multiplicative"_: {
         const auto& ns = a.nodes;
@@ -759,11 +936,154 @@ struct Binder {
     }
   }
 
+  // A user func by name, or the diagnostic for not finding one -- `$`
+  // names are the runtime's own and not the program's to call.
+  const FuncInfo& func_of(const Ast& at, const std::string& callee) {
+    auto fit = funcs.find(callee);
+    if (fit == funcs.end() || callee[0] == '$') fail(at, "undefined: " + callee);
+    return fit->second;
+  }
+
+  // The arguments of a "call" node, each emitted with its parameter's type
+  // as the hint and checked against it -- what a call expression and a
+  // `go` statement both owe before they differ in what they do with the
+  // callee.
+  std::vector<NodeId> emit_call_args(const Ast& a, FuncCtx& ctx,
+                                     const FuncInfo& info,
+                                     const std::string& callee) {
+    const Ast* argsNode = find_child(a, "args");
+    std::vector<const Ast*> argAsts;
+    if (argsNode != nullptr) {
+      for (const auto& n : argsNode->nodes) argAsts.push_back(n.get());
+    }
+    if (argAsts.size() != info.param_types.size()) {
+      fail(a, "wrong argument count calling " + callee);
+    }
+    std::vector<NodeId> args;
+    args.reserve(argAsts.size());
+    for (size_t i = 0; i < argAsts.size(); ++i) {
+      const TypeRef& pt = info.param_types[i];
+      TypedExpr v = emit_expr(*argAsts[i], ctx, hint_for(pt.type));
+      if (!same_type(v.type, v.struct_id, pt.type, pt.struct_id)) {
+        fail(*argAsts[i], "argument type mismatch calling " + callee);
+      }
+      args.push_back(v.node);
+    }
+    return args;
+  }
+
+  // The local an ident names, required to be a channel -- what both ends
+  // of a channel operation need before anything else.
+  const LocalInfo& channel_local(const Ast& ident, FuncCtx& ctx) {
+    const LocalInfo& li = local_of(ident, ctx, std::string(ident.token));
+    if (li.type != Type::Chan) {
+      fail(ident, "'" + std::string(ident.token) + "' (" +
+                      describe_type(li.type, li.struct_id) +
+                      ") is not a channel");
+    }
+    return li;
+  }
+
+  // The statements of a "stmts" node, as one Block at `at`'s position.
+  NodeId emit_block(const Ast& stmts, FuncCtx& ctx, const Ast& at) {
+    std::vector<NodeId> out;
+    for (const auto& s : stmts.nodes) out.push_back(emit_stmt(*s, ctx));
+    Builder b(m);
+    return b.block(out, pos_of(at));
+  }
+
   // -- Statements -------------------------------------------------------
   NodeId emit_stmt(const Ast& a, FuncCtx& ctx) {
     Builder b(m);
     const SrcPos p = pos_of(a);
     switch (a.tag) {
+      // go f(args): the arguments are evaluated now, into cells of this
+      // frame (fresh ones -- CellFresh -- so a `go` inside a loop gives
+      // each goroutine its own), and a wrapper func capturing the callee's
+      // closure and those cells is spawned as a coroutine through the
+      // scheduler: Enqueue(CoroCreate(wrapper)). The wrapper takes the one
+      // argument the scheduler passes (nil) leniently and makes the real
+      // call with the captured values; the callee itself is any declared
+      // func, with or without a result (a goroutine's result goes
+      // nowhere, as in Go).
+      case "gostmt"_: {
+        const Ast& call = *a.nodes[0];
+        const std::string callee(find_child(call, "ident")->token);
+        if (type_from_name(callee)) fail(a, "go needs a function call");
+        const FuncInfo& info = func_of(call, callee);
+        const std::vector<NodeId> args = emit_call_args(call, ctx, info, callee);
+
+        std::vector<NodeId> stmts;
+        std::vector<CaptureSrc> cmap{{VarKind::Cell, ctx.cell_for(callee)}};
+        for (const NodeId arg : args) {
+          const int32_t c = ctx.next_cell++;
+          stmts.push_back(b.cell_fresh(c, p));
+          stmts.push_back(b.assign(VarKind::Cell, c, arg, p));
+          cmap.push_back({VarKind::Cell, c});
+        }
+
+        Func w;
+        w.name = "go " + callee;
+        w.num_captures = static_cast<int32_t>(cmap.size());
+        w.capture_names.push_back(callee);
+        w.lenient_arity = true;
+        std::vector<NodeId> wargs;
+        for (size_t i = 0; i < args.size(); ++i) {
+          w.capture_names.push_back("arg" + std::to_string(i));
+          wargs.push_back(
+              b.varref(VarKind::Capture, static_cast<int32_t>(i + 1), p));
+        }
+        w.body = b.call_value(b.varref(VarKind::Capture, 0, p), wargs, p);
+        const int32_t widx = static_cast<int32_t>(m.funcs.size());
+        m.funcs.push_back(w);
+        const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
+        m.capture_maps.push_back(cmap);
+
+        stmts.push_back(b.intrinsic(
+            IntrinsicId::Enqueue,
+            {b.intrinsic(IntrinsicId::CoroCreate,
+                         {b.make_closure(widx, cm, p)}, p)},
+            p));
+        return b.block(stmts, p);
+      }
+      // ch <- v, through $chan_send; the value takes the channel's element
+      // type as its hint and must match it.
+      case "sendstmt"_: {
+        const LocalInfo& li = channel_local(*a.nodes[0], ctx);
+        const Type elem = static_cast<Type>(li.struct_id);
+        TypedExpr v = emit_expr(*a.nodes[1], ctx, elem);
+        if (v.type != elem) {
+          fail(a, "cannot send " + describe_type(v.type, v.struct_id) +
+                      " on " + describe_type(li.type, li.struct_id));
+        }
+        const NodeId send = b.varref(VarKind::Cell, ctx.cell_for("$chan_send"), p);
+        return b.call_value(send, {b.varref(VarKind::Local, li.slot, p), v.node},
+                            p);
+      }
+      // <-ch as a statement: receive and discard -- the same call the
+      // expression form makes, with nothing reading its value.
+      case "recvstmt"_: {
+        const LocalInfo& li = channel_local(*a.nodes[0], ctx);
+        const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
+        return b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p);
+      }
+      // for cond { ... } -- Go's while. A `var` inside the body declares
+      // into this function's one flat local table, the same as anywhere
+      // else in this front end: it is bound once, and the slot is
+      // reassigned on each iteration.
+      case "forstmt"_: {
+        TypedExpr cond = emit_expr(*a.nodes[0], ctx, std::nullopt);
+        if (cond.type != Type::Bool) fail(a, "for condition must be bool");
+        return b.make_while(cond.node, emit_block(*a.nodes[1], ctx, a), p);
+      }
+      case "ifstmt"_: {
+        TypedExpr cond = emit_expr(*a.nodes[0], ctx, std::nullopt);
+        if (cond.type != Type::Bool) fail(a, "if condition must be bool");
+        const NodeId then_ = emit_block(*a.nodes[1], ctx, a);
+        NodeId els;
+        if (a.nodes.size() > 2) els = emit_block(*a.nodes[2], ctx, a);
+        return b.make_if(cond.node, then_, els, p);
+      }
       case "vardecl"_: {
         const std::string name(find_child(a, "ident")->token);
         if (ctx.locals.count(name)) {
@@ -809,8 +1129,10 @@ struct Binder {
                            emit_field_value(*a.nodes.back(), ctx, fd, a, p), p);
       }
       case "ret"_: {
-        TypedExpr val = emit_expr(*a.nodes[0], ctx, ctx.ret_type);
-        if (!ctx.ret_type || val.type != *ctx.ret_type) {
+        if (!ctx.ret_type) fail(a, "this func does not return a value");
+        TypedExpr val = emit_expr(*a.nodes[0], ctx, hint_for(ctx.ret_type->type));
+        if (!same_type(val.type, val.struct_id, ctx.ret_type->type,
+                       ctx.ret_type->struct_id)) {
           fail(a, "return type does not match the func's declared type");
         }
         return b.make_return(val.node, p);
@@ -821,8 +1143,9 @@ struct Binder {
         // something a slot-indexed Object could reproduce without field
         // names at runtime -- so refuse it rather than print `<object>`
         // and quietly stop agreeing with `go run`, the only thing this
-        // front end's samples are checked against.
-        if (val.type == Type::Struct) {
+        // front end's samples are checked against. A channel prints as an
+        // address in Go, which nothing could reproduce either.
+        if (has_second_half(val.type)) {
           fail(a, "cannot print a " + describe_type(val.type, val.struct_id));
         }
         return b.intrinsic(IntrinsicId::Print, {val.node}, p);
@@ -878,66 +1201,71 @@ struct Binder {
 
   Module build(const Ast& program) {
     register_structs(program);
+    // funcs[0] is vm::run's entry point and, here, the bootstrap that
+    // spawns main as the first goroutine (emit_bootstrap) -- reserved now
+    // so that register_funcs numbers main and the rest from 1.
+    m.funcs.push_back({});
     register_funcs(program);
+    emit_channel_runtime();
 
     for (const auto& fnPtr : program.nodes) {
       if (fnPtr->tag != "func"_) continue;  // a structdecl, already handled
       const Ast& fn = *fnPtr;
       const std::string name(find_child(fn, "ident")->token);
       const FuncInfo& info = funcs.at(name);
-      Func& f = m.funcs[static_cast<size_t>(info.index)];
+      // By index, not reference: a `go` statement in the body appends its
+      // wrapper func to m.funcs, which may move every Func in it.
+      const size_t fidx = static_cast<size_t>(info.index);
 
       FuncCtx ctx;
-      ctx.ret_type = info.has_ret ? std::optional<Type>(info.ret)
+      ctx.ret_type = info.has_ret ? std::optional<TypeRef>(info.ret)
                                   : std::nullopt;
 
       const Ast* paramsNode = find_child(fn, "params");
       for (const auto& pn : paramsNode->nodes) {
         const std::string pname(find_child(*pn, "ident")->token);
-        // Struct-typed params/returns are out of scope for this front end
-        // (register_funcs's own parse_type already rejects them for the
-        // signature; this mirrors that for the param list itself, so the
-        // rejection happens once, consistently, rather than differing
-        // between what register_funcs recorded and what a param's own
-        // local slot ends up typed as).
-        const Type pty =
-            parse_type(std::string(find_child(*pn, "type")->token), *pn);
-        ctx.locals[pname] = {ctx.next_local, pty};
+        // resolve_sig_type, as register_funcs used for the signature, so
+        // what a param's local slot ends up typed as cannot differ from
+        // what the callee's FuncInfo recorded.
+        const TypeRef pty =
+            resolve_sig_type(std::string(find_child(*pn, "type")->token), *pn);
+        ctx.locals[pname] = {ctx.next_local, pty.type, pty.struct_id};
         ctx.local_names.push_back(pname);
         ++ctx.next_local;
       }
 
+      // The body first: each call it emits claims a cell for its callee
+      // (FuncCtx::cell_for), and each `go` claims cells for its arguments.
       const Ast* stmtsNode = find_child(fn, "stmts");
+      std::vector<NodeId> stmts;
+      for (const auto& s : stmtsNode->nodes) {
+        stmts.push_back(emit_stmt(*s, ctx));
+      }
 
-      // Static calls: one Cell per distinct func this one calls, built
-      // once in a preamble ahead of the body -- README's Static calls
-      // recipe, concretely.
-      std::set<std::string> callees;
-      collect_call_targets(*stmtsNode, callees);
+      // Then the preamble ahead of it: one MakeClosure per distinct callee
+      // into the cell the body reads -- README's Static calls recipe,
+      // concretely -- and the channel runtime's own two funcs reached the
+      // same way when the body used a channel.
       Builder b(m);
       std::vector<NodeId> body_stmts;
-      int32_t cell = 0;
-      for (const auto& callee : callees) {
-        ctx.call_cells[callee] = cell;
+      for (const auto& [callee, cell] : ctx.call_cells) {
         const int32_t cmap = static_cast<int32_t>(m.capture_maps.size());
         m.capture_maps.push_back({});
         body_stmts.push_back(b.assign(
             VarKind::Cell, cell,
             b.make_closure(funcs.at(callee).index, cmap, pos_of(fn)),
             pos_of(fn)));
-        ++cell;
       }
-      f.num_cells = cell;
+      body_stmts.insert(body_stmts.end(), stmts.begin(), stmts.end());
 
-      for (const auto& s : stmtsNode->nodes) {
-        body_stmts.push_back(emit_stmt(*s, ctx));
-      }
-
+      Func& f = m.funcs[fidx];
+      f.num_cells = ctx.next_cell;
       f.num_locals = ctx.next_local;
       f.local_names = ctx.local_names;
       f.body = b.scope(0, f.num_locals, b.block(body_stmts, pos_of(fn)),
                        pos_of(fn));
     }
+    emit_bootstrap();
     return std::move(m);
   }
 };

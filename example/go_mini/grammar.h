@@ -4,11 +4,20 @@
 // covers: top-level funcs with typed params/return, `var` with an explicit
 // fixed-width or float type, assignment, `return`, `fmt.Println`, arithmetic/
 // comparison/type-conversion expressions, `type ... struct` declarations with
-// field access/assignment (`p.X`, `p.X = v`), and `switch` over an int
-// subject. No control flow beyond `switch` (no `if`/`for`), no methods, no
-// multiple return values -- this front end exists to exercise vmlib's
-// Fixed-width integers, `float`, Static calls, Struct fields and Switch
+// field access/assignment (`p.X`, `p.X = v`), `switch` over an int subject,
+// `if`/`else` and the condition-only `for`, and goroutines with unbuffered
+// channels: `go f(args)`, `chan T` as a var/param type, `make(chan T)`,
+// `ch <- v` and `<-ch` (as an expression or a statement). No methods, no
+// multiple return values, no `select`, no buffered channels -- this front
+// end exists to exercise vmlib's Fixed-width integers, `float`, Static
+// calls, Struct fields, Switch and (with goroutines) Coroutines + scheduler
 // recipes (see the top-level README), not to be a Go implementation.
+//
+// `if x {` with a bare identifier as the condition is a syntax error here:
+// `structlit` (tried ahead of `primary`) eats `x {` as a struct literal
+// first, the same pitfall the `switchstmt` note below describes. Real Go
+// has a rule against a composite literal in that position; this grammar
+// does not, so a sample compares or parenthesizes instead.
 //
 // Every rule that can end up with exactly one child needs `no_ast_opt`,
 // or optimize_ast folds it away and its identity (or its list shape) is
@@ -58,16 +67,23 @@ inline constexpr const char* kGrammar = R"(
   func       <- 'func' __ ident '(' _ params ')' _ type? '{' _ stmts '}' _
   params     <- (param (',' _ param)*)?                     { no_ast_opt }
   param      <- ident type
-  type       <- < 'int32' / 'int64' / 'uint32' / 'float32' / 'float64' / 'bool'
-                  / [a-zA-Z_][a-zA-Z0-9_]* > _
+  type       <- < ('chan' __)? ('int32' / 'int64' / 'uint32' / 'float32'
+                  / 'float64' / 'bool' / [a-zA-Z_][a-zA-Z0-9_]*) > _
 
   stmts      <- stmt*                                       { no_ast_opt }
-  stmt       <- vardecl / assign / ret / print / switchstmt
+  stmt       <- vardecl / assign / ret / print / switchstmt / gostmt
+              / sendstmt / recvstmt / forstmt / ifstmt
 
   vardecl    <- 'var' __ ident type '=' _ expr
   assign     <- ident ('.' ident)* '=' _ expr
   ret        <- 'return' __ expr                             { no_ast_opt }
   print      <- 'fmt.Println' _ '(' _ expr ')' _              { no_ast_opt }
+
+  gostmt     <- 'go' __ call                                  { no_ast_opt }
+  sendstmt   <- ident '<-' _ expr
+  recvstmt   <- '<-' _ ident                                  { no_ast_opt }
+  forstmt    <- 'for' __ expr '{' _ stmts '}' _
+  ifstmt     <- 'if' __ expr '{' _ stmts '}' _ ('else' _ '{' _ stmts '}' _)?
 
   switchstmt <- 'switch' __ expr '{' _ case* defaultcase? '}' _   { no_ast_opt }
   case       <- 'case' __ intlist ':' _ stmts
@@ -76,14 +92,18 @@ inline constexpr const char* kGrammar = R"(
   defaultcase <- 'default' _ ':' _ stmts                      { no_ast_opt }
 
   expr       <- equality
-  equality   <- additive (eqop additive)*
+  equality   <- relational (eqop relational)*
   eqop       <- < '==' / '!=' > _
+  relational <- additive (relop additive)*
+  relop      <- < '<=' / '>=' / '<' / '>' > _
   additive   <- multiplicative (addop multiplicative)*
   addop      <- < [-+] > _
   multiplicative <- unary (mulop unary)*
   mulop      <- < [*/] > _
-  unary      <- neg / structlit / fieldaccess / call / primary
+  unary      <- neg / recv / makechan / structlit / fieldaccess / call / primary
   neg        <- '-' _ unary                                   { no_ast_opt }
+  recv       <- '<-' _ ident                                  { no_ast_opt }
+  makechan   <- 'make' _ '(' _ type ')' _                      { no_ast_opt }
   structlit  <- ident '{' _ fieldinits '}' _
   fieldinits <- (fieldinit (',' _ fieldinit)*)?                { no_ast_opt }
   fieldinit  <- ident ':' _ expr

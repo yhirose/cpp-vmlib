@@ -266,6 +266,99 @@ int main() {
     check_eq(joined(), "main|job|drop|", "drops-bare output");
   }
 
+  // --- 8. The queue as a scheduler: coroutines take turns. ---------------
+  // A(x) { print "A1"; enqueue corocurrent(); coroyield nil; print "A2" }
+  // B the same with "B". main { enqueue corocreate(A); enqueue corocreate(B) }
+  // -> A1 B1 A2 B2: each yields after putting itself back, so the other
+  // runs, and each resumes where it left off.
+  auto turn_taker = [&p](Builder& b, const char* one, const char* two) {
+    return b.block(
+        {b.intrinsic(IntrinsicId::Print, {b.str_literal(one, p)}, p),
+         b.intrinsic(IntrinsicId::Enqueue,
+                     {b.intrinsic(IntrinsicId::CoroCurrent, {}, p)}, p),
+         b.intrinsic(IntrinsicId::CoroYield, {b.nil_literal(p)}, p),
+         b.intrinsic(IntrinsicId::Print, {b.str_literal(two, p)}, p)},
+        p);
+  };
+  auto spawn = [&p](Builder& b, int32_t func, int32_t cmap) {
+    return b.intrinsic(
+        IntrinsicId::Enqueue,
+        {b.intrinsic(IntrinsicId::CoroCreate, {b.make_closure(func, cmap, p)},
+                     p)},
+        p);
+  };
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"A", 1, 0, turn_taker(b, "A1", "A2"), {"x"}, {}});
+    m.funcs.back().num_params = 1;  // the scheduler's one argument
+    m.funcs.push_back({"B", 1, 0, turn_taker(b, "B1", "B2"), {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs[0] = {"main", 0, 0,
+                  b.block({spawn(b, 1, 0), spawn(b, 2, 0), say(b, "main")}, p),
+                  {}, {}};
+    check_eq(run_module(m, "turns"), "", "turns: failure");
+    check_eq(joined(), "main|A1|B1|A2|B2|", "turns output");
+  }
+
+  // --- 9. A coroutine that parks with nothing to wake it is a deadlock,
+  // reported once the queue is dry; a closure job never is. -------------
+  // P(x) { print "parked"; coroyield nil; print "never" }
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back(
+        {"P", 1, 0,
+         b.block({say(b, "parked"),
+                  b.intrinsic(IntrinsicId::CoroYield, {b.nil_literal(p)}, p),
+                  say(b, "never")},
+                 p),
+         {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.push_back({"after", 0, 0, say(b, "after"), {}, {}});
+    m.funcs[0] = {"main", 0, 0,
+                  b.block({spawn(b, 1, 0), enqueue(b, 2, 0)}, p), {}, {}};
+    check_eq(run_module(m, "deadlock"),
+             "deadlock: 1 coroutine(s) parked with nothing to wake them",
+             "deadlock: failure");
+    check_eq(joined(), "parked|after|", "deadlock output");
+  }
+
+  // --- 10. Woken twice: the second turn finds it done and is skipped. A
+  // scheduled coroutine's uncaught throw ends the run like a job's. ------
+  // W(x) { print "W" }   T(x) { throw "t" }
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"W", 1, 0, say(b, "W"), {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.push_back({"T", 1, 0, b.make_throw(b.str_literal("t", p), p),
+                       {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    // main { w = corocreate(W); enqueue w; enqueue w; enqueue corocreate(T);
+    //        enqueue never }
+    m.funcs.push_back({"never", 0, 0, say(b, "never"), {}, {}});
+    const NodeId w = b.varref(VarKind::Local, 0, p);
+    m.funcs[0] = {"main", 1, 0,
+                  b.block({b.assign(VarKind::Local, 0,
+                                    b.intrinsic(IntrinsicId::CoroCreate,
+                                                {b.make_closure(1, 0, p)}, p),
+                                    p),
+                           b.intrinsic(IntrinsicId::Enqueue, {w}, p),
+                           b.intrinsic(IntrinsicId::Enqueue, {w}, p),
+                           spawn(b, 2, 0), enqueue(b, 3, 0)},
+                          p),
+                  {"w"}, {}};
+    check_eq(run_module(m, "twice"), "uncaught: t", "twice: failure");
+    check_eq(joined(), "W|", "twice output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

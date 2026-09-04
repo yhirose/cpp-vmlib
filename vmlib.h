@@ -604,9 +604,11 @@ struct CoroObj : HeapObj {
   State state = State::Start;
   Value fn;                       // Start only: what the first resume calls
   std::vector<GenFrame> frames;   // Suspended only: bottom frame first
-  // Set once the scheduler has taken it (Enqueue of a coroutine). What
-  // vm::run's end-of-run deadlock check counts: a scheduled coroutine
-  // still Suspended, with nothing left that could resume it.
+  // Set once the scheduler has taken it (Enqueue of a coroutine), and
+  // from then on the executor holds its own reference to it until it
+  // finishes (Exec::scheduled) -- so vm::run's end-of-run deadlock check
+  // sees every scheduled coroutine still Suspended, including one nothing
+  // else refers to any more.
   bool scheduled = false;
 };
 
@@ -1172,7 +1174,20 @@ enum class IntrinsicId : uint8_t {
   // settles what, in what order) written on top of it. A job's uncaught
   // throw ends the run the way the entry frame's would; the queue is
   // never drained inside a job (it is not re-entrant), only between them.
-  Enqueue,      // (closure) -> nil
+  //
+  // A coroutine may be enqueued too, which makes the queue a scheduler:
+  // taken from the queue it is resumed (a first time as f(nil), later at
+  // its CoroYield with nil) and driven until it yields or finishes; a
+  // yield does not put it back -- whoever it is waiting for enqueues it
+  // again (a channel's receiver waking its sender, say), and a coroutine
+  // that wants merely to let others run enqueues itself first. That is
+  // every green-thread primitive: spawn is Enqueue(CoroCreate(f)), block
+  // is "record CoroCurrent() somewhere, then CoroYield", wake is Enqueue.
+  // A coroutine once enqueued is the scheduler's until it finishes: if
+  // the queue runs dry while any such coroutine is still suspended,
+  // nothing can ever wake it, and the run fails with a deadlock diagnostic
+  // through coreir_rt_fail -- Go's "all goroutines are asleep".
+  Enqueue,      // (closure | coroutine) -> nil
   // Rounds a double to what it would be after passing through a 32-bit
   // float -- the one float-specific fact a front end for a language with
   // both `float` and `double` cannot write in-language, the same way ToStr
@@ -4999,6 +5014,24 @@ struct Exec {
   static constexpr int32_t kSyncRet = -2;
   Value sync_result;
 
+  // Every coroutine ever handed to Enqueue, held until it finishes: the
+  // scheduler's own reference, so a coroutine that parks and is then
+  // forgotten by everything else is still there for check_deadlock to
+  // count rather than quietly freed -- Go's rule, that a goroutine is the
+  // runtime's until it returns. Keyed by object for the O(1) erase at
+  // finish_coro.
+  std::unordered_map<const CoroObj*, Value> scheduled;
+
+  // The one place a coroutine becomes Done: from its bottom frame's Ret or
+  // an unwind past it, from CoroClose, or from a first resume whose
+  // function completed on the spot. Drops the scheduler's reference if it
+  // held one. `co` stays alive through the call -- every caller holds it
+  // in a frame's coro_self or a local Value.
+  void finish_coro(CoroObj* co) {
+    co->state = CoroObj::State::Done;
+    if (co->scheduled) scheduled.erase(co);
+  }
+
   std::unique_ptr<Frame> make_frame(const Chunk& ch) {
     auto f = std::make_unique<Frame>();
     f->chunk = &ch;
@@ -5323,12 +5356,65 @@ struct Exec {
       Value job = std::move(jobs.front());
       jobs.pop_front();
       try {
-        push_closure(job, nullptr, 0, -1, SrcPos{0, 0});
+        if (job.is_coroutine()) {
+          if (!schedule_coroutine(job)) continue;
+        } else {
+          push_closure(job, nullptr, 0, -1, SrcPos{0, 0});
+        }
       } catch (Raise& r) {
         report_uncaught(r);
         return;
       }
       drive();
+    }
+    check_deadlock();
+  }
+
+  // A coroutine's turn from the scheduler: its first resume calls f(nil),
+  // a later one re-enters its CoroYield with nil, and its result goes
+  // nowhere (ret_reg -1). Answers whether there is now something on the
+  // stack to drive -- a coroutine already done (woken twice, say), or one
+  // whose function completed on the spot, leaves nothing.
+  bool schedule_coroutine(const Value& cv) {
+    CoroObj* co = cv.as_coroutine();
+    using St = CoroObj::State;
+    if (co->state == St::Done || co->state == St::Running) return false;
+    const Value nil;
+    if (co->state == St::Start) {
+      Value fn = std::move(co->fn);
+      co->state = St::Running;
+      const size_t before = frames.size();
+      try {
+        push_closure(fn, &nil, 1, -1, SrcPos{0, 0});
+      } catch (Raise&) {
+        finish_coro(co);
+        throw;
+      }
+      if (frames.size() == before) {
+        finish_coro(co);
+        return false;
+      }
+      frames.back()->coro_self = cv;
+      return true;
+    }
+    if (co->frames.size() > max_frames) {
+      raise_trap("recursion limit exceeded", SrcPos{0, 0});
+    }
+    unpark_coro(cv, -1, &nil);
+    return true;
+  }
+
+  // The queue is empty and nothing is running: a scheduled coroutine
+  // still suspended now has nothing left that could enqueue it.
+  void check_deadlock() {
+    int64_t parked = 0;
+    for (const auto& [co, v] : scheduled) {
+      if (co->state == CoroObj::State::Suspended) ++parked;
+    }
+    if (parked > 0) {
+      coreir_rt::fail("deadlock: " + std::to_string(parked) +
+                          " coroutine(s) parked with nothing to wake them",
+                      0, 0);
     }
   }
 
@@ -5506,9 +5592,7 @@ struct Exec {
       if (f.gen_self.is_generator()) {
         f.gen_self.as_generator()->state = GeneratorObj::State::Done;
       }
-      if (f.coro_self.is_coroutine()) {
-        f.coro_self.as_coroutine()->state = CoroObj::State::Done;
-      }
+      if (f.coro_self.is_coroutine()) finish_coro(f.coro_self.as_coroutine());
       pop_frame();
     }
     return false;
@@ -6258,7 +6342,13 @@ struct Exec {
         }
         case Op::Enqueue: {
           const Value& v = f.regs[in.a];
-          if (!v.is_callable()) {
+          if (v.is_coroutine()) {
+            CoroObj* co = v.as_coroutine();
+            if (!co->scheduled && co->state != CoroObj::State::Done) {
+              co->scheduled = true;
+              scheduled.emplace(co, v);
+            }
+          } else if (!v.is_callable()) {
             fail(f, std::string("enqueue needs a function, not ") +
                         type_name(v.tag()));
           }
@@ -6302,7 +6392,7 @@ struct Exec {
             result = gen_result(std::move(result), true);
           }
           if (f.coro_self.is_coroutine()) {
-            f.coro_self.as_coroutine()->state = CoroObj::State::Done;
+            finish_coro(f.coro_self.as_coroutine());
             result = gen_result(std::move(result), true);
           }
           const int32_t ret_reg = f.ret_reg;
@@ -6347,11 +6437,11 @@ struct Exec {
             try {
               push_closure(fn, &sent, 1, in.a, pos);
             } catch (Raise&) {
-              co->state = St::Done;
+              finish_coro(co);
               throw;
             }
             if (frames.size() == before) {
-              co->state = St::Done;
+              finish_coro(co);
               f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
               continue;
             }
@@ -6399,7 +6489,7 @@ struct Exec {
           if (co->state == St::Done) break;
           if (co->state == St::Start) {
             co->fn = Value();
-            co->state = St::Done;
+            finish_coro(co);
             break;
           }
           // Restore the slice and unwind it by hand, top frame first: each
@@ -6428,11 +6518,11 @@ struct Exec {
               pop_frame();
             }
           } catch (Raise&) {
-            co->state = St::Done;
+            finish_coro(co);
             while (frames.size() > base) frames.pop_back();
             throw;
           }
-          co->state = St::Done;
+          finish_coro(co);
           continue;
         }
         case Op::CoroStatus: {

@@ -14,16 +14,18 @@ that way, the same relationship PL/0's samples have to culebra's own PL/0
 interpreter. What is covered: top-level `func`s with typed params and an
 optional return type, `var` with an explicit `int32`/`int64`/`uint32`/
 `float32`/`float64`/`bool` type, assignment, `return`, `fmt.Println`,
-arithmetic (`+ - * /`), equality (`== !=`) and type-conversion (`int32(x)`,
-`float64(x)`, ...) expressions, `type ... struct` declarations with field
-access and assignment (`p.X`, `p.From.X = v`, any depth), and `switch` over
-an `int32`/`int64`/`uint32` subject with `case a, b:` and `default`. What
-is deliberately absent: control flow beyond `switch` (no `if`/`for`),
-methods, multiple return values, slices/maps, and a struct as a func
-parameter or return type -- none of those exercise this front end's five
-recipes any further, and a struct crossing a call boundary raises value-
-semantics questions (does the callee's copy alias the caller's?) that are
-orthogonal to what Struct fields is here to prove.
+arithmetic (`+ - * /`), comparison (`== != < <= > >=`) and type-conversion
+(`int32(x)`, `float64(x)`, ...) expressions, `type ... struct` declarations
+with field access and assignment (`p.X`, `p.From.X = v`, any depth),
+`switch` over an `int32`/`int64`/`uint32` subject with `case a, b:` and
+`default`, `if`/`else`, the condition-only `for`, and goroutines with
+unbuffered channels (`go f(args)`, `chan T`, `make(chan T)`, `ch <- v`,
+`<-ch`) -- see **Goroutines** below. What is deliberately absent: methods,
+multiple return values, slices/maps, `select`, buffered channels, and a
+struct as a func parameter or return type -- none of those exercise this
+front end's recipes any further, and a struct crossing a call boundary
+raises value-semantics questions (does the callee's copy alias the
+caller's?) that are orthogonal to what Struct fields is here to prove.
 
 ## Running
 
@@ -104,6 +106,49 @@ anything. Everything else gets a field-by-field `FieldGet` into a new
 itself a `Point`) is copied too rather than its own `ObjectObj` carried
 over by reference.
 
+## Goroutines: coroutines plus the scheduler, and a channel written in IR
+
+`samples/goroutines/goroutines.go` is the top-level README's **Coroutines**
+and **Scheduler** sections turned into running Go, checked against `go
+run`. Three things the binder does, none of which needed a change to
+`vmlib.h`:
+
+**`go f(a, b)` is `Enqueue(CoroCreate(wrapper))`.** The arguments are
+evaluated at the `go` statement (Go's rule) into fresh cells of the
+current frame -- `CellFresh` first, so a `go` inside a loop gives each
+goroutine its own values -- and a synthesized wrapper func captures the
+callee's closure and those cells and makes the real call. The wrapper is
+`lenient_arity`, since the scheduler resumes a coroutine with one
+argument (nil) and a Go func may take none.
+
+**`main` is a goroutine too.** `funcs[0]` is a bootstrap (`$entry`) that
+spawns `main` as the first coroutine and returns, and the scheduler
+drains the queue from there. That is what lets `main` block on a channel
+-- a `CoroYield` in vmlib's entry frame would have no coroutine to
+suspend -- and what makes the end-of-run deadlock check Go's "all
+goroutines are asleep" rather than a hang. One difference to know: Go
+ends the program when `main` returns, this scheduler runs the goroutines
+still runnable to their own ends, so a sample whose output must match
+`go run` synchronizes through channels rather than leaving output
+pending in a goroutine.
+
+**A channel is an object, and its two operations are funcs in IR.** An
+unbuffered channel is `{recvq: [...], sendq: [...]}`, each queue holding
+`{co, value}` waiters. `$chan_send` and `$chan_recv`
+(`Binder::emit_channel_runtime`) are ordinary funcs built once per module
+and called through the same Static calls cells any user func is; the `$`
+keeps them out of the source language's reach. Go's rendezvous rule -- a
+sender with a receiver waiting hands the value over, wakes it with
+`Enqueue`, and goes on; one without parks itself (`CoroCurrent()` into
+the queue, then `CoroYield`) until a receiver takes the value and wakes
+it; symmetrically for a receiver -- lives here, not in `vmlib.h`, because
+it is Go's rule and not every language's. The library supplies only
+`CoroCurrent`, `CoroYield` and `Enqueue`.
+
+The sample's every print is ordered by a channel handshake, so its output
+is the same under Go's scheduler (which may run goroutines in parallel)
+and vmlib's (one at a time, one thread).
+
 ## Two grammar pitfalls worth knowing if you touch `grammar.h`
 
 **`no_ast_opt`.** `ret`, `print` and `neg` each have exactly one child (the
@@ -133,7 +178,8 @@ failing on its own `type ... struct` line.
 
 ## Testing
 
-`ctest -R go_mini_samples` runs `samples/{ints,floats,structs,switch}/*.go`
+`ctest -R go_mini_samples` runs
+`samples/{ints,floats,structs,switch,goroutines}/*.go`
 and requires the output to match a golden file (`samples/golden/`)
 captured from `go run` -- see PL/0's own README for why an external,
 independent oracle is what "passing" means here, not just this binary
