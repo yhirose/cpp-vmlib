@@ -329,6 +329,7 @@ front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
 | Front end | Parser | Notes |
 |---|---|---|
 | [PL/0](example/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [example/pl0/README.md](example/pl0/README.md). |
+| [go_mini](example/go_mini/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields and Switch against `go run`. See [example/go_mini/README.md](example/go_mini/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
 -- under `example/<name>/`, plus that front end's own implementation of the
