@@ -1201,12 +1201,48 @@ enum class IntrinsicId : uint8_t {
   // object one -- Index already dispatches on the receiver's kind, and the
   // three questions are the same questions.
   MapNew,       // () -> map
+  // Coroutines: Yield's dynamic counterpart, over a whole frame stack. A
+  // generator suspends the one frame whose body lexically contains the
+  // Yield; a coroutine suspends every frame from the one CoroResume
+  // entered down to wherever CoroYield is reached -- three calls deep, in
+  // a callback, in a function that has no idea it is running inside one.
+  // What Lua's coroutines, Ruby's Fibers and a goroutine are made of, and
+  // what an `await` that is not itself in a generator body needs.
+  //
+  // CoroCreate(f) answers a coroutine in its Start state holding `f`. The
+  // first CoroResume(co, v) calls f(v) -- one argument, so f takes one
+  // parameter (or is lenient) -- and runs until a CoroYield or f's return;
+  // each later CoroResume re-enters at the CoroYield, which yields the
+  // sent value. Both answer the {value, done} object GenResume does:
+  // {yielded, false} at a CoroYield, {returned, true} at f's return, and
+  // {nil, true} for a coroutine already done. A throw f's frames do not
+  // catch finishes the coroutine and continues at the CoroResume, into
+  // the resumer's own handlers. CoroYield finds the innermost running
+  // coroutine's frames above it and parks them; with none, it traps --
+  // and with the coroutine's bottom frame below a host boundary (a native
+  // that called back in, a destructor, a defer, a job being driven) it
+  // traps too, since C++ frames cannot be parked: Lua's "attempt to yield
+  // across a C-call boundary", stated once in Exec's CoroYield.
+  //
+  // CoroClose(co) finishes a suspended coroutine early, running its parked
+  // frames' pending defers innermost frame first (as GenReturn does for a
+  // generator's one frame); on one in Start it just drops `f`; on a done
+  // one it is a no-op; on a running one it traps. A coroutine that is
+  // dropped rather than closed runs nothing, the generator's rule.
+  // CoroStatus answers "start" / "suspended" / "running" / "done", and
+  // CoroCurrent the innermost running coroutine, or nil outside any.
+  CoroCreate,   // (f) -> coroutine
+  CoroResume,   // (coroutine, sent) -> {value, done}
+  CoroYield,    // (value) -> sent
+  CoroClose,    // (coroutine) -> nil
+  CoroStatus,   // (coroutine) -> str
+  CoroCurrent,  // () -> coroutine | nil
 };
 
 // The last enumerator, for the scans (from_name, test_names) that walk the
 // enum's range: one place to move when an intrinsic is added, rather than
 // every scan naming the last one itself.
-inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::MapNew;
+inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::CoroCurrent;
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -1448,6 +1484,12 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::StrByte: return 2;
     case IntrinsicId::StrFromByte: return 1;
     case IntrinsicId::MapNew: return 0;
+    case IntrinsicId::CoroCreate: return 1;
+    case IntrinsicId::CoroResume: return 2;
+    case IntrinsicId::CoroYield: return 1;
+    case IntrinsicId::CoroClose: return 1;
+    case IntrinsicId::CoroStatus: return 1;
+    case IntrinsicId::CoroCurrent: return 0;
   }
   return 0;
 }
@@ -2380,6 +2422,16 @@ enum class Op : uint8_t {
   StrFromByte,  // a = dst, b = src
   NewMap,       // a = dst   (empty; SetIndex fills it)
   NativeRef,    // a = dst, b = index into Program::natives
+  // Coroutines (ir.h's intrinsics of the same names). CoroYield parks
+  // every frame from the innermost coroutine's bottom frame up to this
+  // one into its CoroObj and delivers {value, done: false} to the
+  // resumer; the next CoroResume's sent value lands in `a`.
+  CoroCreate,   // a = dst, b = fn reg
+  CoroResume,   // a = dst, b = coroutine reg, c = sent reg
+  CoroYield,    // a = dst (sent value on re-entry), b = value reg
+  CoroClose,    // a = coroutine reg
+  CoroStatus,   // a = dst, b = coroutine reg
+  CoroCurrent,  // a = dst
 };
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
@@ -2455,6 +2507,12 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::StrByte:      return Op::StrByte;
     case I::StrFromByte:  return Op::StrFromByte;
     case I::MapNew:       return Op::NewMap;
+    case I::CoroCreate:   return Op::CoroCreate;
+    case I::CoroResume:   return Op::CoroResume;
+    case I::CoroYield:    return Op::CoroYield;
+    case I::CoroClose:    return Op::CoroClose;
+    case I::CoroStatus:   return Op::CoroStatus;
+    case I::CoroCurrent:  return Op::CoroCurrent;
   }
   return Op::LoadNil;
 }
@@ -2470,6 +2528,7 @@ inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
     case I::ArrayPush:
     case I::ObjectRemove:
     case I::Enqueue:
+    case I::CoroClose:
       return false;
     default:
       return true;
@@ -3327,6 +3386,12 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::StrByte: return "strbyte";
     case IntrinsicId::StrFromByte: return "strfrombyte";
     case IntrinsicId::MapNew: return "mapnew";
+    case IntrinsicId::CoroCreate: return "corocreate";
+    case IntrinsicId::CoroResume: return "cororesume";
+    case IntrinsicId::CoroYield: return "coroyield";
+    case IntrinsicId::CoroClose: return "coroclose";
+    case IntrinsicId::CoroStatus: return "corostatus";
+    case IntrinsicId::CoroCurrent: return "corocurrent";
   }
   return "?";
 }
@@ -3915,6 +3980,12 @@ inline const char* name_of(Op op) {
     case Op::StrFromByte: return "strfrombyte";
     case Op::NewMap:      return "newmap";
     case Op::NativeRef:   return "nativeref";
+    case Op::CoroCreate:  return "corocreate";
+    case Op::CoroResume:  return "cororesume";
+    case Op::CoroYield:   return "coroyield";
+    case Op::CoroClose:   return "coroclose";
+    case Op::CoroStatus:  return "corostatus";
+    case Op::CoroCurrent: return "corocurrent";
   }
   return "?";
 }
@@ -4892,6 +4963,11 @@ struct Frame {
   // GeneratorObj it suspends back into. Owning, so the generator cannot be
   // freed out from under its own running frame.
   Value gen_self;
+  // Non-nil exactly when this frame is the bottom of a running coroutine
+  // -- the one CoroResume entered. CoroYield walks down to the nearest one
+  // to know where the parked slice starts; Ret and the unwinder finish the
+  // coroutine when this frame goes. Owning, like gen_self.
+  Value coro_self;
 };
 
 struct Exec {
@@ -4988,11 +5064,10 @@ struct Exec {
     gf.owned_marks = std::move(f.owned_marks);
   }
 
-  // ...and back onto the executor's stack (resume). The new frame owns the
-  // generator for as long as it runs.
-  std::unique_ptr<Frame> unpark_frame(const Value& gv, int32_t ret_reg) {
-    GeneratorObj* go = gv.as_generator();
-    GenFrame& gf = go->frame;
+  // ...and back into a fresh executor frame, storage and all. The
+  // GenFrame's own ret_reg and gen_self come along; a caller that has its
+  // own (a generator's resume site) overwrites them.
+  std::unique_ptr<Frame> restore_frame(GenFrame& gf) {
     auto f = std::make_unique<Frame>();
     f->chunk = &p.chunks[static_cast<size_t>(gf.func)];
     f->pc = static_cast<size_t>(gf.pc);
@@ -5003,11 +5078,89 @@ struct Exec {
     f->defers = std::move(gf.defers);
     f->defer_marks = std::move(gf.defer_marks);
     f->owned_marks = std::move(gf.owned_marks);
-    f->ret_reg = ret_reg;
+    f->ret_reg = gf.ret_reg;
     f->argc = gf.argc;
+    f->gen_self = std::move(gf.gen_self);
+    return f;
+  }
+
+  // A generator's frame, back onto the executor's stack (resume). The new
+  // frame owns the generator for as long as it runs.
+  std::unique_ptr<Frame> unpark_frame(const Value& gv, int32_t ret_reg) {
+    GeneratorObj* go = gv.as_generator();
+    auto f = restore_frame(go->frame);
+    f->ret_reg = ret_reg;
     f->gen_self = gv;
     go->state = GeneratorObj::State::Running;
     return f;
+  }
+
+  // Coroutines. The innermost frame carrying coro_self, searching down
+  // from the top -- the bottom of the running coroutine a CoroYield here
+  // would suspend; frames.size() when no frame does.
+  size_t coro_bottom() const {
+    for (size_t i = frames.size(); i-- > 0;) {
+      if (frames[i]->coro_self.is_coroutine()) return i;
+    }
+    return frames.size();
+  }
+
+  CoroObj* coro_operand(Frame& f, const Value& cv, const char* verb) {
+    if (!cv.is_coroutine()) {
+      fail(f, std::string("cannot ") + verb + " " + type_name(cv.tag()));
+    }
+    return cv.as_coroutine();
+  }
+
+  // Suspend: frames [bottom, top] move into the coroutine, bottom first,
+  // each with its own pc (every frame below the top is already advanced
+  // past its call; the top's pc is the caller's to set), its ret_reg into
+  // the frame below it, and -- for the top -- the register the next
+  // resume's value lands in. Then the frames go: their storage is gone,
+  // and what a Frame still holds (the bottom's coro_self) goes with them.
+  void park_coro(CoroObj* co, size_t bottom, int32_t yield_reg) {
+    co->frames.clear();
+    co->frames.reserve(frames.size() - bottom);
+    for (size_t i = bottom; i < frames.size(); ++i) {
+      Frame& fr = *frames[i];
+      GenFrame gf;
+      gf.func = static_cast<int32_t>(fr.chunk - p.chunks.data());
+      gf.pc = static_cast<int64_t>(fr.pc);
+      gf.yield_reg = i + 1 == frames.size() ? yield_reg : -1;
+      gf.argc = fr.argc;
+      gf.ret_reg = fr.ret_reg;
+      park_frame(gf, fr);
+      gf.gen_self = std::move(fr.gen_self);
+      co->frames.push_back(std::move(gf));
+    }
+    frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(bottom),
+                 frames.end());
+    co->state = CoroObj::State::Suspended;
+  }
+
+  // Resume: the parked frames back onto the stack in order. The bottom
+  // frame's result now goes to this resume's register (`ret_reg`) and it
+  // carries the coroutine again; the top frame receives `sent` where its
+  // CoroYield's result was to land. A null `sent` (CoroClose) delivers
+  // nothing.
+  void unpark_coro(const Value& cv, int32_t ret_reg, const Value* sent) {
+    CoroObj* co = cv.as_coroutine();
+    const size_t n = co->frames.size();
+    for (size_t i = 0; i < n; ++i) {
+      GenFrame& gf = co->frames[i];
+      const int32_t yield_reg = gf.yield_reg;
+      auto nf = restore_frame(gf);
+      if (i == 0) {
+        nf->ret_reg = ret_reg;
+        nf->coro_self = cv;
+      }
+      if (i + 1 == n && sent && yield_reg >= 0) {
+        nf->regs[static_cast<size_t>(yield_reg)] = *sent;
+      }
+      frames.push_back(std::move(nf));
+    }
+    co->frames.clear();
+    co->state = CoroObj::State::Running;
   }
 
   // Calling a closure -- the only way a frame is entered. The callee gets the
@@ -5347,8 +5500,14 @@ struct Exec {
       }
       // A generator frame unwound past is finished for good: the throw
       // reaches whoever resumed it, and every later resume answers done.
+      // A coroutine's bottom frame, the same: the frame below it is the
+      // resumer's, at its CoroResume, whose own handlers get the throw
+      // next.
       if (f.gen_self.is_generator()) {
         f.gen_self.as_generator()->state = GeneratorObj::State::Done;
+      }
+      if (f.coro_self.is_coroutine()) {
+        f.coro_self.as_coroutine()->state = CoroObj::State::Done;
       }
       pop_frame();
     }
@@ -6136,9 +6295,14 @@ struct Exec {
           if (in.b != 0) result = f.regs[in.a];
           // A generator body's return finishes the generator; its resume
           // caller sees {value, done: true} where a plain call would see
-          // the bare value.
+          // the bare value. A coroutine's bottom frame returning finishes
+          // the coroutine the same way, for its CoroResume.
           if (f.gen_self.is_generator()) {
             f.gen_self.as_generator()->state = GeneratorObj::State::Done;
+            result = gen_result(std::move(result), true);
+          }
+          if (f.coro_self.is_coroutine()) {
+            f.coro_self.as_coroutine()->state = CoroObj::State::Done;
             result = gen_result(std::move(result), true);
           }
           const int32_t ret_reg = f.ret_reg;
@@ -6146,6 +6310,149 @@ struct Exec {
           deliver(ret_reg, std::move(result));
           if (frames.size() <= floor) return;
           continue;
+        }
+        case Op::CoroCreate: {
+          const Value& fn = f.regs[in.b];
+          if (!fn.is_callable()) {
+            fail(f, std::string("coroutine needs a function, not ") +
+                        type_name(fn.tag()));
+          }
+          Value co = Value::make_coroutine();
+          co.as_coroutine()->fn = fn;
+          f.regs[in.a] = std::move(co);
+          break;
+        }
+        case Op::CoroResume: {
+          const SrcPos pos = pos_at(ch, f.pc);
+          const Value cv = f.regs[in.b];
+          CoroObj* co = coro_operand(f, cv, "resume");
+          using St = CoroObj::State;
+          if (co->state == St::Running) fail(f, "coroutine already running");
+          if (co->state == St::Done) {
+            f.regs[in.a] = gen_result(Value(), true);
+            break;
+          }
+          if (co->state == St::Start) {
+            // The first resume is the call: f(sent), its frame the
+            // coroutine's bottom. A callee that completes on the spot (a
+            // native; a generator function, whose call builds an object)
+            // leaves nothing to suspend, so the coroutine is done at once
+            // with that answer. A trap at the call itself (arity) finishes
+            // it too, and is this instruction's own.
+            Value fn = std::move(co->fn);
+            co->state = St::Running;
+            const Value sent = f.regs[in.c];
+            const size_t before = frames.size();
+            ++f.pc;
+            try {
+              push_closure(fn, &sent, 1, in.a, pos);
+            } catch (Raise&) {
+              co->state = St::Done;
+              throw;
+            }
+            if (frames.size() == before) {
+              co->state = St::Done;
+              f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
+              continue;
+            }
+            frames.back()->coro_self = cv;
+            continue;
+          }
+          // Suspended: the parked frames come back, all of them at once,
+          // so the depth bound is checked against the whole slice.
+          if (frames.size() + co->frames.size() > max_frames) {
+            raise_trap("recursion limit exceeded", pos);
+          }
+          coreir_rt_poll();
+          ++f.pc;
+          unpark_coro(cv, in.a, &f.regs[in.c]);
+          continue;
+        }
+        case Op::CoroYield: {
+          // The frames to park are the innermost running coroutine's:
+          // from its bottom (the frame CoroResume entered) up to here. A
+          // bottom below this dispatch's floor belongs to an outer
+          // dispatch -- there is C++ between it and here (a native that
+          // called back in, a destructor, a defer, the job driver) which
+          // no frame stack can hold -- so that yield cannot happen: Lua's
+          // "attempt to yield across a C-call boundary".
+          const size_t bottom = coro_bottom();
+          if (bottom == frames.size()) fail(f, "yield outside a coroutine");
+          if (bottom < floor) fail(f, "cannot yield across a host boundary");
+          const Value self = frames[bottom]->coro_self;
+          Value out = f.regs[in.b];
+          const int32_t ret_reg = frames[bottom]->ret_reg;
+          ++f.pc;  // where the next resume re-enters
+          park_coro(self.as_coroutine(), bottom, in.a);
+          deliver(ret_reg, gen_result(std::move(out), false));
+          if (frames.size() <= floor) return;
+          continue;
+        }
+        case Op::CoroClose: {
+          const SrcPos pos = pos_at(ch, f.pc);
+          const Value cv = f.regs[in.a];
+          CoroObj* co = coro_operand(f, cv, "close");
+          using St = CoroObj::State;
+          if (co->state == St::Running) {
+            fail(f, "cannot close a running coroutine");
+          }
+          if (co->state == St::Done) break;
+          if (co->state == St::Start) {
+            co->fn = Value();
+            co->state = St::Done;
+            break;
+          }
+          // Restore the slice and unwind it by hand, top frame first: each
+          // frame's pending defers innermost mark first, then the frame
+          // itself (its locals last-slot-first, as any return would). A
+          // generator activation caught in the slice is finished with it.
+          // A defer that throws propagates to this call; the coroutine is
+          // done either way.
+          if (frames.size() + co->frames.size() > max_frames) {
+            raise_trap("recursion limit exceeded", pos);
+          }
+          const size_t base = frames.size();
+          ++f.pc;
+          unpark_coro(cv, -1, nullptr);
+          try {
+            while (frames.size() > base) {
+              Frame& t = *frames.back();
+              while (!t.defer_marks.empty()) {
+                const size_t mark = t.defer_marks.back().first;
+                t.defer_marks.pop_back();
+                run_defers_now(t, mark, pos);
+              }
+              if (t.gen_self.is_generator()) {
+                t.gen_self.as_generator()->state = GeneratorObj::State::Done;
+              }
+              pop_frame();
+            }
+          } catch (Raise&) {
+            co->state = St::Done;
+            while (frames.size() > base) frames.pop_back();
+            throw;
+          }
+          co->state = St::Done;
+          continue;
+        }
+        case Op::CoroStatus: {
+          const Value& cv = f.regs[in.b];
+          CoroObj* co = coro_operand(f, cv, "ask the status of");
+          const char* s = "?";
+          switch (co->state) {
+            case CoroObj::State::Start:     s = "start"; break;
+            case CoroObj::State::Suspended: s = "suspended"; break;
+            case CoroObj::State::Running:   s = "running"; break;
+            case CoroObj::State::Done:      s = "done"; break;
+          }
+          f.regs[in.a] = Value::make_str(s);
+          break;
+        }
+        case Op::CoroCurrent: {
+          const size_t bottom = coro_bottom();
+          f.regs[in.a] =
+              bottom < frames.size() ? frames[bottom]->coro_self : Value();
+          break;
         }
       }
       ++f.pc;
