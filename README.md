@@ -498,6 +498,40 @@ ctest --test-dir build --output-on-failure
 `VMLIB_BUILD_TESTS` (default `ON`) builds the tests, and with them the PL/0
 front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
 (default `OFF`) builds the example front ends on their own.
+`VMLIB_BUILD_BENCH` (default `ON`) builds the benchmark harness.
+
+## Benchmarks
+
+`bench/bench.cc` builds one Core-IR program per thing the executor spends
+its time on -- calls, variable traffic, the arithmetic dispatch, string
+constants, field access, allocation -- and times `vm::run` on each. It
+prints one TSV row per case (name, best-of-N ms, mean ms, and a checksum of
+what the program printed):
+
+```
+./build/bench/bench --reps 5          # every case
+./build/bench/bench call_fib alloc    # named cases only
+```
+
+A change is judged by comparing two builds, not by one number. Build the
+harness before the change, keep the binary, build it after, and:
+
+```
+bench/compare.sh path/to/bench_before ./build/bench/bench 9
+```
+
+The two binaries are run alternately, case by case, and each one's best time
+is kept -- alternating because a machine whose speed drifts under load would
+otherwise charge the drift to whichever side ran second. The checksum column
+is what makes the comparison honest: a row marked `CHECK-DIFF` means the two
+builds printed different things, so they did not do the same work.
+
+Two cautions. Anything under about 5% between two *different binaries* is
+usually the compiler's code layout rather than the change -- the dispatch
+loop is one enormous function, and adding code anywhere in it moves the
+numbers of cases that never execute that code. Where it matters, make the
+same binary do both things (a runtime flag) and compare it against itself;
+that removes layout from the question entirely.
 
 ## Front ends
 
@@ -603,7 +637,8 @@ for), not one heap with locks. *Multi-shot continuations*: a coroutine is
 one-shot -- its parked frames move, they are not copied -- and Scheme's
 full `call/cc` would need a rule for what a copied cell means that nothing
 here has. *Speed*: there is no JIT, no inline cache, no inlining; a
-language that works here is not thereby fast.
+language that works here is not thereby fast -- what it does cost is at
+least measurable, in [Benchmarks](#benchmarks).
 
 ## Testing
 

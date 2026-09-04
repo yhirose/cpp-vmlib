@@ -20,6 +20,7 @@ target_include_directories(vmlib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 option(VMLIB_BUILD_TESTS "Build cpp-vmlib tests" ON)
 option(VMLIB_BUILD_EXAMPLES "Build the example front ends" OFF)
+option(VMLIB_BUILD_BENCH "Build the benchmark harness" ON)
 
 # Unconditional, and up here before any add_subdirectory: a subdirectory's
 # own add_test only reaches `ctest` run from the top build directory if the
@@ -50,6 +51,10 @@ endif()
 
 if(VMLIB_BUILD_TESTS)
   add_subdirectory(test)
+endif()
+
+if(VMLIB_BUILD_BENCH)
+  add_subdirectory(bench)
 endif()
 
 install(FILES vmlib.h DESTINATION include)
