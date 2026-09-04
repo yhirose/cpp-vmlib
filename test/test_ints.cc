@@ -424,19 +424,22 @@ int main() {
   test_binop(
       BinOp::Add, "u32 Add", u32_pairs(false),
       [](int64_t a, int64_t bb) {
-        return static_cast<int64_t>(static_cast<uint32_t>(a + bb));
+        return static_cast<int64_t>(static_cast<uint32_t>(a) +
+                                    static_cast<uint32_t>(bb));
       },
       UnOp::WrapU32);
   test_binop(
       BinOp::Sub, "u32 Sub", u32_pairs(false),
       [](int64_t a, int64_t bb) {
-        return static_cast<int64_t>(static_cast<uint32_t>(a - bb));
+        return static_cast<int64_t>(static_cast<uint32_t>(a) -
+                                    static_cast<uint32_t>(bb));
       },
       UnOp::WrapU32);
   test_binop(
       BinOp::Mul, "u32 Mul", u32_pairs(false),
       [](int64_t a, int64_t bb) {
-        return static_cast<int64_t>(static_cast<uint32_t>(a * bb));
+        return static_cast<int64_t>(static_cast<uint32_t>(a) *
+                                    static_cast<uint32_t>(bb));
       },
       UnOp::WrapU32);
   test_binop(BinOp::Div, "u32 Div", u32_pairs(true),
