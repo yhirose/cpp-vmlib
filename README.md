@@ -13,9 +13,11 @@ representation, a register-bytecode compiler, and the executor that runs it
 
 You write a *binder*: the pass that turns your parse tree into the IR's
 fixed node shapes. Everything below that -- register allocation, closures,
-reference counting plus a cycle collector, exceptions, defers, generators --
-already exists and is shared by every front end. Nothing under `coreir` knows
-what parser, or what language, produced the nodes it is given.
+reference counting plus a cycle collector, exceptions, defers, generators,
+stackful coroutines and the scheduler that turns them into green threads,
+tail calls, value-keyed maps, host functions -- already exists and is shared
+by every front end. Nothing under `coreir` knows what parser, or what
+language, produced the nodes it is given.
 
 ## Quickstart
 
@@ -88,7 +90,7 @@ to it:
 | Values | `Literal`, `VarRef`, `Assign` |
 | Operators | `Unary`, `Binary`, `Intrinsic` |
 | Control flow | `If`, `Switch`, `While`, `Block`, `Break`, `Continue`, `Return` |
-| Functions | `MakeClosure`, `CallValue`, `Yield` |
+| Functions | `MakeClosure`, `CallValue`, `Yield`, `NativeRef` |
 | Containers | `ArrayLit`, `ObjectLit`, `Index`, `SetIndex`, `FieldGet`, `FieldSet` |
 | Lifetimes | `Scope`, `Defer`, `CellFresh` |
 | Exceptions | `Throw`, `TryCatch` |
@@ -105,13 +107,22 @@ A few things worth knowing before you write a binder:
   an unwinding throw. That is what makes a value die with its scope rather
   than with the frame.
 - **Calling is two tags.** `MakeClosure` builds a callable over cells;
-  `CallValue` calls whatever a value turns out to be. There is no "call
-  function #n" shortcut -- see [Design notes](#design-notes).
+  `CallValue` calls whatever a value turns out to be -- a closure, or a host
+  function a `NativeRef` named (see [Host functions](#host-functions)).
+  There is no "call function #n" shortcut -- see
+  [Design notes](#design-notes).
+- **`Break` and `Continue` name their loop by depth.** `a = 0` is the
+  innermost `While` (the plain form), `a = 1` the one around it: Java's and
+  Go's labeled `break`/`continue`, with the label resolved to a depth by
+  your binder. `verify()` requires the depth to name a loop that is open.
 - **Intrinsics** are what a language cannot write in itself: `Print`,
-  `ReadInt`, `Len`, `ToStr`, `TypeOf`, numeric conversions, the array and
-  object primitives (`ArrayPush`, `ObjectKeys`, ...), `Same`, `Collect`.
-  Everything else -- map, filter, slices -- is a loop your front end writes
-  in its own language.
+  `ReadInt`, `Len`, `ToStr`, `TypeOf`, numeric conversions, the array,
+  object and map primitives (`ArrayPush`, `ArraySlice`, `ObjectKeys`,
+  `MapNew`, ...), the string primitives (`StrSlice`, `StrByte`,
+  `StrFromByte`), `Same`, `Collect`, the generator and coroutine protocols
+  (`GenResume`, `CoroResume`, `CoroYield`, ...) and the job queue
+  (`Enqueue`). Everything else -- map, filter, a channel, a Promise -- is a
+  loop or an object your front end writes in its own language.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
@@ -284,9 +295,166 @@ Go's `case a, b:` (multiple      ->  one (key, body) child pair per label,
                                      it, just emitted again at each position
 ```
 
+## Maps
+
+`Object` is keyed by strings, and deliberately so: string keys are what let
+a struct be indexed by slot (`FieldGet`/`FieldSet`) and what the drop key
+hangs on. A language's `dict`/`Map`/`map[int]T`/numeric-keyed table needs
+keys that are values, and gets a second container rather than a widened
+first one: `ValueTag::Map`, made by `Intrinsic(MapNew)`, filled and read
+through the same `Index`/`SetIndex` (which already dispatch on the
+receiver), sized by `Len`, and asked about through `ObjectHas`, `ObjectKeys`
+and `ObjectRemove`, each of which accepts a map receiver too. Nothing about
+`Object` changes.
+
+Two values are the same key when they have the same tag and -- for a string
+-- the same bytes, or -- for everything else -- the same payload: an int by
+value, a double by bit pattern (so `-0.0` and `0.0` are two keys and `NaN` is
+one; a language with SameValueZero normalizes first), a heap object by
+identity. That is a third rule beside `Eq` (which refuses to compare across
+types) and `Same` (which compares two equal strings from two allocations as
+different), stated once as `key_eq` in `vmlib.h`. Lookup is a hash;
+iteration is insertion order, like an object's, so a printed map is
+reproducible.
+
+## Strings and slices
+
+`Index` on a string yields one byte, as a string. That is enough to express
+everything and too slow for most of it: a substring built by concatenating
+bytes is quadratic, and a byte's numeric value cannot be recovered from a
+one-byte string at all. Four intrinsics fill exactly those gaps and no
+more: `StrSlice(s, i, j)` and `ArraySlice(a, i, j)` take the half-open
+range `[i, j)` -- bounds-checked the way `Index` is (`0 <= i <= j <= len`,
+anything else traps; a language that clamps or counts from the end
+normalizes first), always a fresh value -- and `StrByte(s, i)` /
+`StrFromByte(n)` are what `ord`/`chr`, and any UTF-8 decoding a front end
+writes itself, bottom out in. Strings stay byte sequences; what a code point
+is belongs to the language.
+
+## Host functions
+
+The six-function contract below is what the executor itself needs from a
+host. What a *program* needs from a host -- a clock, a file, a socket, a
+random number -- is not the executor's to know, so it is not an intrinsic:
+a module declares the host functions it calls by name (`Module::natives`,
+`Builder::declare_native`), reaches one through `Tag::NativeRef` as a
+callable value, and the run supplies the definitions
+(`RunOptions::natives`, a list of `NativeDef{name, arity, fn, ctx}`).
+`vm::run` links the two before the first instruction: a name the host did
+not supply fails the whole run, not the one call site that reaches it.
+
+A native runs on the spot, with no frame, and its answer lands where a
+closure's return would; it is callable wherever a closure is -- `CallValue`,
+`Enqueue`, `Defer`, the drop key -- and `TypeOf` says "function" for it.
+Its signature is `bool (*)(NativeCall&)`: read the arguments, set `result`
+and return `true`, or set `error` and return `false`, which raises that
+value at the call site exactly as a `Throw` there would, catchable by the
+program's own `TryCatch`. That is the one way a native fails a program (a
+C++ exception thrown out of one is not the program's to catch: it passes
+through the executor untouched, the rule the `coreir_rt_*` hooks already
+have, and ends the run). `NativeCall::call` runs a closure -- or another
+native -- to completion from inside a native, and a throw the callee lets
+out travels through the native to the caller's handler; a native that calls
+back therefore keeps what it owns in RAII handles. A front end that calls
+one host function from many sites hoists the `NativeRef` into a `Cell`
+exactly as [Static calls](#static-calls) hoists a `MakeClosure`.
+
+## Tail calls
+
+With `Func::tail_calls` on, a `CallValue` in tail position -- a `Return`'s
+operand, or the value the body ends in, followed down through `Block`,
+`If`, `Switch` and `Scope` -- replaces the frame instead of stacking on it,
+so a loop written as a call chain runs in one frame however long it goes,
+and `max_call_depth` stops mattering for it. The frame exits *before* the
+callee runs: temporaries, then locals last-slot-first, then each open
+scope's owned resolution. That is Rust's rule for `become`, and the one
+observable difference from a plain call -- a local's destructor now prints
+before the callee's output rather than after -- which is why a front end
+switches it on rather than getting it by default. The compiler leaves a
+call alone inside a `TryCatch` body (the handler is a pc range of this
+chunk and would go with the frame) and inside a `Scope` that declares
+defers; the executor leaves one alone when the callee is a native or a
+generator function, or the frame is the entry frame -- each of those is
+the call it would otherwise have been, and the frame returns its result.
+`test/test_tailcalls.cc` runs a million-deep mutual recursion under the
+default 10000-frame limit.
+
+## Coroutines
+
+A generator suspends the one frame whose body lexically contains the
+`Yield`. A coroutine suspends every frame from the one `CoroResume` entered
+down to wherever `CoroYield` is reached -- three calls deep, in a callback,
+in a function that never heard of coroutines. That is what Lua's
+coroutines, Ruby's Fibers and a goroutine are made of, and what an `await`
+that is not itself inside a generator body needs.
+
+`CoroCreate(f)` answers a coroutine in its Start state. The first
+`CoroResume(co, v)` calls `f(v)` -- one argument, so `f` takes one
+parameter or is lenient -- and runs until a `CoroYield` or `f`'s return;
+each later `CoroResume` re-enters at the `CoroYield`, which yields the sent
+value. Both answer the `{value, done}` object `GenResume` does. A throw the
+coroutine's frames do not catch finishes it and continues at the
+`CoroResume`, into the resumer's own handlers. `CoroClose(co)` finishes a
+suspended coroutine early, running its parked frames' pending defers
+innermost frame first (what `GenReturn` does for a generator's one frame);
+a coroutine that is dropped rather than closed runs nothing, the
+generator's rule. `CoroStatus` and `CoroCurrent` are the introspection.
+
+One rule, stated once in the executor's `CoroYield`: a yield whose
+coroutine's bottom frame lies below the current dispatch's floor -- there is
+C++ between it and here: a native that called back in, a destructor, a
+defer, the job driver -- traps with "cannot yield across a host boundary",
+Lua's C-call boundary. No frame stack can hold what is on the machine
+stack; everything else can be parked. The storage is the same `GenFrame`
+per frame a generator uses, and the executor's frames were `unique_ptr`s
+from the start so that a frame's ownership could move -- this is the change
+that design note was waiting for.
+
+## Scheduler
+
+`Enqueue` accepts a coroutine as well as a closure, which makes the job
+queue a scheduler. Taken from the queue it is resumed -- a first time as
+`f(nil)`, later at its `CoroYield` with `nil` -- and driven until it yields
+or finishes; a yield does not put it back, whoever it is waiting for
+enqueues it again. That is every green-thread primitive: spawn is
+`Enqueue(CoroCreate(f))`, block is "record `CoroCurrent()` somewhere, then
+`CoroYield`", wake is `Enqueue`, and a coroutine that merely wants to let
+others run enqueues itself first. A channel, a mutex, a `select` are then
+objects a front end writes in its own language over those three; Go's
+rendezvous rule for an unbuffered channel is forty lines of IR in
+[example/go_mini/](example/go_mini/)'s binder, not a line of `vmlib.h`.
+
+A coroutine once enqueued is the scheduler's until it finishes: the
+executor holds its own reference, so one that parks and is then forgotten
+by everything else is not quietly freed, and when the queue runs dry with
+any of them still suspended the run fails through `coreir_rt_fail` with a
+deadlock diagnostic -- Go's "all goroutines are asleep". The entry frame is
+not a coroutine (a `CoroYield` there has no frames to park), so a front end
+whose main *is* a green thread -- Go's -- spawns it from a bootstrap entry
+function and returns; go_mini does exactly that.
+
+## Arbitrary-precision integers
+
+`Value` holds an `int64` or a `double` and nothing wider, and this is a
+decision rather than a gap: a third numeric tag would sit in `apply_binop`'s
+hot path and tax every language's integer arithmetic for the few that need
+bignums. A front end that does (Python's `int`, Ruby's `Integer`, Scheme's
+numbers) carries them itself, as a little-endian `Array` of `Int` limbs in
+base 10^9: a limb product plus two carries then fits an `int64` with room to
+spare, and rendering is nine decimal digits per limb with no division at
+all. `test/test_bigint_recipe.cc` writes addition, schoolbook
+multiplication and decimal rendering once in IR, the way a front end would
+emit them, and checks 312 operand pairs against C++'s own `unsigned
+__int128` -- the same oracle discipline `test_ints.cc` uses for the
+fixed-width recipe. If a front end living on this recipe ever shows it to be
+the bottleneck, that measurement is the moment to revisit the tag; until
+then the hot path stays two-tagged.
+
 ## The host contract
 
-`vm/exec.cc` links against exactly six C functions and nothing else:
+`vm/exec.cc` links against exactly six C functions and nothing else -- the
+program-level host functions above arrive through `RunOptions`, as data, so
+they change nothing here:
 
 ```cpp
 void coreir_rt_out(int64_t v);                       // print an integer
@@ -329,7 +497,7 @@ front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
 | Front end | Parser | Notes |
 |---|---|---|
 | [PL/0](example/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [example/pl0/README.md](example/pl0/README.md). |
-| [go_mini](example/go_mini/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields and Switch against `go run`. See [example/go_mini/README.md](example/go_mini/README.md). |
+| [go_mini](example/go_mini/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields, Switch, and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. See [example/go_mini/README.md](example/go_mini/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
 -- under `example/<name>/`, plus that front end's own implementation of the
@@ -364,12 +532,27 @@ Keeping both would have meant two ownership rules inside one frame -- a
 borrowed slot pointer and an owned cell -- with the meaning of a capture
 depending on which kind of call got you there. A front end wanting the old
 shape builds a closure and calls it on the spot, which is what the PL/0
-example does.
+example does. A host function is called by that same `CallValue` (it is a
+value a `NativeRef` produced), and a tail call is that same call in tail
+position -- neither added a second way.
 
 **Calls do not recurse through the host's C++ stack.** The executor keeps its
 own stack of heap-allocated frames, so a deep call chain costs heap rather
 than machine stack and cannot overflow the thread it runs on, and a frame's
-address stays put for as long as it is live.
+address stays put for as long as it is live. The frames are `unique_ptr`s
+rather than a `vector<Frame>` so that a frame's ownership can move -- which
+is exactly what a generator's `Yield` does with one frame and a coroutine's
+`CoroYield` does with a whole slice of them. The one thing that cannot be
+parked is C++: a native that called back in, a destructor, a defer, the job
+driver each re-enter the dispatch loop with a floor, and a yield from under
+one of those traps rather than pretending.
+
+**Code runs at a few, named moments.** A destructor runs at a refcount
+death, a scope exit or a collection; a defer at its scope's exit; a
+coroutine's parked defers at an explicit `CoroClose`. Dropping a suspended
+coroutine or generator runs nothing, and a native fails a program only by
+returning `false` -- every path on which the executor calls back into
+program code is one a reader can name.
 
 ## Scope
 
@@ -380,27 +563,40 @@ deliberately fixed. What a given front end exercises is necessarily narrower
 than that; see its own README for what it does and does not rehearse.
 
 **What kind of language this targets.** A dynamically-typed language (PL/0,
-culebra, a JS subset) is the easy case: `Value` already is the dynamic-typed
-value. A managed, statically-typed language (a C#, Java or Go subset) is in
-scope too -- a binder that has already type-checked can erase types on the
-way into the IR, and the runtime's refcounted objects, cycle collector,
-`Scope`/`Defer` pair and generators cover classes, `using`/`try`-`finally`,
-and `yield return` without changes. What the binder still has to work around:
-`Value` holds only `int64` and `double`, so `int`/`uint`/`long`/`ulong` need
-their own wrap-and-widen lowering the front end writes itself, and a struct's
-fields have no layout the IR derives on its own -- the front end assigns
-every slot. Real work either way, but neither is a wall: the ops that
-lowering lands in are **Fixed-width integers**, and the slot-indexed access
-is **Struct fields**.
+culebra, a JavaScript or Lua subset) is the easy case: `Value` already is
+the dynamic-typed value, `Map` is its dictionary, `Generator` and
+`Coroutine` are its `function*` and its `coroutine.create`, and `async`/
+`await` is a coroutine driven from the job queue. A managed,
+statically-typed language (a C#, Java or Go subset) is in scope too -- a
+binder that has already type-checked can erase types on the way into the
+IR, and the runtime's refcounted objects, cycle collector, `Scope`/`Defer`
+pair, generators, coroutines and scheduler cover classes, `using`/`try`-
+`finally`, `yield return`, `async` and goroutines with channels without
+changes. What the binder still has to write itself, with a section above
+for each: `int`/`uint`/`long`/`ulong` as **Fixed-width integers**, `float`
+as a re-rounded double, a struct's slot layout for **Struct fields**, a
+bignum as the **Arbitrary-precision integers** recipe, a channel or a
+Promise over the **Scheduler**'s three primitives, and its standard library
+as **Host functions** the run supplies. Real work either way, but none of
+it is a wall: every one of those has a recipe here that a test checks
+against an oracle this repository does not contain.
 
-**What is out of scope: C and C++.** `Value` is a tagged value, not a byte
-representation, so `&x`, `*p`, pointer arithmetic, a `union`'s type punning
-and a `memcpy` reinterpreting one type's bytes as another's have nothing to
-lower to. Faking a byte-addressable heap as one big int array (pointers as
-indices, the wasm approach) sidesteps that, but then nothing else here is
-being used either -- not the refcounted objects, not the cycle collector,
-not `Str`, not `Array` -- so a front end wanting that shape is better off
-without this library underneath it.
+**What stays out of reach, and why.** *C, C++, Zig, Rust's `unsafe`*:
+`Value` is a tagged value, not a byte representation, so `&x`, `*p`, pointer
+arithmetic, a `union`'s type punning and a `memcpy` reinterpreting one
+type's bytes as another's have nothing to lower to. Faking a
+byte-addressable heap as one big int array (pointers as indices, the wasm
+approach) sidesteps that, but then nothing else here is being used either,
+so a front end wanting that shape is better off without this library
+underneath it. *Shared-memory parallelism*: one `Runtime` is current per
+thread and its refcounts are not atomic; the scheduler is N:1 on one
+thread, and the way to two programs running at once is two runtimes with
+values crossing only by copying (the design `Runtime` was made an object
+for), not one heap with locks. *Multi-shot continuations*: a coroutine is
+one-shot -- its parked frames move, they are not copied -- and Scheme's
+full `call/cc` would need a rule for what a copied cell means that nothing
+here has. *Speed*: there is no JIT, no inline cache, no inlining; a
+language that works here is not thereby fast.
 
 ## Testing
 

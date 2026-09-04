@@ -4958,9 +4958,9 @@ struct Raise {
 };
 
 // One activation record. A frame is a heap object owned by Exec's stack, not
-// a C++ stack frame, so its address is stable for as long as it is live --
-// which is what lets `captures` be raw pointers into the frame that declared
-// each variable.
+// a C++ stack frame, so its address is stable for as long as it is live, and
+// its ownership can move: into a GeneratorObj at a Yield, into a CoroObj
+// with every frame above the coroutine's bottom at a CoroYield, and back.
 //
 // `regs` and `locals` hold owned references, and nothing in this
 // file places a retain or a release to make that work. Value is an RAII
