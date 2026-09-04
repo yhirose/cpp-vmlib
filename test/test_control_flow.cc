@@ -267,6 +267,102 @@ int main() {
              "break across a function: verify message");
   }
 
+  // --- 8. A labeled Break leaves two loops at once, and releases the inner
+  // Scope's local on the way out; a labeled Continue re-enters the outer
+  // loop's test. -------------------------------------------------------
+  // d(x) { print "drop" }
+  // main {
+  //   i = 0
+  //   while i < 3 { scope(1, 3) { o = {drop: d}; j = 0
+  //     while j < 3 { if j == 1 { break ^1 }; print j; j = j + 1 } }
+  //     i = i + 1 }
+  //   print "after"
+  //   i = 0
+  //   while i < 2 { i = i + 1; j = 0
+  //     while j < 3 { if j == 1 { continue ^1 }; print i * 10 + j; j = j + 1 }
+  //     print "never" }
+  //   print "end"
+  // }
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{8, 1};
+    auto lit = [&](int64_t v) { return b.literal(v, p); };
+    auto loc = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    auto set = [&](int32_t i, NodeId v) {
+      return b.assign(VarKind::Local, i, v, p);
+    };
+    auto say = [&](const char* s) {
+      return b.intrinsic(IntrinsicId::Print, {b.str_literal(s, p)}, p);
+    };
+    auto pr = [&](NodeId v) { return b.intrinsic(IntrinsicId::Print, {v}, p); };
+    auto add = [&](NodeId x, NodeId y) { return b.binary(BinOp::Add, x, y, p); };
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"d", 1, 0, say("drop"), {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    // locals: 0 i, 1 o, 2 j
+    const NodeId first = b.make_while(
+        b.binary(BinOp::Lt, loc(0), lit(3), p),
+        b.block(
+            {b.scope(1, 3,
+                     b.block({set(1, b.object_lit({{b.str_literal("\x01" "drop", p),
+                                                    b.varref(VarKind::Cell, 0, p)}},
+                                                  p)),
+                              set(2, lit(0)),
+                              b.make_while(
+                                  b.binary(BinOp::Lt, loc(2), lit(3), p),
+                                  b.block({b.make_if(b.binary(BinOp::Eq, loc(2),
+                                                              lit(1), p),
+                                                     b.make_break(p, 1),
+                                                     NodeId{}, p),
+                                           pr(loc(2)), set(2, add(loc(2), lit(1)))},
+                                          p),
+                                  p)},
+                             p),
+                     p),
+             set(0, add(loc(0), lit(1)))},
+            p),
+        p);
+    const NodeId second = b.make_while(
+        b.binary(BinOp::Lt, loc(0), lit(2), p),
+        b.block({set(0, add(loc(0), lit(1))), set(2, lit(0)),
+                 b.make_while(
+                     b.binary(BinOp::Lt, loc(2), lit(3), p),
+                     b.block({b.make_if(b.binary(BinOp::Eq, loc(2), lit(1), p),
+                                        b.make_continue(p, 1), NodeId{}, p),
+                              pr(add(b.binary(BinOp::Mul, loc(0), lit(10), p),
+                                     loc(2))),
+                              set(2, add(loc(2), lit(1)))},
+                             p),
+                     p),
+                 say("never")},
+                p),
+        p);
+    m.funcs[0] = {"main", 3, 0,
+                  b.block({b.assign(VarKind::Cell, 0, b.make_closure(1, 0, p), p),
+                           set(0, lit(0)), first, say("after"), set(0, lit(0)),
+                           second, say("end")},
+                          p),
+                  {"i", "o", "j"}, {}};
+    m.funcs[0].num_cells = 1;
+    check_eq(run_module(m, "labeled"), "", "labeled: unexpected failure");
+    check_eq(joined(), "0|drop|after|10|20|end|", "labeled output");
+  }
+  // A depth that names no open loop is verify()'s to refuse.
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{9, 1};
+    m.funcs.push_back({"main", 0, 0,
+                       b.make_while(b.bool_literal(true, p), b.make_break(p, 1),
+                                    p),
+                       {}, {}});
+    const auto err = verify(m);
+    check_eq(err ? *err : "", "Break names a loop that is not open",
+             "labeled: verify");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "control_flow: %d failure(s)\n", g_failures);
     return 1;

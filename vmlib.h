@@ -1001,10 +1001,14 @@ enum class Tag : uint8_t {
   // Non-local exits. Statements, like PL/0's: nothing reads their value.
   // Each one leaves every Scope between it and its target the way the
   // scope's own exit would -- locals released -- which is what earns them a
-  // place in the IR rather than being a front-end Jump.
+  // place in the IR rather than being a front-end Jump. Break and Continue
+  // name their loop by how many enclosing While bodies to skip: a = 0 is
+  // the innermost (the plain break), a = 1 the one around it -- Java's and
+  // Go's labeled break/continue, with the label resolved to a depth by the
+  // front end. verify() requires the depth to name a loop that is open.
   Return,     // children: value (optional; none returns nil)
-  Break,      // no children; verify() requires an enclosing While body
-  Continue,   // no children; verify() requires an enclosing While body
+  Break,      // a = loops to skip (0: innermost); no children
+  Continue,   // a = loops to skip (0: innermost); no children
   // Exceptions. Throw raises any value; TryCatch guards its first child,
   // lands what a throw (or a trap the executor raises itself -- divide by
   // zero, a wrong-typed operand) carried in the local slot `a`, and resumes
@@ -1766,7 +1770,11 @@ public:
     if (value.valid()) return emit(Tag::Return, 0, p, 0, 0, {value});
     return emit(Tag::Return, 0, p, 0, 0, {});
   }
-  NodeId make_break(SrcPos p) { return emit(Tag::Break, 0, p, 0, 0, {}); }
+  // `depth`: how many enclosing loops to skip -- 0 (the default) leaves
+  // the innermost, 1 the one around it, and so on.
+  NodeId make_break(SrcPos p, int32_t depth = 0) {
+    return emit(Tag::Break, 0, p, depth, 0, {});
+  }
   NodeId make_throw(NodeId value, SrcPos p) {
     return emit(Tag::Throw, 0, p, 0, 0, {value});
   }
@@ -1783,8 +1791,8 @@ public:
                   SrcPos p) {
     return emit(Tag::TryCatch, 0, p, caught_local, 0, {body, handler});
   }
-  NodeId make_continue(SrcPos p) {
-    return emit(Tag::Continue, 0, p, 0, 0, {});
+  NodeId make_continue(SrcPos p, int32_t depth = 0) {
+    return emit(Tag::Continue, 0, p, depth, 0, {});
   }
   NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args, SrcPos p) {
     return emit(Tag::Intrinsic, static_cast<uint8_t>(id), p, 0, 0, args);
@@ -3643,9 +3651,15 @@ struct Verifier {
         break;
       case Tag::Break:
         if (loop_depth == 0) return fail("Break outside a loop body");
+        if (n.a < 0 || n.a >= loop_depth) {
+          return fail("Break names a loop that is not open");
+        }
         break;
       case Tag::Continue:
         if (loop_depth == 0) return fail("Continue outside a loop body");
+        if (n.a < 0 || n.a >= loop_depth) {
+          return fail("Continue names a loop that is not open");
+        }
         break;
       case Tag::TryCatch:
         if (n.a < 0 || n.a >= f.num_locals) {
@@ -3803,8 +3817,11 @@ struct Dumper {
         break;
       }
       case Tag::Return:   out << "return"; break;
-      case Tag::Break:    out << "break"; break;
-      case Tag::Continue: out << "continue"; break;
+      case Tag::Break:
+      case Tag::Continue:
+        out << name_of(n.tag);
+        if (n.a > 0) out << " ^" << n.a;  // how many loops it skips
+        break;
       case Tag::Throw:    out << "throw"; break;
       case Tag::Defer:    out << "defer"; break;
       case Tag::CellFresh:
@@ -4839,7 +4856,12 @@ struct FnCompiler {
 
       case Tag::Break:
       case Tag::Continue: {
-        OpenLoop& loop = open_loops.back();  // verify(): inside a loop body
+        // verify(): inside a loop body, and n.a names one that is open.
+        // leave_down_to already leaves every scope between here and the
+        // target loop, however many loops lie in between, so a labeled
+        // exit costs nothing the plain one did not.
+        OpenLoop& loop =
+            open_loops[open_loops.size() - 1 - static_cast<size_t>(n.a)];
         leave_down_to(loop.scope_depth, loop.stmt_base, n.pos);
         if (n.tag == Tag::Continue) {
           emit(Op::Jump, loop.head, 0, 0, n.pos);
