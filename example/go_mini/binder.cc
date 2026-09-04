@@ -33,8 +33,7 @@
 //   * a `switch` lowers straight to coreir::Switch with no extra work,
 //     because Go's own case semantics (no fallthrough) already are
 //     Switch's; `case a, b:` shares one compiled body NodeId between both
-//     keys rather than compiling it twice.
-//
+//     keys rather than compiling it twice;
 //   * goroutines are coroutines on vmlib's scheduler (`go f(args)` is
 //     Enqueue(CoroCreate(wrapper)), main itself runs as the first one --
 //     see emit_bootstrap), and an unbuffered channel is an object whose
@@ -74,7 +73,7 @@ namespace {
 // (Binder::structs), a channel's is its element type, and neither is a
 // fixed word this front end knows ahead of time, so resolving either needs
 // more than this free function (Binder::resolve_type). Both carry their
-// second half in the `struct_id` field beside them: the structs index for
+// second half in the `second_half` field beside them: the structs index for
 // a Struct, the element Type (one of the six scalars) for a Chan.
 enum class Type { I32, I64, U32, F32, F64, Bool, Struct, Chan };
 
@@ -142,7 +141,7 @@ BinOp binop_of(std::string_view t, const Ast& at) {
   fail(at, "unknown operator '" + std::string(t) + "'");
 }
 
-// Whether a Type needs its struct_id to be fully described: a Struct (which
+// Whether a Type needs its second_half to be fully described: a Struct (which
 // struct) and a Chan (which element type). Every other Type is
 // self-describing.
 bool has_second_half(Type t) { return t == Type::Struct || t == Type::Chan; }
@@ -150,8 +149,8 @@ bool has_second_half(Type t) { return t == Type::Struct || t == Type::Chan; }
 // Two Struct-typed values (or hints) are the same type only if they name
 // the same struct, two Chan-typed ones only if they carry the same element
 // -- the one comparison Type alone, a plain enum, cannot make.
-bool same_type(Type t1, int32_t struct_id1, Type t2, int32_t struct_id2) {
-  return t1 == t2 && (!has_second_half(t1) || struct_id1 == struct_id2);
+bool same_type(Type t1, int32_t half1, Type t2, int32_t half2) {
+  return t1 == t2 && (!has_second_half(t1) || half1 == half2);
 }
 
 // A struct- or chan-typed target gives a literal nothing to take on. Hints
@@ -167,16 +166,18 @@ std::optional<Type> hint_for(Type t) {
   return t;
 }
 
-// A resolved `type` token: a fixed scalar, or Type::Struct plus which entry
-// of Binder::structs it names, or Type::Chan plus its element Type (as an
-// int, in the same field).
-struct TypeRef { Type type; int32_t struct_id = -1; };
+// A resolved `type` token: a fixed scalar, or one of the two types that
+// need a second half (has_second_half) -- Type::Struct plus which entry of
+// Binder::structs it names, or Type::Chan plus its element Type. The two
+// share one field because no type needs both, and -1 means "none", which
+// is what a self-describing type carries.
+struct TypeRef { Type type; int32_t second_half = -1; };
 
 // A variable's slot and static type; a function's own call-target cells
 // (README's Static calls recipe) and, while its body is being compiled,
-// how many locals and cells it has claimed so far. struct_id is only
-// meaningful when type is a Struct or a Chan (TypeRef's rule).
-struct LocalInfo { int32_t slot; Type type; int32_t struct_id = -1; };
+// how many locals and cells it has claimed so far. second_half is
+// TypeRef's, and means nothing for a self-describing type.
+struct LocalInfo { int32_t slot; Type type; int32_t second_half = -1; };
 
 struct FuncCtx {
   std::map<std::string, LocalInfo> locals;
@@ -206,12 +207,12 @@ struct FuncInfo {
   std::vector<TypeRef> param_types;
 };
 
-struct TypedExpr { NodeId node; Type type; int32_t struct_id = -1; };
+struct TypedExpr { NodeId node; Type type; int32_t second_half = -1; };
 
 // One struct field: its static type (README's Struct fields section) and
 // the props slot ObjectLit/FieldGet/FieldSet agree on -- declaration order,
 // the same contract a local's slot index already is.
-struct FieldDef { std::string name; Type type; int32_t struct_id; int32_t slot; };
+struct FieldDef { std::string name; Type type; int32_t second_half; int32_t slot; };
 struct StructDef { std::string name; std::vector<FieldDef> fields; };
 
 struct Binder {
@@ -220,13 +221,15 @@ struct Binder {
   std::map<std::string, int32_t> struct_ids;  // struct name -> structs index
   std::vector<StructDef> structs;
 
-  // Struct(struct_id).name when t == Type::Struct, "chan <elem>" for a
+  // Struct(second_half).name when t == Type::Struct, "chan <elem>" for a
   // Chan, else type_name(t) -- the one place a diagnostic needs a type's
   // own spelling rather than the bare word "struct" or "chan".
-  std::string describe_type(Type t, int32_t struct_id) const {
-    if (t == Type::Struct) return structs[static_cast<size_t>(struct_id)].name;
+  std::string describe_type(Type t, int32_t second_half) const {
+    if (t == Type::Struct) {
+      return structs[static_cast<size_t>(second_half)].name;
+    }
     if (t == Type::Chan) {
-      return std::string("chan ") + type_name(static_cast<Type>(struct_id));
+      return std::string("chan ") + type_name(static_cast<Type>(second_half));
     }
     return type_name(t);
   }
@@ -323,14 +326,14 @@ struct Binder {
     if (v.type != Type::Struct) return v;
     if (m.at(v.node).tag == Tag::ObjectLit) return v;
     Builder b(m);
-    const StructDef& sd = structs[static_cast<size_t>(v.struct_id)];
+    const StructDef& sd = structs[static_cast<size_t>(v.second_half)];
     std::vector<NodeId> values;
     values.reserve(sd.fields.size());
     for (const auto& fd : sd.fields) {
       const NodeId raw = b.field_get(v.node, fd.slot, fd.name, p);
-      values.push_back(copy_struct({raw, fd.type, fd.struct_id}, p).node);
+      values.push_back(copy_struct({raw, fd.type, fd.second_half}, p).node);
     }
-    return make_struct(v.struct_id, values, p);
+    return make_struct(v.second_half, values, p);
   }
 
   // One step of a field chain: the field `a.nodes[i]` names on the value
@@ -344,9 +347,9 @@ struct Binder {
   const FieldDef& field_of(const Ast& a, const TypedExpr& recv, size_t i) {
     if (recv.type != Type::Struct) {
       fail(a, "'" + std::string(a.nodes[i - 1]->token) + "' (" +
-                  describe_type(recv.type, recv.struct_id) + ") has no fields");
+                  describe_type(recv.type, recv.second_half) + ") has no fields");
     }
-    const StructDef& sd = structs[static_cast<size_t>(recv.struct_id)];
+    const StructDef& sd = structs[static_cast<size_t>(recv.second_half)];
     const std::string fname(a.nodes[i]->token);
     const int32_t idx = find_field_index(sd, fname);
     if (idx < 0) fail(a, sd.name + " has no field '" + fname + "'");
@@ -368,11 +371,11 @@ struct Binder {
     const LocalInfo& li = local_of(a, ctx, std::string(a.nodes[0]->token));
     Builder b(m);
     TypedExpr cur{b.varref(VarKind::Local, li.slot, p), li.type,
-                 li.struct_id};
+                 li.second_half};
     for (size_t i = 1; i < last; ++i) {
       const FieldDef& fd = field_of(a, cur, i);
       cur = {b.field_get(cur.node, fd.slot, fd.name, p), fd.type,
-             fd.struct_id};
+             fd.second_half};
     }
     return cur;
   }
@@ -393,10 +396,10 @@ struct Binder {
   NodeId emit_field_value(const Ast& expr, FuncCtx& ctx, const FieldDef& fd,
                           const Ast& at, SrcPos p) {
     TypedExpr v = emit_expr(expr, ctx, hint_for(fd.type));
-    if (!same_type(v.type, v.struct_id, fd.type, fd.struct_id)) {
-      fail(at, "cannot assign " + describe_type(v.type, v.struct_id) +
+    if (!same_type(v.type, v.second_half, fd.type, fd.second_half)) {
+      fail(at, "cannot assign " + describe_type(v.type, v.second_half) +
                    " to field '" + fd.name + "' (" +
-                   describe_type(fd.type, fd.struct_id) + ")");
+                   describe_type(fd.type, fd.second_half) + ")");
     }
     return copy_struct(v, p).node;
   }
@@ -411,11 +414,11 @@ struct Binder {
   // against the copy -- or a copy that never ran -- cannot appear in one of
   // them and not the other.
   NodeId emit_local_value(const Ast& expr, FuncCtx& ctx, Type ty,
-                          int32_t struct_id, const Ast& at, SrcPos p) {
+                          int32_t second_half, const Ast& at, SrcPos p) {
     TypedExpr val = emit_expr(expr, ctx, hint_for(ty));
-    if (!same_type(val.type, val.struct_id, ty, struct_id)) {
-      fail(at, "cannot assign " + describe_type(val.type, val.struct_id) +
-                   " to " + describe_type(ty, struct_id));
+    if (!same_type(val.type, val.second_half, ty, second_half)) {
+      fail(at, "cannot assign " + describe_type(val.type, val.second_half) +
+                   " to " + describe_type(ty, second_half));
     }
     return copy_struct(val, p).node;
   }
@@ -456,20 +459,23 @@ struct Binder {
         // would otherwise let a struct name itself: a type nothing could
         // ever construct a value of, and one copy_struct would recurse on
         // forever if anything ever did.
-        if (fty.struct_id == sid) {
+        if (fty.second_half == sid) {
           fail(f, "invalid recursive type '" + name + "'");
         }
         const int32_t slot = static_cast<int32_t>(sd.fields.size());
-        sd.fields.push_back({fname, fty.type, fty.struct_id, slot});
+        sd.fields.push_back({fname, fty.type, fty.second_half, slot});
       }
     }
   }
 
   // -- Pass 1: register every func's signature, main first --------------
   //
-  // main first because vm::run's entry point is always funcs[0], and this
-  // front end (like real Go) does not require main to be declared first in
-  // the source.
+  // funcs[0] is build()'s reserved slot for the $entry bootstrap
+  // (emit_bootstrap), so these are numbered from 1. main goes first only to
+  // keep it at funcs[1], next to the bootstrap that spawns it; nothing
+  // indexes it, emit_bootstrap finds it by name. What this pass does
+  // require is that there be one -- this front end (like real Go) does not
+  // require it to be declared first in the source.
   void register_funcs(const Ast& program) {
     const Ast* main_fn = nullptr;
     std::vector<const Ast*> others;
@@ -601,6 +607,17 @@ struct Binder {
     }
   }
 
+  // Enqueue(CoroCreate(MakeClosure(func, cmap))): a func handed to the
+  // scheduler as a goroutine -- what `go` and the bootstrap both emit, and
+  // the one place that shape is spelled out.
+  NodeId spawn(int32_t func, int32_t cmap, SrcPos p) {
+    Builder b(m);
+    return b.intrinsic(IntrinsicId::Enqueue,
+                       {b.intrinsic(IntrinsicId::CoroCreate,
+                                    {b.make_closure(func, cmap, p)}, p)},
+                       p);
+  }
+
   // Go's main is a goroutine: it can block on a channel, and a program
   // whose every goroutine is blocked is a deadlock rather than a hang.
   // vmlib's entry frame is neither (a CoroYield there has no coroutine to
@@ -627,11 +644,7 @@ struct Binder {
     m.funcs.push_back(w);
     Func& entry = m.funcs[0];
     entry.name = "$entry";
-    entry.body = b.intrinsic(
-        IntrinsicId::Enqueue,
-        {b.intrinsic(IntrinsicId::CoroCreate,
-                     {b.make_closure(widx, empty_cmap, p)}, p)},
-        p);
+    entry.body = spawn(widx, empty_cmap, p);
   }
 
   // -- Literals -----------------------------------------------------------
@@ -683,9 +696,9 @@ struct Binder {
 
   // -- Arithmetic, per README's Fixed-width integers and `float` recipes -
   TypedExpr emit_binary(BinOp op, TypedExpr l, TypedExpr r, const Ast& at) {
-    if (!same_type(l.type, l.struct_id, r.type, r.struct_id)) {
-      fail(at, "cannot combine " + describe_type(l.type, l.struct_id) +
-                   " and " + describe_type(r.type, r.struct_id));
+    if (!same_type(l.type, l.second_half, r.type, r.second_half)) {
+      fail(at, "cannot combine " + describe_type(l.type, l.second_half) +
+                   " and " + describe_type(r.type, r.second_half));
     }
     const SrcPos p = pos_of(at);
     Builder b(m);
@@ -698,7 +711,7 @@ struct Binder {
       // ordering of bools is not Go either.
       if (has_second_half(l.type) ||
           (l.type == Type::Bool && op != BinOp::Eq && op != BinOp::Ne)) {
-        fail(at, "cannot compare " + describe_type(l.type, l.struct_id) +
+        fail(at, "cannot compare " + describe_type(l.type, l.second_half) +
                      " values");
       }
       // A normalized operand compares correctly at every width without a
@@ -724,7 +737,7 @@ struct Binder {
   // theirs into a string literal that could drift from the word the rest of
   // this front end prints.
   [[noreturn]] void fail_convert(Type to, const TypedExpr& v, const Ast& at) {
-    fail(at, "cannot convert " + describe_type(v.type, v.struct_id) + " to " +
+    fail(at, "cannot convert " + describe_type(v.type, v.second_half) + " to " +
                  type_name(to));
   }
 
@@ -822,7 +835,7 @@ struct Binder {
       }
       case "ident"_: {
         const LocalInfo& li = local_of(a, ctx, std::string(a.token));
-        return {b.varref(VarKind::Local, li.slot, p), li.type, li.struct_id};
+        return {b.varref(VarKind::Local, li.slot, p), li.type, li.second_half};
       }
       case "neg"_: {
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
@@ -880,12 +893,8 @@ struct Binder {
       // <-ch: the element the channel hands over, through $chan_recv. Its
       // type is the channel's element type, which is what makes
       // `var v int32 = <-in` check and `fmt.Println(<-out)` print an int.
-      case "recv"_: {
-        const LocalInfo& li = channel_local(*a.nodes[0], ctx);
-        const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
-        return {b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p),
-                static_cast<Type>(li.struct_id)};
-      }
+      case "recv"_:
+        return emit_chan_recv(*a.nodes[0], ctx, p);
       // make(chan T): a fresh channel object. Its two queues start empty;
       // emit_channel_runtime's two funcs are the only things that read or
       // write them.
@@ -896,7 +905,7 @@ struct Binder {
             {{b.str_literal("recvq", p), b.array_lit({}, p)},
              {b.str_literal("sendq", p), b.array_lit({}, p)}},
             p);
-        return {ch, Type::Chan, t.struct_id};
+        return {ch, Type::Chan, t.second_half};
       }
       case "call"_: {
         const std::string callee(find_child(a, "ident")->token);
@@ -916,7 +925,7 @@ struct Binder {
         // MakeClosure at every call site.
         const NodeId closure = b.varref(VarKind::Cell, ctx.cell_for(callee), p);
         return {b.call_value(closure, args, p), info.ret.type,
-                info.ret.struct_id};
+                info.ret.second_half};
       }
       case "equality"_:
       case "relational"_:
@@ -964,7 +973,7 @@ struct Binder {
     for (size_t i = 0; i < argAsts.size(); ++i) {
       const TypeRef& pt = info.param_types[i];
       TypedExpr v = emit_expr(*argAsts[i], ctx, hint_for(pt.type));
-      if (!same_type(v.type, v.struct_id, pt.type, pt.struct_id)) {
+      if (!same_type(v.type, v.second_half, pt.type, pt.second_half)) {
         fail(*argAsts[i], "argument type mismatch calling " + callee);
       }
       args.push_back(v.node);
@@ -978,10 +987,21 @@ struct Binder {
     const LocalInfo& li = local_of(ident, ctx, std::string(ident.token));
     if (li.type != Type::Chan) {
       fail(ident, "'" + std::string(ident.token) + "' (" +
-                      describe_type(li.type, li.struct_id) +
+                      describe_type(li.type, li.second_half) +
                       ") is not a channel");
     }
     return li;
+  }
+
+  // <-ch: one call to $chan_recv, and the element type it answers with.
+  // The expression form and the discard-the-value statement form are the
+  // same receive, so they are the same code.
+  TypedExpr emit_chan_recv(const Ast& ident, FuncCtx& ctx, SrcPos p) {
+    Builder b(m);
+    const LocalInfo& li = channel_local(ident, ctx);
+    const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
+    return {b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p),
+            static_cast<Type>(li.second_half)};
   }
 
   // The statements of a "stmts" node, as one Block at `at`'s position.
@@ -1039,22 +1059,18 @@ struct Binder {
         const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
         m.capture_maps.push_back(cmap);
 
-        stmts.push_back(b.intrinsic(
-            IntrinsicId::Enqueue,
-            {b.intrinsic(IntrinsicId::CoroCreate,
-                         {b.make_closure(widx, cm, p)}, p)},
-            p));
+        stmts.push_back(spawn(widx, cm, p));
         return b.block(stmts, p);
       }
       // ch <- v, through $chan_send; the value takes the channel's element
       // type as its hint and must match it.
       case "sendstmt"_: {
         const LocalInfo& li = channel_local(*a.nodes[0], ctx);
-        const Type elem = static_cast<Type>(li.struct_id);
+        const Type elem = static_cast<Type>(li.second_half);
         TypedExpr v = emit_expr(*a.nodes[1], ctx, elem);
         if (v.type != elem) {
-          fail(a, "cannot send " + describe_type(v.type, v.struct_id) +
-                      " on " + describe_type(li.type, li.struct_id));
+          fail(a, "cannot send " + describe_type(v.type, v.second_half) +
+                      " on " + describe_type(li.type, li.second_half));
         }
         const NodeId send = b.varref(VarKind::Cell, ctx.cell_for("$chan_send"), p);
         return b.call_value(send, {b.varref(VarKind::Local, li.slot, p), v.node},
@@ -1062,11 +1078,8 @@ struct Binder {
       }
       // <-ch as a statement: receive and discard -- the same call the
       // expression form makes, with nothing reading its value.
-      case "recvstmt"_: {
-        const LocalInfo& li = channel_local(*a.nodes[0], ctx);
-        const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
-        return b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p);
-      }
+      case "recvstmt"_:
+        return emit_chan_recv(*a.nodes[0], ctx, p).node;
       // for cond { ... } -- Go's while. A `var` inside the body declares
       // into this function's one flat local table, the same as anywhere
       // else in this front end: it is bound once, and the slot is
@@ -1096,9 +1109,9 @@ struct Binder {
         // before this statement (or fails "undeclared"), never against the
         // slot this statement is itself about to create.
         const NodeId value = emit_local_value(*a.nodes.back(), ctx, ty.type,
-                                              ty.struct_id, a, p);
+                                              ty.second_half, a, p);
         const int32_t slot = ctx.next_local++;
-        ctx.locals[name] = {slot, ty.type, ty.struct_id};
+        ctx.locals[name] = {slot, ty.type, ty.second_half};
         ctx.local_names.push_back(name);
         return b.assign(VarKind::Local, slot, value, p);
       }
@@ -1120,7 +1133,7 @@ struct Binder {
               local_of(a, ctx, std::string(find_child(a, "ident")->token));
           return b.assign(VarKind::Local, li.slot,
                          emit_local_value(*a.nodes.back(), ctx, li.type,
-                                          li.struct_id, a, p),
+                                          li.second_half, a, p),
                          p);
         }
         const TypedExpr recv = walk_fields(a, ctx, nfields, p);
@@ -1131,8 +1144,8 @@ struct Binder {
       case "ret"_: {
         if (!ctx.ret_type) fail(a, "this func does not return a value");
         TypedExpr val = emit_expr(*a.nodes[0], ctx, hint_for(ctx.ret_type->type));
-        if (!same_type(val.type, val.struct_id, ctx.ret_type->type,
-                       ctx.ret_type->struct_id)) {
+        if (!same_type(val.type, val.second_half, ctx.ret_type->type,
+                       ctx.ret_type->second_half)) {
           fail(a, "return type does not match the func's declared type");
         }
         return b.make_return(val.node, p);
@@ -1146,7 +1159,7 @@ struct Binder {
         // front end's samples are checked against. A channel prints as an
         // address in Go, which nothing could reproduce either.
         if (has_second_half(val.type)) {
-          fail(a, "cannot print a " + describe_type(val.type, val.struct_id));
+          fail(a, "cannot print a " + describe_type(val.type, val.second_half));
         }
         return b.intrinsic(IntrinsicId::Print, {val.node}, p);
       }
@@ -1162,7 +1175,7 @@ struct Binder {
         if (subj.type != Type::I32 && subj.type != Type::I64 &&
             subj.type != Type::U32) {
           fail(a, "switch subject must be int32, int64 or uint32, not " +
-                      describe_type(subj.type, subj.struct_id));
+                      describe_type(subj.type, subj.second_half));
         }
         std::vector<std::pair<NodeId, NodeId>> arms;
         std::set<int64_t> seen_keys;
@@ -1175,11 +1188,7 @@ struct Binder {
           // gets hung: on the default, or on every key in this arm's
           // intlist, all sharing this one NodeId (the top-level README's
           // `case a, b:` point).
-          std::vector<NodeId> body_stmts;
-          for (const auto& s : find_child(c, "stmts")->nodes) {
-            body_stmts.push_back(emit_stmt(*s, ctx));
-          }
-          const NodeId body = b.block(body_stmts, pos_of(c));
+          const NodeId body = emit_block(*find_child(c, "stmts"), ctx, c);
           if (c.tag != "case"_) {  // "defaultcase"_
             default_body = body;
             continue;
@@ -1229,7 +1238,7 @@ struct Binder {
         // what the callee's FuncInfo recorded.
         const TypeRef pty =
             resolve_sig_type(std::string(find_child(*pn, "type")->token), *pn);
-        ctx.locals[pname] = {ctx.next_local, pty.type, pty.struct_id};
+        ctx.locals[pname] = {ctx.next_local, pty.type, pty.second_half};
         ctx.local_names.push_back(pname);
         ++ctx.next_local;
       }

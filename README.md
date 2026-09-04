@@ -313,7 +313,7 @@ value, a double by bit pattern (so `-0.0` and `0.0` are two keys and `NaN` is
 one; a language with SameValueZero normalizes first), a heap object by
 identity. That is a third rule beside `Eq` (which refuses to compare across
 types) and `Same` (which compares two equal strings from two allocations as
-different), stated once as `key_eq` in `vmlib.h`. Lookup is a hash;
+different), stated once as `MapKeyRef` in `vmlib.h`. Lookup is a hash;
 iteration is insertion order, like an object's, so a printed map is
 reproducible.
 
@@ -341,7 +341,14 @@ a module declares the host functions it calls by name (`Module::natives`,
 callable value, and the run supplies the definitions
 (`RunOptions::natives`, a list of `NativeDef{name, arity, fn, ctx}`).
 `vm::run` links the two before the first instruction: a name the host did
-not supply fails the whole run, not the one call site that reaches it.
+not supply fails the whole run, not the one call site that reaches it, and
+where a name is supplied twice the first definition wins.
+
+A native's `arity` is checked the way a closure's `num_params` is -- a
+mismatch traps at the call site with the same wording -- except for `-1`,
+which registers it as taking any count, so the function reads
+`NativeCall::argc` to find out what it got. `FnArity` answers that number,
+`-1` and all, where for a closure it answers `num_params`.
 
 A native runs on the spot, with no frame, and its answer lands where a
 closure's return would; it is callable wherever a closure is -- `CallValue`,

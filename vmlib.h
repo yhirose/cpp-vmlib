@@ -154,7 +154,7 @@ class Runtime {
     finalize_ = fn;
   }
 
-  // Deterministic destructors: an Object whose kDropKey holds a closure
+  // Deterministic destructors: an Object whose kDropKey holds a callable
   // gets it called -- with the object as its one argument -- at the moment
   // its refcount reaches zero, before the object is freed; at the exit of
   // the scope that owns the cycle it is in (owned_scope_exit); or, last,
@@ -622,35 +622,22 @@ struct NativeObj : HeapObj {
   NativeFn fn = nullptr;
 };
 
-// Map keys, stated once. Two values are the same key when they have the
-// same tag and, for a string, the same bytes -- or, for everything else,
-// the same payload word: an int by value, a double by bit pattern (so
-// -0.0 and 0.0 are two keys and NaN is one; a language with
-// SameValueZero normalizes before the value gets here), a heap object by
-// identity. This is a third rule beside Eq (which refuses to compare
-// across types at all, and refuses objects) and Same (which compares a
-// string by pointer, so two equal strings from two allocations are not
-// Same): a key is neither a comparison a language defines nor a question
-// of which allocation this is. Defined here rather than in semantics.h
-// because MapObj's own index is built on it.
-inline bool key_eq(const Value& a, const Value& b) {
-  if (a.tag() != b.tag()) return false;
-  if (a.is_str()) return a.as_str() == b.as_str();
-  return a.raw_data() == b.raw_data();
-}
-
-inline size_t key_hash(const Value& v) {
-  if (v.is_str()) return std::hash<std::string_view>{}(v.as_str());
-  // The tag goes into the hashed word so Int 1, Bool true and the cell at
-  // address 1 do not all land in one bucket.
-  const uint64_t x = static_cast<uint64_t>(v.raw_data()) ^
-                     (static_cast<uint64_t>(v.tag()) << 56);
-  return std::hash<uint64_t>{}(x);
-}
-
-// The index's key: a Value's tag and payload without the retain -- the
-// entry vector already owns the key, and a second owning copy in the index
-// would make every key look externally held to the collector (two counted
+// Map keys, stated once -- as the index's key type, since that is what
+// every lookup actually goes through. Two values are the same key when
+// they have the same tag and, for a string, the same bytes -- or, for
+// everything else, the same payload word: an int by value, a double by
+// bit pattern (so -0.0 and 0.0 are two keys and NaN is one; a language
+// with SameValueZero normalizes before the value gets here), a heap
+// object by identity. This is a third rule beside Eq (which refuses to
+// compare across types at all, and refuses objects) and Same (which
+// compares a string by pointer, so two equal strings from two allocations
+// are not Same): a key is neither a comparison a language defines nor a
+// question of which allocation this is. It lives here rather than in
+// semantics.h because MapObj's own index is built on it.
+//
+// A MapKeyRef is a Value's tag and payload without the retain -- the entry
+// vector already owns the key, and a second owning copy in the index would
+// make every key look externally held to the collector (two counted
 // references, one visit_children edge). A string key is compared through
 // its StrObj, which the owning entry keeps alive for as long as the index
 // names it.
@@ -1131,8 +1118,9 @@ enum class IntrinsicId : uint8_t {
   // is every parameter (there are no hidden ones: captures travel as cells,
   // and a generator's parameters are the same locals). The one fact a front
   // end needs to check "this callback takes two arguments" before calling
-  // it; anything but a Func traps.
-  FnArity,      // (f) -> int
+  // it. A host function answers the arity it was registered with, or -1
+  // when it was registered as taking any count; anything else traps.
+  FnArity,      // (f) -> int, or -1 for a variadic host function
   // The tracing collector, on demand: a full collection right now, on top
   // of the ones the allocators run on their own (Runtime::collect). Answers
   // how many objects it freed. A condemned Object carrying the drop key
@@ -2210,7 +2198,7 @@ inline std::string index_error(const Value& recv, const Value& key) {
     }
     return {};
   }
-  // A map takes any value as a key (key_eq's rule, value.h) -- what it is
+  // A map takes any value as a key (MapKeyRef's rule, value.h) -- what it is
   // for. Uninit is the one exception, and an unassigned local traps at its
   // read before it could get here, so nothing needs saying about it.
   if (recv.is_map()) return {};
@@ -2417,7 +2405,7 @@ enum class Op : uint8_t {
   ObjectRemove, // a = object reg, b = key reg
   ArgCount,     // a = dst   (the frame's supplied argument count)
   Same,         // a = dst, b = lhs, c = rhs   (reference identity)
-  FnArity,      // a = dst, b = src   (a Func's num_params; else traps)
+  FnArity,      // a = dst, b = src   (num_params, or a native's arity)
   Collect,      // a = dst   (runs Runtime::collect; the count it freed)
   HeapStats,    // a = dst   (fresh {live_objects, heap_bytes} object)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
@@ -2434,8 +2422,9 @@ enum class Op : uint8_t {
   GenResume,    // a = dst, b = generator reg, c = sent reg
   GenReturn,    // a = dst, b = generator reg, c = value reg
   GenThrow,     // a = dst, b = generator reg, c = value reg
-  // The job queue (ir.h's Enqueue): the closure joins the run's FIFO.
-  Enqueue,      // a = closure reg
+  // The job queue (ir.h's Enqueue): the closure -- or the coroutine, which
+  // is what makes the queue a scheduler -- joins the run's FIFO.
+  Enqueue,      // a = closure or coroutine reg
   ToFloat32,    // a = dst, b = src   (round to float precision, as a double)
   // Slices spend the fourth operand on their second bound, the way
   // CallValue spends it on its argument count.
@@ -5020,9 +5009,9 @@ struct Exec {
   // suspend and be resumed later would need. The indirection buys both.
   std::vector<std::unique_ptr<Frame>> frames;
 
-  // The job queue (IntrinsicId::Enqueue): closures waiting to run after the
-  // entry frame, FIFO. C++-side handles, so the collector sees them as
-  // roots the way it sees a frame's registers.
+  // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
+  // to run after the entry frame, FIFO. C++-side handles, so the collector
+  // sees them as roots the way it sees a frame's registers.
   std::deque<Value> jobs;
 
   // Program::natives, resolved against RunOptions::natives into NativeObj
@@ -5218,9 +5207,54 @@ struct Exec {
     co->state = CoroObj::State::Running;
   }
 
-  // Calling a closure -- the only way a frame is entered. The callee gets the
-  // closure's cells, which are shared rather than pointed at, so nothing here
-  // depends on the caller still being alive.
+  // A Start-state coroutine's first resume, wherever it comes from -- an
+  // Op::CoroResume, or the scheduler taking it off the queue: call f(sent),
+  // and make the frame that call entered the coroutine's bottom. Answers
+  // whether there is now a frame to drive; a callee that completes on the
+  // spot (a native, or a generator function, whose call builds an object
+  // rather than running a body) leaves none, and the coroutine is done at
+  // once with whatever went to ret_reg. A trap at the call itself (arity)
+  // finishes it too, and propagates.
+  bool start_coro(const Value& cv, const Value& sent, int32_t ret_reg,
+                  SrcPos pos) {
+    CoroObj* co = cv.as_coroutine();
+    Value fn = std::move(co->fn);
+    co->state = CoroObj::State::Running;
+    const size_t before = frames.size();
+    try {
+      push_closure(fn, &sent, 1, ret_reg, pos);
+    } catch (Raise&) {
+      finish_coro(co);
+      throw;
+    }
+    if (frames.size() == before) {
+      finish_coro(co);
+      return false;
+    }
+    frames.back()->coro_self = cv;
+    return true;
+  }
+
+  // The arity contract, stated once: a mismatch traps unless the chunk is
+  // lenient, and the params window then takes what it can -- extras stay
+  // with the caller, and a param nothing arrived for is filled with nil
+  // rather than left Uninit, so the body can test it without tripping the
+  // read-before-init check. Both ways into an activation ask this:
+  // push_closure for a fresh frame, Op::TailCall for the one it reuses.
+  int32_t check_arity(const Chunk& ch, int32_t argc, SrcPos pos) {
+    if (argc != ch.num_params && !ch.lenient_arity) {
+      raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
+                     " argument(s), given " + std::to_string(argc),
+                 pos);
+    }
+    return std::min(argc, ch.num_params);
+  }
+
+  // Calling a closure into a fresh frame. Op::TailCall is the other way
+  // into an activation -- it reuses this frame rather than pushing one --
+  // and the two share check_arity above. The callee gets the closure's
+  // cells, which are shared rather than pointed at, so nothing here depends
+  // on the caller still being alive.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
     if (callee.is_native()) {
@@ -5232,16 +5266,7 @@ struct Exec {
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
-    if (argc != ch.num_params && !ch.lenient_arity) {
-      raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
-                     " argument(s), given " + std::to_string(argc),
-                 pos);
-    }
-    // Under lenient arity the params window takes what it can: extras stay
-    // with the caller, and a param nothing arrived for is nil rather than
-    // Uninit, so the body can test it without tripping the read-before-
-    // init check.
-    const int32_t taken = std::min(argc, ch.num_params);
+    const int32_t taken = check_arity(ch, argc, pos);
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.
@@ -5367,11 +5392,13 @@ struct Exec {
                                      : f.captures[src.index];
   }
 
-  // The entry frame to its end, then the job queue: each job a fresh
-  // 0-argument call driven to completion before the next is taken, so the
-  // jobs it enqueues run after every one already waiting. A job whose call
-  // itself traps (a parameter it cannot be given) fails the run the way an
-  // uncaught throw does.
+  // The entry frame to its end, then the job queue: a closure job is a
+  // fresh 0-argument call, a coroutine job a resume (schedule_coroutine),
+  // each driven until it finishes -- or, for a coroutine, until it yields
+  // -- before the next is taken, so the jobs it enqueues run after every
+  // one already waiting. A job whose call itself traps (a parameter it
+  // cannot be given) fails the run the way an uncaught throw does; a queue
+  // that runs dry with coroutines still parked is check_deadlock's.
   void run() {
     drive();
     while (!jobs.empty()) {
@@ -5402,23 +5429,7 @@ struct Exec {
     using St = CoroObj::State;
     if (co->state == St::Done || co->state == St::Running) return false;
     const Value nil;
-    if (co->state == St::Start) {
-      Value fn = std::move(co->fn);
-      co->state = St::Running;
-      const size_t before = frames.size();
-      try {
-        push_closure(fn, &nil, 1, -1, SrcPos{0, 0});
-      } catch (Raise&) {
-        finish_coro(co);
-        throw;
-      }
-      if (frames.size() == before) {
-        finish_coro(co);
-        return false;
-      }
-      frames.back()->coro_self = cv;
-      return true;
-    }
+    if (co->state == St::Start) return start_coro(cv, nil, -1, SrcPos{0, 0});
     if (co->frames.size() > max_frames) {
       raise_trap("recursion limit exceeded", SrcPos{0, 0});
     }
@@ -5486,6 +5497,19 @@ struct Exec {
         while (f.defers.size() > mark) f.defers.pop_back();
         throw;
       }
+    }
+  }
+
+  // Every defer mark a frame still holds, innermost first -- what closing a
+  // suspended activation owes before its frame goes, as opposed to
+  // returning from one, where each scope's own exit already ran its share.
+  // A defer that throws propagates to the caller; the marks already run
+  // stay run.
+  void run_pending_defers(Frame& f, SrcPos pos) {
+    while (!f.defer_marks.empty()) {
+      const size_t mark = f.defer_marks.back().first;
+      f.defer_marks.pop_back();
+      run_defers_now(f, mark, pos);
     }
   }
 
@@ -6209,35 +6233,43 @@ struct Exec {
           }
           const ClosureObj* c = callee.as_closure();
           const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
-          if (in.d != nch.num_params && !nch.lenient_arity) {
-            raise_trap(nch.name + " takes " + std::to_string(nch.num_params) +
-                           " argument(s), given " + std::to_string(in.d),
-                       pos);
-          }
-          // The arguments go with the frame's registers; copy them out
-          // first. The callee value above keeps the closure alive the
-          // same way.
-          std::vector<Value> args(
-              f.regs.begin() + in.c,
-              f.regs.begin() + in.c + in.d);
           // This frame's exit, in full, before the callee starts: every
-          // temporary, the locals last-slot-first, then each open scope's
-          // owned resolution innermost-first -- what falling off the end
-          // would do, minus per-scope interleaving, since the frame is
-          // going as a whole. The compiler has kept defers out of here
-          // (tail_call_ok), so there are none to run.
-          for (Value& r : f.regs) r = Value();
+          // temporary except the argument window, the locals
+          // last-slot-first, then each open scope's owned resolution
+          // innermost-first -- what falling off the end would do, minus
+          // per-scope interleaving, since the frame is going as a whole.
+          // The compiler has kept defers out of here (tail_call_ok), so
+          // there are none to run: neither f.defers nor f.defer_marks can
+          // be non-empty at a TailCall.
+          //
+          // The argument window stays: those registers hold the arguments'
+          // one counted reference across the exit, and the callee's locals
+          // move out of them below. They cannot be stashed anywhere else
+          // -- a release here can run a drop hook, which re-enters dispatch
+          // and may tail-call again, so a buffer Exec owned would be
+          // clobbered under them -- and copying them out would be an
+          // allocation per call, on the one path that exists to make a call
+          // loop cheap.
+          for (int32_t r = 0; r < in.c; ++r) {
+            f.regs[static_cast<size_t>(r)] = Value();
+          }
+          for (size_t r = static_cast<size_t>(in.c + in.d); r < f.regs.size();
+               ++r) {
+            f.regs[r] = Value();
+          }
           release_range(f, 0, static_cast<int32_t>(f.locals.size()));
           while (!f.owned_marks.empty()) leave_scope_owned(f);
-          f.defer_marks.clear();
-          // The new activation, in place: ret_reg, gen_self and the frame's
-          // position in the stack are the caller's and stay.
+          // The new activation, in place: ret_reg, gen_self, coro_self and
+          // the frame's position in the stack are the caller's and stay --
+          // a tail call from a coroutine's bottom frame is still that
+          // coroutine's bottom frame.
           f.chunk = &nch;
           f.pc = 0;
           f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-          const int32_t taken = std::min(in.d, nch.num_params);
+          const int32_t taken = check_arity(nch, in.d, pos);
           for (int32_t i = 0; i < taken; ++i) {
-            f.locals[static_cast<size_t>(i)] = std::move(args[i]);
+            f.locals[static_cast<size_t>(i)] =
+                std::move(f.regs[static_cast<size_t>(in.c + i)]);
           }
           for (int32_t i = taken; i < nch.num_params; ++i) {
             f.locals[static_cast<size_t>(i)] = Value();
@@ -6313,11 +6345,7 @@ struct Exec {
             frames.push_back(unpark_frame(gv, -1));
             Frame& gf = *frames.back();
             try {
-              while (!gf.defer_marks.empty()) {
-                const size_t mark = gf.defer_marks.back().first;
-                gf.defer_marks.pop_back();
-                run_defers_now(gf, mark, pos);
-              }
+              run_pending_defers(gf, pos);
             } catch (Raise&) {
               go->state = St::Done;
               frames.pop_back();
@@ -6445,29 +6473,15 @@ struct Exec {
             break;
           }
           if (co->state == St::Start) {
-            // The first resume is the call: f(sent), its frame the
-            // coroutine's bottom. A callee that completes on the spot (a
-            // native; a generator function, whose call builds an object)
-            // leaves nothing to suspend, so the coroutine is done at once
-            // with that answer. A trap at the call itself (arity) finishes
-            // it too, and is this instruction's own.
-            Value fn = std::move(co->fn);
-            co->state = St::Running;
+            // The first resume is the call (start_coro), and a trap at it
+            // is this instruction's own. A callee that completed on the
+            // spot left no frame to suspend, so the coroutine is done at
+            // once, with the answer that call delivered into in.a.
             const Value sent = f.regs[in.c];
-            const size_t before = frames.size();
             ++f.pc;
-            try {
-              push_closure(fn, &sent, 1, in.a, pos);
-            } catch (Raise&) {
-              finish_coro(co);
-              throw;
-            }
-            if (frames.size() == before) {
-              finish_coro(co);
+            if (!start_coro(cv, sent, in.a, pos)) {
               f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
-              continue;
             }
-            frames.back()->coro_self = cv;
             continue;
           }
           // Suspended: the parked frames come back, all of them at once,
@@ -6496,7 +6510,12 @@ struct Exec {
           const int32_t ret_reg = frames[bottom]->ret_reg;
           ++f.pc;  // where the next resume re-enters
           park_coro(self.as_coroutine(), bottom, in.a);
-          deliver(ret_reg, gen_result(std::move(out), false));
+          // The {value, done} answer belongs to whoever resumed. A
+          // scheduler turn (ret_reg -1) resumed nobody's expression, so
+          // there is no answer to build.
+          if (ret_reg != -1) {
+            deliver(ret_reg, gen_result(std::move(out), false));
+          }
           if (frames.size() <= floor) return;
           continue;
         }
@@ -6529,11 +6548,7 @@ struct Exec {
           try {
             while (frames.size() > base) {
               Frame& t = *frames.back();
-              while (!t.defer_marks.empty()) {
-                const size_t mark = t.defer_marks.back().first;
-                t.defer_marks.pop_back();
-                run_defers_now(t, mark, pos);
-              }
+              run_pending_defers(t, pos);
               if (t.gen_self.is_generator()) {
                 t.gen_self.as_generator()->state = GeneratorObj::State::Done;
               }
@@ -6607,7 +6622,7 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   for (const std::string& name : p.natives) {
     const NativeDef* def = nullptr;
     for (const NativeDef& d : opts.natives) {
-      if (d.name == name) def = &d;
+      if (d.name == name) { def = &d; break; }  // the first definition wins
     }
     if (!def || !def->fn) {
       coreir_rt::fail("unresolved native '" + name + "'", 0, 0);

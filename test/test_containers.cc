@@ -334,7 +334,7 @@ int main() {
              "pop empty: message");
   }
 
-  // --- Maps: any value is a key, by key_eq's rule. ------------------------
+  // --- Maps: any value is a key, by MapKeyRef's rule. --------------------
   // An int, a string, a double, a bool and nil are five distinct keys; a
   // string key matches by content, so ToStr(1) -- a fresh allocation --
   // finds what the literal "1" stored (the case Same gets wrong); Index on
