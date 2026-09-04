@@ -443,7 +443,7 @@ function and returns; go_mini does exactly that.
 ## Arbitrary-precision integers
 
 `Value` holds an `int64` or a `double` and nothing wider, and this is a
-decision rather than a gap: a third numeric tag would sit in `apply_binop`'s
+decision rather than a gap: a third numeric tag would sit in `eval_binop`'s
 hot path and tax every language's integer arithmetic for the few that need
 bignums. A front end that does (Python's `int`, Ruby's `Integer`, Scheme's
 numbers) carries them itself, as a little-endian `Array` of `Int` limbs in
@@ -583,7 +583,11 @@ than machine stack and cannot overflow the thread it runs on, and a frame's
 address stays put for as long as it is live. The frames are `unique_ptr`s
 rather than a `vector<Frame>` so that a frame's ownership can move -- which
 is exactly what a generator's `Yield` does with one frame and a coroutine's
-`CoroYield` does with a whole slice of them. The one thing that cannot be
+`CoroYield` does with a whole slice of them. A returned frame is not freed
+but recycled: it goes back to a bounded pool with its registers' capacity
+kept, so an ordinary call allocates nothing, and every way a frame can die
+reaches the pool through one `unique_ptr` deleter rather than through a
+recycling step written at each site. The one thing that cannot be
 parked is C++: a native that called back in, a destructor, a defer, the job
 driver each re-enter the dispatch loop with a floor, and a yield from under
 one of those traps rather than pretending.

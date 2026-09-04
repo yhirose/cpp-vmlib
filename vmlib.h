@@ -1995,55 +1995,6 @@ inline bool is_comparison(BinOp op) {
   }
 }
 
-// Returns an empty string when the operation is defined for these operands,
-// or the diagnostic when it is not. Two failure kinds now, where the i64 IR
-// had one: the arithmetic traps it always had, and type errors, which only
-// exist once values can disagree about what they are.
-//
-// Returning std::string rather than a const char* costs an allocation on the
-// failing path only, and buys operand types in the message -- most of what
-// makes a dynamic language's type error useful.
-inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
-  // Two ints stay integers; anything else numeric widens to double. Mod on
-  // doubles is deliberately absent -- fmod versus truncation is a language's
-  // decision, and no front end here needs it yet.
-  if (l.is_int() && r.is_int()) {
-    // Every division form traps on a zero divisor -- one statement of that,
-    // since UDiv/UMod differ from Div/Mod only in the overflow case they do
-    // not have (no negative dividend for -1 to misfire on).
-    if (op == BinOp::Div || op == BinOp::Mod || op == BinOp::UDiv ||
-        op == BinOp::UMod) {
-      if (r.as_int() == 0) return "divide by zero";
-    }
-    if (op == BinOp::Div || op == BinOp::Mod) {
-      if (l.as_int() == std::numeric_limits<int64_t>::min() &&
-          r.as_int() == -1) {
-        return "division overflow";
-      }
-    }
-    return {};
-  }
-  if (l.is_number() && r.is_number() && !is_int_only(op)) {
-    if (op == BinOp::Mod) return "cannot mod double";
-    return {};
-  }
-  if (l.is_str() && r.is_str()) {
-    // Strings concatenate and compare; they do not subtract or divide.
-    if (op == BinOp::Add || is_comparison(op)) return {};
-  }
-  if (l.is_bool() && r.is_bool()) {
-    if (op == BinOp::Eq || op == BinOp::Ne) return {};
-  }
-  if (l.is_nil() && r.is_nil()) {
-    if (op == BinOp::Eq || op == BinOp::Ne) return {};
-  }
-  // Comparing across types is a question ("is 1 == '1'?", "is nil == false?")
-  // a language answers, not the VM. Refusing it keeps the VM from baking in an
-  // answer a front end would then have to work around.
-  return std::string("cannot ") + name_of(op) + " " + type_name(l.tag()) +
-         " and " + type_name(r.tag());
-}
-
 // Comparisons produce Bool, not 0/1. PL/0 cannot tell the difference -- its
 // grammar only ever puts a comparison in a condition -- but a language with
 // a boolean type would have to undo an integer here.
@@ -2060,71 +2011,146 @@ inline Value compare(BinOp op, const T& a, const T& b) {
   }
 }
 
-// Only valid when binop_error returned empty.
-inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
-  if (l.is_str()) {
-    if (op == BinOp::Add) return Value::make_str(l.as_str() + r.as_str());
-    return compare(op, l.as_str(), r.as_str());
-  }
-  if (l.is_bool()) return compare(op, l.as_bool(), r.as_bool());
-  if (l.is_nil()) return Value::make_bool(op == BinOp::Eq);
-
+// The check and the arithmetic in one walk of the operand ladder: on
+// success `out` takes the result and the answer is empty, and on failure the
+// diagnostic comes back and `out` is untouched. Two failure kinds, where the
+// i64 IR had one: the arithmetic traps it always had, and type errors, which
+// only exist once values can disagree about what they are.
+//
+// One walk rather than two because this is the instruction a loop spends its
+// time in, and asking what the operands are and then asking again in order to
+// act on the answer was a type ladder per instruction more than the work
+// needs. binop_error and apply_binop below are this same function asked for
+// one half at a time, for a front end folding constants at compile time.
+//
+// Returning std::string rather than a const char* costs an allocation on the
+// failing path only, and buys operand types in the message -- most of what
+// makes a dynamic language's type error useful.
+inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
+                              Value& out) {
+  // Two ints stay integers; anything else numeric widens to double. Mod on
+  // doubles is deliberately absent -- fmod versus truncation is a language's
+  // decision, and no front end here needs it yet.
   if (l.is_int() && r.is_int()) {
     const int64_t a = l.as_int();
     const int64_t b = r.as_int();
     switch (op) {
-      case BinOp::Add: return Value::make_int(wrap_add(a, b));
-      case BinOp::Sub: return Value::make_int(wrap_sub(a, b));
-      case BinOp::Mul: return Value::make_int(wrap_mul(a, b));
-      case BinOp::Div: return Value::make_int(a / b);
-      case BinOp::Mod: return Value::make_int(a % b);
-      case BinOp::BitAnd: return Value::make_int(a & b);
-      case BinOp::BitOr:  return Value::make_int(a | b);
-      case BinOp::BitXor: return Value::make_int(a ^ b);
+      case BinOp::Add: out = Value::make_int(wrap_add(a, b)); return {};
+      case BinOp::Sub: out = Value::make_int(wrap_sub(a, b)); return {};
+      case BinOp::Mul: out = Value::make_int(wrap_mul(a, b)); return {};
+      case BinOp::Div: case BinOp::Mod:
+      case BinOp::UDiv: case BinOp::UMod: {
+        // Every division form traps on a zero divisor -- one statement of
+        // that, since UDiv/UMod differ from Div/Mod only in the overflow
+        // case they do not have (no negative dividend for -1 to misfire on).
+        if (b == 0) return "divide by zero";
+        if ((op == BinOp::Div || op == BinOp::Mod) &&
+            a == std::numeric_limits<int64_t>::min() && b == -1) {
+          return "division overflow";
+        }
+        const uint64_t ua = static_cast<uint64_t>(a);
+        const uint64_t ub = static_cast<uint64_t>(b);
+        // Unsigned: reinterpret both operands' bits as uint64_t, do the
+        // operation there, and cast the bit pattern back. Same convention as
+        // wrap_add et al -- the arithmetic goes through uint64_t rather than
+        // trusting int64_t's signed behavior to match.
+        switch (op) {
+          case BinOp::Div:  out = Value::make_int(a / b); break;
+          case BinOp::Mod:  out = Value::make_int(a % b); break;
+          case BinOp::UDiv: out = Value::make_int(static_cast<int64_t>(ua / ub)); break;
+          default:          out = Value::make_int(static_cast<int64_t>(ua % ub)); break;
+        }
+        return {};
+      }
+      case BinOp::BitAnd: out = Value::make_int(a & b); return {};
+      case BinOp::BitOr:  out = Value::make_int(a | b); return {};
+      case BinOp::BitXor: out = Value::make_int(a ^ b); return {};
       // Through uint64_t like wrap_add: a left shift that overflows is
       // wrapping, not UB. Shr stays signed -- C++20 defines it arithmetic.
       case BinOp::Shl:
-        return Value::make_int(static_cast<int64_t>(
-            static_cast<uint64_t>(a) << (b & 63)));
-      case BinOp::Shr: return Value::make_int(a >> (b & 63));
-      // Unsigned: reinterpret both operands' bits as uint64_t, do the
-      // operation there, and (for UDiv/UMod/UShr) cast the bit pattern back.
-      // Same convention as wrap_add et al -- the arithmetic goes through
-      // uint64_t rather than trusting int64_t's signed behavior to match.
-      case BinOp::UDiv:
-        return Value::make_int(static_cast<int64_t>(
-            static_cast<uint64_t>(a) / static_cast<uint64_t>(b)));
-      case BinOp::UMod:
-        return Value::make_int(static_cast<int64_t>(
-            static_cast<uint64_t>(a) % static_cast<uint64_t>(b)));
+        out = Value::make_int(
+            static_cast<int64_t>(static_cast<uint64_t>(a) << (b & 63)));
+        return {};
+      case BinOp::Shr: out = Value::make_int(a >> (b & 63)); return {};
       case BinOp::UShr:
-        return Value::make_int(static_cast<int64_t>(
-            static_cast<uint64_t>(a) >> (b & 63)));
+        out = Value::make_int(
+            static_cast<int64_t>(static_cast<uint64_t>(a) >> (b & 63)));
+        return {};
       case BinOp::ULt:
-        return Value::make_bool(static_cast<uint64_t>(a) <
-                                static_cast<uint64_t>(b));
+        out = Value::make_bool(static_cast<uint64_t>(a) <
+                               static_cast<uint64_t>(b));
+        return {};
       case BinOp::ULe:
-        return Value::make_bool(static_cast<uint64_t>(a) <=
-                                static_cast<uint64_t>(b));
+        out = Value::make_bool(static_cast<uint64_t>(a) <=
+                               static_cast<uint64_t>(b));
+        return {};
       case BinOp::UGt:
-        return Value::make_bool(static_cast<uint64_t>(a) >
-                                static_cast<uint64_t>(b));
+        out = Value::make_bool(static_cast<uint64_t>(a) >
+                               static_cast<uint64_t>(b));
+        return {};
       case BinOp::UGe:
-        return Value::make_bool(static_cast<uint64_t>(a) >=
-                                static_cast<uint64_t>(b));
-      default: return compare(op, a, b);
+        out = Value::make_bool(static_cast<uint64_t>(a) >=
+                               static_cast<uint64_t>(b));
+        return {};
+      default: out = compare(op, a, b); return {};  // Eq .. Ge
     }
   }
-
-  const double a = l.as_number();
-  const double b = r.as_number();
-  switch (op) {
-    case BinOp::Add: return Value::make_double(a + b);
-    case BinOp::Sub: return Value::make_double(a - b);
-    case BinOp::Mul: return Value::make_double(a * b);
-    case BinOp::Div: return Value::make_double(a / b);  // inf/nan, not a trap
-    default: return compare(op, a, b);
+  if (l.is_number() && r.is_number() && !is_int_only(op)) {
+    if (op == BinOp::Mod) return "cannot mod double";
+    const double a = l.as_number();
+    const double b = r.as_number();
+    switch (op) {
+      case BinOp::Add: out = Value::make_double(a + b); return {};
+      case BinOp::Sub: out = Value::make_double(a - b); return {};
+      case BinOp::Mul: out = Value::make_double(a * b); return {};
+      // inf/nan, not a trap
+      case BinOp::Div: out = Value::make_double(a / b); return {};
+      default: out = compare(op, a, b); return {};
+    }
   }
+  if (l.is_str() && r.is_str()) {
+    // Strings concatenate and compare; they do not subtract or divide.
+    if (op == BinOp::Add) {
+      out = Value::make_str(l.as_str() + r.as_str());
+      return {};
+    }
+    if (is_comparison(op)) {
+      out = compare(op, l.as_str(), r.as_str());
+      return {};
+    }
+  }
+  if (l.is_bool() && r.is_bool()) {
+    if (op == BinOp::Eq || op == BinOp::Ne) {
+      out = compare(op, l.as_bool(), r.as_bool());
+      return {};
+    }
+  }
+  if (l.is_nil() && r.is_nil()) {
+    if (op == BinOp::Eq || op == BinOp::Ne) {
+      out = Value::make_bool(op == BinOp::Eq);
+      return {};
+    }
+  }
+  // Comparing across types is a question ("is 1 == '1'?", "is nil == false?")
+  // a language answers, not the VM. Refusing it keeps the VM from baking in an
+  // answer a front end would then have to work around.
+  return std::string("cannot ") + name_of(op) + " " + type_name(l.tag()) +
+         " and " + type_name(r.tag());
+}
+
+// Whether the operation is defined for these operands: empty when it is, the
+// diagnostic when it is not. The result eval_binop computed on the way to
+// the answer is dropped, which is what a caller asking only this wants.
+inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
+  Value unused;
+  return eval_binop(op, l, r, unused);
+}
+
+// The other half. Only valid when binop_error returned empty.
+inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
+  Value out;
+  eval_binop(op, l, r, out);
+  return out;
 }
 
 inline bool is_wrap(UnOp op) {
@@ -2352,8 +2378,17 @@ enum class Op : uint8_t {
   // coreir::BinOp's u64 group, same offset scheme as Add..Ge -- see
   // kBinOpOffset.
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,  // a = dst, b = lhs, c = rhs
-  LoadVar,      // a = dst, b = VarKind, c = index   (rejects Uninit)
-  StoreVar,     // a = VarKind, b = index, c = src
+  // Which storage class a variable lives in is a compile-time fact -- the
+  // coreir::VarKind on the VarRef the compiler is lowering -- so it is an
+  // opcode here rather than an operand the executor switches on a second
+  // time. Reading a local is the most frequent instruction a program has;
+  // one dispatch is what it should cost.
+  // Both groups sit at a fixed offset from coreir::VarKind's own Local,
+  // Capture, Cell -- the same trick Add..UGe plays on coreir::BinOp, and for
+  // the same reason: the correspondence is a subtraction the static_asserts
+  // below pin, not a switch that could drift.
+  LoadLocal, LoadCapture, LoadCell,     // a = dst, b = index
+  StoreLocal, StoreCapture, StoreCell,  // a = index, b = src
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
   // Looks the subject up in Chunk::switch_tables[b] and jumps to the
@@ -2497,6 +2532,30 @@ inline constexpr coreir::UnOp unop_of(Op op) {
 static_assert(op_of(coreir::UnOp::Neg) == Op::Neg);
 static_assert(op_of(coreir::UnOp::BitNot) == Op::BitNot);
 static_assert(op_of(coreir::UnOp::WrapU32) == Op::WrapU32);
+
+// A variable's storage class, as the opcode that reads it and the one that
+// writes it: the choice is made once, at compile time, which is the whole
+// point of there being six opcodes rather than two operands the executor
+// would switch on again.
+inline constexpr int32_t kVarLoadOffset =
+    static_cast<int32_t>(Op::LoadLocal) -
+    static_cast<int32_t>(coreir::VarKind::Local);
+inline constexpr int32_t kVarStoreOffset =
+    static_cast<int32_t>(Op::StoreLocal) -
+    static_cast<int32_t>(coreir::VarKind::Local);
+
+inline constexpr Op load_op_of(coreir::VarKind k) {
+  return static_cast<Op>(static_cast<int32_t>(k) + kVarLoadOffset);
+}
+inline constexpr Op store_op_of(coreir::VarKind k) {
+  return static_cast<Op>(static_cast<int32_t>(k) + kVarStoreOffset);
+}
+static_assert(load_op_of(coreir::VarKind::Local) == Op::LoadLocal);
+static_assert(load_op_of(coreir::VarKind::Capture) == Op::LoadCapture);
+static_assert(load_op_of(coreir::VarKind::Cell) == Op::LoadCell);
+static_assert(store_op_of(coreir::VarKind::Local) == Op::StoreLocal);
+static_assert(store_op_of(coreir::VarKind::Capture) == Op::StoreCapture);
+static_assert(store_op_of(coreir::VarKind::Cell) == Op::StoreCell);
 
 // The intrinsics have no such offset -- their opcodes were not laid out to
 // have one -- so the correspondence is a table. It is still one table: with
@@ -3970,8 +4029,12 @@ inline const char* name_of(Op op) {
     case Op::UDiv: case Op::UMod: case Op::UShr:
     case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
       return coreir::name_of(binop_of(op));
-    case Op::LoadVar:     return "loadvar";
-    case Op::StoreVar:    return "storevar";
+    case Op::LoadLocal:   return "loadlocal";
+    case Op::LoadCell:    return "loadcell";
+    case Op::LoadCapture: return "loadcapture";
+    case Op::StoreLocal:  return "storelocal";
+    case Op::StoreCell:   return "storecell";
+    case Op::StoreCapture: return "storecapture";
     case Op::Jump:        return "jump";
     case Op::JumpIfFalse: return "jumpiffalse";
     case Op::Switch:      return "switch";
@@ -4038,12 +4101,6 @@ inline const char* name_of(Op op) {
   return "?";
 }
 
-// A VarKind reaches bytecode as a plain operand word; naming it is coreir's
-// job, the same way the arithmetic opcode names above are.
-inline const char* kind_name(int32_t k) {
-  return coreir::name_of(static_cast<coreir::VarKind>(k));
-}
-
 }  // namespace detail
 
 inline std::string to_string(const Program& p) {
@@ -4063,13 +4120,13 @@ inline std::string to_string(const Program& p) {
         case Op::Neg:
           out << " r" << in.a << ", r" << in.b;
           break;
-        case Op::LoadVar:
-          out << " r" << in.a << ", " << detail::kind_name(in.b) << "["
-              << in.c << "]";
+        // The opcode's own name says which storage class this is, so the
+        // operand is just the index into it.
+        case Op::LoadLocal: case Op::LoadCell: case Op::LoadCapture:
+          out << " r" << in.a << ", [" << in.b << "]";
           break;
-        case Op::StoreVar:
-          out << " " << detail::kind_name(in.a) << "[" << in.b << "], r"
-              << in.c;
+        case Op::StoreLocal: case Op::StoreCell: case Op::StoreCapture:
+          out << " [" << in.a << "], r" << in.b;
           break;
         case Op::MakeClosure:
           out << " r" << in.a << ", #" << in.b << " cmap=" << in.c;
@@ -4482,7 +4539,7 @@ struct FnCompiler {
       case Tag::VarRef: {
         auto v = view_varref(m, id);
         const int32_t r = alloc();
-        emit(Op::LoadVar, r, static_cast<int32_t>(v.kind), v.index, n.pos);
+        emit(load_op_of(v.kind), r, v.index, 0, n.pos);
         return r;
       }
       case Tag::Unary: {
@@ -4776,7 +4833,7 @@ struct FnCompiler {
       case Tag::Assign: {
         auto v = view_assign(m, id);
         const int32_t s = compile_expr(v.value);
-        emit(Op::StoreVar, static_cast<int32_t>(v.kind), v.index, s, n.pos);
+        emit(store_op_of(v.kind), v.index, s, 0, n.pos);
         break;
       }
 
@@ -4979,6 +5036,8 @@ struct Raise {
   std::string fatal_msg;
 };
 
+struct FramePool;
+
 // One activation record. A frame is a heap object owned by Exec's stack, not
 // a C++ stack frame, so its address is stable for as long as it is live, and
 // its ownership can move: into a GeneratorObj at a Yield, into a CoroObj
@@ -5022,6 +5081,12 @@ struct Frame {
   // GeneratorObj it suspends back into. Owning, so the generator cannot be
   // freed out from under its own running frame.
   Value gen_self;
+  // The free list this frame goes back to when it dies (null: it is the
+  // allocator's). Held here rather than in the deleter so that the deleter
+  // stays empty and a FramePtr stays one word -- `frames.back()` is read at
+  // the top of every instruction, and a two-word handle doubles what that
+  // walk touches.
+  FramePool* pool = nullptr;
   // Non-nil exactly when this frame is the bottom of a running coroutine
   // -- the one CoroResume entered. CoroYield walks down to the nearest one
   // to know where the parked slice starts; Ret and the unwinder finish the
@@ -5029,18 +5094,84 @@ struct Frame {
   Value coro_self;
 };
 
+// A blank frame, stated once: everything it holds released in the order
+// ~Frame would have released it -- the two self-references first, then the
+// vectors from the last declared to the first -- and every scalar back to
+// the value a fresh Frame's own initializer gives it. Recycling a frame
+// means running this instead of the destructor, so a drop hook a release
+// fires sees the order it saw before there was a pool, and a field added to
+// Frame is blanked on a recycled frame the way it is on a fresh one.
+// `pool` is the exception: it says where this frame goes next, not what it
+// holds.
+inline void clear_frame(Frame& f) {
+  f.coro_self = Value();
+  f.gen_self = Value();
+  f.owned_marks.clear();
+  f.defer_marks.clear();
+  f.defers.clear();
+  f.captures.clear();
+  f.cells.clear();
+  f.regs.clear();
+  f.locals.clear();
+  f.chunk = nullptr;
+  f.pc = 0;
+  f.ret_reg = -1;
+  f.argc = 0;
+  f.entry = false;
+}
+
+// The frames a call is not paying the allocator for. A frame is a heap
+// object with five vectors in it, so a call that pushed one and a return
+// that dropped it were several malloc/free pairs each -- on the one path a
+// program takes most often. A returned frame comes back here with its
+// vectors emptied but their capacity kept, and the next call of any shape
+// takes it and resizes into that capacity.
+//
+// Bounded: a run that goes a thousand frames deep once should not hold a
+// thousand frames' worth of registers for the rest of the run.
+struct FramePool {
+  static constexpr size_t kMax = 64;
+  // Plain unique_ptrs, not FramePtrs: a frame already on the free list must
+  // be deleted when the list goes, not handed back to the list it is in.
+  std::vector<std::unique_ptr<Frame>> free_list;
+};
+
+// Every way a frame dies goes through a unique_ptr's deleter, so this is the
+// one place recycling has to be written -- rather than at each pop_back, the
+// coroutine park's erase, and the unwinder's two loops. Exec::take_frame is
+// the only thing that ever builds a Frame, and it sets `pool`, so there is
+// no frame here without one.
+struct FrameDeleter {
+  void operator()(Frame* f) const {
+    if (f->pool->free_list.size() >= FramePool::kMax) {
+      delete f;
+      return;
+    }
+    // Emptied before it joins the list, never after: a release here can run
+    // a drop hook, which re-enters the executor and may take a frame.
+    clear_frame(*f);
+    f->pool->free_list.push_back(std::unique_ptr<Frame>(f));
+  }
+};
+
+using FramePtr = std::unique_ptr<Frame, FrameDeleter>;
+
 struct Exec {
   const Program& p;
   size_t max_frames;
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
 
+  // Declared before `frames`, so it outlives them: a frame returning to the
+  // pool during teardown must find the pool still there.
+  FramePool pool;
+
   // unique_ptr rather than a vector<Frame> or a deque<Frame>: a vector moves
   // its elements as it grows, which would invalidate every `captures` pointer
   // aimed at them, and a deque owns its elements outright, which leaves no
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
-  std::vector<std::unique_ptr<Frame>> frames;
+  std::vector<FramePtr> frames;
 
   // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
   // to run after the entry frame, FIFO. C++-side handles, so the collector
@@ -5076,8 +5207,23 @@ struct Exec {
     if (co->scheduled) scheduled.erase(co);
   }
 
-  std::unique_ptr<Frame> make_frame(const Chunk& ch) {
-    auto f = std::make_unique<Frame>();
+  // A blank frame: the pool's, if it has one -- clear_frame blanked it on
+  // the way in, and its vectors' capacity is still there for a caller's
+  // resize to land in -- and a fresh one otherwise. The only place a Frame
+  // is ever built, which is what lets the deleter trust `pool`.
+  FramePtr take_frame() {
+    if (!pool.free_list.empty()) {
+      FramePtr f(pool.free_list.back().release());
+      pool.free_list.pop_back();
+      return f;
+    }
+    FramePtr fresh(new Frame());
+    fresh->pool = &pool;
+    return fresh;
+  }
+
+  FramePtr make_frame(const Chunk& ch) {
+    FramePtr f = take_frame();
     f->chunk = &ch;
     f->locals.assign(static_cast<size_t>(ch.num_locals), Value::uninit());
     f->regs.resize(static_cast<size_t>(ch.num_regs));
@@ -5131,30 +5277,39 @@ struct Exec {
   }
 
   // Move a frame's storage into a generator's keeping (suspend)...
+  //
+  // Swapped rather than move-assigned, here and in restore_frame: a move
+  // frees whatever the destination held, and between the two of them that
+  // is the pool's own capacity on the way in and the generator's on the way
+  // out -- two frees per vector per suspend/resume pair, for buffers both
+  // sides are about to want again. A swap leaves each side holding the
+  // other's, which is exactly the circulation the pool exists for. The
+  // frame is dead either way: park_frame is only ever called on one about
+  // to be popped.
   void park_frame(GenFrame& gf, Frame& f) {
-    gf.locals = std::move(f.locals);
-    gf.regs = std::move(f.regs);
-    gf.cells = std::move(f.cells);
-    gf.captures = std::move(f.captures);
-    gf.defers = std::move(f.defers);
-    gf.defer_marks = std::move(f.defer_marks);
-    gf.owned_marks = std::move(f.owned_marks);
+    gf.locals.swap(f.locals);
+    gf.regs.swap(f.regs);
+    gf.cells.swap(f.cells);
+    gf.captures.swap(f.captures);
+    gf.defers.swap(f.defers);
+    gf.defer_marks.swap(f.defer_marks);
+    gf.owned_marks.swap(f.owned_marks);
   }
 
   // ...and back into a fresh executor frame, storage and all. The
   // GenFrame's own ret_reg and gen_self come along; a caller that has its
   // own (a generator's resume site) overwrites them.
-  std::unique_ptr<Frame> restore_frame(GenFrame& gf) {
-    auto f = std::make_unique<Frame>();
+  FramePtr restore_frame(GenFrame& gf) {
+    FramePtr f = take_frame();
     f->chunk = &p.chunks[static_cast<size_t>(gf.func)];
     f->pc = static_cast<size_t>(gf.pc);
-    f->locals = std::move(gf.locals);
-    f->regs = std::move(gf.regs);
-    f->cells = std::move(gf.cells);
-    f->captures = std::move(gf.captures);
-    f->defers = std::move(gf.defers);
-    f->defer_marks = std::move(gf.defer_marks);
-    f->owned_marks = std::move(gf.owned_marks);
+    f->locals.swap(gf.locals);
+    f->regs.swap(gf.regs);
+    f->cells.swap(gf.cells);
+    f->captures.swap(gf.captures);
+    f->defers.swap(gf.defers);
+    f->defer_marks.swap(gf.defer_marks);
+    f->owned_marks.swap(gf.owned_marks);
     f->ret_reg = gf.ret_reg;
     f->argc = gf.argc;
     f->gen_self = std::move(gf.gen_self);
@@ -5163,7 +5318,7 @@ struct Exec {
 
   // A generator's frame, back onto the executor's stack (resume). The new
   // frame owns the generator for as long as it runs.
-  std::unique_ptr<Frame> unpark_frame(const Value& gv, int32_t ret_reg) {
+  FramePtr unpark_frame(const Value& gv, int32_t ret_reg) {
     GeneratorObj* go = gv.as_generator();
     auto f = restore_frame(go->frame);
     f->ret_reg = ret_reg;
@@ -5322,7 +5477,7 @@ struct Exec {
       return;
     }
     check_can_push(pos);
-    std::unique_ptr<Frame> f = make_frame(ch);
+    FramePtr f = make_frame(ch);
     f->captures = c->cells;  // shared, not copied: each element is a Cell
     for (int32_t i = 0; i < taken; ++i) {
       f->locals[static_cast<size_t>(i)] = args[i];
@@ -5391,30 +5546,17 @@ struct Exec {
     return Value();
   }
 
-  // Reading and writing a variable, in whichever of the three storage classes
-  // it lives. A local starts out Uninit and a cell starts out nil, so "read
+  // A local read's one check, which the other two storage classes do not
+  // have: a local starts out Uninit and a cell starts out nil, so "read
   // before assigned" is observable through the first and not the second --
-  // which is right: a cell is created by the frame, not by the source-level
-  // declaration a diagnostic would name.
-  Value& var_ref(Frame& f, int32_t kind, int32_t index, const Chunk& ch) {
-    switch (static_cast<VarKind>(kind)) {
-      case VarKind::Local: {
-        Value& v = f.locals[index];
-        if (v.is_uninit()) fail(f, format_uninit_var(ch.local_names[index]));
-        return v;
-      }
-      case VarKind::Capture: return f.captures[index].as_cell()->v;
-      case VarKind::Cell:    return f.cells[index].as_cell()->v;
+  // which is right, since a cell is created by the frame rather than by the
+  // source-level declaration a diagnostic would name.
+  Value& local_ref(Frame& f, int32_t index, const Chunk& ch) {
+    Value& v = f.locals[static_cast<size_t>(index)];
+    if (v.is_uninit()) {
+      fail(f, format_uninit_var(ch.local_names[static_cast<size_t>(index)]));
     }
-    return f.regs[0];  // unreachable
-  }
-
-  void var_store(Frame& f, int32_t kind, int32_t index, const Value& v) {
-    switch (static_cast<VarKind>(kind)) {
-      case VarKind::Local:   f.locals[index] = v; break;
-      case VarKind::Capture: f.captures[index].as_cell()->v = v; break;
-      case VarKind::Cell:    f.cells[index].as_cell()->v = v; break;
-    }
+    return v;
   }
 
   // The cells a MakeClosure hands to the closure it builds, resolved in the
@@ -5774,18 +5916,34 @@ struct Exec {
         case Op::Shl: case Op::Shr:
         case Op::UDiv: case Op::UMod: case Op::UShr:
         case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe: {
-          const BinOp op = binop_of(in.op);
-          const Value& l = f.regs[in.b];
-          const Value& r = f.regs[in.c];
-          if (auto err = binop_error(op, l, r); !err.empty()) fail(f, err);
-          f.regs[in.a] = apply_binop(op, l, r);
+          // Straight into the destination register: eval_binop computes
+          // the whole result before it assigns, so the compiler reusing an
+          // operand's register as the destination -- which it does freely --
+          // needs no temporary here. A failure leaves the register alone.
+          if (auto err = eval_binop(binop_of(in.op), f.regs[in.b], f.regs[in.c],
+                                    f.regs[in.a]);
+              !err.empty()) {
+            fail(f, err);
+          }
           break;
         }
-        case Op::LoadVar:
-          f.regs[in.a] = var_ref(f, in.b, in.c, ch);
+        case Op::LoadLocal:
+          f.regs[in.a] = local_ref(f, in.b, ch);
           break;
-        case Op::StoreVar:
-          var_store(f, in.a, in.b, f.regs[in.c]);
+        case Op::LoadCell:
+          f.regs[in.a] = f.cells[in.b].as_cell()->v;
+          break;
+        case Op::LoadCapture:
+          f.regs[in.a] = f.captures[in.b].as_cell()->v;
+          break;
+        case Op::StoreLocal:
+          f.locals[in.a] = f.regs[in.b];
+          break;
+        case Op::StoreCell:
+          f.cells[in.a].as_cell()->v = f.regs[in.b];
+          break;
+        case Op::StoreCapture:
+          f.captures[in.a].as_cell()->v = f.regs[in.b];
           break;
         case Op::Jump:
           // A backward (or self) jump is a loop iteration -- the one place a
