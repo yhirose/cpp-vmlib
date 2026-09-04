@@ -58,14 +58,28 @@ namespace coreir {
 // declaring the variable still shares one copy of it; Func is such a closure.
 // Both are values because both are refcounted heap objects, and making them
 // ordinary tags means one lifetime rule covers everything.
+//
+// Map is the associative container whose keys are values rather than
+// strings -- what Object deliberately is not. An Object's string keys are
+// what let a struct be indexed by slot (FieldGet/FieldSet) and what the
+// drop key hangs on; a language's dict/map with int, double or object keys
+// needs a second container rather than a widened first one, so nothing
+// about Object changes when Map arrives. Coroutine is a suspended
+// activation like Generator, but of a whole frame *stack* rather than one
+// frame, and entered dynamically (CoroYield anywhere below CoroResume)
+// rather than lexically (Yield inside an is_generator body). Native is a
+// host function registered for the run (vm::NativeDef), callable like a
+// closure.
 enum class ValueTag : uint8_t {
-  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator
+  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator,
+  Map, Coroutine, Native
 };
 
 // The immediates come first and the heap tags last, so Value::is_heap is a
 // single comparison against Str. Order is load-bearing, not cosmetic.
 static_assert(ValueTag::Str > ValueTag::Double);
 static_assert(ValueTag::Generator > ValueTag::Str);
+static_assert(ValueTag::Native > ValueTag::Str);
 
 struct HeapObj;
 struct ObjectObj;
@@ -281,6 +295,17 @@ struct ClosureObj;
 // A suspended generator activation, owning its frame's storage while no
 // executor frame exists for it. Defined out of line, like CellObj.
 struct GeneratorObj;
+// A value-keyed associative container (ValueTag::Map), a suspended frame
+// stack (ValueTag::Coroutine) and a registered host function
+// (ValueTag::Native). All three hold Values, so all three are defined
+// after Value, like CellObj.
+struct MapObj;
+struct CoroObj;
+struct NativeObj;
+// A host function's signature (vm/exec.h defines NativeCall): answers true
+// with NativeCall::result set, or false with NativeCall::error set.
+struct NativeCall;
+using NativeFn = bool (*)(NativeCall& call);
 
 class Value {
  public:
@@ -361,6 +386,12 @@ class Value {
   static Value make_closure(int32_t func, std::vector<Value> cells);
   static Value make_array(std::vector<Value> items);
   static Value make_object();
+  static Value make_map();                      // empty
+  static Value make_coroutine();                // Start state; the executor fills it
+  // A host function, as a value. `arity` is what FnArity answers and what
+  // a call is checked against (-1: any count). `name` is diagnostics only.
+  static Value make_native(std::string name, int32_t arity, void* ctx,
+                           NativeFn fn);
 
   ValueTag tag() const { return tag_; }
   // The raw payload, for the collector's child walk only.
@@ -387,6 +418,11 @@ class Value {
   bool is_cell() const { return tag_ == ValueTag::Cell; }
   bool is_func() const { return tag_ == ValueTag::Func; }
   bool is_generator() const { return tag_ == ValueTag::Generator; }
+  bool is_map() const { return tag_ == ValueTag::Map; }
+  bool is_coroutine() const { return tag_ == ValueTag::Coroutine; }
+  bool is_native() const { return tag_ == ValueTag::Native; }
+  // Anything CallValue accepts: a closure or a host function.
+  bool is_callable() const { return is_func() || is_native(); }
 
   bool as_bool() const { return data_ != 0; }
   int64_t as_int() const { return data_; }
@@ -411,6 +447,9 @@ class Value {
   GeneratorObj* as_generator() const {
     return reinterpret_cast<GeneratorObj*>(data_);
   }
+  MapObj* as_map() const { return reinterpret_cast<MapObj*>(data_); }
+  CoroObj* as_coroutine() const { return reinterpret_cast<CoroObj*>(data_); }
+  NativeObj* as_native() const { return reinterpret_cast<NativeObj*>(data_); }
 
   // nil, false and zero are false; everything else is true. A string's
   // emptiness and NaN are deliberately not special-cased -- JavaScript calls
@@ -523,6 +562,11 @@ struct GenFrame {
   int64_t pc = 0;           // where the next resume re-enters
   int32_t yield_reg = -1;   // register the resumed-with value lands in
   int32_t argc = 0;         // what the activation's call supplied
+  // Where this frame's own result goes in the frame below it -- only a
+  // coroutine's parked stack has a "below" to keep (a generator's single
+  // frame gets its ret_reg from each resume); its bottom frame's is
+  // re-patched on every resume the same way.
+  int32_t ret_reg = -1;
   std::vector<Value> locals;
   std::vector<Value> regs;
   std::vector<Value> cells;
@@ -530,6 +574,9 @@ struct GenFrame {
   std::vector<Value> defers;
   std::vector<std::pair<size_t, int32_t>> defer_marks;
   std::vector<std::pair<uint64_t, int32_t>> owned_marks;
+  // A generator activation caught inside a coroutine's parked stack keeps
+  // its GeneratorObj here (Running state) until the stack resumes.
+  Value gen_self;
 };
 
 // Calling a generator function makes one of these instead of running the
@@ -544,6 +591,144 @@ struct GeneratorObj : HeapObj {
   GenFrame frame;
 };
 
+// A coroutine: the same four states as a generator, over a whole frame
+// stack. CoroCreate(f) makes one in Start holding `f`; the first
+// CoroResume calls it, and a CoroYield anywhere in the frames that call
+// builds -- however deep -- parks every frame from the one CoroResume
+// entered (the bottom) to the yielding one (the top) here, bottom first.
+// What a Yield does lexically for one frame, this does dynamically for a
+// stack, and the storage is the same GenFrame per frame.
+struct CoroObj : HeapObj {
+  CoroObj() : HeapObj(ValueTag::Coroutine) {}
+  enum class State : uint8_t { Start, Suspended, Running, Done };
+  State state = State::Start;
+  Value fn;                       // Start only: what the first resume calls
+  std::vector<GenFrame> frames;   // Suspended only: bottom frame first
+  // Set once the scheduler has taken it (Enqueue of a coroutine). What
+  // vm::run's end-of-run deadlock check counts: a scheduled coroutine
+  // still Suspended, with nothing left that could resume it.
+  bool scheduled = false;
+};
+
+// A host function registered for one run (vm::RunOptions::natives) and
+// reached by a program through Tag::NativeRef.
+struct NativeObj : HeapObj {
+  NativeObj() : HeapObj(ValueTag::Native) {}
+  std::string name;      // diagnostics only
+  int32_t arity = -1;    // -1: any argument count
+  void* ctx = nullptr;
+  NativeFn fn = nullptr;
+};
+
+// Map keys, stated once. Two values are the same key when they have the
+// same tag and, for a string, the same bytes -- or, for everything else,
+// the same payload word: an int by value, a double by bit pattern (so
+// -0.0 and 0.0 are two keys and NaN is one; a language with
+// SameValueZero normalizes before the value gets here), a heap object by
+// identity. This is a third rule beside Eq (which refuses to compare
+// across types at all, and refuses objects) and Same (which compares a
+// string by pointer, so two equal strings from two allocations are not
+// Same): a key is neither a comparison a language defines nor a question
+// of which allocation this is. Defined here rather than in semantics.h
+// because MapObj's own index is built on it.
+inline bool key_eq(const Value& a, const Value& b) {
+  if (a.tag() != b.tag()) return false;
+  if (a.is_str()) return a.as_str() == b.as_str();
+  return a.raw_data() == b.raw_data();
+}
+
+inline size_t key_hash(const Value& v) {
+  if (v.is_str()) return std::hash<std::string_view>{}(v.as_str());
+  // The tag goes into the hashed word so Int 1, Bool true and the cell at
+  // address 1 do not all land in one bucket.
+  const uint64_t x = static_cast<uint64_t>(v.raw_data()) ^
+                     (static_cast<uint64_t>(v.tag()) << 56);
+  return std::hash<uint64_t>{}(x);
+}
+
+// The index's key: a Value's tag and payload without the retain -- the
+// entry vector already owns the key, and a second owning copy in the index
+// would make every key look externally held to the collector (two counted
+// references, one visit_children edge). A string key is compared through
+// its StrObj, which the owning entry keeps alive for as long as the index
+// names it.
+struct MapKeyRef {
+  ValueTag tag;
+  int64_t bits;
+  static MapKeyRef of(const Value& v) { return {v.tag(), v.raw_data()}; }
+  const std::string& str() const {
+    return reinterpret_cast<const StrObj*>(bits)->s;
+  }
+  bool operator==(const MapKeyRef& o) const {
+    if (tag != o.tag) return false;
+    if (tag == ValueTag::Str) return str() == o.str();
+    return bits == o.bits;
+  }
+};
+struct MapKeyHash {
+  size_t operator()(const MapKeyRef& k) const {
+    if (k.tag == ValueTag::Str) return std::hash<std::string_view>{}(k.str());
+    const uint64_t x = static_cast<uint64_t>(k.bits) ^
+                       (static_cast<uint64_t>(k.tag) << 56);
+    return std::hash<uint64_t>{}(x);
+  }
+};
+
+// Insertion-ordered like Object (so ObjectKeys over a map is reproducible),
+// but found by hash rather than by scan: `entries` holds the order, `index`
+// finds a key in O(1). A removed entry leaves a tombstone -- an Uninit key,
+// which no real key can be, since a read of one traps before it reaches a
+// container -- rather than shifting the entries behind it, and the vector
+// is compacted once the tombstones outnumber what is live.
+struct MapObj : HeapObj {
+  MapObj() : HeapObj(ValueTag::Map) {}
+  std::vector<std::pair<Value, Value>> entries;
+  std::unordered_map<MapKeyRef, size_t, MapKeyHash> index;
+  size_t live = 0;
+
+  Value* find(const Value& k) {
+    auto it = index.find(MapKeyRef::of(k));
+    return it == index.end() ? nullptr : &entries[it->second].second;
+  }
+  void set(const Value& k, Value v) {
+    auto it = index.find(MapKeyRef::of(k));
+    if (it != index.end()) {
+      entries[it->second].second = std::move(v);
+      return;
+    }
+    entries.emplace_back(k, std::move(v));
+    index.emplace(MapKeyRef::of(entries.back().first), entries.size() - 1);
+    ++live;
+  }
+  void remove(const Value& k) {
+    auto it = index.find(MapKeyRef::of(k));
+    if (it == index.end()) return;
+    auto& e = entries[it->second];
+    index.erase(it);  // before the key it refers through is released
+    e.first = Value::uninit();
+    e.second = Value();
+    --live;
+    if (entries.size() > 8 && live * 2 < entries.size()) compact();
+  }
+  void compact() {
+    std::vector<std::pair<Value, Value>> kept;
+    kept.reserve(live);
+    for (auto& e : entries) {
+      if (!e.first.is_uninit()) kept.push_back(std::move(e));
+    }
+    entries.swap(kept);
+    index.clear();
+    for (size_t i = 0; i < entries.size(); ++i) {
+      index.emplace(MapKeyRef::of(entries[i].first), i);
+    }
+  }
+  void clear() {
+    index.clear();  // first: it refers through keys the entries own
+    entries.clear();
+    live = 0;
+  }
+};
+
 inline Value Value::make_array(std::vector<Value> items) {
   auto* a = new ArrayObj();
   a->items = std::move(items);
@@ -554,6 +739,30 @@ inline Value Value::make_array(std::vector<Value> items) {
 
 inline Value Value::make_object() {
   Value r = adopt(new ObjectObj());
+  gc_safepoint();
+  return r;
+}
+
+inline Value Value::make_map() {
+  Value r = adopt(new MapObj());
+  gc_safepoint();
+  return r;
+}
+
+inline Value Value::make_coroutine() {
+  Value r = adopt(new CoroObj());
+  gc_safepoint();
+  return r;
+}
+
+inline Value Value::make_native(std::string name, int32_t arity, void* ctx,
+                                NativeFn fn) {
+  auto* n = new NativeObj();
+  n->name = std::move(name);
+  n->arity = arity;
+  n->ctx = ctx;
+  n->fn = fn;
+  Value r = adopt(n);
   gc_safepoint();
   return r;
 }
@@ -821,7 +1030,20 @@ enum class Tag : uint8_t {
   // activation instead of running the body, and the GenResume / GenReturn
   // intrinsics drive it from there.
   Yield,      // children: value
+  // A host function, as a value: the one Module::natives[a] names. What
+  // the name resolves to is the run's business (vm::RunOptions::natives),
+  // not the module's -- the same module runs against any host that
+  // supplies the names it declares, and a name the host does not supply
+  // fails the run before its first instruction rather than at the call.
+  // Yields a callable; a front end that calls one host function from many
+  // sites hoists this into a Cell exactly as the Static calls recipe hoists
+  // a MakeClosure.
+  NativeRef,  // a = index into Module::natives
 };
+
+// The last enumerator, for the scans (from_name, test_names) that walk the
+// enum's range.
+inline constexpr Tag kLastTag = Tag::NativeRef;
 
 // WrapI8..WrapU32 truncate an int to a narrower width and sign- or
 // zero-extend it back to int64 -- non-int traps, like Neg and BitNot. A
@@ -960,7 +1182,31 @@ enum class IntrinsicId : uint8_t {
   // for fixed-width ints (see the README's Fixed-width integers section) --
   // this is that discipline's one addition for a language with `float`.
   ToFloat32,    // (n) -> double, rounded to float precision
+  // The string and array primitives a front end cannot write over Index
+  // alone at a reasonable cost. A slice is the half-open range [i, j),
+  // bounds-checked the way Index is (semantics.h's slice_error) and always
+  // a fresh value; a front end that wants Python's clamping or negative
+  // indices normalizes first. StrByte reads one byte as its 0..255 value
+  // (Index on a string yields a one-byte string, which nothing can turn
+  // into a number), and StrFromByte is its inverse -- together they are
+  // what a language's ord/chr, or any UTF-8 decoding it writes itself,
+  // bottoms out in.
+  StrSlice,     // (str, i, j) -> str
+  ArraySlice,   // (array, i, j) -> array
+  StrByte,      // (str, i) -> int, 0..255; out of range traps like Index
+  StrFromByte,  // (int 0..255) -> str of one byte; anything else traps
+  // A fresh, empty Map (value.h's MapObj). Filled through SetIndex, read
+  // through Index, and asked about through ObjectHas / ObjectKeys /
+  // ObjectRemove, each of which accepts a map receiver as well as an
+  // object one -- Index already dispatches on the receiver's kind, and the
+  // three questions are the same questions.
+  MapNew,       // () -> map
 };
+
+// The last enumerator, for the scans (from_name, test_names) that walk the
+// enum's range: one place to move when an intrinsic is added, rather than
+// every scan naming the last one itself.
+inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::MapNew;
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -1062,6 +1308,9 @@ struct Module {
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<Func> funcs;                      // funcs[0] is the entry point
   std::vector<std::vector<CaptureSrc>> capture_maps;
+  // The host functions this module calls, by name; Tag::NativeRef indexes
+  // this. Resolved against the run's RunOptions::natives by vm::run.
+  std::vector<std::string> natives;
 
   const Node& at(NodeId id) const { return nodes[id.v]; }
   NodeId child(NodeId id, uint32_t i) const {
@@ -1134,6 +1383,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Defer:       return 1;
     case Tag::CellFresh:   return 0;
     case Tag::Yield:       return 1;
+    case Tag::NativeRef:   return 0;
   }
   return -1;
 }
@@ -1178,6 +1428,11 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::GenThrow: return 2;
     case IntrinsicId::Enqueue: return 1;
     case IntrinsicId::ToFloat32: return 1;
+    case IntrinsicId::StrSlice: return 3;
+    case IntrinsicId::ArraySlice: return 3;
+    case IntrinsicId::StrByte: return 2;
+    case IntrinsicId::StrFromByte: return 1;
+    case IntrinsicId::MapNew: return 0;
   }
   return 0;
 }
@@ -1210,6 +1465,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Scope:
     case Tag::TryCatch:
     case Tag::Yield:
+    case Tag::NativeRef:
       return true;
     default:
       return false;
@@ -1502,6 +1758,19 @@ public:
     children.insert(children.end(), args.begin(), args.end());
     return emit(Tag::CallValue, 0, p, 0, 0, children);
   }
+  // The host function Module::natives[index] names, as a callable value.
+  NodeId native_ref(int32_t index, SrcPos p) {
+    return emit(Tag::NativeRef, 0, p, index, 0, {});
+  }
+  // Declares a host function by name (or finds the declaration already
+  // made) and answers its Module::natives index -- what native_ref takes.
+  int32_t declare_native(const std::string& name) {
+    for (size_t i = 0; i < m_.natives.size(); ++i) {
+      if (m_.natives[i] == name) return static_cast<int32_t>(i);
+    }
+    m_.natives.push_back(name);
+    return static_cast<int32_t>(m_.natives.size() - 1);
+  }
 
 private:
   NodeId emit(Tag tag, uint8_t op, SrcPos p, int32_t a, int32_t b,
@@ -1586,6 +1855,12 @@ inline const char* type_name(ValueTag t) {
     case ValueTag::Cell:   return "cell";
     case ValueTag::Func:   return "function";
     case ValueTag::Generator: return "generator";
+    case ValueTag::Map:    return "map";
+    case ValueTag::Coroutine: return "coroutine";
+    // A host function answers "function" like a closure: what a program
+    // can do with the two is the same (call it, ask its arity), and a
+    // language's own type test should not tell them apart.
+    case ValueTag::Native: return "function";
   }
   return "?";
 }
@@ -1855,6 +2130,10 @@ inline std::string index_error(const Value& recv, const Value& key) {
     }
     return {};
   }
+  // A map takes any value as a key (key_eq's rule, value.h) -- what it is
+  // for. Uninit is the one exception, and an unassigned local traps at its
+  // read before it could get here, so nothing needs saying about it.
+  if (recv.is_map()) return {};
   return std::string("cannot index ") + type_name(recv.tag());
 }
 
@@ -1873,6 +2152,12 @@ inline Value index_get(const Value& recv, const Value& key) {
   if (recv.is_array()) {
     return recv.as_array()->items[static_cast<size_t>(key.as_int())];
   }
+  // A missing map key reads as nil, like a missing property: the same
+  // asymmetry with arrays, for the same reason.
+  if (recv.is_map()) {
+    const Value* v = recv.as_map()->find(key);
+    return v ? *v : Value();
+  }
   const Value* v = recv.as_object()->find(key.as_str());
   return v ? *v : Value();
 }
@@ -1882,11 +2167,15 @@ inline void index_set(const Value& recv, const Value& key, const Value& v) {
     recv.as_array()->items[static_cast<size_t>(key.as_int())] = v;
     return;
   }
+  if (recv.is_map()) {
+    recv.as_map()->set(key, v);
+    return;
+  }
   recv.as_object()->set(key.as_str(), v);
 }
 
 inline std::string len_error(const Value& v) {
-  if (v.is_array() || v.is_str() || v.is_object()) return {};
+  if (v.is_array() || v.is_str() || v.is_object() || v.is_map()) return {};
   return std::string("cannot take the length of ") + type_name(v.tag());
 }
 
@@ -1895,7 +2184,30 @@ inline Value length_of(const Value& v) {
   if (v.is_array()) {
     return Value::make_int(static_cast<int64_t>(v.as_array()->items.size()));
   }
+  if (v.is_map()) return Value::make_int(static_cast<int64_t>(v.as_map()->live));
   return Value::make_int(static_cast<int64_t>(v.as_object()->props.size()));
+}
+
+// The half-open slice [i, j) of a string or an array, shared by StrSlice
+// and ArraySlice so that "what bounds are legal" is answered once: both
+// ends must be ints with 0 <= i <= j <= len, and anything else fails rather
+// than clamping -- a language that clamps (Python) or counts from the end
+// (negative indices) normalizes in its own lowering first, the same way it
+// does for Index. A slice is a fresh value either way; nothing aliases.
+inline std::string slice_error(const Value& recv, const Value& i,
+                               const Value& j, int64_t len) {
+  if (!i.is_int() || !j.is_int()) {
+    return std::string("slice bounds must be ints, not ") +
+           type_name(i.tag()) + " and " + type_name(j.tag());
+  }
+  const int64_t a = i.as_int();
+  const int64_t b = j.as_int();
+  if (a < 0 || b < a || b > len) {
+    return "slice [" + std::to_string(a) + ", " + std::to_string(b) +
+           ") out of range for " + type_name(recv.tag()) + " of length " +
+           std::to_string(len);
+  }
+  return {};
 }
 
 // How a non-string scalar prints, when a front end has not formatted it
@@ -2037,6 +2349,14 @@ enum class Op : uint8_t {
   // The job queue (ir.h's Enqueue): the closure joins the run's FIFO.
   Enqueue,      // a = closure reg
   ToFloat32,    // a = dst, b = src   (round to float precision, as a double)
+  // Slices spend the fourth operand on their second bound, the way
+  // CallValue spends it on its argument count.
+  StrSlice,     // a = dst, b = str reg, c = from reg, d = to reg
+  ArraySlice,   // a = dst, b = array reg, c = from reg, d = to reg
+  StrByte,      // a = dst, b = str reg, c = index reg
+  StrFromByte,  // a = dst, b = src
+  NewMap,       // a = dst   (empty; SetIndex fills it)
+  NativeRef,    // a = dst, b = index into Program::natives
 };
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
@@ -2107,6 +2427,11 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::GenThrow:     return Op::GenThrow;
     case I::Enqueue:      return Op::Enqueue;
     case I::ToFloat32:    return Op::ToFloat32;
+    case I::StrSlice:     return Op::StrSlice;
+    case I::ArraySlice:   return Op::ArraySlice;
+    case I::StrByte:      return Op::StrByte;
+    case I::StrFromByte:  return Op::StrFromByte;
+    case I::MapNew:       return Op::NewMap;
   }
   return Op::LoadNil;
 }
@@ -2133,7 +2458,8 @@ struct Insn {
   int32_t a = 0;
   int32_t b = 0;
   int32_t c = 0;
-  int32_t d = 0;  // only CallValue needs a fourth operand (arg count)
+  int32_t d = 0;  // CallValue's arg count, FieldGet/FieldSet's name const,
+                  // a slice's second bound; zero for everything else
 };
 
 // One record per lexical region the compiler closed. Children close before
@@ -2242,6 +2568,7 @@ struct Program {
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<coreir::SrcPos> positions;
   std::vector<std::vector<coreir::CaptureSrc>> capture_maps;
+  std::vector<std::string> natives;  // Module::natives, for Op::NativeRef
 
   // The same decode coreir::Module::str_const_at does, from this program's
   // own pools -- what FieldGet/FieldSet's diagnostic-only name const needs
@@ -2266,7 +2593,61 @@ Program compile(const coreir::Module& m);
 
 // ===== vm/exec.h =====
 
+namespace coreir {
+
+// What a host function is handed when a program calls it (value.h's
+// NativeFn). The function reads its arguments here, writes its answer to
+// `result` and returns true -- or writes what the call should throw to
+// `error` and returns false, which raises it at the call site exactly as a
+// Throw there would, catchable by the program's own TryCatch. That is the
+// one way a native fails a program: a C++ exception thrown out of the
+// function is not the program's to catch (it passes through the executor
+// untouched, the rule coreir_rt_* hooks already have) and ends the run.
+struct NativeCall {
+  const Value* args = nullptr;
+  int32_t argc = 0;
+  void* ctx = nullptr;   // NativeDef::ctx, verbatim
+  SrcPos pos{};          // the call site
+  Value result;
+  Value error;
+
+  // The i-th argument, or nil past the end -- so a variadic native need
+  // not bounds-check each read.
+  const Value& arg(int32_t i) const {
+    static const Value kNil;
+    return i < argc ? args[i] : kNil;
+  }
+
+  // Calls back into the program: runs `callee` (a closure, or another
+  // native) with `argv` to completion and answers its return value. A
+  // throw the callee does not catch propagates out of this call as the
+  // executor's own C++ exception, through the native's frame, to the
+  // nearest handler in the *calling* program -- so a native that calls
+  // back keeps what it owns in RAII handles (a Value is one) rather than
+  // in raw pointers it would have to free on that path.
+  Value call(const Value& callee, const Value* argv, int32_t argc);
+
+  // A fresh {message, line, col} object at this call's position: the
+  // value the executor's own traps carry, for a native that wants to fail
+  // the way a divide by zero does (`call.error = call.trap("...")`).
+  Value trap(const std::string& msg) const;
+
+  void* exec = nullptr;  // vm::detail::Exec*, set by the executor
+};
+
+}  // namespace coreir
+
 namespace vm {
+
+// One host function, as the run registers it: the name a module's
+// Tag::NativeRef resolves by, the argument count a call is checked against
+// (-1: any), the function and the context pointer it is handed.
+struct NativeDef {
+  std::string name;
+  int32_t arity = -1;
+  coreir::NativeFn fn = nullptr;
+  void* ctx = nullptr;
+};
 
 struct RunOptions {
   // Calls do not recurse through this thread's C++ stack -- the executor
@@ -2284,6 +2665,10 @@ struct RunOptions {
   // [0, 0): its defers still run at its exit, while the bindings stay the
   // frame's to release, destructor-free.
   bool entry_frame_drops = true;
+  // The host functions this run supplies. Every name the program declares
+  // (Program::natives) must be here, or the run fails before its first
+  // instruction; names the program does not declare are simply unused.
+  std::vector<NativeDef> natives;
 };
 
 // Run the bytecode, on a heap the caller owns. Use this to inspect what a
@@ -2348,6 +2733,16 @@ namespace detail {
 // One place that knows each kind's outgoing references, shared by the edge
 // count and the mark. New heap kinds add their arm here in the same commit
 // that adds the type.
+template <typename Visit>
+void visit_gen_frame(const GenFrame& gf, Visit& visit) {
+  for (const Value& v : gf.locals) visit(v);
+  for (const Value& v : gf.regs) visit(v);
+  for (const Value& v : gf.cells) visit(v);
+  for (const Value& v : gf.captures) visit(v);
+  for (const Value& v : gf.defers) visit(v);
+  visit(gf.gen_self);
+}
+
 template <typename Fn>
 void visit_children(HeapObj* o, Fn fn) {
   auto visit = [&](const Value& v) {
@@ -2368,17 +2763,25 @@ void visit_children(HeapObj* o, Fn fn) {
     case ValueTag::Func:
       for (const Value& v : static_cast<ClosureObj*>(o)->cells) visit(v);
       break;
-    case ValueTag::Generator: {
-      const GenFrame& gf = static_cast<GeneratorObj*>(o)->frame;
-      for (const Value& v : gf.locals) visit(v);
-      for (const Value& v : gf.regs) visit(v);
-      for (const Value& v : gf.cells) visit(v);
-      for (const Value& v : gf.captures) visit(v);
-      for (const Value& v : gf.defers) visit(v);
+    case ValueTag::Generator:
+      visit_gen_frame(static_cast<GeneratorObj*>(o)->frame, visit);
+      break;
+    case ValueTag::Map:
+      // Keys and values both; the index refers through the keys the
+      // entries own and holds no reference of its own (MapKeyRef).
+      for (const auto& kv : static_cast<MapObj*>(o)->entries) {
+        visit(kv.first);
+        visit(kv.second);
+      }
+      break;
+    case ValueTag::Coroutine: {
+      auto* co = static_cast<CoroObj*>(o);
+      visit(co->fn);
+      for (const GenFrame& gf : co->frames) visit_gen_frame(gf, visit);
       break;
     }
     default:
-      break;  // a string refers to nothing
+      break;  // a string, or a native, refers to nothing
   }
 }
 
@@ -2632,6 +3035,10 @@ inline int64_t Runtime::heap_bytes() const {
   auto vec = [](const auto& v) {
     return static_cast<int64_t>(v.capacity() * sizeof(v[0]));
   };
+  auto gen_frame_bytes = [&vec](const GenFrame& gf) {
+    return vec(gf.locals) + vec(gf.regs) + vec(gf.cells) + vec(gf.captures) +
+           vec(gf.defers) + vec(gf.defer_marks) + vec(gf.owned_marks);
+  };
   for (HeapObj* o = head_; o; o = o->next) {
     switch (o->kind) {
       case ValueTag::Str:
@@ -2652,13 +3059,26 @@ inline int64_t Runtime::heap_bytes() const {
       case ValueTag::Func:
         bytes += sizeof(ClosureObj) + vec(static_cast<ClosureObj*>(o)->cells);
         break;
-      case ValueTag::Generator: {
-        const GenFrame& gf = static_cast<GeneratorObj*>(o)->frame;
-        bytes += sizeof(GeneratorObj) + vec(gf.locals) + vec(gf.regs) +
-                 vec(gf.cells) + vec(gf.captures) + vec(gf.defers) +
-                 vec(gf.defer_marks) + vec(gf.owned_marks);
+      case ValueTag::Generator:
+        bytes += sizeof(GeneratorObj) +
+                 gen_frame_bytes(static_cast<GeneratorObj*>(o)->frame);
+        break;
+      case ValueTag::Map: {
+        auto* mp = static_cast<MapObj*>(o);
+        bytes += sizeof(MapObj) + vec(mp->entries) +
+                 static_cast<int64_t>(mp->index.bucket_count() *
+                                      sizeof(void*));
         break;
       }
+      case ValueTag::Coroutine: {
+        auto* co = static_cast<CoroObj*>(o);
+        bytes += sizeof(CoroObj) + vec(co->frames);
+        for (const GenFrame& gf : co->frames) bytes += gen_frame_bytes(gf);
+        break;
+      }
+      case ValueTag::Native:
+        bytes += sizeof(NativeObj) + vec(static_cast<NativeObj*>(o)->name);
+        break;
       default:
         break;
     }
@@ -2724,8 +3144,17 @@ inline void clear_heap_object_refs(HeapObj* o) {
     case ValueTag::Generator:
       static_cast<GeneratorObj*>(o)->frame = GenFrame{};
       break;
+    case ValueTag::Map:
+      static_cast<MapObj*>(o)->clear();
+      break;
+    case ValueTag::Coroutine: {
+      auto* co = static_cast<CoroObj*>(o);
+      co->fn = Value();
+      co->frames.clear();
+      break;
+    }
     default:
-      break;  // a string refers to nothing
+      break;  // a string, or a native, refers to nothing
   }
 }
 
@@ -2737,6 +3166,9 @@ inline void destroy_heap_object(HeapObj* o) {
     case ValueTag::Cell:  delete static_cast<CellObj*>(o); break;
     case ValueTag::Func:  delete static_cast<ClosureObj*>(o); break;
     case ValueTag::Generator: delete static_cast<GeneratorObj*>(o); break;
+    case ValueTag::Map:   delete static_cast<MapObj*>(o); break;
+    case ValueTag::Coroutine: delete static_cast<CoroObj*>(o); break;
+    case ValueTag::Native: delete static_cast<NativeObj*>(o); break;
     default: break;  // no other tag names a heap object
   }
 }
@@ -2774,6 +3206,7 @@ inline const char* name_of(Tag t) {
     case Tag::Defer:       return "defer";
     case Tag::CellFresh:   return "cellfresh";
     case Tag::Yield:       return "yield";
+    case Tag::NativeRef:   return "nativeref";
   }
   return "?";
 }
@@ -2865,6 +3298,11 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::GenThrow: return "genthrow";
     case IntrinsicId::Enqueue: return "enqueue";
     case IntrinsicId::ToFloat32: return "tofloat32";
+    case IntrinsicId::StrSlice: return "strslice";
+    case IntrinsicId::ArraySlice: return "arrayslice";
+    case IntrinsicId::StrByte: return "strbyte";
+    case IntrinsicId::StrFromByte: return "strfrombyte";
+    case IntrinsicId::MapNew: return "mapnew";
   }
   return "?";
 }
@@ -2887,7 +3325,7 @@ inline const char* name_of(ConstKind k) {
 // bound is just its last enumerator.
 template <>
 inline std::optional<Tag> from_name<Tag>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(Tag::Yield); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastTag); ++i) {
     const auto t = static_cast<Tag>(i);
     if (name_of(t) == s) return t;
   }
@@ -2923,8 +3361,7 @@ inline std::optional<VarKind> from_name<VarKind>(std::string_view s) {
 
 template <>
 inline std::optional<IntrinsicId> from_name<IntrinsicId>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::ToFloat32);
-       ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastIntrinsic); ++i) {
     const auto id = static_cast<IntrinsicId>(i);
     if (name_of(id) == s) return id;
   }
@@ -3126,6 +3563,11 @@ struct Verifier {
           return fail("Yield outside a generator function");
         }
         break;
+      case Tag::NativeRef:
+        if (n.a < 0 || static_cast<size_t>(n.a) >= m.natives.size()) {
+          return fail("native index out of range");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -3296,6 +3738,10 @@ struct Dumper {
             << "]=" << m.str_const_at(v.name_const);
         break;
       }
+      case Tag::NativeRef:
+        out << "nativeref " << m.natives[static_cast<size_t>(n.a)] << " #"
+            << n.a;
+        break;
     }
     out << "  @" << p.line << ":" << p.col << "\n";
     for (uint32_t i = 0; i < n.num_children; ++i) node(m.child(id, i), d + 1);
@@ -3438,6 +3884,12 @@ inline const char* name_of(Op op) {
     case Op::GenThrow:    return "genthrow";
     case Op::Enqueue:     return "enqueue";
     case Op::ToFloat32:   return "tofloat32";
+    case Op::StrSlice:    return "strslice";
+    case Op::ArraySlice:  return "arrayslice";
+    case Op::StrByte:     return "strbyte";
+    case Op::StrFromByte: return "strfrombyte";
+    case Op::NewMap:      return "newmap";
+    case Op::NativeRef:   return "nativeref";
   }
   return "?";
 }
@@ -3477,6 +3929,10 @@ inline std::string to_string(const Program& p) {
           break;
         case Op::MakeClosure:
           out << " r" << in.a << ", #" << in.b << " cmap=" << in.c;
+          break;
+        case Op::NativeRef:
+          out << " r" << in.a << ", " << p.natives[static_cast<size_t>(in.b)]
+              << " #" << in.b;
           break;
         case Op::CallValue:
           out << " r" << in.a << ", r" << in.b << ", args r" << in.c << ".."
@@ -3525,6 +3981,11 @@ inline std::string to_string(const Program& p) {
           break;
         case Op::FieldSet:
           out << " r" << in.a << ", field[" << in.b << "], r" << in.c;
+          break;
+        case Op::StrSlice:
+        case Op::ArraySlice:
+          out << " r" << in.a << ", r" << in.b << ", r" << in.c << ", r"
+              << in.d;
           break;
         default:
           out << " r" << in.a << ", r" << in.b << ", r" << in.c;
@@ -3925,21 +4386,21 @@ struct FnCompiler {
           emit(Op::LoadNil, r, 0, 0, n.pos);
           return r;
         }
-        // Two, because an Insn has three operand fields and the widest
-        // intrinsic spends one of them on its destination. An intrinsic
-        // wanting more would need a different instruction shape, not a
-        // bigger array here.
-        constexpr uint32_t kMaxArgs = 2;
+        // Three, because an Insn has four operand fields and the widest
+        // intrinsic spends one of them on its destination (a slice: the
+        // receiver and two bounds). An intrinsic wanting more would need a
+        // different instruction shape, not a bigger array here.
+        constexpr uint32_t kMaxArgs = 3;
         const uint32_t argc = std::min(intrinsic_arity(v.id), kMaxArgs);
         const int32_t base = top;
-        int32_t a[kMaxArgs] = {0, 0};
+        int32_t a[kMaxArgs] = {0, 0, 0};
         for (uint32_t i = 0; i < argc; ++i) {
           a[i] = compile_expr(m.child(id, i));
         }
         top = base;
         if (intrinsic_has_dst(v.id)) {
           const int32_t r = alloc();
-          emit(op_of(v.id), r, a[0], a[1], n.pos);
+          emit(op_of(v.id), r, a[0], a[1], n.pos, a[2]);
           return r;
         }
         // Statement-shaped: the operands are a and b, and the value is nil.
@@ -4030,6 +4491,11 @@ struct FnCompiler {
         auto v = view_make_closure(m, id);
         const int32_t r = alloc();
         emit(Op::MakeClosure, r, v.func, v.capture_map, n.pos);
+        return r;
+      }
+      case Tag::NativeRef: {
+        const int32_t r = alloc();
+        emit(Op::NativeRef, r, n.a, 0, n.pos);
         return r;
       }
       case Tag::Yield: {
@@ -4265,6 +4731,7 @@ inline Program compile(const coreir::Module& m) {
   p.str_consts = m.str_consts;
   p.positions = m.positions;
   p.capture_maps = m.capture_maps;
+  p.natives = m.natives;
   p.chunks.resize(m.funcs.size());
 
   for (size_t i = 0; i < m.funcs.size(); ++i) {
@@ -4387,6 +4854,17 @@ struct Exec {
   // roots the way it sees a frame's registers.
   std::deque<Value> jobs;
 
+  // Program::natives, resolved against RunOptions::natives into NativeObj
+  // values before the first instruction; Op::NativeRef reads one out.
+  std::vector<Value> natives;
+
+  // Where a call made from C++ (NativeCall::call) gets its result: a
+  // ret_reg of kSyncRet names this slot instead of a register in the frame
+  // below. One slot suffices because such calls nest as a stack -- an
+  // inner one has been consumed before the outer one delivers.
+  static constexpr int32_t kSyncRet = -2;
+  Value sync_result;
+
   std::unique_ptr<Frame> make_frame(const Chunk& ch) {
     auto f = std::make_unique<Frame>();
     f->chunk = &ch;
@@ -4479,6 +4957,10 @@ struct Exec {
   // depends on the caller still being alive.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
+    if (callee.is_native()) {
+      call_native(callee.as_native(), args, argc, ret_reg, pos);
+      return;
+    }
     if (!callee.is_func()) {
       raise_trap(std::string("cannot call ") + type_name(callee.tag()), pos);
     }
@@ -4512,9 +4994,7 @@ struct Exec {
       gf.regs.resize(static_cast<size_t>(ch.num_regs));
       gf.cells.resize(static_cast<size_t>(ch.num_cells));
       gf.captures = c->cells;
-      if (ret_reg >= 0 && !frames.empty()) {
-        frames.back()->regs[ret_reg] = std::move(g);
-      }
+      deliver(ret_reg, std::move(g));
       return;
     }
     check_can_push(pos);
@@ -4741,7 +5221,7 @@ struct Exec {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
     Value* dv = o->find(kDropKey);
-    if (!dv || !dv->is_func()) return;
+    if (!dv || !dv->is_callable()) return;
     Value closure = *dv;
     Value arg = Value::make_ref(h);
     const size_t floor = self->frames.size();
@@ -4837,9 +5317,46 @@ struct Exec {
   // that wanted no result (ret_reg -1) and an empty stack are the two cases
   // that mean "nobody is listening".
   void deliver(int32_t ret_reg, Value result) {
-    if (ret_reg >= 0 && !frames.empty()) {
+    if (ret_reg == kSyncRet) {
+      sync_result = std::move(result);
+    } else if (ret_reg >= 0 && !frames.empty()) {
       frames.back()->regs[ret_reg] = std::move(result);
     }
+  }
+
+  // A call made from C++ rather than from an instruction: push the callee,
+  // drive it to completion inside a nested dispatch, answer what it
+  // returned. What NativeCall::call is; also usable by a host that wants to
+  // call a program's closure directly.
+  Value call_sync(const Value& callee, const Value* args, int32_t argc,
+                  SrcPos pos) {
+    const size_t floor = frames.size();
+    push_closure(callee, args, argc, kSyncRet, pos);
+    if (frames.size() > floor) run_nested(floor);
+    return std::move(sync_result);
+  }
+
+  // A native's turn: arity-checked like a closure, run to completion on
+  // the spot (no frame -- it is C++), its answer delivered where a Ret's
+  // would go. `false` from the function raises `error` at the call site,
+  // as a Throw there would; the arguments stay borrowed from the caller's
+  // registers for the duration, which the caller's frame outlives.
+  void call_native(const NativeObj* n, const Value* args, int32_t argc,
+                   int32_t ret_reg, SrcPos pos) {
+    if (n->arity >= 0 && argc != n->arity) {
+      raise_trap(n->name + " takes " + std::to_string(n->arity) +
+                     " argument(s), given " + std::to_string(argc),
+                 pos);
+    }
+    coreir_rt_poll();
+    NativeCall call;
+    call.args = args;
+    call.argc = argc;
+    call.ctx = n->ctx;
+    call.pos = pos;
+    call.exec = this;
+    if (!n->fn(call)) throw Raise{std::move(call.error), pos, {}};
+    deliver(ret_reg, std::move(call.result));
   }
 
   void dispatch(size_t floor) {
@@ -4982,6 +5499,11 @@ struct Exec {
         }
         case Op::FnArity: {
           const Value& v = f.regs[in.b];
+          if (v.is_native()) {
+            // The registered count; -1 for a native that takes any.
+            f.regs[in.a] = Value::make_int(v.as_native()->arity);
+            break;
+          }
           if (!v.is_func()) {
             fail(f, std::string("cannot take the arity of ") +
                         type_name(v.tag()));
@@ -4990,6 +5512,9 @@ struct Exec {
           f.regs[in.a] = Value::make_int(p.chunks[fi].num_params);
           break;
         }
+        case Op::NativeRef:
+          f.regs[in.a] = natives[static_cast<size_t>(in.b)];
+          break;
         case Op::Collect:
           // Safe mid-instruction for the same reason a stress collect at
           // every allocation is: every register and local is a C++ handle,
@@ -5119,6 +5644,10 @@ struct Exec {
         case Op::ObjectHas: {
           const Value& o = f.regs[in.b];
           const Value& k = f.regs[in.c];
+          if (o.is_map()) {
+            f.regs[in.a] = Value::make_bool(o.as_map()->find(k) != nullptr);
+            break;
+          }
           if (!o.is_object() || !k.is_str()) {
             fail(f, std::string("cannot ask ") + type_name(o.tag()) +
                         " for a " + type_name(k.tag()) + " key");
@@ -5129,13 +5658,23 @@ struct Exec {
         }
         case Op::ObjectKeys: {
           const Value& o = f.regs[in.b];
-          if (!o.is_object()) {
-            fail(f, std::string("cannot list keys of ") + type_name(o.tag()));
-          }
           std::vector<Value> keys;
-          keys.reserve(o.as_object()->props.size());
-          for (const auto& kv : o.as_object()->props) {
-            keys.push_back(Value::make_str(kv.first));
+          if (o.is_map()) {
+            // Insertion order, tombstones skipped: the same reproducible
+            // order an object's keys come out in.
+            const MapObj* mp = o.as_map();
+            keys.reserve(mp->live);
+            for (const auto& kv : mp->entries) {
+              if (!kv.first.is_uninit()) keys.push_back(kv.first);
+            }
+          } else {
+            if (!o.is_object()) {
+              fail(f, std::string("cannot list keys of ") + type_name(o.tag()));
+            }
+            keys.reserve(o.as_object()->props.size());
+            for (const auto& kv : o.as_object()->props) {
+              keys.push_back(Value::make_str(kv.first));
+            }
           }
           f.regs[in.a] = Value::make_array(std::move(keys));
           break;
@@ -5143,11 +5682,72 @@ struct Exec {
         case Op::ObjectRemove: {
           const Value& o = f.regs[in.a];
           const Value& k = f.regs[in.b];
+          if (o.is_map()) {
+            o.as_map()->remove(k);
+            break;
+          }
           if (!o.is_object() || !k.is_str()) {
             fail(f, std::string("cannot remove a ") + type_name(k.tag()) +
                         " key from " + type_name(o.tag()));
           }
           o.as_object()->remove(k.as_str());
+          break;
+        }
+        case Op::NewMap:
+          f.regs[in.a] = Value::make_map();
+          break;
+        case Op::StrSlice:
+        case Op::ArraySlice: {
+          const Value& recv = f.regs[in.b];
+          const bool want_str = in.op == Op::StrSlice;
+          if (want_str ? !recv.is_str() : !recv.is_array()) {
+            fail(f, std::string("cannot slice ") + type_name(recv.tag()) +
+                        (want_str ? " as a string" : " as an array"));
+          }
+          const int64_t len =
+              want_str ? static_cast<int64_t>(recv.as_str().size())
+                       : static_cast<int64_t>(recv.as_array()->items.size());
+          const Value& i = f.regs[in.c];
+          const Value& j = f.regs[in.d];
+          if (auto err = slice_error(recv, i, j, len); !err.empty()) {
+            fail(f, err);
+          }
+          const auto from = static_cast<size_t>(i.as_int());
+          const auto to = static_cast<size_t>(j.as_int());
+          // Build the result before storing it: dst may alias the receiver.
+          Value out;
+          if (want_str) {
+            out = Value::make_str(recv.as_str().substr(from, to - from));
+          } else {
+            const auto& items = recv.as_array()->items;
+            out = Value::make_array(std::vector<Value>(
+                items.begin() + static_cast<std::ptrdiff_t>(from),
+                items.begin() + static_cast<std::ptrdiff_t>(to)));
+          }
+          f.regs[in.a] = std::move(out);
+          break;
+        }
+        case Op::StrByte: {
+          const Value& s = f.regs[in.b];
+          const Value& k = f.regs[in.c];
+          if (!s.is_str()) {
+            fail(f, std::string("cannot read a byte of ") + type_name(s.tag()));
+          }
+          if (auto err = index_error(s, k); !err.empty()) fail(f, err);
+          const auto byte = static_cast<unsigned char>(
+              s.as_str()[static_cast<size_t>(k.as_int())]);
+          f.regs[in.a] = Value::make_int(byte);
+          break;
+        }
+        case Op::StrFromByte: {
+          const Value& v = f.regs[in.b];
+          if (!v.is_int() || v.as_int() < 0 || v.as_int() > 255) {
+            fail(f, "byte value must be an int in 0..255, not " +
+                        (v.is_int() ? std::to_string(v.as_int())
+                                    : std::string(type_name(v.tag()))));
+          }
+          f.regs[in.a] = Value::make_str(
+              std::string(1, static_cast<char>(v.as_int())));
           break;
         }
         case Op::ToInt: {
@@ -5380,7 +5980,7 @@ struct Exec {
         }
         case Op::Enqueue: {
           const Value& v = f.regs[in.a];
-          if (!v.is_func()) {
+          if (!v.is_callable()) {
             fail(f, std::string("enqueue needs a function, not ") +
                         type_name(v.tag()));
           }
@@ -5389,7 +5989,7 @@ struct Exec {
         }
         case Op::DeferPush: {
           const Value& v = f.regs[in.a];
-          if (!v.is_func()) {
+          if (!v.is_callable()) {
             fail(f, std::string("defer needs a function, not ") +
                         type_name(v.tag()));
           }
@@ -5436,11 +6036,47 @@ struct Exec {
 
 }  // namespace detail
 
+}  // namespace vm
+
+namespace coreir {
+
+inline Value NativeCall::call(const Value& callee, const Value* argv,
+                              int32_t n) {
+  return static_cast<vm::detail::Exec*>(exec)->call_sync(callee, argv, n, pos);
+}
+
+inline Value NativeCall::trap(const std::string& msg) const {
+  Value e = Value::make_object();
+  e.as_object()->set("message", Value::make_str(msg));
+  e.as_object()->set("line", Value::make_int(pos.line));
+  e.as_object()->set("col", Value::make_int(pos.col));
+  return e;
+}
+
+}  // namespace coreir
+
+namespace vm {
+
 inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   coreir::Runtime::Scope scope(rt);
   const int depth = opts.max_call_depth;
   detail::Exec e{p, depth < 0 ? 0 : static_cast<size_t>(depth), rt,
          opts.entry_frame_drops, {}};
+  // Link the program's declared host functions before anything runs: a
+  // name the host did not supply is a configuration error of the whole
+  // run, not something to discover at the one call site that reaches it.
+  e.natives.reserve(p.natives.size());
+  for (const std::string& name : p.natives) {
+    const NativeDef* def = nullptr;
+    for (const NativeDef& d : opts.natives) {
+      if (d.name == name) def = &d;
+    }
+    if (!def || !def->fn) {
+      coreir_rt::fail("unresolved native '" + name + "'", 0, 0);
+    }
+    e.natives.push_back(
+        coreir::Value::make_native(def->name, def->arity, def->ctx, def->fn));
+  }
   rt.set_drop_fn(&e, &detail::Exec::drop_hook);
   e.frames.push_back(e.make_frame(p.chunks[0]));
   e.frames.back()->entry = true;

@@ -57,7 +57,7 @@ void coreir_rt_poll(void) {}
 }
 
 int main() {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(Tag::Yield); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastTag); ++i) {
     check_round_trip(static_cast<Tag>(i), "Tag");
   }
   for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::WrapU32); ++i) {
@@ -69,7 +69,7 @@ int main() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(VarKind::Cell); ++i) {
     check_round_trip(static_cast<VarKind>(i), "VarKind");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::ToFloat32);
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastIntrinsic);
        ++i) {
     check_round_trip(static_cast<IntrinsicId>(i), "IntrinsicId");
   }

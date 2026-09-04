@@ -334,6 +334,224 @@ int main() {
              "pop empty: message");
   }
 
+  // --- Maps: any value is a key, by key_eq's rule. ------------------------
+  // An int, a string, a double, a bool and nil are five distinct keys; a
+  // string key matches by content, so ToStr(1) -- a fresh allocation --
+  // finds what the literal "1" stored (the case Same gets wrong); Index on
+  // a missing key is nil; ObjectHas/ObjectKeys/ObjectRemove accept a map.
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const NodeId mp = b.varref(VarKind::Local, 0, p);
+    const NodeId body = b.block(
+        {b.assign(VarKind::Local, 0, b.intrinsic(IntrinsicId::MapNew, {}, p), p),
+         b.set_index(mp, b.literal(1, p), b.str_literal("int", p), p),
+         b.set_index(mp, b.str_literal("1", p), b.str_literal("str", p), p),
+         b.set_index(mp, b.double_literal(1.5, p), b.str_literal("dbl", p), p),
+         b.set_index(mp, b.bool_literal(true, p), b.str_literal("bool", p), p),
+         b.set_index(mp, b.nil_literal(p), b.str_literal("nil", p), p),
+         pr(b.intrinsic(IntrinsicId::Len, {mp}, p)),
+         pr(b.index(mp, b.literal(1, p), p)),
+         pr(b.index(mp, b.intrinsic(IntrinsicId::ToStr, {b.literal(1, p)}, p),
+                    p)),
+         pr(b.index(mp, b.double_literal(1.5, p), p)),
+         pr(b.index(mp, b.bool_literal(true, p), p)),
+         pr(b.index(mp, b.nil_literal(p), p)),
+         pr(b.index(mp, b.literal(2, p), p)),
+         pr(b.intrinsic(IntrinsicId::ObjectHas, {mp, b.literal(2, p)}, p)),
+         pr(b.intrinsic(IntrinsicId::ObjectHas, {mp, b.literal(1, p)}, p)),
+         pr(b.index(b.intrinsic(IntrinsicId::ObjectKeys, {mp}, p),
+                    b.literal(0, p), p)),
+         pr(b.intrinsic(IntrinsicId::Len,
+                        {b.intrinsic(IntrinsicId::ObjectKeys, {mp}, p)}, p)),
+         b.intrinsic(IntrinsicId::ObjectRemove, {mp, b.literal(1, p)}, p),
+         b.intrinsic(IntrinsicId::ObjectRemove, {mp, b.literal(99, p)}, p),
+         pr(b.intrinsic(IntrinsicId::ObjectHas, {mp, b.literal(1, p)}, p)),
+         pr(b.intrinsic(IntrinsicId::Len, {mp}, p)),
+         // The first surviving key is now "1" -- removal keeps the order.
+         pr(b.index(b.intrinsic(IntrinsicId::ObjectKeys, {mp}, p),
+                    b.literal(0, p), p)),
+         pr(b.intrinsic(IntrinsicId::TypeOf, {mp}, p))},
+        p);
+    m.funcs.push_back({"main", 1, 0, body, {"m"}, {}});
+    check_eq(run_module(m, "map"), "", "map: failure");
+    check_eq(joined(),
+             "5|int|str|dbl|bool|nil|nil|false|true|1|5|false|4|1|map|",
+             "map output");
+  }
+  // Objects as keys go by identity: two empty objects are two keys, and
+  // the same object read twice is one. Compaction after many removals
+  // keeps every survivor findable.
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const NodeId mp = b.varref(VarKind::Local, 0, p);
+    const NodeId o1 = b.varref(VarKind::Local, 1, p);
+    const NodeId o2 = b.varref(VarKind::Local, 2, p);
+    const NodeId i = b.varref(VarKind::Local, 3, p);
+    std::vector<NodeId> stmts{
+        b.assign(VarKind::Local, 0, b.intrinsic(IntrinsicId::MapNew, {}, p), p),
+        b.assign(VarKind::Local, 1, b.object_lit({}, p), p),
+        b.assign(VarKind::Local, 2, b.object_lit({}, p), p),
+        b.set_index(mp, o1, b.literal(1, p), p),
+        b.set_index(mp, o2, b.literal(2, p), p),
+        b.set_index(mp, o1, b.literal(11, p), p),
+        pr(b.intrinsic(IntrinsicId::Len, {mp}, p)),
+        pr(b.index(mp, o1, p)),
+        pr(b.index(mp, o2, p)),
+        // 100 int keys in, 90 removed: the vector compacts under them.
+        b.assign(VarKind::Local, 3, b.literal(0, p), p),
+        b.make_while(b.binary(BinOp::Lt, i, b.literal(100, p), p),
+                     b.block({b.set_index(mp, i, i, p),
+                              b.assign(VarKind::Local, 3,
+                                       b.binary(BinOp::Add, i, b.literal(1, p),
+                                                p),
+                                       p)},
+                             p),
+                     p),
+        b.assign(VarKind::Local, 3, b.literal(0, p), p),
+        b.make_while(b.binary(BinOp::Lt, i, b.literal(90, p), p),
+                     b.block({b.intrinsic(IntrinsicId::ObjectRemove, {mp, i}, p),
+                              b.assign(VarKind::Local, 3,
+                                       b.binary(BinOp::Add, i, b.literal(1, p),
+                                                p),
+                                       p)},
+                             p),
+                     p),
+        pr(b.intrinsic(IntrinsicId::Len, {mp}, p)),
+        pr(b.index(mp, b.literal(95, p), p)),
+        pr(b.index(mp, o2, p)),
+        pr(b.intrinsic(IntrinsicId::ObjectHas, {mp, b.literal(5, p)}, p)),
+        pr(b.index(b.intrinsic(IntrinsicId::ObjectKeys, {mp}, p),
+                   b.literal(2, p), p))};
+    m.funcs.push_back({"main", 4, 0, b.block(stmts, p),
+                       {"m", "o1", "o2", "i"}, {}});
+    check_eq(run_module(m, "map identity"), "", "map identity: failure");
+    check_eq(joined(), "2|11|2|12|95|2|false|90|", "map identity output");
+  }
+  // A cycle through a map key is the collector's: m[o] = o, o.m = m, both
+  // locals dropped -- Collect frees exactly the two of them.
+  {
+    Module m;
+    Builder b(m);
+    const NodeId mp = b.varref(VarKind::Local, 0, p);
+    const NodeId o = b.varref(VarKind::Local, 1, p);
+    m.funcs.push_back(
+        {"main", 2, 0,
+         b.block({b.assign(VarKind::Local, 0,
+                           b.intrinsic(IntrinsicId::MapNew, {}, p), p),
+                  b.assign(VarKind::Local, 1, b.object_lit({}, p), p),
+                  b.set_index(mp, o, o, p),
+                  b.set_index(o, b.str_literal("m", p), mp, p),
+                  b.assign(VarKind::Local, 0, b.nil_literal(p), p),
+                  b.assign(VarKind::Local, 1, b.nil_literal(p), p),
+                  b.intrinsic(IntrinsicId::Print,
+                              {b.intrinsic(IntrinsicId::Collect, {}, p)}, p)},
+                 p),
+         {"m", "o"}, {}});
+    check_eq(run_module(m, "map cycle"), "", "map cycle: failure");
+    check_eq(joined(), "2|", "map cycle output");
+  }
+  // A map is not an object: FieldGet needs the slot-shaped receiver.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.field_get(b.intrinsic(IntrinsicId::MapNew, {}, p), 0,
+                                  "x", p)},
+                     p),
+         {}, {}});
+    check_eq(run_module(m, "map field"), "cannot get field 'x' of map",
+             "map field: message");
+  }
+
+  // --- Slices and bytes. ---------------------------------------------------
+  {
+    Module m;
+    Builder b(m);
+    auto pr = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const NodeId arr = b.varref(VarKind::Local, 0, p);
+    const NodeId sl = b.varref(VarKind::Local, 1, p);
+    m.funcs.push_back(
+        {"main", 2, 0,
+         b.block(
+             {pr(b.intrinsic(IntrinsicId::StrSlice,
+                             {b.str_literal("hello", p), b.literal(1, p),
+                              b.literal(3, p)},
+                             p)),
+              pr(b.intrinsic(IntrinsicId::StrSlice,
+                             {b.str_literal("hello", p), b.literal(5, p),
+                              b.literal(5, p)},
+                             p)),
+              b.assign(VarKind::Local, 0,
+                       b.array_lit({b.literal(1, p), b.literal(2, p),
+                                    b.literal(3, p), b.literal(4, p)},
+                                   p),
+                       p),
+              b.assign(VarKind::Local, 1,
+                       b.intrinsic(IntrinsicId::ArraySlice,
+                                   {arr, b.literal(1, p), b.literal(3, p)}, p),
+                       p),
+              pr(b.intrinsic(IntrinsicId::Len, {sl}, p)),
+              pr(b.index(sl, b.literal(0, p), p)),
+              // A slice is a copy: writing through it leaves the source be.
+              b.set_index(sl, b.literal(0, p), b.literal(99, p), p),
+              pr(b.index(arr, b.literal(1, p), p)),
+              pr(b.intrinsic(IntrinsicId::StrByte,
+                             {b.str_literal("AB", p), b.literal(1, p)}, p)),
+              pr(b.intrinsic(IntrinsicId::StrFromByte, {b.literal(67, p)}, p)),
+              pr(b.binary(BinOp::Add,
+                          b.intrinsic(IntrinsicId::StrFromByte,
+                                      {b.literal(0xE3, p)}, p),
+                          b.intrinsic(IntrinsicId::StrFromByte,
+                                      {b.literal(0x81, p)}, p),
+                          p))},
+             p),
+         {"arr", "sl"}, {}});
+    check_eq(run_module(m, "slices"), "", "slices: failure");
+    check_eq(joined(), "el||2|2|2|66|C|\xE3\x81|", "slices output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::StrSlice,
+                                  {b.str_literal("abc", p), b.literal(2, p),
+                                   b.literal(1, p)},
+                                  p)},
+                     p),
+         {}, {}});
+    check_eq(run_module(m, "slice bounds"),
+             "slice [2, 1) out of range for string of length 3",
+             "slice bounds: message");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::StrFromByte, {b.literal(256, p)},
+                                  p)},
+                     p),
+         {}, {}});
+    check_eq(run_module(m, "byte range"),
+             "byte value must be an int in 0..255, not 256",
+             "byte range: message");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;
