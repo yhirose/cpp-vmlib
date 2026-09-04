@@ -1288,6 +1288,21 @@ struct Func {
   // "missing argument" diagnostic (with the parameter's name, which the
   // executor never knew) or fill a default. Off, a mismatch traps.
   bool lenient_arity = false;
+  // A CallValue in tail position (the operand of a Return, or the value the
+  // body ends in, through any Block / If / Switch / Scope on the way)
+  // replaces this activation instead of stacking on it, so a loop written
+  // as a call chain runs in one frame. The frame's exit happens *before*
+  // the callee runs: locals released last-slot-first, each open Scope's
+  // owned cycles resolved -- Rust's rule for `become`, and the one
+  // observable difference from a plain call, which is why this is the
+  // front end's to switch on rather than the default. Not applied inside
+  // a TryCatch body (the handler is a pc range of this chunk, and would be
+  // lost with the frame) or a Scope that declares defers (which the exit
+  // ordering above would run before the callee); and only for a callee
+  // that is a plain closure -- a native or a generator function is called
+  // the ordinary way and the frame returns its result. Off, a tail call
+  // is a call.
+  bool tail_calls = false;
 };
 
 struct Node {
@@ -2299,6 +2314,14 @@ enum class Op : uint8_t {
   // First-class functions.
   MakeClosure,  // a = dst, b = func index, c = capture map index
   CallValue,    // a = dst, b = callee reg, c = first arg reg, d = arg count
+  // CallValue in tail position of a Func::tail_calls function: the same
+  // operands, and the same call when the callee is not a plain closure or
+  // this is the entry frame; otherwise the frame exits (locals, then each
+  // open scope's owned resolution, innermost first) and the callee's
+  // activation takes its place -- same ret_reg, same slot in the stack --
+  // rather than being pushed on top of it. The instructions after it (the
+  // exits and Ret the compiler emits regardless) run only on the call path.
+  TailCall,     // a = dst, b = callee reg, c = first arg reg, d = arg count
   CellNew,      // a = cell index   (fresh box, holding nil)
   LoadNil,      // a = dst
   Move,         // a = dst, b = src
@@ -2555,6 +2578,7 @@ struct Chunk {
   int32_t num_params = 0;
   bool is_generator = false;
   bool lenient_arity = false;
+  bool tail_calls = false;
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
@@ -3849,6 +3873,7 @@ inline const char* name_of(Op op) {
     case Op::OwnedMark:   return "ownedmark";
     case Op::MakeClosure: return "makeclosure";
     case Op::CallValue:   return "callvalue";
+    case Op::TailCall:    return "tailcall";
     case Op::CellNew:     return "cellnew";
     case Op::LoadNil:     return "loadnil";
     case Op::Move:        return "move";
@@ -3935,6 +3960,7 @@ inline std::string to_string(const Program& p) {
               << " #" << in.b;
           break;
         case Op::CallValue:
+        case Op::TailCall:
           out << " r" << in.a << ", r" << in.b << ", args r" << in.c << ".."
               << (in.c + in.d);
           break;
@@ -4068,6 +4094,21 @@ struct FnCompiler {
   // (a defer throwing at the body's fall-through exit escapes its own catch,
   // the way culebra's does). -1 when the last scope had no defers.
   int32_t last_scope_defer_run_pc = -1;
+  // How many TryCatch bodies enclose the point being compiled. A tail call
+  // inside one would drop the handler with the frame (Cleanup regions are
+  // pc ranges of this chunk), so none is emitted there.
+  int try_depth = 0;
+
+  // Whether a CallValue here may be emitted as a TailCall: the function
+  // asked for them (Func::tail_calls), no try body is open, and no open
+  // Scope declares defers -- Func::tail_calls' comment has the reasons.
+  bool tail_call_ok() const {
+    if (!ch.tail_calls || try_depth > 0) return false;
+    for (const OpenScope& sc : open_scopes) {
+      if (sc.has_defers) return false;
+    }
+    return true;
+  }
 
   int32_t top = 0;  // next free register
   // Highest register the statement being compiled has reached, so its end can
@@ -4230,7 +4271,7 @@ struct FnCompiler {
   // a value held in a register across the scope's release would count as
   // an outside holder in the owned resolution, keeping a cycle the block
   // merely named last -- `{ ...; a }` as a statement -- from dropping.
-  int32_t compile_scope(NodeId id, bool want_value) {
+  int32_t compile_scope(NodeId id, bool want_value, bool tail = false) {
     const Node& sn = m.at(id);
     const ScopeView sv = view_scope(m, id);
     const bool defers = declares_defers(sv.body);
@@ -4248,7 +4289,7 @@ struct FnCompiler {
     open_scopes.push_back(sc);
     int32_t r = -1;
     if (want_value) {
-      r = compile_value(sv.body);
+      r = compile_value(sv.body, tail);
     } else {
       compile_stmt(sv.body);
     }
@@ -4281,8 +4322,15 @@ struct FnCompiler {
   // nil. Three callers need exactly this (a function body, a block's last
   // child, an If arm), and each of them can be handed a statement by a front
   // end that is not doing anything wrong.
-  int32_t compile_value(NodeId id) {
-    if (yields_value(m.at(id).tag)) return compile_expr(id);
+  //
+  // `tail` says the value is what the function returns, with nothing left
+  // to run in this frame after it -- a Return's operand, or the body's
+  // last value -- and follows the value down through Block, If, Switch and
+  // Scope to whatever CallValue ends it, which may then be a TailCall. A
+  // TryCatch body is never in tail position (its handler must survive the
+  // call), and nothing else propagates it.
+  int32_t compile_value(NodeId id, bool tail = false) {
+    if (yields_value(m.at(id).tag)) return compile_expr(id, tail);
     compile_stmt(id);
     const int32_t r = alloc();
     emit(Op::LoadNil, r, 0, 0, m.at(id).pos);
@@ -4291,16 +4339,16 @@ struct FnCompiler {
 
   // Compile one arm of a value-producing If so its result lands in `dst`
   // rather than wherever the arm's own allocation happened to put it.
-  void branch_into(int32_t dst, NodeId arm, uint32_t pos) {
+  void branch_into(int32_t dst, NodeId arm, uint32_t pos, bool tail = false) {
     const int32_t base = top;
-    const int32_t r = compile_value(arm);
+    const int32_t r = compile_value(arm, tail);
     if (r != dst) emit(Op::Move, dst, r, 0, pos);
     top = base;
   }
 
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
-  int32_t compile_expr(NodeId id) {
+  int32_t compile_expr(NodeId id, bool tail = false) {
     const Node& n = m.at(id);
     switch (n.tag) {
       case Tag::Literal: {
@@ -4324,7 +4372,7 @@ struct FnCompiler {
         return r;
       }
       case Tag::Scope:
-        return compile_scope(id, true);
+        return compile_scope(id, true, tail);
       case Tag::TryCatch: {
         // dst sits below regs_base on purpose: the unwinder drops the
         // region's temps, and the result register must not be one of them.
@@ -4333,7 +4381,9 @@ struct FnCompiler {
         const int32_t regs_base = top;
         const int32_t start = here();
         last_scope_defer_run_pc = -1;
+        ++try_depth;
         branch_into(dst, v.body, n.pos);
+        --try_depth;
         // A body that is a defer-declaring Scope runs those defers at its
         // fall-through exit; the guarded region ends before that run, so a
         // defer throwing there escapes its own catch (culebra's rule: a try
@@ -4424,7 +4474,7 @@ struct FnCompiler {
         for (uint32_t i = 0; i + 1 < n.num_children; ++i) {
           compile_stmt(m.child(id, i));
         }
-        return compile_value(m.child(id, n.num_children - 1));
+        return compile_value(m.child(id, n.num_children - 1), tail);
       }
 
       // An If's value is the branch taken's, so both branches have to land in
@@ -4437,11 +4487,11 @@ struct FnCompiler {
         top = base;
         const int32_t r = alloc();
         const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
-        branch_into(r, v.then_, n.pos);
+        branch_into(r, v.then_, n.pos, tail);
         const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
         patch(jf, here());
         if (v.els.valid()) {
-          branch_into(r, v.els, n.pos);
+          branch_into(r, v.els, n.pos, tail);
         } else {
           emit(Op::LoadNil, r, 0, 0, n.pos);
         }
@@ -4473,13 +4523,13 @@ struct FnCompiler {
         arm_keys.reserve(sw.arm_count);
         for (uint32_t i = 0; i < sw.arm_count; ++i) {
           arm_keys.emplace_back(switch_key(m, id, i), here());
-          branch_into(r, switch_body(m, id, i), n.pos);
+          branch_into(r, switch_body(m, id, i), n.pos, tail);
           end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
         }
         int32_t default_pc = -1;
         if (sw.default_body.valid()) {
           default_pc = here();
-          branch_into(r, sw.default_body, n.pos);
+          branch_into(r, sw.default_body, n.pos, tail);
           end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
         }
         for (size_t j : end_jumps) patch(j, here());
@@ -4567,7 +4617,13 @@ struct FnCompiler {
         }
         top = base;
         const int32_t r = alloc();
-        emit(Op::CallValue, r, callee, args_at, n.pos, argc);
+        // In tail position, and allowed here, the call may replace the
+        // frame (Op::TailCall). Everything after it -- the scope exits and
+        // the Ret a Return or the body's end emits -- stays emitted: when
+        // the replacement does not happen (a native or generator callee,
+        // the entry frame) TailCall is a CallValue and that code runs.
+        emit(tail && tail_call_ok() ? Op::TailCall : Op::CallValue, r, callee,
+             args_at, n.pos, argc);
         return r;
       }
       default:
@@ -4669,7 +4725,7 @@ struct FnCompiler {
         // order rather than the scoped, last-declared-first order.
         int32_t r;
         if (n.num_children == 1) {
-          r = compile_value(m.child(id, 0));
+          r = compile_value(m.child(id, 0), /*tail=*/true);
         } else {
           r = alloc();
           emit(Op::LoadNil, r, 0, 0, n.pos);
@@ -4747,6 +4803,7 @@ inline Program compile(const coreir::Module& m) {
     ch.num_params = fn.num_params;
     ch.is_generator = fn.is_generator;
     ch.lenient_arity = fn.lenient_arity;
+    ch.tail_calls = fn.tail_calls;
 
     detail::FnCompiler fc{m, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
@@ -4761,8 +4818,9 @@ inline Program compile(const coreir::Module& m) {
     // A function returns its body's value, whatever that is. PL/0's bodies
     // are blocks ending in statements, so they return nil and nothing reads
     // it -- one path rather than a "does this body produce a value" fork that
-    // Block, now value-producing, no longer answers usefully anyway.
-    const int32_t r = fc.compile_value(fn.body);
+    // Block, now value-producing, no longer answers usefully anyway. The
+    // body is in tail position: a call it ends in may replace the frame.
+    const int32_t r = fc.compile_value(fn.body, /*tail=*/true);
     fc.emit(Op::Ret, r, 1, 0, body_pos);
   }
   return p;
@@ -5865,6 +5923,67 @@ struct Exec {
           const Value callee = f.regs[in.b];
           ++f.pc;
           push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+          continue;
+        }
+        case Op::TailCall: {
+          const SrcPos pos = pos_at(ch, f.pc);
+          const Value callee = f.regs[in.b];
+          // The replacement needs a callee whose activation is a plain frame
+          // (a native runs on the spot, a generator call builds an object),
+          // and a frame that is not the program's own (the entry frame's
+          // end is the program's end, with entry_frame_drops' rules). Any
+          // other shape is the call it would otherwise have been.
+          const bool replace =
+              callee.is_func() && !f.entry &&
+              !p.chunks[static_cast<size_t>(callee.as_closure()->func)]
+                   .is_generator;
+          if (!replace) {
+            ++f.pc;
+            push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+            continue;
+          }
+          const ClosureObj* c = callee.as_closure();
+          const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
+          if (in.d != nch.num_params && !nch.lenient_arity) {
+            raise_trap(nch.name + " takes " + std::to_string(nch.num_params) +
+                           " argument(s), given " + std::to_string(in.d),
+                       pos);
+          }
+          // The arguments go with the frame's registers; copy them out
+          // first. The callee value above keeps the closure alive the
+          // same way.
+          std::vector<Value> args(
+              f.regs.begin() + in.c,
+              f.regs.begin() + in.c + in.d);
+          // This frame's exit, in full, before the callee starts: every
+          // temporary, the locals last-slot-first, then each open scope's
+          // owned resolution innermost-first -- what falling off the end
+          // would do, minus per-scope interleaving, since the frame is
+          // going as a whole. The compiler has kept defers out of here
+          // (tail_call_ok), so there are none to run.
+          for (Value& r : f.regs) r = Value();
+          release_range(f, 0, static_cast<int32_t>(f.locals.size()));
+          while (!f.owned_marks.empty()) leave_scope_owned(f);
+          f.defer_marks.clear();
+          // The new activation, in place: ret_reg, gen_self and the frame's
+          // position in the stack are the caller's and stay.
+          f.chunk = &nch;
+          f.pc = 0;
+          f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
+          const int32_t taken = std::min(in.d, nch.num_params);
+          for (int32_t i = 0; i < taken; ++i) {
+            f.locals[static_cast<size_t>(i)] = std::move(args[i]);
+          }
+          for (int32_t i = taken; i < nch.num_params; ++i) {
+            f.locals[static_cast<size_t>(i)] = Value();
+          }
+          f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
+          f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
+          f.captures = c->cells;
+          f.argc = in.d;
+          // A tail call is the loop back-edge of a program written as calls:
+          // the same interrupt point Jump gives a While.
+          coreir_rt_poll();
           continue;
         }
         case Op::Throw: {
