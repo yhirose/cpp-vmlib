@@ -60,16 +60,17 @@ int main() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(Tag::Yield); ++i) {
     check_round_trip(static_cast<Tag>(i), "Tag");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::BitNot); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::WrapU32); ++i) {
     check_round_trip(static_cast<UnOp>(i), "UnOp");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::Shr); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::UGe); ++i) {
     check_round_trip(static_cast<BinOp>(i), "BinOp");
   }
   for (uint8_t i = 0; i <= static_cast<uint8_t>(VarKind::Cell); ++i) {
     check_round_trip(static_cast<VarKind>(i), "VarKind");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::Enqueue); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::ToFloat32);
+       ++i) {
     check_round_trip(static_cast<IntrinsicId>(i), "IntrinsicId");
   }
   for (uint8_t i = 0; i <= static_cast<uint8_t>(ConstKind::Str); ++i) {

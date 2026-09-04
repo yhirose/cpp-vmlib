@@ -87,9 +87,9 @@ to it:
 |---|---|
 | Values | `Literal`, `VarRef`, `Assign` |
 | Operators | `Unary`, `Binary`, `Intrinsic` |
-| Control flow | `If`, `While`, `Block`, `Break`, `Continue`, `Return` |
+| Control flow | `If`, `Switch`, `While`, `Block`, `Break`, `Continue`, `Return` |
 | Functions | `MakeClosure`, `CallValue`, `Yield` |
-| Containers | `ArrayLit`, `ObjectLit`, `Index`, `SetIndex` |
+| Containers | `ArrayLit`, `ObjectLit`, `Index`, `SetIndex`, `FieldGet`, `FieldSet` |
 | Lifetimes | `Scope`, `Defer`, `CellFresh` |
 | Exceptions | `Throw`, `TryCatch` |
 
@@ -115,6 +115,174 @@ A few things worth knowing before you write a binder:
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
+
+## Fixed-width integers
+
+`Value` only ever holds an `int64` or a `double` -- there is no `int32`, no
+`uint` of any width. A dynamically-typed front end never notices; a
+statically-typed one whose `int`/`uint`/`long`/`ulong` have to wrap and
+compare the way the source language promises needs a convention for landing
+those into an `int64` slot, which `UnOp`'s `WrapI8`..`WrapU32` and `BinOp`'s
+`UDiv`/`UMod`/`UShr`/`ULt`/`ULe`/`UGt`/`UGe` exist to make possible without a
+dedicated opcode per width.
+
+**The convention: every slot holds a normalized value.** A signed width's
+value is sign-extended to `int64`; an unsigned width's is zero-extended, so
+it reads as a non-negative `int64`; a `u64`'s is its own bit pattern,
+verbatim, in the `int64` slot. Once operands are normalized this way,
+`Lt`/`Le`/`Gt`/`Ge`/`Div`/`Mod`/`Shr` are already correct for every width up
+to 32 bits without a wrapped or unsigned form -- only arithmetic that can
+carry a result out of its width needs attention afterward, and `u64` needs
+its own comparison, division and shift because its bit pattern does not
+sit in `int64`'s own ordering. Lowering a fixed-width language means keeping
+every value in this form on the way into and out of every operation --
+`WrapI32(x)` after loading a param whose static type is `int`, say -- and it
+is a property this repository checks against C++'s own `int32_t`/`uint32_t`/
+`uint64_t` arithmetic as the oracle, in `test/test_ints.cc`.
+
+Recipes, in terms of a source language's own operator:
+
+```
+i32 a + b / a - b / a * b   ->  WrapI32(Add(a, b))   -- likewise Sub, Mul
+i32 a / b                   ->  WrapI32(Div(a, b))   -- INT32_MIN / -1 is the
+                                                         one case Div does not
+                                                         trap on but i32 must
+                                                         wrap (Java's rule)
+i32 -a                      ->  WrapI32(Neg(a))      -- -INT32_MIN is the one
+                                                         case that leaves i32
+u32 a + b / a - b / a * b   ->  WrapU32(Add(a, b))    -- likewise Sub, Mul
+u32 -a                      ->  WrapU32(Neg(a))       -- every nonzero case
+                                                          leaves u32
+u32 ~a                      ->  WrapU32(BitNot(a))
+u32 / u64 a / b, a % b      ->  Div(a, b), Mod(a, b) / UDiv(a, b), UMod(a, b)
+u32 / u64 a < b (etc.)      ->  Lt(a, b) (etc.) / ULt(a, b) (etc.)
+i32 a << b                  ->  WrapI32(Shl(a, BitAnd(b, 31)))
+u32 a >> b                  ->  Shr(a, BitAnd(b, 31))
+u64 a >> b                  ->  UShr(a, b)   -- the VM's own & 63 already
+                                                 matches a 64-bit shift's rule
+i32 -> i64                  ->  nothing; i64 -> i32  ->  WrapI32(x)
+u64 constant                ->  literal(bits) -- the bit pattern as int64
+```
+
+A width narrower than 32 bits (`i8`/`u8`/`i16`/`u16`) follows the same
+pattern with the matching `Wrap*`; the VM's shift-count mask (`& 63`) is
+always wider than any source width's own mask, so a front end must apply its
+narrower mask itself rather than relying on the VM's.
+
+## `float`
+
+`Value` has no third numeric tag for a 32-bit float; a language with both
+`float` and `double` (C#, Java) keeps a `float`'s value in a `Double` the
+same way it keeps an `i32` in an `Int` -- normalized, this time to what the
+value would be after rounding through an actual `float`. The one thing a
+front end cannot do in-language is produce that rounding at all (the same
+reason `ToStr`'s digits are an intrinsic), so `ToFloat32` exists to do it:
+`Intrinsic(ToFloat32, x) -> double`, an int widening first like `ToDouble`.
+A magnitude too large to round back to a finite `float` becomes +-infinity
+rather than trapping (Java's and C#'s own rule for a narrowing cast) -- one
+just past `float`'s maximum rounds back down to it, the way round-to-nearest
+rounds any in-range value, and only the true overflow boundary goes to
+infinity -- and `NaN` passes through unchanged.
+
+A front end re-applies `ToFloat32` after every operation whose result can
+leave float precision -- `Add`/`Sub`/`Mul`/`Div`, `FMod`, `Pow`, and after
+widening through `ToDouble` -- the same discipline `WrapI32` et al. use
+above, once more per operation. A comparison (`Lt`, `Eq`, ...) needs no
+`ToFloat32`: comparing two already-rounded doubles is exact.
+
+## Static calls
+
+A statically-typed language often calls something the binder already knows
+by name -- a static method, a top-level function -- rather than a value that
+merely turns out to be callable. The IR still has exactly one way to call
+something (see [Design notes](#design-notes) for why the faster, index-based
+form was removed): `MakeClosure` builds a callable, `CallValue` calls it.
+PL/0's own binder builds one and calls it on the spot, which is fine for a
+call site reached once; a call inside a loop, or any method called from more
+than one place, should not pay `MakeClosure`'s allocation on every visit for
+a target that never changes between them.
+
+The recipe costs nothing in the library: build the closure once, at module
+initialization, into a `Cell` the binder reserves for it -- the same kind of
+`Cell` a captured local would use, just never reassigned after its one
+store -- and lower every call site to `VarRef(Cell)` followed by
+`CallValue`, instead of a fresh `MakeClosure` at each one. The difference
+from PL/0's shape is exactly that one hoist; nothing about `CallValue`
+itself changes.
+
+If that recipe is not enough once profiled, the next step lives entirely in
+the executor and needs no new IR: cache the `ClosureObj` a capture-map-empty
+`MakeClosure` builds, keyed by func index, in a table `Exec` owns for the
+run -- not `Program`, since the cached value is a refcounted heap object
+bound to one `Runtime` and so cannot be precomputed once and reused across
+runs the way a compiled `Chunk` can be. `Op::MakeClosure` checks the table
+before allocating a new closure; no new opcode.
+
+## Struct fields
+
+`Index`/`SetIndex` read an `ObjectObj`'s props by comparing a key against
+every prop in turn -- fine for a dynamic language's objects, whose set of
+keys is a runtime fact, but the wrong cost for a struct whose fields (which
+name lives at which offset) a statically-typed binder already knows before
+it ever runs. `FieldGet`/`FieldSet` are the same receiver, read and written
+by slot instead of by key: `props[slot]` directly, no comparison at all. A
+struct is exactly an `ObjectObj` a front end has promised to index this way
+-- same drop key, same owned-stack machinery, same `ObjectKeys` -- so
+nothing about the value model changes, only how one kind of front end
+chooses to reach it.
+
+The promise a front end makes in exchange for the O(1) access: build every
+field through one `ObjectLit` (which fills props in key order and never
+leaves a gap) before any `FieldGet`/`FieldSet` reaches the object, and never
+hand a struct-backed object to `ObjectRemove` -- removing a key would shift
+every later field's slot out from under the front end's own numbering. A
+type with a destructor keeps its drop key as one of those fields, occupying
+a slot like any other (first is the simplest layout to compute by hand).
+Slot numbering is the front end's own to assign, the same contract
+`VarKind::Local`'s slot indices already are -- `FieldGet`/`FieldSet` carry
+the field's name too, but only for a trap message ("field 'next' of ..."),
+never to execute anything.
+
+## Switch
+
+C#'s `switch`, Java's `switch`, Go's `switch` with an expression: all three
+pick one of several arms by comparing a subject against a set of constants,
+and all three want better than the `if`/`else if` chain a front end without
+`Switch` is forced into, which pays one comparison per arm even when the
+keys are dense integers a jump table could dispatch in one step.
+
+`Switch`'s children are `subject, key, body, key, body, ..., [default]` --
+each key a `Literal` child rather than a side table, the same shape
+`ObjectLit`'s key/value pairs already are. All keys share one
+`ConstKind` (`Int` or `Str`) and are pairwise distinct; `verify()` rejects a
+front end that gets either wrong, since neither is a runtime fact the
+executor could recover from. `Switch` yields the taken arm's value, like
+`If` -- and, like `If` with no `else`, a subject matching no key and with no
+default yields `nil` rather than trapping. A subject whose runtime type does
+not match the keys' `ConstKind` does trap, the same line `Eq` already draws
+against comparing across types: a C# `switch (string)` seeing `null` is the
+front end's job to catch before the switch reaches it, by testing for `nil`
+first and branching to its own default.
+
+`Break` does not stop at a `Switch`, the same way it does not stop at an
+`If` -- a `Break` inside an arm still targets the enclosing `While`. That
+leaves three things front ends differ on as lowering, not IR:
+
+```
+C#/Java's switch-scoped break   ->  wrap the switch in front-end state (a
+                                     flag checked after each arm) or, if the
+                                     switch is already loop-shaped, a
+                                     synthetic one-iteration While around it
+                                     so Break has something of its own to hit
+Java's case fallthrough         ->  duplicate the falling-through arms'
+                                     bodies rather than trying to jump
+                                     between them
+Go's `case a, b:` (multiple      ->  one (key, body) child pair per label,
+  keys, one body)                    all pointing at the same body NodeId --
+                                     safe to share since nothing about a
+                                     node's identity is mutated by compiling
+                                     it, just emitted again at each position
+```
 
 ## The host contract
 
@@ -209,6 +377,29 @@ never by special-casing an existing one -- see the design notes in `vmlib.h`
 (the `coreir/ir.h` and `coreir/semantics.h` sections) for what is
 deliberately fixed. What a given front end exercises is necessarily narrower
 than that; see its own README for what it does and does not rehearse.
+
+**What kind of language this targets.** A dynamically-typed language (PL/0,
+culebra, a JS subset) is the easy case: `Value` already is the dynamic-typed
+value. A managed, statically-typed language (a C#, Java or Go subset) is in
+scope too -- a binder that has already type-checked can erase types on the
+way into the IR, and the runtime's refcounted objects, cycle collector,
+`Scope`/`Defer` pair and generators cover classes, `using`/`try`-`finally`,
+and `yield return` without changes. What the binder still has to work around:
+`Value` holds only `int64` and `double`, so `int`/`uint`/`long`/`ulong` need
+their own wrap-and-widen lowering the front end writes itself, and a struct's
+fields have no layout the IR derives on its own -- the front end assigns
+every slot. Real work either way, but neither is a wall: the ops that
+lowering lands in are **Fixed-width integers**, and the slot-indexed access
+is **Struct fields**.
+
+**What is out of scope: C and C++.** `Value` is a tagged value, not a byte
+representation, so `&x`, `*p`, pointer arithmetic, a `union`'s type punning
+and a `memcpy` reinterpreting one type's bytes as another's have nothing to
+lower to. Faking a byte-addressable heap as one big int array (pointers as
+indices, the wasm approach) sidesteps that, but then nothing else here is
+being used either -- not the refcounted objects, not the cycle collector,
+not `Str`, not `Array` -- so a front end wanting that shape is better off
+without this library underneath it.
 
 ## Testing
 

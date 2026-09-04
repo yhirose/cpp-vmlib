@@ -706,6 +706,22 @@ enum class Tag : uint8_t {
   Binary,     // op = BinOp,   children: lhs, rhs
   Assign,     // op = VarKind, a = index, children: value
   If,         // children: cond, then [, else]
+  // A branch on one of several literal keys, all the same coreir::ConstKind
+  // (Int or Str) and pairwise distinct -- verify()'s job, so lowering never
+  // meets an ambiguous key set. Each key is a Literal child rather than a
+  // side table, the shape ObjectLit's key/value pairs already are; an even
+  // child count means the last child is a default arm, odd means there is
+  // none. Yields the taken arm's value, like If -- and like If, a subject
+  // that matches no key and has no default yields nil rather than trapping.
+  // A subject whose runtime type does not match the keys' ConstKind does
+  // trap (the same line Eq draws against cross-type comparison): a C#
+  // `switch (string)` seeing null is a front end's job to catch before the
+  // switch, by testing for nil first and branching to its own default.
+  // Break does not stop at a Switch, the same way it does not stop at an
+  // If -- a Break inside an arm still targets the enclosing While. Arms
+  // that fall through (Java) or a switch-scoped break (C#/Java) are front
+  // end lowerings, not new tags.
+  Switch,     // children: subject, key, body, key, body, ... [, default]
   While,      // children: cond, body
   Block,      // children: stmts...  (zero children = the empty statement)
   Intrinsic,  // op = IntrinsicId, children: args...
@@ -731,6 +747,25 @@ enum class Tag : uint8_t {
   ObjectLit,  // children: key, value, key, value, ...
   Index,      // children: receiver, key
   SetIndex,   // children: receiver, key, value
+  // A struct field, at a slot the front end assigns -- the same contract
+  // VarKind::Local's slot indices already are. Where Index looks a key up
+  // by comparing it against every prop in turn, FieldGet/FieldSet read
+  // props[slot] directly: O(1) rather than O(props.size()), for a receiver
+  // whose shape (which field lives at which slot) is known at compile time
+  // rather than discovered at runtime, which a statically-typed struct's
+  // fields are and a dynamic object's keys are not. The receiver is still
+  // an ObjectObj -- same drop key, same owned-stack machinery, same
+  // ObjectKeys -- so a struct is exactly an Object a front end has
+  // promised to index this way instead of by key. That promise has two
+  // obligations: every field is present (built via ObjectLit, which fills
+  // props in key order and never leaves a gap) before any FieldGet/FieldSet
+  // reaches it, and a struct is never handed to ObjectRemove -- removing a
+  // key would shift every later field's slot out from under the front
+  // end's own numbering.
+  // a = props index, b = field name (str const, diagnostics only -- read on
+  // the trap path, never to execute anything).
+  FieldGet,   // children: receiver
+  FieldSet,   // children: receiver, value
   // A lexical region and the local slots it owns: a = first local,
   // b = one past last. Slot indices are the front end's to assign, so the
   // scope structure they follow is too -- this is how it says it. The
@@ -788,14 +823,40 @@ enum class Tag : uint8_t {
   Yield,      // children: value
 };
 
-enum class UnOp : uint8_t { Neg, BitNot };
+// WrapI8..WrapU32 truncate an int to a narrower width and sign- or
+// zero-extend it back to int64 -- non-int traps, like Neg and BitNot. A
+// front end for a fixed-width language (a C#/Java/Go int, say) keeps every
+// slot holding one of these normalized values: a signed width sign-extended,
+// an unsigned width zero-extended (so it reads as a non-negative int64), and
+// a u64 as int64's own bit pattern verbatim. That single convention is what
+// lets Lt/Le/Div/Mod/Shr stay correct unchanged for every width up to 32
+// bits -- only the arithmetic that can leave the width (Neg, Add, Sub, Mul,
+// Shl, and Div/BitNot at their boundaries -- see the README's recipe table)
+// needs a Wrap after it, and u64 needs its own comparison, division and
+// shift (BinOp's U-prefixed group) because its bit pattern does not fit
+// int64's own ordering.
+enum class UnOp : uint8_t {
+  Neg, BitNot,
+  WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,
+};
 
 enum class BinOp : uint8_t {
   Add, Sub, Mul, Div, Mod,
   Eq, Ne, Lt, Le, Gt, Ge,
   // Int-only. Shift counts are masked to the low six bits (1 << 64 == 1),
   // matching the hardware and Java rather than trapping; Shr is arithmetic.
+  // A narrower width's own shift-count rule (Java's int shift masks to 5
+  // bits, not 6) is the front end's to apply before this -- BitAnd the count
+  // against the width's own mask -- rather than this growing a width
+  // parameter.
   BitAnd, BitOr, BitXor, Shl, Shr,
+  // u64 as unsigned: int64's own Lt/Le/Gt/Ge/Div/Mod/Shr read a u64's bit
+  // pattern as negative once its top bit is set, so a front end normalizing
+  // u64 into that bit pattern (WrapU8..WrapU32's own convention, one width
+  // further) needs these instead. Eq/Ne need no U form -- a bit pattern
+  // comparison does not care about sign -- and neither does Add/Sub/Mul,
+  // whose wrapping result is the same bits either way.
+  UDiv, UMod, UShr, ULt, ULe, UGt, UGe,
 };
 
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
@@ -890,6 +951,15 @@ enum class IntrinsicId : uint8_t {
   // throw ends the run the way the entry frame's would; the queue is
   // never drained inside a job (it is not re-entrant), only between them.
   Enqueue,      // (closure) -> nil
+  // Rounds a double to what it would be after passing through a 32-bit
+  // float -- the one float-specific fact a front end for a language with
+  // both `float` and `double` cannot write in-language, the same way ToStr
+  // cannot produce digits from a number at all. An int widens first, like
+  // ToDouble. A front end for such a language re-applies this after every
+  // arithmetic op on a float value, the same discipline WrapI32 et al. use
+  // for fixed-width ints (see the README's Fixed-width integers section) --
+  // this is that discipline's one addition for a language with `float`.
+  ToFloat32,    // (n) -> double, rounded to float precision
 };
 
 // A variable is either a slot in this frame or a slot borrowed from an
@@ -1014,6 +1084,14 @@ struct Module {
   const std::string& str_const(NodeId id) const {
     return str_consts[static_cast<size_t>(consts[nodes[id.v].a].bits)];
   }
+  // The same decode as str_const, from a raw const-pool index rather than a
+  // Literal NodeId -- what FieldGet/FieldSet's diagnostic-only name const
+  // is (it names a field, not an operand position a node's own const index
+  // would point through).
+  const std::string& str_const_at(int32_t const_index) const {
+    return str_consts[static_cast<size_t>(
+        consts[static_cast<size_t>(const_index)].bits)];
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1113,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Binary:    return 2;
     case Tag::Assign:    return 1;
     case Tag::If:        return -1;  // 2 or 3
+    case Tag::Switch:    return -1;  // subject, (key, body)*, optional default
     case Tag::While:     return 2;
     case Tag::Block:     return -1;
     case Tag::Intrinsic: return -1;  // per IntrinsicId
@@ -1044,6 +1123,8 @@ inline constexpr int arity_of(Tag t) {
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
     case Tag::Index:       return 2;
     case Tag::SetIndex:    return 3;
+    case Tag::FieldGet:    return 1;
+    case Tag::FieldSet:    return 2;
     case Tag::Scope:       return -1;  // body, or body + release list
     case Tag::Return:      return -1;  // 0 or 1
     case Tag::Break:       return 0;
@@ -1096,6 +1177,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::GenReturn: return 2;
     case IntrinsicId::GenThrow: return 2;
     case IntrinsicId::Enqueue: return 1;
+    case IntrinsicId::ToFloat32: return 1;
   }
   return 0;
 }
@@ -1118,11 +1200,13 @@ inline constexpr bool yields_value(Tag t) {
     // does observe it.
     case Tag::Block:
     case Tag::If:
+    case Tag::Switch:
     case Tag::MakeClosure:
     case Tag::CallValue:
     case Tag::ArrayLit:
     case Tag::ObjectLit:
     case Tag::Index:
+    case Tag::FieldGet:
     case Tag::Scope:
     case Tag::TryCatch:
     case Tag::Yield:
@@ -1149,6 +1233,15 @@ struct BinaryView { BinOp op; NodeId lhs, rhs; };
 struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
+// Switch's shape is decided by parity, not position: subject, (key, body)
+// pairs, then a default if the count came out even. Stated once here for
+// the two verify() passes and FnCompiler that would each otherwise
+// rederive it -- the discipline the rest of this section is for.
+// default_body is invalid when there is none, the same optional-child
+// shape IfView's `els` uses; the arms themselves stay in the arena, read
+// by index through switch_key/switch_body the way a Block's statements are
+// read through Module::child.
+struct SwitchView { NodeId subject, default_body; uint32_t arm_count; };
 struct WhileView  { NodeId cond, body; };
 struct ClosureView { int32_t func; int32_t capture_map; };
 struct IntrinsicView { IntrinsicId id; };
@@ -1158,6 +1251,8 @@ struct IntrinsicView { IntrinsicId id; };
 struct ScopeView { int32_t first_local, end_local; NodeId body, release_order; };
 struct TryView { int32_t caught_local; NodeId body, handler; };
 struct CellFreshView { int32_t cell; };
+struct FieldView { int32_t slot, name_const; NodeId receiver; };
+struct FieldSetView { int32_t slot, name_const; NodeId receiver, value; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
   return {static_cast<UnOp>(m.at(n).op), m.child(n, 0)};
@@ -1175,6 +1270,22 @@ inline IfView view_if(const Module& m, NodeId n) {
   IfView v{m.child(n, 0), m.child(n, 1), NodeId{}};
   if (m.num_children(n) > 2) v.els = m.child(n, 2);
   return v;
+}
+// Callers only reach this once check_node has already rejected a Switch
+// with no subject, so num_children(n) >= 1 always holds here.
+inline SwitchView view_switch(const Module& m, NodeId n) {
+  const uint32_t rest = m.num_children(n) - 1;
+  // rest / 2 either way: an odd `rest` is the one with a default, and the
+  // odd child it leaves over is exactly what the truncation drops.
+  SwitchView v{m.child(n, 0), NodeId{}, rest / 2};
+  if (rest % 2 != 0) v.default_body = m.child(n, m.num_children(n) - 1);
+  return v;
+}
+inline NodeId switch_key(const Module& m, NodeId n, uint32_t i) {
+  return m.child(n, 1 + 2 * i);
+}
+inline NodeId switch_body(const Module& m, NodeId n, uint32_t i) {
+  return m.child(n, 2 + 2 * i);
 }
 inline WhileView view_while(const Module& m, NodeId n) {
   return {m.child(n, 0), m.child(n, 1)};
@@ -1195,6 +1306,12 @@ inline TryView view_try(const Module& m, NodeId n) {
 }
 inline CellFreshView view_cellfresh(const Module& m, NodeId n) {
   return {m.at(n).a};
+}
+inline FieldView view_field_get(const Module& m, NodeId n) {
+  return {m.at(n).a, m.at(n).b, m.child(n, 0)};
+}
+inline FieldSetView view_field_set(const Module& m, NodeId n) {
+  return {m.at(n).a, m.at(n).b, m.child(n, 0), m.child(n, 1)};
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1406,21 @@ public:
   NodeId make_while(NodeId cond, NodeId body, SrcPos p) {
     return emit(Tag::While, 0, p, 0, 0, {cond, body});
   }
+  // `arms` keys must be Literal nodes (see b.literal / b.str_literal), all
+  // the same ConstKind and pairwise distinct -- verify() enforces both.
+  // `default_body` may be an invalid NodeId for a switch with no default.
+  NodeId make_switch(NodeId subject,
+                     const std::vector<std::pair<NodeId, NodeId>>& arms,
+                     NodeId default_body, SrcPos p) {
+    std::vector<NodeId> children{subject};
+    children.reserve(1 + arms.size() * 2 + (default_body.valid() ? 1 : 0));
+    for (const auto& kv : arms) {
+      children.push_back(kv.first);
+      children.push_back(kv.second);
+    }
+    if (default_body.valid()) children.push_back(default_body);
+    return emit(Tag::Switch, 0, p, 0, 0, children);
+  }
   NodeId block(const std::vector<NodeId>& stmts, SrcPos p) {
     return emit(Tag::Block, 0, p, 0, 0, stmts);
   }
@@ -1352,6 +1484,18 @@ public:
   }
   NodeId set_index(NodeId recv, NodeId key, NodeId value, SrcPos p) {
     return emit(Tag::SetIndex, 0, p, 0, 0, {recv, key, value});
+  }
+  // `slot` is the front end's own field numbering (props index); `name` is
+  // carried along only for a trap message ("field 'next' of ..."), never
+  // read to execute anything -- the same diagnostics-only role
+  // Func::local_names plays for VarKind::Local.
+  NodeId field_get(NodeId recv, int32_t slot, const std::string& name,
+                   SrcPos p) {
+    return emit(Tag::FieldGet, 0, p, slot, intern_str(name), {recv});
+  }
+  NodeId field_set(NodeId recv, int32_t slot, const std::string& name,
+                   NodeId value, SrcPos p) {
+    return emit(Tag::FieldSet, 0, p, slot, intern_str(name), {recv, value});
   }
   NodeId call_value(NodeId callee, const std::vector<NodeId>& args, SrcPos p) {
     std::vector<NodeId> children{callee};
@@ -1464,10 +1608,16 @@ inline int64_t wrap_neg(int64_t a) {
   return static_cast<int64_t>(0u - static_cast<uint64_t>(a));
 }
 
-inline bool is_bitop(BinOp op) {
+// Operators that never widen to double: the classic bitops plus the
+// unsigned-only group (a bit pattern's "unsigned" reading has nothing to
+// widen to). No longer is_bitop -- the U-prefixed group is not a bitop, and
+// int-only is the property the two groups actually share.
+inline bool is_int_only(BinOp op) {
   switch (op) {
     case BinOp::BitAnd: case BinOp::BitOr: case BinOp::BitXor:
     case BinOp::Shl: case BinOp::Shr:
+    case BinOp::UDiv: case BinOp::UMod: case BinOp::UShr:
+    case BinOp::ULt: case BinOp::ULe: case BinOp::UGt: case BinOp::UGe:
       return true;
     default:
       return false;
@@ -1497,8 +1647,14 @@ inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
   // doubles is deliberately absent -- fmod versus truncation is a language's
   // decision, and no front end here needs it yet.
   if (l.is_int() && r.is_int()) {
-    if (op == BinOp::Div || op == BinOp::Mod) {
+    // Every division form traps on a zero divisor -- one statement of that,
+    // since UDiv/UMod differ from Div/Mod only in the overflow case they do
+    // not have (no negative dividend for -1 to misfire on).
+    if (op == BinOp::Div || op == BinOp::Mod || op == BinOp::UDiv ||
+        op == BinOp::UMod) {
       if (r.as_int() == 0) return "divide by zero";
+    }
+    if (op == BinOp::Div || op == BinOp::Mod) {
       if (l.as_int() == std::numeric_limits<int64_t>::min() &&
           r.as_int() == -1) {
         return "division overflow";
@@ -1506,7 +1662,7 @@ inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
     }
     return {};
   }
-  if (l.is_number() && r.is_number() && !is_bitop(op)) {
+  if (l.is_number() && r.is_number() && !is_int_only(op)) {
     if (op == BinOp::Mod) return "cannot mod double";
     return {};
   }
@@ -1570,6 +1726,31 @@ inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
         return Value::make_int(static_cast<int64_t>(
             static_cast<uint64_t>(a) << (b & 63)));
       case BinOp::Shr: return Value::make_int(a >> (b & 63));
+      // Unsigned: reinterpret both operands' bits as uint64_t, do the
+      // operation there, and (for UDiv/UMod/UShr) cast the bit pattern back.
+      // Same convention as wrap_add et al -- the arithmetic goes through
+      // uint64_t rather than trusting int64_t's signed behavior to match.
+      case BinOp::UDiv:
+        return Value::make_int(static_cast<int64_t>(
+            static_cast<uint64_t>(a) / static_cast<uint64_t>(b)));
+      case BinOp::UMod:
+        return Value::make_int(static_cast<int64_t>(
+            static_cast<uint64_t>(a) % static_cast<uint64_t>(b)));
+      case BinOp::UShr:
+        return Value::make_int(static_cast<int64_t>(
+            static_cast<uint64_t>(a) >> (b & 63)));
+      case BinOp::ULt:
+        return Value::make_bool(static_cast<uint64_t>(a) <
+                                static_cast<uint64_t>(b));
+      case BinOp::ULe:
+        return Value::make_bool(static_cast<uint64_t>(a) <=
+                                static_cast<uint64_t>(b));
+      case BinOp::UGt:
+        return Value::make_bool(static_cast<uint64_t>(a) >
+                                static_cast<uint64_t>(b));
+      case BinOp::UGe:
+        return Value::make_bool(static_cast<uint64_t>(a) >=
+                                static_cast<uint64_t>(b));
       default: return compare(op, a, b);
     }
   }
@@ -1585,6 +1766,16 @@ inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
   }
 }
 
+inline bool is_wrap(UnOp op) {
+  switch (op) {
+    case UnOp::WrapI8: case UnOp::WrapI16: case UnOp::WrapI32:
+    case UnOp::WrapU8: case UnOp::WrapU16: case UnOp::WrapU32:
+      return true;
+    default:
+      return false;
+  }
+}
+
 inline std::string unop_error(UnOp op, const Value& v) {
   if (op == UnOp::Neg && !v.is_number()) {
     return std::string("cannot negate ") + type_name(v.tag());
@@ -1592,11 +1783,36 @@ inline std::string unop_error(UnOp op, const Value& v) {
   if (op == UnOp::BitNot && !v.is_int()) {
     return std::string("cannot bitwise-not ") + type_name(v.tag());
   }
+  if (is_wrap(op) && !v.is_int()) {
+    return std::string("cannot truncate ") + type_name(v.tag());
+  }
   return {};
 }
 
+// Truncate-and-widen, stated once: the six Wrap ops differ only in the type
+// whose width they land in, and C++'s own conversion from int64 down to a
+// narrower type and back is exactly the promise WrapI8..WrapU32 make to a
+// front end -- the same reason wrap_add et al. go through uint64_t rather
+// than restating the rule per operator.
+template <typename T>
+inline Value wrap_to(int64_t x) {
+  return Value::make_int(static_cast<int64_t>(static_cast<T>(x)));
+}
+
 inline Value apply_unop(UnOp op, const Value& v) {
-  if (op == UnOp::BitNot) return Value::make_int(~v.as_int());
+  // One exhaustive switch rather than an is_wrap guard around a second one:
+  // a width added to UnOp without a case here fails the build (-Wswitch),
+  // not silently falls into whichever arm happened to be last.
+  switch (op) {
+    case UnOp::BitNot:  return Value::make_int(~v.as_int());
+    case UnOp::WrapI8:  return wrap_to<int8_t>(v.as_int());
+    case UnOp::WrapI16: return wrap_to<int16_t>(v.as_int());
+    case UnOp::WrapI32: return wrap_to<int32_t>(v.as_int());
+    case UnOp::WrapU8:  return wrap_to<uint8_t>(v.as_int());
+    case UnOp::WrapU16: return wrap_to<uint16_t>(v.as_int());
+    case UnOp::WrapU32: return wrap_to<uint32_t>(v.as_int());
+    case UnOp::Neg:     break;
+  }
   return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
                     : Value::make_double(-v.as_double());
 }
@@ -1729,13 +1945,28 @@ enum class Op : uint8_t {
   LoadConst,    // a = dst, b = const index
   Neg,          // a = dst, b = src
   BitNot,       // a = dst, b = src
+  // coreir::UnOp's WrapI8..WrapU32, at a fixed offset from Neg/BitNot the
+  // same way Add..Ge sits at one from coreir::BinOp's -- see kUnOpOffset.
+  WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,  // a = dst, b = src
   Add, Sub, Mul, Div, Mod,   // a = dst, b = lhs, c = rhs
   Eq, Ne, Lt, Le, Gt, Ge,    // a = dst, b = lhs, c = rhs   (writes 0 or 1)
   BitAnd, BitOr, BitXor, Shl, Shr,  // a = dst, b = lhs, c = rhs
+  // coreir::BinOp's u64 group, same offset scheme as Add..Ge -- see
+  // kBinOpOffset.
+  UDiv, UMod, UShr, ULt, ULe, UGt, UGe,  // a = dst, b = lhs, c = rhs
   LoadVar,      // a = dst, b = VarKind, c = index   (rejects Uninit)
   StoreVar,     // a = VarKind, b = index, c = src
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
+  // Looks the subject up in Chunk::switch_tables[b] and jumps to the
+  // matching arm's pc; on no match it jumps to the table's default_pc if it
+  // has one, and otherwise falls through to the next instruction (a LoadNil
+  // FnCompiler emits there, the same "no arm taken" nil an If without an
+  // else yields). Traps when the subject's ValueTag does not match the
+  // table's key kind -- except a table with no keys at all (a Switch whose
+  // every arm is its default), which has no key kind to hold the subject
+  // to and so never traps on it.
+  Switch,       // a = subject reg, b = table index
   Out,          // a = src
   OutRaw,       // a = src   (no trailing newline)
   In,           // a = dst
@@ -1775,6 +2006,8 @@ enum class Op : uint8_t {
   NewArray,     // a = dst, b = first item reg, c = item count
   Index,        // a = dst, b = receiver reg, c = key reg
   SetIndex,     // a = receiver reg, b = key reg, c = value reg
+  FieldGet,     // a = dst, b = receiver reg, c = slot, d = name const
+  FieldSet,     // a = receiver reg, b = slot, c = value reg, d = name const
   Len,          // a = dst, b = src
   ToStr,        // a = dst, b = src   (to_display's formatting)
   ArrayPush,    // a = array reg, b = value reg
@@ -1803,12 +2036,13 @@ enum class Op : uint8_t {
   GenThrow,     // a = dst, b = generator reg, c = value reg
   // The job queue (ir.h's Enqueue): the closure joins the run's FIFO.
   Enqueue,      // a = closure reg
+  ToFloat32,    // a = dst, b = src   (round to float precision, as a double)
 };
 
-// vm::Op's Add..Ge deliberately sit at a fixed offset from coreir::BinOp's own
-// Add..Ge, so the compiler and the executor can share one arithmetic
-// conversion instead of each hand-writing an eleven-arm switch that could
-// silently drift out of step with the other.
+// vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
+// own Add..UGe, so the compiler and the executor can share one arithmetic
+// conversion instead of each hand-writing a switch that could silently drift
+// out of step with the other.
 inline constexpr int32_t kBinOpOffset =
     static_cast<int32_t>(Op::Add) - static_cast<int32_t>(coreir::BinOp::Add);
 
@@ -1821,6 +2055,23 @@ inline constexpr coreir::BinOp binop_of(Op op) {
 static_assert(op_of(coreir::BinOp::Add) == Op::Add);
 static_assert(op_of(coreir::BinOp::Ge) == Op::Ge);
 static_assert(op_of(coreir::BinOp::Shr) == Op::Shr);
+static_assert(op_of(coreir::BinOp::UGe) == Op::UGe);
+
+// The same trick for coreir::UnOp's Neg..WrapU32 against vm::Op's own
+// Neg..WrapU32 -- the pair Exec used to tell apart with a two-way ternary
+// before WrapI8..WrapU32 existed to make that stop being true.
+inline constexpr int32_t kUnOpOffset =
+    static_cast<int32_t>(Op::Neg) - static_cast<int32_t>(coreir::UnOp::Neg);
+
+inline constexpr Op op_of(coreir::UnOp op) {
+  return static_cast<Op>(static_cast<int32_t>(op) + kUnOpOffset);
+}
+inline constexpr coreir::UnOp unop_of(Op op) {
+  return static_cast<coreir::UnOp>(static_cast<int32_t>(op) - kUnOpOffset);
+}
+static_assert(op_of(coreir::UnOp::Neg) == Op::Neg);
+static_assert(op_of(coreir::UnOp::BitNot) == Op::BitNot);
+static_assert(op_of(coreir::UnOp::WrapU32) == Op::WrapU32);
 
 // The intrinsics have no such offset -- their opcodes were not laid out to
 // have one -- so the correspondence is a table. It is still one table: with
@@ -1855,6 +2106,7 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::GenReturn:    return Op::GenReturn;
     case I::GenThrow:     return Op::GenThrow;
     case I::Enqueue:      return Op::Enqueue;
+    case I::ToFloat32:    return Op::ToFloat32;
   }
   return Op::LoadNil;
 }
@@ -1921,6 +2173,48 @@ struct SlotRef {
   int32_t index;
 };
 
+// One Switch's key table (Chunk::switch_tables[Op::Switch.b]), built once at
+// compile time from the coreir::Switch node's Literal keys. Dense int keys
+// (a run short enough that a base-offset array does not waste much space)
+// get `pcs`, so a match costs one subtraction, one bounds check and one
+// array read; anything else -- sparse int keys, or Str keys, which have no
+// useful notion of "dense" -- gets a sorted table Exec binary-searches.
+// Exactly one of the two forms is populated, per `dense` -- except a Switch
+// with no keys at all (every arm its own default: `switch (x) { default:
+// ... }`), whose table populates neither and whose key_kind is therefore
+// not a promise about anything; has_keys() is how Exec tells the two cases
+// apart, so a keyless table's default Int key_kind never gets read as one.
+struct SwitchTable {
+  coreir::ConstKind key_kind = coreir::ConstKind::Int;  // Int or Str
+  bool dense = false;
+  int64_t base = 0;              // dense form: pcs[subject - base]
+  std::vector<int32_t> pcs;      // dense form; -1 = no arm at that offset
+  std::vector<int64_t> int_keys; // sparse Int form, sorted ascending
+  std::vector<std::string> str_keys;  // Str form, sorted ascending
+  std::vector<int32_t> arm_pcs;  // sparse form, parallel to int_keys/str_keys
+  // -1: no default arm -- Op::Switch falls through to the FnCompiler-emitted
+  // LoadNil rather than jumping here.
+  int32_t default_pc = -1;
+
+  bool has_keys() const {
+    return dense || !int_keys.empty() || !str_keys.empty();
+  }
+};
+
+// The sparse form's lookup: the arm pc for `key`, or -1 if no arm has it.
+// One template rather than a copy for int_keys and a copy for str_keys --
+// they differ only in what a key is, and two hand-written binary searches
+// are two chances for the found/not-found edge to drift out of step with
+// each other.
+template <class T>
+inline int32_t sparse_arm_pc(const std::vector<T>& keys,
+                             const std::vector<int32_t>& arm_pcs,
+                             const T& key) {
+  const auto it = std::lower_bound(keys.begin(), keys.end(), key);
+  if (it == keys.end() || !(*it == key)) return -1;
+  return arm_pcs[static_cast<size_t>(it - keys.begin())];
+}
+
 struct Chunk {
   std::string name;
   std::vector<Insn> code;
@@ -1939,6 +2233,7 @@ struct Chunk {
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
   std::vector<std::vector<SlotRef>> release_lists;
+  std::vector<SwitchTable> switch_tables;
 };
 
 struct Program {
@@ -1947,6 +2242,14 @@ struct Program {
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<coreir::SrcPos> positions;
   std::vector<std::vector<coreir::CaptureSrc>> capture_maps;
+
+  // The same decode coreir::Module::str_const_at does, from this program's
+  // own pools -- what FieldGet/FieldSet's diagnostic-only name const needs
+  // on the trap path, and the only place a bytecode operand names a string.
+  const std::string& str_const_at(int32_t const_index) const {
+    return str_consts[static_cast<size_t>(
+        consts[static_cast<size_t>(const_index)].bits)];
+  }
 };
 
 std::string to_string(const Program& p);
@@ -2450,6 +2753,7 @@ inline const char* name_of(Tag t) {
     case Tag::Binary:      return "binary";
     case Tag::Assign:      return "assign";
     case Tag::If:          return "if";
+    case Tag::Switch:      return "switch";
     case Tag::While:       return "while";
     case Tag::Block:       return "block";
     case Tag::Intrinsic:   return "intrinsic";
@@ -2459,6 +2763,8 @@ inline const char* name_of(Tag t) {
     case Tag::ObjectLit:   return "objectlit";
     case Tag::Index:       return "index";
     case Tag::SetIndex:    return "setindex";
+    case Tag::FieldGet:    return "fieldget";
+    case Tag::FieldSet:    return "fieldset";
     case Tag::Scope:       return "scope";
     case Tag::Return:      return "return";
     case Tag::Break:       return "break";
@@ -2476,6 +2782,12 @@ inline const char* name_of(UnOp op) {
   switch (op) {
     case UnOp::Neg:    return "neg";
     case UnOp::BitNot: return "bitnot";
+    case UnOp::WrapI8:  return "wrapi8";
+    case UnOp::WrapI16: return "wrapi16";
+    case UnOp::WrapI32: return "wrapi32";
+    case UnOp::WrapU8:  return "wrapu8";
+    case UnOp::WrapU16: return "wrapu16";
+    case UnOp::WrapU32: return "wrapu32";
   }
   return "?";
 }
@@ -2501,6 +2813,13 @@ inline const char* name_of(BinOp op) {
     case BinOp::BitXor: return "bitxor";
     case BinOp::Shl:    return "shl";
     case BinOp::Shr:    return "shr";
+    case BinOp::UDiv: return "udiv";
+    case BinOp::UMod: return "umod";
+    case BinOp::UShr: return "ushr";
+    case BinOp::ULt:  return "ult";
+    case BinOp::ULe:  return "ule";
+    case BinOp::UGt:  return "ugt";
+    case BinOp::UGe:  return "uge";
   }
   return "?";
 }
@@ -2545,6 +2864,7 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::GenReturn: return "genreturn";
     case IntrinsicId::GenThrow: return "genthrow";
     case IntrinsicId::Enqueue: return "enqueue";
+    case IntrinsicId::ToFloat32: return "tofloat32";
   }
   return "?";
 }
@@ -2576,7 +2896,7 @@ inline std::optional<Tag> from_name<Tag>(std::string_view s) {
 
 template <>
 inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::BitNot); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(UnOp::WrapU32); ++i) {
     const auto op = static_cast<UnOp>(i);
     if (name_of(op) == s) return op;
   }
@@ -2585,7 +2905,7 @@ inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
 
 template <>
 inline std::optional<BinOp> from_name<BinOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::Shr); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(BinOp::UGe); ++i) {
     const auto op = static_cast<BinOp>(i);
     if (name_of(op) == s) return op;
   }
@@ -2603,7 +2923,8 @@ inline std::optional<VarKind> from_name<VarKind>(std::string_view s) {
 
 template <>
 inline std::optional<IntrinsicId> from_name<IntrinsicId>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::Enqueue); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(IntrinsicId::ToFloat32);
+       ++i) {
     const auto id = static_cast<IntrinsicId>(i);
     if (name_of(id) == s) return id;
   }
@@ -2662,6 +2983,52 @@ struct Verifier {
           return fail("If takes 2 or 3 children");
         }
         break;
+      // The subject aside, children come in (key, body) pairs plus an
+      // optional trailing default -- an even total means the last one is
+      // that default, the same parity test ObjectLit would use if it had
+      // an odd-shaped variant. Each key must be a Literal (verify() cannot
+      // evaluate an arbitrary expression at compile time), all of one
+      // ConstKind, and pairwise distinct -- ambiguity FnCompiler's table
+      // build has no way to resolve.
+      case Tag::Switch: {
+        if (n.num_children < 1) return fail("Switch needs a subject");
+        const auto sw = view_switch(m, id);
+        std::optional<ConstKind> kind;
+        std::vector<int64_t> seen_int;
+        std::vector<std::string> seen_str;
+        // Linear, like intern_pos: a switch has a handful of arms, and a
+        // set would cost more to build than the scan it saves. Written once
+        // over whichever pool the key's kind picked, so the two kinds
+        // cannot drift apart on what counts as a duplicate.
+        auto first_time = [](auto& seen, const auto& v) {
+          if (std::find(seen.begin(), seen.end(), v) != seen.end()) {
+            return false;
+          }
+          seen.push_back(v);
+          return true;
+        };
+        for (uint32_t i = 0; i < sw.arm_count; ++i) {
+          const NodeId key = switch_key(m, id, i);
+          if (!key.valid() || key.v >= m.nodes.size() ||
+              m.at(key).tag != Tag::Literal) {
+            return fail("switch key must be a literal");
+          }
+          const ConstKind k = m.const_kind(key);
+          if (k != ConstKind::Int && k != ConstKind::Str) {
+            return fail("switch key must be an int or a string");
+          }
+          if (!kind.has_value()) {
+            kind = k;
+          } else if (*kind != k) {
+            return fail("switch keys must share one const kind");
+          }
+          const bool fresh = k == ConstKind::Int
+                                 ? first_time(seen_int, m.int_const(key))
+                                 : first_time(seen_str, m.str_const(key));
+          if (!fresh) return fail("duplicate switch key");
+        }
+        break;
+      }
       // A closure's captures are cells, which outlive the frame that
       // built it. A plain Local cannot be one -- it dies with the frame -- so
       // naming one here is the mistake this rejects, and the front end's cue
@@ -2764,6 +3131,20 @@ struct Verifier {
           return fail("ObjectLit takes key/value pairs");
         }
         break;
+      // The slot itself is the front end's promise, the same way a Local's
+      // slot index is -- not something verify() can bound-check against a
+      // receiver whose actual prop count is a runtime fact. What it can
+      // check is the diagnostic name: a name const that is not there, or
+      // not a string, is a front end bug regardless of what receiver shows
+      // up at runtime.
+      case Tag::FieldGet:
+      case Tag::FieldSet:
+        if (n.a < 0) return fail("field slot must be non-negative");
+        if (n.b < 0 || static_cast<size_t>(n.b) >= m.consts.size() ||
+            m.consts[static_cast<size_t>(n.b)].kind != ConstKind::Str) {
+          return fail("field name must be a string const");
+        }
+        break;
       case Tag::Intrinsic: {
         const auto id = static_cast<IntrinsicId>(n.op);
         if (n.num_children != intrinsic_arity(id)) {
@@ -2791,6 +3172,8 @@ struct Verifier {
       case Tag::ObjectLit:
       case Tag::Index:
       case Tag::SetIndex:
+      case Tag::FieldGet:
+      case Tag::FieldSet:
       case Tag::CallValue:  // callee, then args -- all value positions
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
@@ -2804,6 +3187,18 @@ struct Verifier {
       case Tag::Yield:
         if (!operand(0)) return false;
         break;
+      // Only the subject and the keys are read as values; each arm body is
+      // compiled through compile_value the way If's branches are (branch_
+      // into -> compile_value), so a statement body -- a bare Break, an
+      // Assign -- is as legal here as it is as an If arm.
+      case Tag::Switch: {
+        if (!operand(0)) return false;
+        const auto sw = view_switch(m, id);
+        for (uint32_t i = 0; i < sw.arm_count; ++i) {
+          if (!operand(1 + 2 * i)) return false;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -2854,6 +3249,7 @@ struct Dumper {
         break;
       }
       case Tag::If:     out << "if"; break;
+      case Tag::Switch: out << "switch"; break;
       case Tag::Scope: {
         const auto v = view_scope(m, id);
         out << "scope local[" << v.first_local << ".." << v.end_local << ")";
@@ -2888,6 +3284,18 @@ struct Dumper {
       case Tag::ObjectLit: out << "objectlit"; break;
       case Tag::Index:    out << "index"; break;
       case Tag::SetIndex: out << "setindex"; break;
+      // One case for both: FieldSetView is FieldView plus a value child, so
+      // the slot and the name const are the same a/b either way, and the
+      // word is the one name_of already has for the tag -- the same way
+      // Unary and Binary above defer to name_of for their operator's name
+      // rather than spelling it out here.
+      case Tag::FieldGet:
+      case Tag::FieldSet: {
+        const auto v = view_field_get(m, id);
+        out << name_of(n.tag) << " field[" << v.slot
+            << "]=" << m.str_const_at(v.name_const);
+        break;
+      }
     }
     out << "  @" << p.line << ":" << p.col << "\n";
     for (uint32_t i = 0; i < n.num_children; ++i) node(m.child(id, i), d + 1);
@@ -2964,18 +3372,26 @@ inline const char* name_of(Op op) {
     case Op::LoadConst:   return "loadconst";
     case Op::Neg:         return "neg";
     case Op::BitNot:      return "bitnot";
+    // Shares coreir's name table via unop_of rather than re-typing the
+    // Wrap* names.
+    case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
+    case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
+      return coreir::name_of(unop_of(op));
     // The arithmetic/compare range shares coreir's name table via binop_of
-    // rather than re-typing the same eleven strings.
+    // rather than re-typing the same strings.
     case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
     case Op::Eq:  case Op::Ne:  case Op::Lt:  case Op::Le:
     case Op::Gt:  case Op::Ge:
     case Op::BitAnd: case Op::BitOr: case Op::BitXor:
     case Op::Shl: case Op::Shr:
+    case Op::UDiv: case Op::UMod: case Op::UShr:
+    case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
       return coreir::name_of(binop_of(op));
     case Op::LoadVar:     return "loadvar";
     case Op::StoreVar:    return "storevar";
     case Op::Jump:        return "jump";
     case Op::JumpIfFalse: return "jumpiffalse";
+    case Op::Switch:      return "switch";
     case Op::Out:         return "out";
     case Op::OutRaw:      return "outraw";
     case Op::In:          return "in";
@@ -2996,6 +3412,8 @@ inline const char* name_of(Op op) {
     case Op::NewArray:    return "newarray";
     case Op::Index:       return "index";
     case Op::SetIndex:    return "setindex";
+    case Op::FieldGet:    return "fieldget";
+    case Op::FieldSet:    return "fieldset";
     case Op::Len:         return "len";
     case Op::ToStr:       return "tostr";
     case Op::ArrayPush:   return "arraypush";
@@ -3019,6 +3437,7 @@ inline const char* name_of(Op op) {
     case Op::GenReturn:   return "genreturn";
     case Op::GenThrow:    return "genthrow";
     case Op::Enqueue:     return "enqueue";
+    case Op::ToFloat32:   return "tofloat32";
   }
   return "?";
 }
@@ -3085,6 +3504,9 @@ inline std::string to_string(const Program& p) {
         case Op::JumpIfFalse:
           out << " r" << in.a << ", " << in.b;
           break;
+        case Op::Switch:
+          out << " r" << in.a << ", table#" << in.b;
+          break;
         case Op::Out:
         case Op::OutRaw:
         case Op::In:
@@ -3097,6 +3519,12 @@ inline std::string to_string(const Program& p) {
         case Op::OwnedMark:
           break;
         case Op::Ret:
+          break;
+        case Op::FieldGet:
+          out << " r" << in.a << ", r" << in.b << ", field[" << in.c << "]";
+          break;
+        case Op::FieldSet:
+          out << " r" << in.a << ", field[" << in.b << "], r" << in.c;
           break;
         default:
           out << " r" << in.a << ", r" << in.b << ", r" << in.c;
@@ -3114,6 +3542,29 @@ inline std::string to_string(const Program& p) {
       if (cl.defer_mark_pc >= 0) out << " defer_mark=" << cl.defer_mark_pc;
       if (cl.owned_mark_pc >= 0) out << " owned_mark=" << cl.owned_mark_pc;
       if (cl.release_list >= 0) out << " release=list#" << cl.release_list;
+      out << "\n";
+    }
+    for (size_t j = 0; j < ch.switch_tables.size(); ++j) {
+      const SwitchTable& t = ch.switch_tables[j];
+      out << "  switch_table#" << j << " "
+          << (t.key_kind == coreir::ConstKind::Str ? "str" : "int") << " "
+          << (t.dense ? "dense" : "sparse");
+      if (t.dense) {
+        out << " base=" << t.base << " [";
+        for (size_t k = 0; k < t.pcs.size(); ++k) {
+          out << (k ? " " : "") << t.pcs[k];
+        }
+        out << "]";
+      } else if (t.key_kind == coreir::ConstKind::Str) {
+        for (size_t k = 0; k < t.str_keys.size(); ++k) {
+          out << " \"" << t.str_keys[k] << "\"->" << t.arm_pcs[k];
+        }
+      } else {
+        for (size_t k = 0; k < t.int_keys.size(); ++k) {
+          out << " " << t.int_keys[k] << "->" << t.arm_pcs[k];
+        }
+      }
+      if (t.default_pc >= 0) out << " default=" << t.default_pc;
       out << "\n";
     }
   }
@@ -3242,6 +3693,76 @@ struct FnCompiler {
     return static_cast<int32_t>(ch.release_lists.size() - 1);
   }
 
+  // Fills in ch.switch_tables[idx] -- pushed empty when the Switch's own
+  // Op::Switch was emitted, so its index survives any switch_tables growth a
+  // nested Switch in one of the arms just compiled -- now that every arm's
+  // pc is known.
+  void finish_switch_table(int32_t idx,
+                           const std::vector<std::pair<NodeId, int32_t>>& arms,
+                           int32_t default_pc) {
+    SwitchTable t;
+    t.default_pc = default_pc;
+    if (!arms.empty()) t.key_kind = m.const_kind(arms.front().first);
+    // Sorting a (key, pc) list and splitting it into the two parallel
+    // vectors Exec binary-searches: the same two steps for int keys and for
+    // str keys, so which vector the keys land in is the only thing written
+    // twice.
+    auto fill_sparse = [&t](auto& kv, auto& keys) {
+      std::sort(kv.begin(), kv.end());
+      for (auto& e : kv) {
+        keys.push_back(std::move(e.first));
+        t.arm_pcs.push_back(e.second);
+      }
+    };
+    if (t.key_kind == ConstKind::Int) {
+      std::vector<std::pair<int64_t, int32_t>> kv;
+      kv.reserve(arms.size());
+      for (const auto& a : arms) {
+        kv.emplace_back(m.int_const(a.first), a.second);
+      }
+      int64_t lo = 0, hi = 0;
+      for (size_t i = 0; i < kv.size(); ++i) {
+        if (i == 0 || kv[i].first < lo) lo = kv[i].first;
+        if (i == 0 || kv[i].first > hi) hi = kv[i].first;
+      }
+      // hi - lo is the one subtraction here whose operands are a front
+      // end's own key values, so it is done unsigned: a u64-lowering front
+      // end stores bit patterns, and a switch spanning {INT64_MIN,
+      // INT64_MAX} would take a signed subtraction out of int64's range,
+      // which is UB rather than just a wrong answer. The cap is on the
+      // span (the width less one) rather than the width itself, so a
+      // full-range span cannot wrap back into something small enough to
+      // look dense.
+      const uint64_t span =
+          kv.empty() ? 0
+                     : static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo);
+      // Dense when the array would not be mostly holes, and small enough
+      // that a pathological front end (a switch over {0, 1000000}) cannot
+      // make this allocate an unreasonable table.
+      if (!kv.empty() && span < 4096 &&
+          span + 1 <= static_cast<uint64_t>(kv.size()) * 4) {
+        t.dense = true;
+        t.base = lo;
+        t.pcs.assign(static_cast<size_t>(span) + 1, -1);
+        for (const auto& e : kv) {
+          const uint64_t off =
+              static_cast<uint64_t>(e.first) - static_cast<uint64_t>(lo);
+          t.pcs[static_cast<size_t>(off)] = e.second;
+        }
+      } else {
+        fill_sparse(kv, t.int_keys);
+      }
+    } else {
+      std::vector<std::pair<std::string, int32_t>> kv;
+      kv.reserve(arms.size());
+      for (const auto& a : arms) {
+        kv.emplace_back(m.str_const(a.first), a.second);
+      }
+      fill_sparse(kv, t.str_keys);
+    }
+    ch.switch_tables[static_cast<size_t>(idx)] = std::move(t);
+  }
+
   // A Scope, in value position (its body's value lands in the register
   // returned) or as a statement (`want_value` false: the body is compiled
   // as one and nothing is returned). The distinction matters at the exit:
@@ -3338,7 +3859,7 @@ struct FnCompiler {
         const int32_t s = compile_expr(v.operand);
         top = base;
         const int32_t r = alloc();
-        emit(v.op == UnOp::BitNot ? Op::BitNot : Op::Neg, r, s, 0, n.pos);
+        emit(op_of(v.op), r, s, 0, n.pos);
         return r;
       }
       case Tag::Scope:
@@ -3467,6 +3988,44 @@ struct FnCompiler {
         return r;
       }
 
+      // Same shape as If -- every arm lands its value in one register --
+      // fanned out over a Chunk::switch_tables entry instead of a single
+      // JumpIfFalse. The table's arm pcs are only known once each arm has
+      // been emitted, so it is finished (finish_switch_table) after the
+      // loop below rather than built up front the way compile_release_list
+      // builds a Scope's.
+      case Tag::Switch: {
+        const auto sw = view_switch(m, id);
+        const int32_t base = top;
+        const int32_t s = compile_expr(sw.subject);
+        top = base;
+        const int32_t r = alloc();
+        const int32_t table_idx = static_cast<int32_t>(ch.switch_tables.size());
+        ch.switch_tables.emplace_back();
+        emit(Op::Switch, s, table_idx, 0, n.pos);
+        std::vector<size_t> end_jumps;
+        if (!sw.default_body.valid()) {
+          emit(Op::LoadNil, r, 0, 0, n.pos);
+          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+        }
+        std::vector<std::pair<NodeId, int32_t>> arm_keys;
+        arm_keys.reserve(sw.arm_count);
+        for (uint32_t i = 0; i < sw.arm_count; ++i) {
+          arm_keys.emplace_back(switch_key(m, id, i), here());
+          branch_into(r, switch_body(m, id, i), n.pos);
+          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+        }
+        int32_t default_pc = -1;
+        if (sw.default_body.valid()) {
+          default_pc = here();
+          branch_into(r, sw.default_body, n.pos);
+          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+        }
+        for (size_t j : end_jumps) patch(j, here());
+        finish_switch_table(table_idx, arm_keys, default_pc);
+        return r;
+      }
+
       case Tag::MakeClosure: {
         auto v = view_make_closure(m, id);
         const int32_t r = alloc();
@@ -3517,6 +4076,15 @@ struct FnCompiler {
         top = base;
         const int32_t r = alloc();
         emit(Op::Index, r, recv, key, n.pos);
+        return r;
+      }
+      case Tag::FieldGet: {
+        auto v = view_field_get(m, id);
+        const int32_t base = top;
+        const int32_t recv = compile_expr(v.receiver);
+        top = base;
+        const int32_t r = alloc();
+        emit(Op::FieldGet, r, recv, v.slot, n.pos, v.name_const);
         return r;
       }
       case Tag::CallValue: {
@@ -3615,6 +4183,14 @@ struct FnCompiler {
         const int32_t key = compile_expr(m.child(id, 1));
         const int32_t val = compile_expr(m.child(id, 2));
         emit(Op::SetIndex, recv, key, val, n.pos);
+        break;
+      }
+
+      case Tag::FieldSet: {
+        auto v = view_field_set(m, id);
+        const int32_t recv = compile_expr(v.receiver);
+        const int32_t val = compile_expr(v.value);
+        emit(Op::FieldSet, recv, v.slot, val, n.pos, v.name_const);
         break;
       }
 
@@ -3966,6 +4542,26 @@ struct Exec {
     raise_trap(msg, pos_at(*f.chunk, f.pc));
   }
 
+  // The two checks a field access owes before it may index props directly,
+  // and the two traps they produce. FieldGet and FieldSet differ only in
+  // which operand holds the receiver and which the slot, never in what
+  // makes an access invalid, so the checking is written once here and the
+  // verb ("get"/"set") is all the caller supplies.
+  ObjectObj* field_target(const Frame& f, const Value& recv, int32_t slot,
+                          int32_t name_const, const char* verb) {
+    if (!recv.is_object()) {
+      fail(f, std::string("cannot ") + verb + " field '" +
+                  p.str_const_at(name_const) + "' of " +
+                  type_name(recv.tag()));
+    }
+    ObjectObj* o = recv.as_object();
+    if (slot < 0 || static_cast<size_t>(slot) >= o->props.size()) {
+      fail(f, std::string("field '") + p.str_const_at(name_const) +
+                  "' out of range");
+    }
+    return o;
+  }
+
   // Scalars cost nothing to rebuild; a string literal allocates on every
   // load, which the real version will not want. culebra's answer is that
   // constants are immortal and LoadConst does not refcount them at all
@@ -4265,8 +4861,10 @@ struct Exec {
           f.regs[in.a] = const_value(in.b);
           break;
         case Op::Neg:
-        case Op::BitNot: {
-          const UnOp uop = in.op == Op::BitNot ? UnOp::BitNot : UnOp::Neg;
+        case Op::BitNot:
+        case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
+        case Op::WrapU8: case Op::WrapU16: case Op::WrapU32: {
+          const UnOp uop = unop_of(in.op);
           const Value& v = f.regs[in.b];
           if (auto err = unop_error(uop, v); !err.empty()) fail(f, err);
           f.regs[in.a] = apply_unop(uop, v);
@@ -4276,7 +4874,9 @@ struct Exec {
         case Op::Eq:  case Op::Ne:  case Op::Lt:  case Op::Le:
         case Op::Gt:  case Op::Ge:
         case Op::BitAnd: case Op::BitOr: case Op::BitXor:
-        case Op::Shl: case Op::Shr: {
+        case Op::Shl: case Op::Shr:
+        case Op::UDiv: case Op::UMod: case Op::UShr:
+        case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe: {
           const BinOp op = binop_of(in.op);
           const Value& l = f.regs[in.b];
           const Value& r = f.regs[in.c];
@@ -4303,6 +4903,47 @@ struct Exec {
             continue;
           }
           break;
+        case Op::Switch: {
+          const SwitchTable& t = ch.switch_tables[static_cast<size_t>(in.b)];
+          int32_t target = -1;
+          if (t.has_keys()) {
+            const Value& subj = f.regs[in.a];
+            if (t.key_kind == coreir::ConstKind::Int) {
+              if (!subj.is_int()) {
+                fail(f, std::string("switch subject is ") +
+                            type_name(subj.tag()) + ", not int");
+              }
+              const int64_t key = subj.as_int();
+              if (t.dense) {
+                // Unsigned, so a base far from the subject cannot overflow
+                // the subtraction the way a signed one would, and so the
+                // one wrapped comparison below stands in for both halves
+                // of an off >= 0 / off < size pair: a subject below base,
+                // or past the table's end, wraps to a huge value either
+                // way and fails the same bounds check.
+                const uint64_t off = static_cast<uint64_t>(key) -
+                                     static_cast<uint64_t>(t.base);
+                if (off < t.pcs.size()) {
+                  target = t.pcs[static_cast<size_t>(off)];
+                }
+              } else {
+                target = sparse_arm_pc(t.int_keys, t.arm_pcs, key);
+              }
+            } else {
+              if (!subj.is_str()) {
+                fail(f, std::string("switch subject is ") +
+                            type_name(subj.tag()) + ", not str");
+              }
+              target = sparse_arm_pc(t.str_keys, t.arm_pcs, subj.as_str());
+            }
+          }
+          if (target < 0) target = t.default_pc;
+          if (target >= 0) {
+            f.pc = static_cast<size_t>(target);
+            continue;
+          }
+          break;
+        }
         case Op::OutRaw: {
           const std::string s = to_display(f.regs[in.a]);
           coreir_rt_out_raw(s.data(), static_cast<int64_t>(s.size()));
@@ -4416,6 +5057,32 @@ struct Exec {
           index_set(recv, key, f.regs[in.c]);
           break;
         }
+        case Op::FieldGet: {
+          ObjectObj* o = field_target(f, f.regs[in.b], in.c, in.d, "get");
+          // Direct slot access, not ObjectObj::find: the whole point of
+          // FieldGet is that the front end already knows the offset, so
+          // this pays no key comparison at all, let alone find()'s linear
+          // scan over every prop before this one. Safe even when in.a ==
+          // in.b (the compiler routinely reuses the receiver's own
+          // register as the destination here, the same shape Index's
+          // compilation gives it): Value::operator= copies its argument
+          // into a temporary and retains it before releasing *this, so
+          // reading out of the very object *this holds the only reference
+          // to is exactly the self-assignment case that idiom exists for.
+          f.regs[in.a] = o->props[static_cast<size_t>(in.c)].second;
+          break;
+        }
+        case Op::FieldSet: {
+          ObjectObj* o = field_target(f, f.regs[in.a], in.b, in.d, "set");
+          // A plain overwrite of an existing slot, never a new key -- so
+          // unlike ObjectObj::set() this never has a drop key to register:
+          // a struct's drop key (if it has one) is already registered, from
+          // when ObjectLit first built it with that key present. See the
+          // FieldGet/FieldSet Tag comment for why front ends must build
+          // every field through ObjectLit before any FieldSet reaches it.
+          o->props[static_cast<size_t>(in.b)].second = f.regs[in.c];
+          break;
+        }
         case Op::Len: {
           const Value& v = f.regs[in.b];
           if (auto err = len_error(v); !err.empty()) fail(f, err);
@@ -4510,6 +5177,47 @@ struct Exec {
                         " to double");
           }
           f.regs[in.a] = Value::make_double(v.as_number());
+          break;
+        }
+        case Op::ToFloat32: {
+          const Value& v = f.regs[in.b];
+          if (!v.is_number()) {
+            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
+                        " to float");
+          }
+          // Round-trip through float and back: the one thing a front end
+          // for a language with both float and double cannot write itself,
+          // the same way ToStr's digits are the one thing it cannot derive
+          // from a number in-language. A magnitude beyond float's range is
+          // undefined behavior for a bare static_cast<float> ([conv.double]
+          // defines the cast only up to the destination type's range), so
+          // that range is handled by hand rather than left to the cast --
+          // Java and C# both round such a value to +-infinity, not a trap,
+          // and NaN survives the round trip as NaN either way. The boundary
+          // for that is not float's own max: round-to-nearest sends
+          // everything below the midpoint between kFloatMax and 2^128 back
+          // down to kFloatMax, the same as an in-range value would round,
+          // and only that midpoint (kFloatOverflow) and beyond actually
+          // overflows to infinity.
+          const double d = v.as_number();
+          constexpr double kFloatMax =
+              static_cast<double>(std::numeric_limits<float>::max());
+          constexpr double kFloatOverflow = 0x1.ffffffp127;  // (2-2^-24)*2^127
+          double result;
+          if (std::isnan(d)) {
+            result = d;
+          } else if (d >= kFloatOverflow) {
+            result = std::numeric_limits<double>::infinity();
+          } else if (d > kFloatMax) {
+            result = kFloatMax;
+          } else if (d <= -kFloatOverflow) {
+            result = -std::numeric_limits<double>::infinity();
+          } else if (d < -kFloatMax) {
+            result = -kFloatMax;
+          } else {
+            result = static_cast<double>(static_cast<float>(d));
+          }
+          f.regs[in.a] = Value::make_double(result);
           break;
         }
         case Op::FMod: {
