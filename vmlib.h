@@ -2904,6 +2904,17 @@ inline std::optional<std::string> verify(const Module& m) {
         static_cast<size_t>(f.num_captures) != f.capture_names.size()) {
       return std::string("func name table does not match its slot count");
     }
+    // The params are the first num_params locals, so a frame that declares
+    // more params than locals has the call write past its own locals array
+    // (push_closure fills [0, num_params) of a vector sized num_locals).
+    // The name-table check above already pins num_locals and num_captures to
+    // a real size; num_cells and num_params have no table to be pinned by.
+    if (f.num_cells < 0 || f.num_params < 0) {
+      return std::string("func slot count is negative");
+    }
+    if (f.num_params > f.num_locals) {
+      return std::string("func declares more params than locals");
+    }
     if (!v.check_node(f.body, f, 0, 0)) return v.err;
   }
   if (!m.funcs[0].capture_names.empty()) {

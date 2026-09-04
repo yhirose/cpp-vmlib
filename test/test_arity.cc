@@ -271,6 +271,80 @@ int main() {
              "fnarity output");
   }
 
+  // --- 7. The params window has to fit inside the locals. -----------------
+  // push_closure fills [0, num_params) of a locals vector sized num_locals,
+  // for the ordinary frame and the generator activation alike. A func that
+  // declares more params than locals therefore writes past that vector, so
+  // verify() has to refuse it rather than leave it to the run.
+  {
+    using namespace coreir;
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.call_value(b.make_closure(1, 0, p), {b.literal(1, p)}, p), {}, {}});
+    Func f{"f", 0, 0, NodeId{}, {}, {}};  // no locals at all
+    f.num_params = 1;                     // ... and one param
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+    const auto err = coreir::verify(m);
+    check_eq(err ? *err : "", "func declares more params than locals",
+             "params past locals: verify message");
+  }
+  {
+    // The same shape with is_generator set takes the other filling loop.
+    using namespace coreir;
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.call_value(b.make_closure(1, 0, p), {b.literal(1, p)}, p), {}, {}});
+    Func g{"g", 1, 0, NodeId{}, {"a"}, {}};
+    g.num_params = 2;  // one more than it has locals
+    g.is_generator = true;
+    g.body = b.make_yield(b.literal(0, p), p);
+    m.funcs.push_back(g);
+    const auto err = coreir::verify(m);
+    check_eq(err ? *err : "", "func declares more params than locals",
+             "generator params past locals: verify message");
+  }
+  {
+    // A negative count has no name table to be pinned by, and would reach
+    // vector::assign as a huge size_t.
+    using namespace coreir;
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    Func main_fn{"main", 0, 0, NodeId{}, {}, {}};
+    main_fn.num_cells = -1;
+    main_fn.body = b.block({}, p);
+    m.funcs.push_back(main_fn);
+    const auto err = coreir::verify(m);
+    check_eq(err ? *err : "", "func slot count is negative",
+             "negative slot count: verify message");
+  }
+  {
+    // And the ordinary shape stays accepted: params == locals is the norm.
+    using namespace coreir;
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.call_value(b.make_closure(1, 0, p), {b.literal(1, p)}, p), {}, {}});
+    Func f{"f", 1, 0, NodeId{}, {"a"}, {}};
+    f.num_params = 1;
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+    const auto err = coreir::verify(m);
+    check_eq(err ? *err : "", "", "params fit locals: accepted");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;
