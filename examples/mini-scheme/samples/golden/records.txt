@@ -1,0 +1,12 @@
+Sunday midweek Saturday unknown
+vowel other
+#t #f
+3 4
+10
+25
+5 #t
+#f #f
+2 8 18 
+on the y-axis
+small x
+large x
