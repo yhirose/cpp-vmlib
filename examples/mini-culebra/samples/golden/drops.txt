@@ -1,0 +1,44 @@
+reverse order (c escapes as the return value):
+  drop b
+  drop a
+  drop c
+reverse order (nothing escapes):
+  drop b
+  drop a
+captured bindings keep their place in the order:
+  peek a
+  drop a
+  drop z
+on an unwinding throw:
+  drop t2
+  drop t1
+  caught x
+on an early return:
+  drop r2
+  drop r1
+  early
+defer first, then the bindings:
+  defer
+  drop d2
+  drop d1
+block scope:
+  in block
+  drop inner
+  after block
+  drop outer
+for-in lifetimes:
+  body e1
+  drop loc-e1
+  body e2
+  drop loc-e2
+  drop e1
+  drop e2
+  after loop
+object literal:
+  literal body
+  literal drop
+cycle dropped at the owning scope's exit: 2
+  still held: 2
+dropped with its holder: 3
+end of program
+top-level defer

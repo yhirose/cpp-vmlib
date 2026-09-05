@@ -1,0 +1,70 @@
+# Generators. `fn` whose body yields is Func::is_generator, `yield` is
+# Tag::Yield, and `for ... in` over one is GenResume in a loop -- whose
+# {value, done} answer is the shape the iteration protocol already wants.
+
+fn count(n) {
+  mut i = 1
+  while i <= n {
+    yield i
+    i = i + 1
+  }
+}
+mut out = []
+for v in count(4) { out.push(v) }
+println("basic: {out}")
+
+# Lazy: nothing in the body runs until the loop asks for a value, and it
+# stops again at each yield.
+mut effects = []
+fn noisy() {
+  effects.push('started')
+  yield 'a'
+  effects.push('middle')
+  yield 'b'
+  effects.push('finished')
+}
+let g = noisy()
+println("before: {effects}")
+mut got = []
+for v in g { got.push(v) }
+println("after: {got} {effects}")
+
+# `yield from` delegates: the loop it would be if written out, which is
+# what this binder lowers it to.
+fn inner() { yield 'x'; yield 'y' }
+fn outer() {
+  yield 1
+  yield from inner()
+  yield from [7, 8]
+  yield 2
+}
+mut seq = []
+for v in outer() { seq.push(v) }
+println("delegated: {seq}")
+
+# Generators compose, because a generator is iterable like anything else.
+fn doubled(src) {
+  for v in src { yield v * 2 }
+}
+mut comp = []
+for v in doubled(count(3)) { comp.push(v) }
+println("composed: {comp}")
+
+# A generator closes over what was around it, like any other function.
+fn from_offset(k) {
+  fn gen() { yield k; yield k + 1 }
+  gen
+}
+mut off = []
+for v in from_offset(10)() { off.push(v) }
+println("captured: {off}")
+
+# break leaves a generator part-way through; nothing forces it to finish.
+mut partial = []
+for v in count(100) {
+  if v > 3 { break }
+  partial.push(v)
+}
+println("break: {partial}")
+
+println("types: {type_of(count)}")

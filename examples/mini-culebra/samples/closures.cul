@@ -1,0 +1,57 @@
+# Closures: which bindings become cells, and what a capture map is for.
+
+fn counter() {
+  mut n = 0
+  fn bump() { n = n + 1; n }
+  bump
+}
+let c1 = counter()
+let c2 = counter()
+println("independent: {c1()} {c1()} {c2()} {c1()}")
+
+# Two levels of nesting: `x` is a capture in the middle function and a
+# capture again in the innermost -- the forwarding table that fills it
+# belongs to the site building the closure, not to the function.
+fn outer(x) {
+  fn middle(y) {
+    fn inner(z) { x + y + z }
+    inner
+  }
+  middle
+}
+println("nested: {outer(1)(2)(3)}")
+
+# Lambdas, and a function value passed to the host: `map` is a native that
+# calls back into the program (see stdlib() in binder.cc).
+let double = |x| x * 2
+let add = |x, y| x + y
+println("lambdas: {double(21)} {add(1, 2)} {[1, 2, 3].map(double)}")
+println("anon fn: {[1, 2].map(fn (x) { x * x })}")
+
+# A parameter a nested function captures is copied out of its slot into a
+# cell on entry -- the calling convention stays about locals only.
+fn adder(n) { |m| n + m }
+println("captured param: {adder(10)(5)} {adder(100)(5)}")
+
+# A block is a scope, and a closure over a block-scoped binding keeps it
+# alive after the block is gone.
+mut held = nil
+{
+  let secret = 'inner'
+  held = || secret
+}
+println("block scope: {held()}")
+
+# Recursion through a declared name.
+fn fact(n) { if n < 2 { 1 } else { n * fact(n - 1) } }
+println("recursion: {fact(10)}")
+
+# A closure that mutates what it captured, shared with the frame that made it.
+fn tally() {
+  mut items = []
+  let add = |v| items.push(v)
+  add(1)
+  add(2)
+  items
+}
+println("shared cell: {tally()}")

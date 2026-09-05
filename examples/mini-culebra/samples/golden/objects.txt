@@ -1,0 +1,16 @@
+read: 1 2 origin
+missing field: nil Nil
+literal: {x: 1, y: 2, label: 'origin'}
+keys: ['x', 'y', 'label'] 3
+nested: deep 2
+instance: Box {mut v: 10, mut extra: true} 10
+array: 3 10 30 [10, 20, 30]
+mutated: [10, 21, 30, 40]
+popped: 40 [10, 21, 30]
+mapped: [11, 22, 31]
+reference: 4 true
+for-in: 15
+keys loop: ['x=1', 'y=2', 'label=origin']
+break/continue: ['00', '10', '20']
+protocol: hi world
+strict index: !IndexError !KeyError

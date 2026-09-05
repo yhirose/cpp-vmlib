@@ -1,0 +1,8 @@
+independent: 1 2 1 3
+nested: 6
+lambdas: 42 3 [2, 4, 6]
+anon fn: [1, 4]
+captured param: 15 105
+block scope: inner
+recursion: 3628800
+shared cell: [1, 2]

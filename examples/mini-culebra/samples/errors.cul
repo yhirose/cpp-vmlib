@@ -1,0 +1,89 @@
+# throw / try / catch, and `defer`. A `defer` is Tag::Defer -- a callable
+# the enclosing Scope runs however it is left -- so the block is compiled
+# as a function of its own, and everything it reads becomes a capture.
+
+fn attempt(f) { try { "ok {f()}" } catch e { "caught {e}" } }
+println(attempt(|| 1 + 1))
+println(attempt(|| throw 'boom'))
+
+# try/catch is an expression, so its value is the arm that ran.
+let v = try { throw 'x' } catch e { 'recovered' }
+println("expression: {v}")
+
+# An error this front end raises itself carries a kind and a message,
+# which is culebra's shape for one.
+fn kind(f) { try { "{f()}" } catch e { "{e.kind}: {e.message}" } }
+println("kinds: {kind(|| [1][9])}")
+println("kinds: {kind(|| {a: 1}['b'])}")
+
+# defer is LIFO, and runs on every exit path.
+fn lifo() {
+  defer { println('  cleanup A') }
+  defer { println('  cleanup B') }
+  println('  work')
+}
+println('lifo:')
+lifo()
+
+fn failing() {
+  defer { println('  cleanup on throw') }
+  throw 'inner'
+}
+println('on throw:')
+println(attempt(failing))
+
+fn early() {
+  defer { println('  cleanup on return') }
+  return 42
+}
+println('on return:')
+println("  {early()}")
+
+# A defer in a block runs at the block's exit, not the function's.
+fn blockwise() {
+  println('  before')
+  {
+    defer { println('  block defer') }
+    println('  in block')
+  }
+  println('  after')
+}
+println('block scope:')
+blockwise()
+
+# defer inside a loop body: once per iteration, including the one that
+# breaks out.
+println('loop:')
+mut j = 0
+while j < 3 {
+  j = j + 1
+  {
+    defer { println("  iter {j}") }
+    if j == 2 { break }
+  }
+}
+
+# Nesting: the inner handler runs first, and rethrowing reaches the outer.
+mut trace = []
+let outcome = try {
+  try {
+    throw 'inner'
+  } catch e {
+    trace.push("inner saw {e}")
+    throw 'rethrown'
+  }
+} catch e {
+  trace.push("outer saw {e}")
+  'done'
+}
+println("nested: {outcome} {trace}")
+
+# A defer whose scope is left by a throw still runs, and the throw
+# continues afterwards.
+fn both() {
+  defer { println('  defer ran') }
+  let r = try { throw 'a' } catch e { "handled {e}" }
+  r
+}
+println('defer with catch:')
+println("  {both()}")

@@ -1,0 +1,15 @@
+arith: 7 5 3 1 -1
+floats: 3.5 3.0 3.0 0.30000000000000004
+display: 4.0 100.0 1.5 2 0.0
+strings: ab 3 0
+bools: true false false true true true
+nil: nil true
+eq: true false true false
+deep eq: true false
+obj eq: true false
+if-expr: neg n y
+logic: false true true
+types: Long Float String Nil
+types: Bool Array Object
+while: 5 15
+body value: 2

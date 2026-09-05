@@ -1,0 +1,50 @@
+# Classes. There is no class in the IR: a class value is an object holding
+# its methods, an instance is an object pointing back at it, and `C.new(...)`
+# is a constructor this binder synthesizes -- see emit_class.
+
+class Point {
+  new(x, y) { self.x = x; self.y = y }
+  norm2() { self.x * self.x + self.y * self.y }
+  scaled(k) { Point.new(self.x * k, self.y * k) }
+  label(tag) { "{tag}({self.x}, {self.y})" }
+}
+
+let p = Point.new(3, 4)
+println("fields: {p.x} {p.y}")
+println("method: {p.norm2()}")
+println("chained: {p.scaled(2).norm2()}")
+println("args: {p.label('P')}")
+println("display: {p}")
+println("type: {type_of(p)} {type_of(Point)}")
+
+# The class value itself is an object with one enumerable key: its methods
+# are not properties a program can enumerate, which is culebra's rendering.
+println("class value: {Point}")
+
+# Every function's parameter 0 is `self`, which is what lets a method be
+# taken as a value and applied to a receiver later.
+let q = Point.new(1, 2)
+q.x = 9
+println("mutable fields: {q} {q.norm2()}")
+
+# Instances are values with identity: two with equal fields are equal
+# structurally, because that is what culebra's `==` does for objects.
+println("equality: {Point.new(1, 2) == Point.new(1, 2)}")
+println("identity: {p == p}")
+
+# A method that builds another instance, and a collection of them.
+mut ps = []
+for k in [1, 2, 3] { ps.push(Point.new(k, k)) }
+mut norms = []
+for one in ps { norms.push(one.norm2()) }
+println("collection: {norms}")
+
+# Classes nest inside functions, and close over what is around them.
+fn make_class(offset) {
+  class Shifted {
+    new(v) { self.v = v + offset }
+  }
+  Shifted
+}
+let S = make_class(100)
+println("closed-over class: {S.new(5)}")

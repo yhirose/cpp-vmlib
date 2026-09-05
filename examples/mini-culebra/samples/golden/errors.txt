@@ -1,0 +1,27 @@
+ok 2
+caught boom
+expression: recovered
+kinds: IndexError: index out of range
+kinds: KeyError: key not present
+lifo:
+  work
+  cleanup B
+  cleanup A
+on throw:
+  cleanup on throw
+caught inner
+on return:
+  cleanup on return
+  42
+block scope:
+  before
+  in block
+  block defer
+  after
+loop:
+  iter 1
+  iter 2
+nested: done ['inner saw inner', 'outer saw rethrown']
+defer with catch:
+  defer ran
+  handled a

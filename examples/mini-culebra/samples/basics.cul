@@ -1,0 +1,39 @@
+# Scalars and operators. Almost none of this needed a helper: culebra's
+# Long is the VM's Int, its Float is the VM's Double, `/` on two Longs is
+# integer division and `%` is C's -- which is what eval_binop already does.
+
+println("arith: {1 + 2 * 3} {7 - 2} {7 / 2} {7 % 3} {0 - 7 % 3}")
+println("floats: {7 / 2.0} {1 + 2.0} {1.0 * 3} {0.1 + 0.2}")
+println("display: {4.0} {100.0} {1.5} {2} {0 - 0.0}")
+println("strings: {'a' + 'b'} {'abc'.size()} {''.size()}")
+println("bools: {true} {false} {!true} {1 < 2} {2 <= 2} {'a' < 'b'}")
+println("nil: {nil} {nil == nil}")
+
+# `==` is the one operator that needed writing: BinOp::Eq refuses two
+# values of different types, and culebra answers false. Arrays and objects
+# compare structurally, which no intrinsic does either.
+println("eq: {1 == 1.0} {1 == 'a'} {'a' == 'a'} {true == 1}")
+println("deep eq: {[1, [2]] == [1, [2]]} {[1] == [1, 2]}")
+println("obj eq: {{a: 1, b: 'x'} == {a: 1, b: 'x'}} {{a: 1} == {a: 2}}")
+
+# `if` is an expression, and its condition is a Bool, a Long or a Float --
+# which is Value::truthy()'s own rule for those three, so a condition is a
+# bare Tag::If with nothing in front of it.
+let sign = if 0 - 3 < 0 { 'neg' } else if 0 - 3 > 0 { 'pos' } else { 'zero' }
+println("if-expr: {sign} {if 0 { 'y' } else { 'n' }} {if 2 { 'y' } else { 'n' }}")
+println("logic: {true && false} {false || true} {1 < 2 && 2 < 3}")
+
+println("types: {type_of(1)} {type_of(1.0)} {type_of('s')} {type_of(nil)}")
+println("types: {type_of(true)} {type_of([1])} {type_of({a: 1})}")
+
+mut i = 0
+mut total = 0
+while i < 5 { i = i + 1; total = total + i }
+println("while: {i} {total}")
+
+# `let x = v` evaluates to v, and a function answers its body's last value
+# -- so a body ending in a binding hands that binding's value back. That is
+# not a curiosity: it is what decides whether the last resource a function
+# declares dies at the scope's exit or at the call site. See drops.cul.
+fn last_binding() { let a = 1; let b = a + 1 }
+println("body value: {last_binding()}")

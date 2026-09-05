@@ -1,0 +1,12 @@
+fields: 3 4
+method: 25
+chained: 100
+args: P(3, 4)
+display: Point {mut x: 3, mut y: 4}
+type: Object Object
+class value: {new: [function]}
+mutable fields: Point {mut x: 9, mut y: 2} 85
+equality: true
+identity: true
+collection: [2, 8, 18]
+closed-over class: Shifted {mut v: 105}

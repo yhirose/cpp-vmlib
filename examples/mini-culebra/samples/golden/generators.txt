@@ -1,0 +1,8 @@
+basic: [1, 2, 3, 4]
+before: []
+after: ['a', 'b'] ['started', 'middle', 'finished']
+delegated: [1, 'x', 'y', 7, 8, 2]
+composed: [2, 4, 6]
+captured: [10, 11]
+break: [1, 2, 3]
+types: Function

@@ -1,0 +1,65 @@
+# Objects and arrays, and the difference culebra draws between `.name` and
+# `['name']`: a missing field reads as nil, a missing key raises.
+#
+# An object literal's properties are immutable in culebra (a mutable one is
+# written `{mut x: 1}`), so everything here that changes is either an array
+# or a class instance -- whose fields are mutable, which is why a printed
+# instance marks them `mut`.
+
+let p = {x: 1, y: 2, label: 'origin'}
+println("read: {p.x} {p['y']} {p.label}")
+println("missing field: {p.zz} {type_of(p.zz)}")
+println("literal: {p}")
+println("keys: {p.keys()} {p.size()}")
+
+let nested = {a: {b: {c: 'deep'}}, list: [1, [2, 3]]}
+println("nested: {nested.a.b.c} {nested.list[1][0]}")
+
+class Box {
+  new(v) { self.v = v }
+  get() { self.v }
+}
+let b = Box.new(1)
+b.v = 10
+b.extra = true
+println("instance: {b} {b.get()}")
+
+let xs = [10, 20, 30]
+println("array: {xs.size()} {xs[0]} {xs[2]} {xs}")
+xs[1] = 21
+xs.push(40)
+println("mutated: {xs}")
+println("popped: {xs.pop()} {xs}")
+println("mapped: {xs.map(|v| v + 1)}")
+
+# Arrays are references; a copy is something a program writes.
+let alias = xs
+alias.push(99)
+println("reference: {xs.size()} {alias == xs}")
+
+mut sum = 0
+for v in [1, 2, 3, 4, 5] { sum = sum + v }
+println("for-in: {sum}")
+
+mut seen = []
+for k in p.keys() { seen.push("{k}={p[k]}") }
+println("keys loop: {seen}")
+
+# break and continue name the innermost loop.
+mut pairs = []
+for i in [0, 1, 2] {
+  for j in [0, 1, 2] {
+    if j == 1 { continue }
+    if j == 2 { break }
+    pairs.push("{i}{j}")
+  }
+}
+println("break/continue: {pairs}")
+
+# An object holding a function is how culebra writes a protocol; the
+# function's parameter 0 is `self`, so it reaches the object it is on.
+let greeter = {name: 'world', greet: fn () { "hi {self.name}" }}
+println("protocol: {greeter.greet()}")
+
+fn err(f) { try { "{f()}" } catch e { "!{e.kind}" } }
+println("strict index: {err(|| [1, 2][5])} {err(|| p['nope'])}")

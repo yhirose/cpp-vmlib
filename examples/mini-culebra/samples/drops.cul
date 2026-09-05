@@ -1,0 +1,152 @@
+# Destructor timing. This is the sample the front end exists for: the
+# owned stack in vmlib.h is described in its own comment as "culebra's
+# design", and everything below is that design's observable behaviour,
+# checked against culebra itself.
+#
+# An Object whose drop key holds a callable is a resource. Two ways to make
+# one: a class with a `drop()` method, and an object literal with a `drop`
+# property -- and the key it really lands under is unspellable from the
+# language, which is why a program cannot forge or read it.
+
+class R {
+  new(id) { self.id = id }
+  drop() { println("  drop {self.id}") }
+}
+
+# Reverse declaration order at the scope's exit. Note the last binding: a
+# body answers its last value and `let x = v` evaluates to v, so `c`
+# escapes as the return value and dies at the call site, after the others.
+fn plain() {
+  let a = R.new('a')
+  let b = R.new('b')
+  let c = R.new('c')
+}
+println('reverse order (c escapes as the return value):')
+plain()
+
+fn ends_in_nil() {
+  let a = R.new('a')
+  let b = R.new('b')
+  nil
+}
+println('reverse order (nothing escapes):')
+ends_in_nil()
+
+# A captured binding lives in a cell, not a slot -- and cells are not in a
+# Scope's local range at all. Getting the order right across the two is
+# what the Scope's explicit release list is for.
+fn captured() {
+  let z = R.new('z')
+  let a = R.new('a')
+  let peek = || a.id
+  println("  peek {peek()}")
+  nil
+}
+println('captured bindings keep their place in the order:')
+captured()
+
+# Every exit path, not just the last statement.
+fn thrown() {
+  let a = R.new('t1')
+  let b = R.new('t2')
+  throw 'x'
+}
+println('on an unwinding throw:')
+println("  caught {try { thrown() } catch e { e }}")
+
+fn returned() {
+  let a = R.new('r1')
+  let b = R.new('r2')
+  return 'early'
+}
+println('on an early return:')
+println("  {returned()}")
+
+# defer runs before the bindings, and is LIFO among defers.
+fn with_defer() {
+  let a = R.new('d1')
+  defer { println('  defer') }
+  let b = R.new('d2')
+  nil
+}
+println('defer first, then the bindings:')
+with_defer()
+
+# A block is a scope of its own.
+fn blocks() {
+  let outer = R.new('outer')
+  {
+    let inner = R.new('inner')
+    println('  in block')
+  }
+  println('  after block')
+  nil
+}
+println('block scope:')
+blocks()
+
+# for-in: the body's own bindings first, then the element.
+fn loops() {
+  for x in [R.new('e1'), R.new('e2')] {
+    let loc = R.new("loc-{x.id}")
+    println("  body {x.id}")
+  }
+  println('  after loop')
+  nil
+}
+println('for-in lifetimes:')
+loops()
+
+# An object literal is a resource too, when it carries a drop.
+fn literal() {
+  let o = {name: 'o', drop: fn () { println('  literal drop') }}
+  println('  literal body')
+  nil
+}
+println('object literal:')
+literal()
+
+# What reference counting alone cannot do: a cycle. The scope that owns it
+# resolves it at its own exit -- a trial deletion over the candidates'
+# subgraph, not a full collection -- so the destructors still run in a
+# place the program can point at.
+let log = []
+class C {
+  new(lg) { self.log = lg }
+  drop() { self.log.push(1) }
+}
+fn cyclic() {
+  let a = C.new(log)
+  let b = C.new(log)
+  a.peer = b
+  b.peer = a
+  nil
+}
+fn run_cyclic() { cyclic(); nil }
+run_cyclic()
+println("cycle dropped at the owning scope's exit: {log.size()}")
+
+# A cycle that escapes is not the scope's to resolve; it goes when its
+# holder does.
+fn escapes(sink) {
+  let a = C.new(log)
+  a.me = a
+  sink.push(a)
+  nil
+}
+fn run_escapes() {
+  let sink = []
+  escapes(sink)
+  println("  still held: {log.size()}")
+  nil
+}
+run_escapes()
+println("dropped with its holder: {log.size()}")
+
+# A top-level binding lives to the end of the program and is released
+# without its destructor -- culebra's rule, and the reason this front end
+# runs with RunOptions::entry_frame_drops off and a [0, 0) Scope on the
+# entry frame. Only a top-level defer runs at exit.
+defer { println('top-level defer') }
+let top = R.new('top')
+println('end of program')
