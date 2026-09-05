@@ -1,31 +1,36 @@
 # mini-go
 
 The second front end for cpp-vmlib's Core-IR, and a narrower one than
-PL/0 on purpose: it exists to prove five of `vmlib.h`'s own recipes work
+PL/0 on purpose: it exists to prove six of `vmlib.h`'s own recipes work
 end to end, against a real oracle, rather than to be a Go implementation.
 See the top-level README's **Fixed-width integers**, **`float`**,
-**Static calls**, **Struct fields** and **Switch** sections for what each
-recipe says a front end should do; this front end is those sections turned
-into running code, checked against `go run`.
+**Static calls**, **Struct fields**, **Switch** and **Strings and slices**
+sections for what each recipe says a front end should do; this front end
+is those sections turned into running code, checked against `go run`.
 
 A source file here is real Go -- every sample in `samples/` also runs
 unmodified under `go run`, and each sample's `golden/` output was captured
 that way, the same relationship PL/0's samples have to culebra's own PL/0
 interpreter. What is covered: top-level `func`s with typed params and an
 optional return type, `var` with an explicit `int32`/`int64`/`uint32`/
-`float32`/`float64`/`bool` type, assignment, `return`, `fmt.Println`,
-arithmetic (`+ - * /`), comparison (`== != < <= > >=`) and type-conversion
-(`int32(x)`, `float64(x)`, ...) expressions, `type ... struct` declarations
-with field access and assignment (`p.X`, `p.From.X = v`, any depth),
+`float32`/`float64`/`bool`/`string` or `[]T` type, assignment, `return`,
+`fmt.Println`, arithmetic (`+ - * / %`), comparison (`== != < <= > >=`) and
+type-conversion (`int32(x)`, `float64(x)`, ...) expressions, `type ...
+struct` declarations with field access and assignment (`p.X`,
+`p.From.X = v`, any depth), slices of a scalar (`[]int64{}`, `xs[i]`,
+`xs[i] = v`, `xs = append(xs, v)`, `len(xs)`), strings (`"..."` with the
+four escapes `\n \t \\ \"`, `+`, all six comparisons, `len(s)`),
 `switch` over an `int32`/`int64`/`uint32` subject with `case a, b:` and
 `default`, `if`/`else`, the condition-only `for`, and goroutines with
 unbuffered channels (`go f(args)`, `chan T`, `make(chan T)`, `ch <- v`,
 `<-ch`) -- see **Goroutines** below. What is deliberately absent: methods,
-multiple return values, slices/maps, `select`, buffered channels, and a
-struct as a func parameter or return type -- none of those exercise this
-front end's recipes any further, and a struct crossing a call boundary
-raises value-semantics questions (does the callee's copy alias the
-caller's?) that are orthogonal to what Struct fields is here to prove.
+multiple return values, maps, `select`, buffered channels, a call to a
+result-less func as a statement, a slice whose element is anything but a
+scalar, and a struct as a func parameter or return type -- none of those
+exercise this front end's recipes any further, and a struct crossing a
+call boundary raises value-semantics questions (does the callee's copy
+alias the caller's?) that are orthogonal to what Struct fields is here to
+prove.
 
 ## Running
 
@@ -149,7 +154,44 @@ The sample's every print is ordered by a channel handshake, so its output
 is the same under Go's scheduler (which may run goroutines in parallel)
 and vmlib's (one at a time, one thread).
 
-## Two grammar pitfalls worth knowing if you touch `grammar.h`
+## Slices and strings: what the recipe leaves to the language
+
+`samples/slices/slices.go` and `samples/strings/strings.go` are the top-
+level README's **Strings and slices** section as running Go. Most of it is
+a direct lowering -- a `[]T` is an `ArrayObj` and `xs[i]` is `Index`, a
+`string` is the executor's own `Str` and `s + "x"` is `Add`, `len` is the
+`Len` intrinsic for both -- and the two places it is not are worth stating.
+
+**A slice aliases; a struct does not.** `var alias []int32 = seeded`
+leaves both names on one `ArrayObj`, so a write through either is visible
+through the other -- which is exactly Go, and exactly why none of this
+needs the `copy_struct` the struct samples do. The two rules sit next to
+each other in `emit_local_value`: `copy_struct` is a no-op for everything
+that is not `Type::Struct`, and that is the whole difference.
+
+**`append` is a statement here, not an expression.** Go's `append` returns
+a new slice header and may or may not reuse the backing array; whether a
+later write through the result is visible through the original depends on
+the capacity the original happened to have. `ArrayPush` is unconditionally
+the reuse-it case -- it grows the one `ArrayObj` in place -- so the two
+agree only in the shape where there is no second header to disagree
+through. `Binder::emit_append` requires that shape syntactically:
+`xs = append(xs, v)`, target and first argument the same variable, and
+anything else (`ys = append(xs, v)`, an `append` in an expression) is a
+diagnostic rather than a program that would have printed something `go
+run` does not.
+
+`len` answers `int64`, not Go's own `int` -- a type this front end does
+not have. That costs nothing, because the conversion real Go needs anyway
+(`int64(len(s))`, since `int` and `int64` are distinct types there) is a
+no-op here.
+
+A slice's element is one of the seven scalars and never a struct, a
+channel or another slice: `TypeRef` carries one `second_half`, and an
+element that needs its own has nowhere to record it. `[]Point` is a
+diagnostic, not a silently unchecked type.
+
+## Three grammar pitfalls worth knowing if you touch `grammar.h`
 
 **`no_ast_opt`.** `ret`, `print` and `neg` each have exactly one child (the
 thing they wrap), and `params`/`args`/`stmts`/`program` are lists that can
@@ -176,10 +218,17 @@ the fix: `'struct'` is a keyword literal, not another `ident`, so it has no
 trailing `_` of its own to fall back on. Caught by every struct sample
 failing on its own `type ... struct` line.
 
+**`structlit` has to be tried before `slicelit`.** `slicelit <- type '{'
+_ args '}' _`, and `type`'s last alternative is a bare identifier, so
+`Point{}` matches it too -- with an empty `args` -- and would bind as
+"Point is not a slice type". The reverse never happens: `[]int64{}` cannot
+match `structlit`, which starts with an `ident`. So ordering `structlit`
+first costs nothing and is the only order that parses both.
+
 ## Testing
 
 `ctest -R mini-go-samples` runs
-`samples/{ints,floats,structs,switch,goroutines}/*.go`
+`samples/{ints,floats,structs,switch,goroutines,slices,strings}/*.go`
 and requires the output to match a golden file (`samples/golden/`)
 captured from `go run` -- see PL/0's own README for why an external,
 independent oracle is what "passing" means here, not just this binary

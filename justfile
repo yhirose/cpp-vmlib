@@ -20,7 +20,8 @@ test: build
 bench *args: build
     ./build/bench/bench {{args}}
 
-# The same fib(25) through each front end's own binary and, where actually
+# Five small programs -- startup, fib(28), a tight loop, a container, naive
+# string building -- through each front end's own binary and, where actually
 # installed, the real language it imitates (bench/languages/run.sh).
 bench-lang *args: build
     bench/languages/run.sh {{args}}

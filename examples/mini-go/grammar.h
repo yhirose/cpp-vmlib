@@ -2,16 +2,22 @@
 // accepts every sample verbatim -- the oracle this front end's tests check
 // against is the real language, not a second implementation of it. What it
 // covers: top-level funcs with typed params/return, `var` with an explicit
-// fixed-width or float type, assignment, `return`, `fmt.Println`, arithmetic/
-// comparison/type-conversion expressions, `type ... struct` declarations with
-// field access/assignment (`p.X`, `p.X = v`), `switch` over an int subject,
-// `if`/`else` and the condition-only `for`, and goroutines with unbuffered
-// channels: `go f(args)`, `chan T` as a var/param type, `make(chan T)`,
-// `ch <- v` and `<-ch` (as an expression or a statement). No methods, no
-// multiple return values, no `select`, no buffered channels -- this front
-// end exists to exercise vmlib's Fixed-width integers, `float`, Static
-// calls, Struct fields, Switch and (with goroutines) Coroutines + scheduler
-// recipes (see the top-level README), not to be a Go implementation.
+// fixed-width, float, `string` or `[]T` type, assignment, `return`,
+// `fmt.Println`, arithmetic/comparison/type-conversion expressions,
+// `type ... struct` declarations with field access/assignment (`p.X`,
+// `p.X = v`), slices of a scalar (`[]int64{}`, `xs[i]`, `xs[i] = v`,
+// `len(xs)`, and `append` only in the `xs = append(xs, v)` shape binder.cc
+// insists on), string literals with the four escapes `\n \t \\ \"`,
+// `switch` over an int subject, `if`/`else` and the condition-only `for`,
+// and goroutines with unbuffered channels: `go f(args)`, `chan T` as a
+// var/param type, `make(chan T)`, `ch <- v` and `<-ch` (as an expression
+// or a statement). No methods, no multiple return values, no maps, no
+// `select`, no buffered channels, and no bare call statement (every call
+// here is an expression or a `go`) -- this front end exists to exercise
+// vmlib's Fixed-width integers, `float`, Static calls, Struct fields,
+// Switch, Strings and slices, and (with goroutines) Coroutines +
+// scheduler recipes (see the top-level README), not to be a Go
+// implementation.
 //
 // `if x {` with a bare identifier as the condition is a syntax error here:
 // `structlit` (tried ahead of `primary`) eats `x {` as a struct literal
@@ -51,6 +57,15 @@
 //     grammar does not have), but no sample needs it, so the mark stays
 //     for whichever future case does turn out to have one child rather
 //     than being load-bearing today.
+//
+// `structlit` has to stay ahead of `slicelit` in `unary`. `slicelit` is
+// `type '{' args '}'`, and `type`'s last alternative is a bare identifier,
+// so `Point{}` matches it too -- with an empty `args` -- and would reach
+// the binder as "Point is not a slice type". The reverse cannot happen:
+// `[]int64{}` has no `ident` for `structlit` to start on. So this order
+// costs nothing and is the only one that parses both. (`index` sits after
+// both for the same reason it sits before `call` and `primary`: it is the
+// longer match on `xs[i]`, and neither literal rule can begin one.)
 
 #pragma once
 
@@ -67,15 +82,16 @@ inline constexpr const char* kGrammar = R"(
   func       <- 'func' __ ident '(' _ params ')' _ type? '{' _ stmts '}' _
   params     <- (param (',' _ param)*)?                     { no_ast_opt }
   param      <- ident type
-  type       <- < ('chan' __)? ('int32' / 'int64' / 'uint32' / 'float32'
-                  / 'float64' / 'bool' / [a-zA-Z_][a-zA-Z0-9_]*) > _
+  type       <- < ('chan' __)? '[]'? ('int32' / 'int64' / 'uint32' / 'float32'
+                  / 'float64' / 'bool' / 'string' / [a-zA-Z_][a-zA-Z0-9_]*) > _
 
   stmts      <- stmt*                                       { no_ast_opt }
-  stmt       <- vardecl / assign / ret / print / switchstmt / gostmt
-              / sendstmt / recvstmt / forstmt / ifstmt
+  stmt       <- vardecl / indexassign / assign / ret / print / switchstmt
+              / gostmt / sendstmt / recvstmt / forstmt / ifstmt
 
   vardecl    <- 'var' __ ident type '=' _ expr
   assign     <- ident ('.' ident)* '=' _ expr
+  indexassign <- ident '[' _ expr ']' _ '=' _ expr
   ret        <- 'return' __ expr                             { no_ast_opt }
   print      <- 'fmt.Println' _ '(' _ expr ')' _              { no_ast_opt }
 
@@ -99,19 +115,23 @@ inline constexpr const char* kGrammar = R"(
   additive   <- multiplicative (addop multiplicative)*
   addop      <- < [-+] > _
   multiplicative <- unary (mulop unary)*
-  mulop      <- < [*/] > _
-  unary      <- neg / recv / makechan / structlit / fieldaccess / call / primary
+  mulop      <- < [*/%] > _
+  unary      <- neg / recv / makechan / structlit / slicelit / index
+              / fieldaccess / call / primary
   neg        <- '-' _ unary                                   { no_ast_opt }
   recv       <- '<-' _ ident                                  { no_ast_opt }
   makechan   <- 'make' _ '(' _ type ')' _                      { no_ast_opt }
   structlit  <- ident '{' _ fieldinits '}' _
+  slicelit   <- type '{' _ args '}' _
+  index      <- ident '[' _ expr ']' _
   fieldinits <- (fieldinit (',' _ fieldinit)*)?                { no_ast_opt }
   fieldinit  <- ident ':' _ expr
   fieldaccess <- ident ('.' ident)+
   call       <- ident '(' _ args ')' _
   args       <- (expr (',' _ expr)*)?                         { no_ast_opt }
-  primary    <- number / ident / '(' _ expr ')' _
+  primary    <- number / strlit / ident / '(' _ expr ')' _
 
+  strlit     <- '"' < ('\\' . / [^"\\])* > '"' _
   number     <- < [0-9]+ ('.' [0-9]+)? > _
   ident      <- < [a-zA-Z_] [a-zA-Z0-9_]* > _
 

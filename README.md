@@ -540,30 +540,38 @@ work, since a front end that is competitive on recursive calls (`fib`)
 might not be on a tight arithmetic loop (`loop`), a container built and
 then walked (`array`), or naive string concatenation (`strings`). A fifth
 program, `startup`, prints a constant and does nothing else: process
-startup is not free, and it varies wildly across these seven real
-languages (roughly a millisecond for `lua5.4`, fifty for `python3`, on the
-machine this was written on) -- reading a workload's `real_ms` next to
-`startup`'s own is what tells "this language is slow here" apart from
-"this language is slow to start". All five run through each of the seven
-dynamic/static front ends' own binary and, where that real language is
-actually installed, through it too -- `python3`, `ruby`, `lua5.4`,
-`guile`, `culebra`, `node`, `dotnet`. (mini-scheme has no vectors and
-immutable pairs, so `array.scm` builds and sums a list by tail recursion
-instead of by indexing -- the same total, reached the way this language
-actually reaches it. `loop` and `array` also fold their running total
-through a modulus on every step, not to add work but to keep the answer
-inside a JS `number`'s exact 53-bit range -- JavaScript has no true
-integer, and past that range `node` would legitimately disagree with the
-other six on the exact total.) C# is the one language here
-with a real compile step, and `dotnet build` on a scratch project costs
-around a second on its own -- more than every other language's steady-
-state number combined -- so it is paid once per workload, outside the
-timed loop, the same principle bench/bench.cc itself uses for the
-executor's own compile step. A language not found on `PATH`
-is skipped and reported as `-` rather than failing the run, since not
-every machine has all seven -- CI installs what it reasonably can (see its
-own workflow for exactly what) and gets a `-`-free table as a result, but
-a local run stays honest about whatever this one happens to be missing.
+startup is not free, and it varies wildly across these eight real
+languages (roughly a millisecond for a compiled Go binary or `lua5.4`,
+fifty for `python3`, on the machine this was written on) -- reading a
+workload's `real_ms` next to `startup`'s own is what tells "this language
+is slow here" apart from "this language is slow to start". All five run
+through each of the eight front ends' own binary and, where that real
+language is actually installed, through it too -- `python3`, `ruby`,
+`lua5.4`, `guile`, `culebra`, `node`, `dotnet`, `go`. (mini-scheme has no
+vectors and immutable pairs, so `array.scm` builds and sums a list by tail
+recursion instead of by indexing -- the same total, reached the way this
+language actually reaches it. mini-go is the one statically typed front
+end here, so its five programs are the only ones that spell out a type --
+`var total int64 = 0`, `[]int64`, `string` -- and are otherwise the same
+programs; each also runs unmodified under `go run`. `loop` and `array`
+also fold their running total through a modulus on every step, not to add
+work but to keep the answer inside a JS `number`'s exact 53-bit range --
+JavaScript has no true integer, and past that range `node` would
+legitimately disagree with the other seven on the exact total.) C# and Go
+are the two languages here with a real compile step. `dotnet build` on a
+scratch project costs around a second on its own -- more than every other
+language's steady-state number combined -- so it is paid once per
+workload, outside the timed loop, the same principle bench/bench.cc itself
+uses for the executor's own compile step; Go gets the same treatment
+because `go run` compiles and links on every invocation, so timing it
+would report a compiler rather than a runtime. What the script times for
+Go is the binary `go build` produced, which is why its `startup` row is
+the floor the rest of the table reads against. A language's own toolchain
+not found on `PATH` is skipped and reported as `-` rather than failing the
+run, since not every machine has all eight -- CI installs what it
+reasonably can (see its own workflow for exactly what) and gets a `-`-free
+table as a result, but a local run stays honest about whatever this one
+happens to be missing.
 Run it as `bench/languages/run.sh --reps N` after building with
 `-DVMLIB_BUILD_EXAMPLES=ON`; CI runs both this and `bench/bench.cc` on every
 push and puts the results in the job summary, not in an artifact nobody
@@ -574,7 +582,7 @@ opens.
 | Front end | Parser | Notes |
 |---|---|---|
 | [PL/0](examples/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [examples/pl0/README.md](examples/pl0/README.md). |
-| [mini-go](examples/mini-go/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields, Switch, and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. See [examples/mini-go/README.md](examples/mini-go/README.md). |
+| [mini-go](examples/mini-go/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers (`%` included), `float`, Static calls, Struct fields, Switch, Strings and slices (a `[]T` is an `ArrayObj`, a `string` the executor's own `Str`), and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. The one statically typed front end here, which is what its `bench/languages` numbers are measuring. See [examples/mini-go/README.md](examples/mini-go/README.md). |
 | [mini-ruby](examples/mini-ruby/) | PEG, via cpp-peglib | A slice of Ruby, and the only front end that uses **`FnArity`** and **`ArgCount`** -- Ruby makes both program-visible, as `Proc#arity` and as the difference between a proc (lenient) and a lambda (an `ArgCount` test in its prologue). Blocks travel as an implicit parameter 0, which is what `yield`, `block_given?` and `&blk` are all made of. `ensure` is a `Defer`, reached from a third direction. `class` with inheritance and `super` is the same object-holding-a-table recipe examples/mini-python and examples/mini-csharp use, `case`/`when` is a three-way `===`, and a default parameter is evaluated in the method's own scope rather than the enclosing one, both without disturbing what FnArity/ArgCount mean. See [examples/mini-ruby/README.md](examples/mini-ruby/README.md). |
 | [mini-scheme](examples/mini-scheme/) | PEG, via cpp-peglib | A slice of Scheme, and the front end that shows a *boundary* rather than a recipe: the escape half of `call/cc` is a `TryCatch` and works, while the re-entrant half is the "multi-shot continuations" entry in this README's own list of what stays out of reach -- and the binary says so by name when a program asks for it. Also where **Tail calls** are load-bearing rather than an optimization (iteration in Scheme is tail recursion and nothing else), and the smallest front end here by a wide margin. `case` and R7RS's `define-record-type` (a class table with no source body, like examples/mini-python's constructor) round out the everyday syntax without adding a grammar rule -- both are ordinary lists to a homoiconic parser. See [examples/mini-scheme/README.md](examples/mini-scheme/README.md). |
 | [mini-python](examples/mini-python/) | PEG, via cpp-peglib | A slice of Python 3. The only front end that proves **Arbitrary-precision integers** -- Python's `int` is unbounded by definition, so `python3` is an oracle for the bignum this library deliberately has no `Value` tag for -- and the only one that shows `with` as a `Scope` plus a `Defer`. Also the only one whose *lexical* structure a PEG cannot express, so its indentation is normalized into INDENT/DEDENT markers before parsing. See [examples/mini-python/README.md](examples/mini-python/README.md). |

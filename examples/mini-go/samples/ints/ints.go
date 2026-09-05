@@ -28,4 +28,15 @@ func main() {
 
 	var widened float64 = float64(a)
 	fmt.Println(widened)
+
+	// `%` at each width. The int32 line is the edge the Fixed-width
+	// integers recipe is about: Go's remainder keeps the dividend's sign,
+	// and a normalized operand gets that for free -- as does a uint32 past
+	// int32's range, which needs no unsigned form of the operator because
+	// nothing about it has a sign bit to reinterpret.
+	var neg int32 = -2147483648
+	fmt.Println(neg % 3)
+	fmt.Println(neg % -1)
+	fmt.Println(u % 7)
+	fmt.Println(big % 1000000007)
 }

@@ -1,8 +1,8 @@
-// This binder's whole reason to exist is proving five of vmlib.h's own
+// This binder's whole reason to exist is proving six of vmlib.h's own
 // recipes work end to end, against a real oracle (`go run`), not just
 // against this repository's own tests -- see the top-level README's
-// "Fixed-width integers", "`float`", "Static calls", "Struct fields" and
-// "Switch" sections:
+// "Fixed-width integers", "`float`", "Static calls", "Struct fields",
+// "Switch" and "Strings and slices" sections:
 //
 //   * every int32/uint32 var stays normalized (README's convention) and
 //     gets WrapI32/WrapU32 after Add/Sub/Mul, WrapI32 after Div (the
@@ -30,6 +30,15 @@
 //     code: Go structs are values, so a struct crossing into new storage
 //     (a var, a plain or field assign, a struct literal's own field) is a
 //     fresh ObjectLit, not the source's ObjectObj shared by reference;
+//   * a `[]T` is an ArrayObj and a `string` the executor's own Str, so
+//     `xs[i]`, `xs[i] = v`, `len` and `s + "x"` are Index, SetIndex, the
+//     Len intrinsic and Add with nothing in between -- and the one place
+//     the recipe leaves a choice to the language is `append`, which
+//     emit_append accepts only in the `xs = append(xs, v)` shape, the one
+//     where ArrayPush's grow-in-place cannot disagree with Go's own
+//     may-or-may-not-reallocate answer. A slice aliases and a struct does
+//     not, which in this binder is exactly copy_struct being a no-op for
+//     every type but Type::Struct;
 //   * a `switch` lowers straight to coreir::Switch with no extra work,
 //     because Go's own case semantics (no fallthrough) already are
 //     Switch's; `case a, b:` shares one compiled body NodeId between both
@@ -41,9 +50,11 @@
 //     (emit_channel_runtime) over CoroCurrent / CoroYield / Enqueue.
 //
 // What is deliberately absent, because it is not what this front end is
-// for: methods, multiple return values, `select`, buffered channels, and
-// a struct as a func parameter or return type (structs here are
-// local-only). A source file here is real Go, though a narrow slice of
+// for: methods, multiple return values, maps, `select`, buffered channels,
+// a call to a result-less func as a statement, a slice whose element is
+// anything but a scalar (TypeRef has one second_half, and an element that
+// needs its own has nowhere to go), and a struct as a func parameter or
+// return type (structs here are local-only). A source file here is real Go, though a narrow slice of
 // it -- every sample also runs unmodified under `go run`.
 
 #include "binder.h"
@@ -68,14 +79,18 @@ using namespace coreir;
 namespace mini_go {
 namespace {
 
-// Struct and Chan are deliberately last and outside type_from_name's
+// Struct, Chan and Slice are deliberately last and outside type_from_name's
 // vocabulary: a struct's identity is its name in the struct table
-// (Binder::structs), a channel's is its element type, and neither is a
-// fixed word this front end knows ahead of time, so resolving either needs
-// more than this free function (Binder::resolve_type). Both carry their
-// second half in the `second_half` field beside them: the structs index for
-// a Struct, the element Type (one of the six scalars) for a Chan.
-enum class Type { I32, I64, U32, F32, F64, Bool, Struct, Chan };
+// (Binder::structs), a channel's and a slice's is its element type, and none
+// of the three is a fixed word this front end knows ahead of time, so
+// resolving any of them needs more than this free function
+// (Binder::resolve_type). All three carry their second half in the
+// `second_half` field beside them: the structs index for a Struct, the
+// element Type for a Chan or a Slice. That one int32 is also why a slice's
+// element is one of the seven scalars and never a struct, a channel or
+// another slice -- there is no room beside it for a second second-half, and
+// no sample needs one.
+enum class Type { I32, I64, U32, F32, F64, Bool, Str, Struct, Chan, Slice };
 
 const char* type_name(Type t) {
   switch (t) {
@@ -85,8 +100,10 @@ const char* type_name(Type t) {
     case Type::F32: return "float32";
     case Type::F64: return "float64";
     case Type::Bool: return "bool";
+    case Type::Str: return "string";
     case Type::Struct: return "struct";
     case Type::Chan: return "chan";
+    case Type::Slice: return "slice";
   }
   return "?";
 }
@@ -98,6 +115,7 @@ std::optional<Type> type_from_name(const std::string& s) {
   if (s == "float32") return Type::F32;
   if (s == "float64") return Type::F64;
   if (s == "bool") return Type::Bool;
+  if (s == "string") return Type::Str;
   return std::nullopt;
 }
 
@@ -120,6 +138,32 @@ int64_t parse_int(const std::string& s, const Ast& at) {
   return static_cast<int64_t>(v);
 }
 
+// A string literal's body as the bytes it stands for. Go's own escape
+// vocabulary is much larger (\u, \x, \007, ...); these four are the ones
+// with no way to write the character otherwise inside a `"..."`, and any
+// other backslash is refused rather than passed through as itself -- a
+// literal that quietly meant something different here than under `go run`
+// is exactly the divergence the golden files exist to catch, so it is a
+// diagnostic instead.
+std::string unescape(const std::string& body, const Ast& at) {
+  std::string out;
+  out.reserve(body.size());
+  for (size_t i = 0; i < body.size(); ++i) {
+    if (body[i] != '\\') { out.push_back(body[i]); continue; }
+    if (++i == body.size()) fail(at, "unterminated escape in string literal");
+    switch (body[i]) {
+      case 'n': out.push_back('\n'); break;
+      case 't': out.push_back('\t'); break;
+      case '\\': out.push_back('\\'); break;
+      case '"': out.push_back('"'); break;
+      default:
+        fail(at, std::string("unsupported escape '\\") + body[i] +
+                     "' in string literal");
+    }
+  }
+  return out;
+}
+
 const Ast* find_child(const Ast& a, std::string_view name) {
   for (const auto& n : a.nodes) {
     if (n->name == name) return n.get();
@@ -132,6 +176,7 @@ BinOp binop_of(std::string_view t, const Ast& at) {
   if (t == "-") return BinOp::Sub;
   if (t == "*") return BinOp::Mul;
   if (t == "/") return BinOp::Div;
+  if (t == "%") return BinOp::Mod;
   if (t == "==") return BinOp::Eq;
   if (t == "!=") return BinOp::Ne;
   if (t == "<") return BinOp::Lt;
@@ -142,22 +187,25 @@ BinOp binop_of(std::string_view t, const Ast& at) {
 }
 
 // Whether a Type needs its second_half to be fully described: a Struct (which
-// struct) and a Chan (which element type). Every other Type is
-// self-describing.
-bool has_second_half(Type t) { return t == Type::Struct || t == Type::Chan; }
+// struct), a Chan and a Slice (which element type). Every other Type,
+// `string` included, is self-describing.
+bool has_second_half(Type t) {
+  return t == Type::Struct || t == Type::Chan || t == Type::Slice;
+}
 
 // Two Struct-typed values (or hints) are the same type only if they name
-// the same struct, two Chan-typed ones only if they carry the same element
-// -- the one comparison Type alone, a plain enum, cannot make.
+// the same struct, two Chan- or Slice-typed ones only if they carry the
+// same element -- the one comparison Type alone, a plain enum, cannot make.
 bool same_type(Type t1, int32_t half1, Type t2, int32_t half2) {
   return t1 == t2 && (!has_second_half(t1) || half1 == half2);
 }
 
-// A struct- or chan-typed target gives a literal nothing to take on. Hints
-// exist for Go's untyped constants -- `var x int32 = 1` is what narrows the
-// 1 -- and no literal syntax here can ever become a struct or a channel, so
-// such a target hands down nullopt and lets the assignment's own same_type
-// check produce the message rather than literal_as's cruder "cannot use an
+// A struct-, chan- or slice-typed target gives a literal nothing to take on.
+// Hints exist for Go's untyped constants -- `var x int32 = 1` is what
+// narrows the 1 -- and no bare literal can ever become one of those three
+// (a slice literal carries its own element type in its syntax), so such a
+// target hands down nullopt and lets the assignment's own same_type check
+// produce the message rather than literal_as's cruder "cannot use an
 // integer literal as a struct". Four positions want exactly this (vardecl,
 // a plain assign, a field assign and a structlit's fieldinit), which is why
 // it is a function rather than the same ternary spelled out four times.
@@ -166,11 +214,11 @@ std::optional<Type> hint_for(Type t) {
   return t;
 }
 
-// A resolved `type` token: a fixed scalar, or one of the two types that
+// A resolved `type` token: a fixed scalar, or one of the three types that
 // need a second half (has_second_half) -- Type::Struct plus which entry of
-// Binder::structs it names, or Type::Chan plus its element Type. The two
-// share one field because no type needs both, and -1 means "none", which
-// is what a self-describing type carries.
+// Binder::structs it names, or Type::Chan / Type::Slice plus its element
+// Type. The three share one field because no type needs both, and -1 means
+// "none", which is what a self-describing type carries.
 struct TypeRef { Type type; int32_t second_half = -1; };
 
 // A variable's slot and static type; a function's own call-target cells
@@ -222,8 +270,9 @@ struct Binder {
   std::vector<StructDef> structs;
 
   // Struct(second_half).name when t == Type::Struct, "chan <elem>" for a
-  // Chan, else type_name(t) -- the one place a diagnostic needs a type's
-  // own spelling rather than the bare word "struct" or "chan".
+  // Chan, "[]<elem>" for a Slice, else type_name(t) -- the one place a
+  // diagnostic needs a type's own spelling rather than the bare word
+  // "struct", "chan" or "slice".
   std::string describe_type(Type t, int32_t second_half) const {
     if (t == Type::Struct) {
       return structs[static_cast<size_t>(second_half)].name;
@@ -231,17 +280,31 @@ struct Binder {
     if (t == Type::Chan) {
       return std::string("chan ") + type_name(static_cast<Type>(second_half));
     }
+    if (t == Type::Slice) {
+      return std::string("[]") + type_name(static_cast<Type>(second_half));
+    }
     return type_name(t);
   }
 
-  // A `type` token as any of the three things it can name: one of
-  // type_from_name's six fixed words; `chan T` for one of those six (the
-  // grammar captures the two words as one token, whitespace and all); or a
-  // struct declared by an earlier (in source order -- this front end
-  // resolves field and var types in one linear pass, so a struct's own
-  // fields may only name structs declared above it) structdecl.
+  // A `type` token as any of the four things it can name: one of
+  // type_from_name's seven fixed words; `chan T` or `[]T` for one of those
+  // seven (the grammar captures a `chan T`'s two words as one token,
+  // whitespace and all); or a struct declared by an earlier (in source
+  // order -- this front end resolves field and var types in one linear
+  // pass, so a struct's own fields may only name structs declared above it)
+  // structdecl.
   TypeRef resolve_type(const std::string& s, const Ast& at) {
     if (auto t = type_from_name(s)) return {*t, -1};
+    // []T. The element is one of the scalars and nothing else: TypeRef has
+    // one second_half, so an element that needs its own ([]Point, [][]int64,
+    // []chan int32) has nowhere to record it -- rejected here rather than
+    // silently resolved to something this binder cannot then check.
+    if (s.size() > 2 && s.compare(0, 2, "[]") == 0) {
+      const std::string elem = s.substr(2);
+      auto t = type_from_name(elem);
+      if (!t) fail(at, "unsupported slice element type '" + elem + "'");
+      return {Type::Slice, static_cast<int32_t>(*t)};
+    }
     if (s.size() > 4 && s.compare(0, 4, "chan") == 0 &&
         std::isspace(static_cast<unsigned char>(s[4]))) {
       std::string elem = s.substr(4);
@@ -660,6 +723,9 @@ struct Binder {
   TypedExpr literal_as(int64_t v, Type ty, const Ast& at, SrcPos p) {
     Builder b(m);
     if (ty == Type::Bool) fail_at(p, "cannot use an integer literal as bool");
+    if (ty == Type::Str) {
+      fail_at(p, "cannot use an integer literal as string");
+    }
     if (ty == Type::Struct) {
       fail_at(p, "cannot use an integer literal as a struct");
     }
@@ -686,10 +752,16 @@ struct Binder {
       case Type::F32: return b.intrinsic(IntrinsicId::ToFloat32, {raw}, p);
       case Type::I64: case Type::F64: return raw;
       case Type::Bool: fail(at, std::string("cannot ") + verb + " bool");
+      // `s + "x"` never reaches here -- emit_binary answers concatenation
+      // before it normalizes anything, because there is no width to
+      // normalize a string to. Every other operator on one lands here.
+      case Type::Str: fail(at, std::string("cannot ") + verb + " string");
       case Type::Struct:
         fail(at, std::string("cannot ") + verb + " a struct");
       case Type::Chan:
         fail(at, std::string("cannot ") + verb + " a channel");
+      case Type::Slice:
+        fail(at, std::string("cannot ") + verb + " a slice");
     }
     fail(at, "unreachable");
   }
@@ -707,8 +779,11 @@ struct Binder {
       // identity, which would answer a different question -- so refuse it
       // at bind time rather than let the executor's own "cannot eq object
       // and object" stand in for a diagnostic, the same way printing a
-      // struct is refused in "print" below. Channels the same, and an
-      // ordering of bools is not Go either.
+      // struct is refused in "print" below. Channels the same; slices are
+      // not comparable in Go at all; and an ordering of bools is not Go
+      // either. Strings are not in that company: Go orders them
+      // lexicographically and so does the executor, so all six operators
+      // fall straight through.
       if (has_second_half(l.type) ||
           (l.type == Type::Bool && op != BinOp::Eq && op != BinOp::Ne)) {
         fail(at, "cannot compare " + describe_type(l.type, l.second_half) +
@@ -718,11 +793,31 @@ struct Binder {
       // wrap or an unsigned form (README's Fixed-width integers section).
       return {b.binary(op, l.node, r.node, p), Type::Bool};
     }
+    // Go's only operator on two strings is `+`, and it concatenates: no
+    // width to normalize to, so this answers ahead of the arithmetic path
+    // rather than inside it.
+    if (l.type == Type::Str) {
+      if (op != BinOp::Add) {
+        fail(at, "operator " + std::string(at.token) + " is not defined on string");
+      }
+      return {b.binary(op, l.node, r.node, p), Type::Str};
+    }
+    // `%` is integers only in Go -- float64 has math.Mod, not an operator --
+    // and the executor's own "cannot mod double" would say it as a runtime
+    // trap rather than a diagnostic at the operator's position.
+    if (op == BinOp::Mod && (l.type == Type::F32 || l.type == Type::F64)) {
+      fail(at, "operator % is not defined on " +
+                   describe_type(l.type, l.second_half));
+    }
     const NodeId raw = b.binary(op, l.node, r.node, p);
-    // Add/Sub/Mul can leave u32's range; Div cannot (both operands are
-    // already non-negative, so the quotient is too) -- README's own point
-    // about a normalized operand needing no wrap there.
-    if (l.type == Type::U32 && op == BinOp::Div) return {raw, Type::U32};
+    // Add/Sub/Mul can leave u32's range; Div and Mod cannot (both operands
+    // are already non-negative, so the quotient and the remainder are too)
+    // -- README's own point about a normalized operand needing no wrap
+    // there. That is also why plain Mod, not UMod, is right for a
+    // normalized uint32: nothing here has a sign bit to reinterpret.
+    if (l.type == Type::U32 && (op == BinOp::Div || op == BinOp::Mod)) {
+      return {raw, Type::U32};
+    }
     return {normalize(l.type, raw, at, "do arithmetic on"), l.type};
   }
 
@@ -801,10 +896,19 @@ struct Binder {
         }
       case Type::Bool:
         fail(at, "cannot convert to bool");
+      // Go's `string(x)` over an integer is a rune-to-UTF-8 conversion, not
+      // the decimal rendering everyone first expects (`go vet` warns about
+      // exactly that mistake); reproducing it would mean a UTF-8 encoder
+      // this front end has no reason to own, and getting it wrong would
+      // mean disagreeing with `go run` silently. Refused instead.
+      case Type::Str:
+        fail(at, "cannot convert to string");
       case Type::Struct:
         fail(at, "cannot convert to a struct");
       case Type::Chan:
         fail(at, "cannot convert to a channel");
+      case Type::Slice:
+        fail(at, "cannot convert to a slice");
     }
     fail(at, "unreachable");
   }
@@ -833,6 +937,11 @@ struct Binder {
         }
         return literal_as(parse_int(tok, a), hint.value_or(Type::I64), a, p);
       }
+      // "x" -- a Str value, whatever the hint says: unlike an integer
+      // literal, this one has a type of its own already, and the
+      // destination's own same_type check is what reports a mismatch.
+      case "strlit"_:
+        return {b.str_literal(unescape(std::string(a.token), a), p), Type::Str};
       case "ident"_: {
         const LocalInfo& li = local_of(a, ctx, std::string(a.token));
         return {b.varref(VarKind::Local, li.slot, p), li.type, li.second_half};
@@ -880,6 +989,39 @@ struct Binder {
         }
         return make_struct(sid, values, p);
       }
+      // []int64{}, or []int64{1, 2} -- children: the `type` token and an
+      // "args" list of element expressions. Nothing is copied on the way
+      // in: a slice element is one of the scalars (resolve_type's own
+      // restriction), and no scalar has copy_struct's aliasing problem.
+      case "slicelit"_: {
+        const TypeRef t = resolve_type(std::string(a.nodes[0]->token), a);
+        if (t.type != Type::Slice) {
+          fail(a, describe_type(t.type, t.second_half) +
+                      " is not a slice type");
+        }
+        const Type elem = static_cast<Type>(t.second_half);
+        std::vector<NodeId> values;
+        for (const auto& ePtr : find_child(a, "args")->nodes) {
+          TypedExpr v = emit_expr(*ePtr, ctx, elem);
+          if (!same_type(v.type, v.second_half, elem, -1)) {
+            fail(*ePtr, "cannot use " + describe_type(v.type, v.second_half) +
+                            " as " + type_name(elem) + " in a slice literal");
+          }
+          values.push_back(v.node);
+        }
+        return {b.array_lit(values, p), Type::Slice, t.second_half};
+      }
+      // xs[i] -- children: the slice ident and the index expression. Index
+      // is the same node the executor already answers for an ArrayObj, so
+      // the whole recipe here is "check it is a slice, check the subscript
+      // is an integer". Go's own out-of-range panic is the executor's
+      // trap, at the same source position.
+      case "index"_: {
+        const LocalInfo& li = slice_local(*a.nodes[0], ctx);
+        TypedExpr idx = emit_index(*a.nodes[1], ctx);
+        return {b.index(b.varref(VarKind::Local, li.slot, p), idx.node, p),
+                static_cast<Type>(li.second_half)};
+      }
       // p.X, or p.From.X for a field that is itself a struct -- children:
       // the receiver ident, then one ident per '.'. Each step resolves a
       // field to a slot the way structlit resolved it to one when the
@@ -909,6 +1051,27 @@ struct Binder {
       }
       case "call"_: {
         const std::string callee(find_child(a, "ident")->token);
+        // len(x) -- Go's own builtin, over the two things this front end
+        // has a length for. It answers int64 rather than Go's `int`, which
+        // this front end does not have: a sample writes `int64(len(s))`,
+        // which real Go needs anyway and which is a no-op here.
+        if (callee == "len") {
+          const Ast* argsNode = find_child(a, "args");
+          if (argsNode == nullptr || argsNode->nodes.size() != 1) {
+            fail(a, "len takes exactly one argument");
+          }
+          TypedExpr v = emit_expr(*argsNode->nodes[0], ctx, std::nullopt);
+          if (v.type != Type::Slice && v.type != Type::Str) {
+            fail(a, "len of " + describe_type(v.type, v.second_half));
+          }
+          return {b.intrinsic(IntrinsicId::Len, {v.node}, p), Type::I64};
+        }
+        // append is a statement here, not an expression -- see
+        // emit_append's own comment for why the `xs = append(xs, v)` shape
+        // is the only one this front end accepts.
+        if (callee == "append") {
+          fail(a, "append is only valid as `xs = append(xs, v)` here");
+        }
         if (auto conv = type_from_name(callee)) {
           const Ast* argsNode = find_child(a, "args");
           if (argsNode == nullptr || argsNode->nodes.size() != 1) {
@@ -979,6 +1142,68 @@ struct Binder {
       args.push_back(v.node);
     }
     return args;
+  }
+
+  // The local an ident names, required to be a slice -- what a read
+  // (`xs[i]`), a write (`xs[i] = v`) and an append all need first, and the
+  // same shape channel_local below has for the other container type.
+  const LocalInfo& slice_local(const Ast& ident, FuncCtx& ctx) {
+    const LocalInfo& li = local_of(ident, ctx, std::string(ident.token));
+    if (li.type != Type::Slice) {
+      fail(ident, "'" + std::string(ident.token) + "' (" +
+                      describe_type(li.type, li.second_half) +
+                      ") is not a slice");
+    }
+    return li;
+  }
+
+  // A subscript expression: any of the three integer types (Index itself
+  // wants an int, and a normalized i32/u32 already is one), never a float
+  // or a bool. Go's own rule, minus the untyped-constant machinery -- a
+  // bare `xs[0]` gets I64 from literal_as's own default and is fine.
+  TypedExpr emit_index(const Ast& a, FuncCtx& ctx) {
+    TypedExpr idx = emit_expr(a, ctx, std::nullopt);
+    if (idx.type != Type::I32 && idx.type != Type::I64 &&
+        idx.type != Type::U32) {
+      fail(a, "slice index must be an integer, not " +
+                  describe_type(idx.type, idx.second_half));
+    }
+    return idx;
+  }
+
+  // `xs = append(xs, v)`, and only that shape: the target and append's own
+  // first argument must be the same variable.
+  //
+  // Go's append returns a new slice header and may or may not reuse the
+  // backing array, so `ys := append(xs, v)` leaves whether a later write
+  // through ys is visible through xs up to the capacity xs happened to
+  // have. ArrayPush is unconditionally the first of those -- it grows the
+  // one ArrayObj in place -- so every other shape of append would agree
+  // with `go run` only by luck. Restricting the syntax to the form where
+  // the two answers coincide is what keeps this front end's "every sample
+  // also runs under go run, and prints the same thing" true, rather than
+  // true for the samples that happen to be here.
+  NodeId emit_append(const Ast& call, FuncCtx& ctx, const Ast& target,
+                     SrcPos p) {
+    Builder b(m);
+    const Ast* argsNode = find_child(call, "args");
+    if (argsNode == nullptr || argsNode->nodes.size() != 2) {
+      fail(call, "append takes exactly two arguments here");
+    }
+    const Ast& first = *argsNode->nodes[0];
+    if (first.tag != "ident"_ || first.token != target.token) {
+      fail(call, "append must be written `" + std::string(target.token) +
+                     " = append(" + std::string(target.token) + ", v)`");
+    }
+    const LocalInfo& li = slice_local(target, ctx);
+    const Type elem = static_cast<Type>(li.second_half);
+    TypedExpr v = emit_expr(*argsNode->nodes[1], ctx, elem);
+    if (!same_type(v.type, v.second_half, elem, -1)) {
+      fail(call, "cannot append " + describe_type(v.type, v.second_half) +
+                     " to " + describe_type(li.type, li.second_half));
+    }
+    return b.intrinsic(IntrinsicId::ArrayPush,
+                       {b.varref(VarKind::Local, li.slot, p), v.node}, p);
   }
 
   // The local an ident names, required to be a channel -- what both ends
@@ -1126,11 +1351,37 @@ struct Binder {
       // one -- so `p.From.X = v` writes through a FieldGet of `p`, not a
       // copy of `From`, which is what makes the write visible through `p`
       // afterward rather than only through a value read out of it.
+      // xs[i] = v -- children: the slice ident, the index, the value.
+      // SetIndex writes through the one ArrayObj the local holds, which is
+      // Go's own semantics for a slice: the write is visible through every
+      // other name for the same slice, and no copy_struct-style question
+      // arises because an element is always a scalar.
+      case "indexassign"_: {
+        const LocalInfo& li = slice_local(*a.nodes[0], ctx);
+        const Type elem = static_cast<Type>(li.second_half);
+        TypedExpr idx = emit_index(*a.nodes[1], ctx);
+        TypedExpr v = emit_expr(*a.nodes[2], ctx, elem);
+        if (!same_type(v.type, v.second_half, elem, -1)) {
+          fail(a, "cannot assign " + describe_type(v.type, v.second_half) +
+                      " to an element of " +
+                      describe_type(li.type, li.second_half));
+        }
+        return b.set_index(b.varref(VarKind::Local, li.slot, p), idx.node,
+                           v.node, p);
+      }
       case "assign"_: {
         const size_t nfields = a.nodes.size() - 2;
         if (nfields == 0) {
-          const LocalInfo& li =
-              local_of(a, ctx, std::string(find_child(a, "ident")->token));
+          const Ast& target = *find_child(a, "ident");
+          // `xs = append(xs, v)` is one statement, not an assignment of an
+          // expression: emit_append explains why it is spelled out here
+          // rather than reached through emit_expr like every other call.
+          const Ast& rhs = *a.nodes.back();
+          if (rhs.tag == "call"_ &&
+              find_child(rhs, "ident")->token == "append") {
+            return emit_append(rhs, ctx, target, p);
+          }
+          const LocalInfo& li = local_of(a, ctx, std::string(target.token));
           return b.assign(VarKind::Local, li.slot,
                          emit_local_value(*a.nodes.back(), ctx, li.type,
                                           li.second_half, a, p),
@@ -1157,15 +1408,18 @@ struct Binder {
         // names at runtime -- so refuse it rather than print `<object>`
         // and quietly stop agreeing with `go run`, the only thing this
         // front end's samples are checked against. A channel prints as an
-        // address in Go, which nothing could reproduce either.
+        // address in Go, which nothing could reproduce either, and a slice
+        // prints as `[1 4 9]`, which is not ToStr's rendering of an array.
+        // A string is fine: Go's Println writes it as itself, so does
+        // Print.
         if (has_second_half(val.type)) {
           fail(a, "cannot print a " + describe_type(val.type, val.second_half));
         }
         return b.intrinsic(IntrinsicId::Print, {val.node}, p);
       }
       // switch subject { case k1, k2: stmts ... [default: stmts] } --
-      // README's Switch recipe, concretely: this front end has no string
-      // type, so every key is Int, and Go's own case syntax already means
+      // README's Switch recipe, concretely: `caseval` has no string form,
+      // so every key here is Int, and Go's own case syntax already means
       // "no fallthrough", which is exactly coreir::Switch's own semantics,
       // needing no extra lowering to get there. A `case a, b:` shares one
       // compiled body NodeId across both keys (see the top-level README's

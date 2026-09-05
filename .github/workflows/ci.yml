@@ -63,12 +63,14 @@ jobs:
   # binop, or a variable access costs) and five small programs (bare
   # startup, calls, a tight loop, a container, string building) run
   # through each front end's own binary next to the real language it
-  # imitates (bench/languages). python3/ruby/node already come with the runner
-  # image; lua5.4/guile-3.0 are one apt install; dotnet is
+  # imitates (bench/languages). python3/ruby/node/go already come with the
+  # runner image; lua5.4/guile-3.0 are one apt install; dotnet is
   # actions/setup-dotnet; culebra has no package, so its own docs' latest-
   # release binary is fetched directly. bench/languages/run.sh still skips
   # (reports "-") whatever it does not find, which is what keeps a local
-  # run honest when one of these is missing there. Both benchmarks land in
+  # run honest when one of these is missing there. (Go needs no go.mod
+  # here: `go build prog.go` names its file explicitly, which works outside
+  # a module.) Both benchmarks land in
   # the job summary as tables, not as an artifact nobody opens.
   bench:
     runs-on: ubuntu-latest
