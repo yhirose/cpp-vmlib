@@ -44,17 +44,24 @@ summary-only table is browser-only and unreachable from here.
    gh run view --job=<job-id> --log \
      | cut -f3- \
      | sed -E 's/^[^ ]+ //' \
-     | grep -E '^(##|\||warning:)'
+     | grep -E '^(## |\||warning:)'
    ```
 
    Each log line is `<job><TAB><step><TAB><ISO timestamp> <content>`, so
    `cut -f3-` (whose delimiter is already a tab) drops the first two fields
    and the `sed` drops the timestamp, leaving the markdown behind. Doing the
    tab work in `cut` rather than in a `[^\t]` bracket keeps this off GNU
-   sed's own regex extensions. The `warning:`
-   arm catches run.sh's own answer check -- it prints one to stderr when a
-   front end's output does not match the workload's known result, which
-   matters far more than any timing on the same row.
+   sed's own regex extensions.
+
+   The space in `'^## '` is load-bearing: GitHub's own log markers are
+   `##[group]` / `##[endgroup]`, and a bare `^##` matches every one of them.
+   The two headings this wants both have a space after the hashes.
+
+   The `warning:` arm catches run.sh's own answer check -- it prints one to
+   stderr when a front end's output does not match the workload's known
+   result, which matters far more than any timing on the same row. It is
+   anchored for a reason too: node's `DeprecationWarning` lines are in this
+   log and are not that.
 
 5. **Render both tables** to the user as markdown, then say in a sentence
    or two what actually stands out. Worth calling out, in this order:
