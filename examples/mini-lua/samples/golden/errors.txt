@@ -1,0 +1,9 @@
+false	errors.lua:5: something broke
+true	fine	2
+false	table	42
+false	errors.lua:18: bottom
+true	outer saw false errors.lua:25: inner
+false	errors.lua:32: re: errors.lua:31: first
+true	7
+false
+true	false	errors.lua:45: in coroutine

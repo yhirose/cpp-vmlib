@@ -1,0 +1,16 @@
+7	5	12
+3.5	3	-4	1	2	-2
+1024.0	1.4142135623731
+integer	float	integer	float
+ab	n=1	12
+5	0
+T	T	T	F	F	T
+true	false	true	false	false
+true	true	true	true
+2	nil	x	y	0
+true	false	false
+1	1.0	5.0	0.3
+number	string	table	function	nil
+15	5
+3
+ABC	xyxyxy	el	llo

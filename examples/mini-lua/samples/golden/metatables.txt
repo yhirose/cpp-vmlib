@@ -1,0 +1,10 @@
+3	4	true
+25
+P(3, 4)
+100
+true	true
+shadowed	25
+made alpha	made beta
+alpha,beta
+a derived	derived
+2 8 18

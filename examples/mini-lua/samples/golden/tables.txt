@@ -1,0 +1,13 @@
+10	30	row	far	nil
+3
+4	40
+nil	10	30
+5	1,4,9,16,25
+6	36
+float overwrites it	string is its own key
+32
+1a 2b 3c
+2	x	nil
+3	1-2-3
+only	42
+table	0

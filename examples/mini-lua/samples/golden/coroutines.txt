@@ -1,0 +1,12 @@
+suspended
+true	11
+suspended
+true	10
+true	end!	and more
+dead
+false	cannot resume dead coroutine
+1,2,3,4
+true	from level 3
+true	finished
+x1/y1 x2/y2 xdone/ydone
+thread	dead	dead
