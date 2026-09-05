@@ -1,0 +1,28 @@
+Hello, Ada!
+Hi, Ada!
+Hello, Ada?
+Yo, Ada!
+Well, Ada...
+0
+1
+10
+60
+63
+a
+a 1 2
+a 1 loud=True n=3
+a z=1
+a 1 n=9
+[1]
+[1, 2]
+[3]
+[1, 2, 4]
+1 2
+0 1 2
+11 3
+1 4 305
+10
+12
+TypeError: strict() missing 1 required positional argument: 'b'
+TypeError: strict() takes 2 positional arguments but 3 were given
+TypeError: strict() got an unexpected keyword argument 'c'

@@ -1,0 +1,20 @@
+1 2 2
+100 2
+1 2 3
+1 4
+('inner', 'outer')
+(102, 'shadowed') 102
+True False
+True False True
+True True
+[('a', 1), ('c', 3)]
+[10, 30, 40]
+[10, 30]
+KeyError: 'zz'
+AssertionError: one is not two
+AssertionError: ''
+<hi ada>
+<ABAB>
+N:5 N:5
+[0, 1, 2, 3, 4, 5, 6]
+[1, 2, 3, 4, 5]

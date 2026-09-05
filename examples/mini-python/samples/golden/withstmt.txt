@@ -1,0 +1,7 @@
+['enter plain', 'body plain', 'exit plain']
+['enter outer', 'enter inner', 'body', 'exit inner', 'exit outer']
+returned ['enter return', 'body', 'exit return']
+['enter loop0', 'body 0', 'exit loop0', 'enter loop1', 'exit loop1']
+['enter raise', 'exit raise', 'caught thrown']
+['enter anonymous', 'body', 'exit anonymous']
+3 1

@@ -1,0 +1,23 @@
+nothing area=0
+rect area=12
+a square area=25
+4 2 2
+12 rect rect area=12
+True True True
+False
+True True True
+False
+$5
+$5 Money(5)
+True False
+True
+$3 in coins
+True
+got ok
+NotFound: no such key key
+AppError: something else
+caught by base: no such key
+Exception: NotFound
+Exception: ZeroDivisionError
+Exception: IndexError
+True False
