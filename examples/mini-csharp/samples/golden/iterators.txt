@@ -1,0 +1,9 @@
+0,1,4,9,16
+4,3,2,1
+0,1,2
+0,2,8,18
+a0 b0 a1 b1
+before: 
+after: started,middle,finished total 3
+0,1,4,9
+15 2

@@ -1,0 +1,7 @@
+open plain, body 42, close plain
+open outer, open inner, body, close inner, close outer
+7
+open return, body, close return
+open throw, close throw, caught boom, finally
+open loop, body 0, close loop, open loop, close loop
+inner finally, outer caught inner

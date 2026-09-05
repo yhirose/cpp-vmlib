@@ -1,0 +1,14 @@
+s0 is a shape of area 0
+r1 is a rectangle of area 12
+12
+rectangle
+q1 is a square of area 25
+25
+c1 is a circle of area 12
+plain is a shape of area 0
+rectangle 12
+square 25
+circle 12
+total 49
+r2 2 6
+60

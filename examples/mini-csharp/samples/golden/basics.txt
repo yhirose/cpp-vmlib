@@ -1,0 +1,32 @@
+3
+-3
+1
+-1
+0.25
+2
+7
+3.5
+3
+-3
+True
+True
+False
+True
+True
+hello, world
+5
+True
+True
+count: 3!
+sum: 3
+negative
+zero
+positive
+27
+120
+610
+4
+7
+37
+30-1-2-4
+one two
