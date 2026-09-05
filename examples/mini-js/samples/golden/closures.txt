@@ -1,0 +1,8 @@
+independent: [1, 2, 1, 3]
+per-iteration: [0, 1, 2]
+block scope: inner
+nested captures: 6
+mutual recursion: true
+higher order: 18
+captured parameter: [15, 105]
+accumulate: 10

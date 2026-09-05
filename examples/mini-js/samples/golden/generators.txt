@@ -1,0 +1,13 @@
+protocol: [{ value: 1, done: false }, { value: 2, done: false }, { value: 'done', done: true }, { value: undefined, done: true }]
+for-of: [1, 2, 3, 4]
+before first next: []
+after first next: ['started']
+drained: ['started', 'resumed', 'finished']
+sent values: ['ready', 'got one', { value: 'got two', done: true }]
+first: { value: 1, done: false }
+returned: { value: 'early', done: true }
+cleanup ran: ['cleaned']
+after return: { value: undefined, done: true }
+throw into: ['a', 'caught in', 'still going']
+composed: [2, 4, 6]
+typeof: ['function', 'object']

@@ -1,0 +1,9 @@
+caught: threw Error: boom
+thrown value: threw a string
+no throw: no throw
+order: ['try', 'catch TypeError', 'finally', 'after']
+return through finally: ['returned', ['body', 'finally on return']]
+throw through finally: ['threw RangeError: deep', ['finally on throw']]
+nested: ['inner saw inner', 'inner finally', 'outer saw rethrown']
+break through finally: ['body 0', 'finally 0', 'finally 1']
+fields: ['Error', 'has fields', 'object']

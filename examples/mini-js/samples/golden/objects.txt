@@ -1,0 +1,17 @@
+read: [1, 2, 'origin']
+missing: [undefined, 'undefined']
+write: { x: 10, y: 20, label: 'origin', extra: true }
+keys: ['x', 'y', 'label', 'extra']
+nested: ['deep', 2]
+write through: changed
+array: [3, 10, 30, undefined, undefined]
+mutated: [10, 21, 30, 40]
+popped: [40, [10, 21, 30]]
+slice: [[21, 30], [10, 21], [21, 30], []]
+join: ['10-21-30', '10,21,30', '']
+reference: [4, true]
+for-of array: 15
+for-of string: a.b.c.
+for-of keys: ['x=10', 'y=20', 'label=origin', 'extra=true']
+break/continue: ['00', '10', '20']
+function property: hi there

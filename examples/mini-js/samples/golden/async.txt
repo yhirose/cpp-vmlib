@@ -1,0 +1,10 @@
+call answers a promise: object
+awaited: body value
+awaited a value: 42
+nested await: 3
+caught from await: rejected
+executor: from executor
+chain: recovered from at 2
+adopted: inner
+main resolved: main value
+order: ['body start', 'after call', 'main start', 'sync tail', 'body end', 'executor ran', 'main end']

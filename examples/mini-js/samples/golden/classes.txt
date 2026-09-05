@@ -1,0 +1,11 @@
+fields: [3, 4]
+norm2: 25
+label: P(3, 4)
+chained: 100
+constructor property: true
+shadowed vs plain: ['shadowed', 25]
+chained mutation: 2
+arrow closes over this: [3, 4, 4]
+array of instances: [2, 8, 18]
+class over an outer variable: 16
+plain object method: [1, 2]
