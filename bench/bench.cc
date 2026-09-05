@@ -161,6 +161,42 @@ Module bench_call_loop() {
   });
 }
 
+// A self-tail-recursive accumulator: sum(n, acc) = n == 0 ? acc : sum(n -
+// 1, acc + n). With Func::tail_calls on, the call in the else branch is a
+// TailCall -- it reuses the current frame instead of pushing a new one --
+// which is the steady-state shape mini-lua/mini-scheme/mini-culebra/
+// mini-csharp's own tail-call recipes actually run at runtime, and until
+// now nothing here put a number on it the way call_fib does for the
+// frame-per-call path it deliberately avoids.
+Module bench_tail_call() {
+  Module m;
+  Builder b(m);
+  m.capture_maps.push_back({{VarKind::Cell, 0}});
+  m.funcs.push_back({});  // main, filled in below
+  m.funcs.push_back(
+      {"sum", 2, 1,
+       b.make_if(
+           b.binary(BinOp::Eq, loc(b, 0), lit(b, 0), P), loc(b, 1),
+           b.call_value(cap(b, 0),
+                        {b.binary(BinOp::Sub, loc(b, 0), lit(b, 1), P),
+                         add(b, loc(b, 1), loc(b, 0))},
+                        P),
+           P),
+       {"n", "acc"}, {"sum"}});
+  m.funcs.back().num_params = 2;
+  m.funcs.back().tail_calls = true;
+  m.funcs[0] = {"main", 0, 0,
+                b.block({b.assign(VarKind::Cell, 0, b.make_closure(1, 0, P), P),
+                         print(b, b.call_value(cell(b, 0),
+                                               {lit(b, 5000000), lit(b, 0)},
+                                               P)),
+                         b.assign(VarKind::Cell, 0, b.nil_literal(P), P)},
+                        P),
+                {}, {}};
+  m.funcs[0].num_cells = 1;
+  return m;
+}
+
 // Arithmetic and comparison through the executor's binop dispatch, over
 // locals: the Add/Sub/Mul/Lt path plus the local reads and writes it takes
 // to feed it.  sum = sum + (i * 2 - 1)
@@ -272,6 +308,7 @@ struct Case {
 
 const Case kCases[] = {
     {"call_fib", bench_call_fib},         {"call_loop", bench_call_loop},
+    {"tail_call", bench_tail_call},
     {"loop_arith", bench_loop_arith},     {"var_access", bench_var_access},
     {"str_const", bench_str_const},       {"str_concat", bench_str_concat},
     {"field_access", bench_field_access}, {"alloc", bench_alloc},

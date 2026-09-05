@@ -57,3 +57,47 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+  # Two numbers, neither a pass/fail gate: the executor microbenchmarks
+  # (bench/bench.cc, Core-IR built by hand -- what a change to a call, a
+  # binop, or a variable access costs) and five small programs (bare
+  # startup, calls, a tight loop, a container, string building) run
+  # through each front end's own binary next to the real language it
+  # imitates (bench/languages). python3/ruby/node already come with the runner
+  # image; lua5.4/guile-3.0 are one apt install; dotnet is
+  # actions/setup-dotnet; culebra has no package, so its own docs' latest-
+  # release binary is fetched directly. bench/languages/run.sh still skips
+  # (reports "-") whatever it does not find, which is what keeps a local
+  # run honest when one of these is missing there. Both benchmarks land in
+  # the job summary as tables, not as an artifact nobody opens.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4 guile-3.0
+      # culebra has no apt package; its own docs point at the tagged
+      # release's prebuilt binary rather than building from source (see
+      # https://github.com/yhirose/culebra/blob/master/docs/handbook.ja.md#1-%E5%B0%8E%E5%85%A5).
+      # `/latest/download/...` always resolves to whatever the newest
+      # release is, so this needs no version pin to keep working.
+      - run: |
+          curl -fsSL https://github.com/yhirose/culebra/releases/latest/download/culebra-linux-x64.tar.gz | tar xz
+          sudo mv culebra-*/culebra /usr/local/bin/
+          culebra --version
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
+      - run: cmake --build build -j
+      - name: executor benchmarks
+        run: |
+          {
+            echo '## vmlib executor'
+            build/bench/bench --reps 5 | awk -F'\t' 'NR==1{printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""; printf "|"; for(i=1;i<=NF;i++) printf " --- |"; print ""; next} {printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""}'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: language front ends vs. the language they imitate
+        run: |
+          {
+            echo '## front ends vs. the real language'
+            bench/languages/run.sh --reps 3 | awk -F'\t' 'NR==1{printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""; printf "|"; for(i=1;i<=NF;i++) printf " --- |"; print ""; next} {printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""}'
+          } >> "$GITHUB_STEP_SUMMARY"
