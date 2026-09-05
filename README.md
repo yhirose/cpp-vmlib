@@ -74,7 +74,7 @@ g++ -std=c++20 -I path/to/cpp-vmlib quick.cc -o quick
 ```
 
 For a real front end -- a grammar, a binder that tracks scopes, and a CLI --
-read [example/pl0/](example/pl0/).
+read [examples/pl0/](examples/pl0/).
 
 ## The IR in one page
 
@@ -429,7 +429,7 @@ enqueues it again. That is every green-thread primitive: spawn is
 others run enqueues itself first. A channel, a mutex, a `select` are then
 objects a front end writes in its own language over those three; Go's
 rendezvous rule for an unbuffered channel is forty lines of IR in
-[example/go_mini/](example/go_mini/)'s binder, not a line of `vmlib.h`.
+[examples/mini-go/](examples/mini-go/)'s binder, not a line of `vmlib.h`.
 
 A coroutine once enqueued is the scheduler's until it finishes: the
 executor holds its own reference, so one that parks and is then forgotten
@@ -438,7 +438,7 @@ any of them still suspended the run fails through `coreir_rt_fail` with a
 deadlock diagnostic -- Go's "all goroutines are asleep". The entry frame is
 not a coroutine (a `CoroYield` there has no frames to park), so a front end
 whose main *is* a green thread -- Go's -- spawns it from a bootstrap entry
-function and returns; go_mini does exactly that.
+function and returns; mini-go does exactly that.
 
 ## Arbitrary-precision integers
 
@@ -503,8 +503,8 @@ front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
 ## Benchmarks
 
 `bench/bench.cc` builds one Core-IR program per thing the executor spends
-its time on -- calls, variable traffic, the arithmetic dispatch, string
-constants, field access, allocation -- and times `vm::run` on each. It
+its time on -- calls, variable traffic, tail calls, the arithmetic dispatch,
+string constants, field access, allocation -- and times `vm::run` on each. It
 prints one TSV row per case (name, best-of-N ms, mean ms, and a checksum of
 what the program printed):
 
@@ -533,15 +533,58 @@ numbers of cases that never execute that code. Where it matters, make the
 same binary do both things (a runtime flag) and compare it against itself;
 that removes layout from the question entirely.
 
+`bench/languages/run.sh` asks a different question: not "did this change
+make the executor faster", but "what does a front end's own compiled-down
+shape cost against the language it imitates" -- on more than one shape of
+work, since a front end that is competitive on recursive calls (`fib`)
+might not be on a tight arithmetic loop (`loop`), a container built and
+then walked (`array`), or naive string concatenation (`strings`). A fifth
+program, `startup`, prints a constant and does nothing else: process
+startup is not free, and it varies wildly across these seven real
+languages (roughly a millisecond for `lua5.4`, fifty for `python3`, on the
+machine this was written on) -- reading a workload's `real_ms` next to
+`startup`'s own is what tells "this language is slow here" apart from
+"this language is slow to start". All five run through each of the seven
+dynamic/static front ends' own binary and, where that real language is
+actually installed, through it too -- `python3`, `ruby`, `lua5.4`,
+`guile`, `culebra`, `node`, `dotnet`. (mini-scheme has no vectors and
+immutable pairs, so `array.scm` builds and sums a list by tail recursion
+instead of by indexing -- the same total, reached the way this language
+actually reaches it. `loop` and `array` also fold their running total
+through a modulus on every step, not to add work but to keep the answer
+inside a JS `number`'s exact 53-bit range -- JavaScript has no true
+integer, and past that range `node` would legitimately disagree with the
+other six on the exact total.) C# is the one language here
+with a real compile step, and `dotnet build` on a scratch project costs
+around a second on its own -- more than every other language's steady-
+state number combined -- so it is paid once per workload, outside the
+timed loop, the same principle bench/bench.cc itself uses for the
+executor's own compile step. A language not found on `PATH`
+is skipped and reported as `-` rather than failing the run, since not
+every machine has all seven -- CI installs what it reasonably can (see its
+own workflow for exactly what) and gets a `-`-free table as a result, but
+a local run stays honest about whatever this one happens to be missing.
+Run it as `bench/languages/run.sh --reps N` after building with
+`-DVMLIB_BUILD_EXAMPLES=ON`; CI runs both this and `bench/bench.cc` on every
+push and puts the results in the job summary, not in an artifact nobody
+opens.
+
 ## Front ends
 
 | Front end | Parser | Notes |
 |---|---|---|
-| [PL/0](example/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [example/pl0/README.md](example/pl0/README.md). |
-| [go_mini](example/go_mini/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields, Switch, and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. See [example/go_mini/README.md](example/go_mini/README.md). |
+| [PL/0](examples/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [examples/pl0/README.md](examples/pl0/README.md). |
+| [mini-go](examples/mini-go/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers, `float`, Static calls, Struct fields, Switch, and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. See [examples/mini-go/README.md](examples/mini-go/README.md). |
+| [mini-ruby](examples/mini-ruby/) | PEG, via cpp-peglib | A slice of Ruby, and the only front end that uses **`FnArity`** and **`ArgCount`** -- Ruby makes both program-visible, as `Proc#arity` and as the difference between a proc (lenient) and a lambda (an `ArgCount` test in its prologue). Blocks travel as an implicit parameter 0, which is what `yield`, `block_given?` and `&blk` are all made of. `ensure` is a `Defer`, reached from a third direction. `class` with inheritance and `super` is the same object-holding-a-table recipe examples/mini-python and examples/mini-csharp use, `case`/`when` is a three-way `===`, and a default parameter is evaluated in the method's own scope rather than the enclosing one, both without disturbing what FnArity/ArgCount mean. See [examples/mini-ruby/README.md](examples/mini-ruby/README.md). |
+| [mini-scheme](examples/mini-scheme/) | PEG, via cpp-peglib | A slice of Scheme, and the front end that shows a *boundary* rather than a recipe: the escape half of `call/cc` is a `TryCatch` and works, while the re-entrant half is the "multi-shot continuations" entry in this README's own list of what stays out of reach -- and the binary says so by name when a program asks for it. Also where **Tail calls** are load-bearing rather than an optimization (iteration in Scheme is tail recursion and nothing else), and the smallest front end here by a wide margin. `case` and R7RS's `define-record-type` (a class table with no source body, like examples/mini-python's constructor) round out the everyday syntax without adding a grammar rule -- both are ordinary lists to a homoiconic parser. See [examples/mini-scheme/README.md](examples/mini-scheme/README.md). |
+| [mini-python](examples/mini-python/) | PEG, via cpp-peglib | A slice of Python 3. The only front end that proves **Arbitrary-precision integers** -- Python's `int` is unbounded by definition, so `python3` is an oracle for the bignum this library deliberately has no `Value` tag for -- and the only one that shows `with` as a `Scope` plus a `Defer`. Also the only one whose *lexical* structure a PEG cannot express, so its indentation is normalized into INDENT/DEDENT markers before parsing. See [examples/mini-python/README.md](examples/mini-python/README.md). |
+| [mini-lua](examples/mini-lua/) | PEG, via cpp-peglib | A slice of Lua 5.4. The only front end that proves **Tail calls** -- Lua's specification requires them, so `lua` is an oracle for the property and `samples/tailcalls.lua` recurses far past `max_call_depth`, failing outright without `Func::tail_calls` -- and the only one that hands **Coroutines** to the program (`coroutine.create`/`resume`/`yield`/`status`/`wrap`) rather than driving them from a scheduler. Also writes a variadic calling convention over the IR's fixed-arity one, for Lua's multiple return values, and a real generic-`for` protocol and metatable dispatch (`__add`/`__eq`/`__tostring`/`__call`/`__newindex`, alongside the original `__index`) over two small funcs every metamethod shares. See [examples/mini-lua/README.md](examples/mini-lua/README.md). |
+| [mini-culebra](examples/mini-culebra/) | PEG, via cpp-peglib | A slice of culebra, checked against `culebra` itself. The only front end that exercises the three mechanisms this header describes in culebra's own terms -- the owned stack (deterministic destructors, cycles resolved at the owning scope's exit), a `Scope`'s explicit release order, and `RunOptions::entry_frame_drops` -- and the only one that uses **Host functions**: its standard library is `vm::RunOptions::natives`. `for x in v` now reaches culebra's real custom iterator protocol (`iter`/`has_next`/`next`, on any class), with `dispose()` left out rather than risked against the destructor-ordering guarantee this front end exists to show. See [examples/mini-culebra/README.md](examples/mini-culebra/README.md). |
+| [mini-js](examples/mini-js/) | PEG, via cpp-peglib | A slice of JavaScript -- the dynamic counterpart to mini-go. Proves Closures (`let`'s per-iteration binding, through `CellFresh`), Exceptions (`finally` as a Defer), Generators (`GenResume`'s `{value, done}` *is* the iterator protocol), Maps, Strings and slices, and Coroutines + the Scheduler (`async`/`await` over a Promise it writes in IR) against `node`. Also the front end that shows what the VM deliberately does *not* decide: truthiness, `===` and number formatting are funcs it writes itself. `class`/`this`/`new` (no `extends`) followed, a method table built where the `class` stands and a per-instance wrapper closure supplying `this` to a call the generic property-call path already knew how to make. See [examples/mini-js/README.md](examples/mini-js/README.md). |
+| [mini-csharp](examples/mini-csharp/) | PEG, via cpp-peglib | A slice of C#, checked against `dotnet`. The only front end with **classes and inheritance** -- virtual dispatch is a walk up a chain of ordinary objects, so an override wins with no support from the IR -- and the only *statically-typed* one, which is the claim it exists to make: it parses types and then erases them, and the runtime it lands on needs no addition. A **property** (auto or with a `get`/`set` body) compiles to the same `get_Name`/`set_Name` pair `csc` itself would name, found by the very `$mfind` walk a method call uses -- an `override` on one costs nothing beyond declaring the derived accessor. `using` is a `Scope` plus a `Defer`, `yield return` is a generator, `async`/`await` is a coroutine and the scheduler, and `Main` itself is a coroutine so that a `Task` can be awaited from it. Notably it carries **no** truthiness helper and **no** float-formatting rule -- the two decisions this header says it leaves to a front end, and the two every dynamic front end here has to make -- because on both, C#'s answer is already the VM's. See [examples/mini-csharp/README.md](examples/mini-csharp/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
--- under `example/<name>/`, plus that front end's own implementation of the
+-- under `examples/<name>/`, plus that front end's own implementation of the
 `coreir_rt_*` contract and CLI if it needs them. Nothing in `coreir` or `vm`
 changes, or even has to know the front end exists.
 
@@ -611,7 +654,13 @@ than that; see its own README for what it does and does not rehearse.
 culebra, a JavaScript or Lua subset) is the easy case: `Value` already is
 the dynamic-typed value, `Map` is its dictionary, `Generator` and
 `Coroutine` are its `function*` and its `coroutine.create`, and `async`/
-`await` is a coroutine driven from the job queue. A managed,
+`await` is a coroutine driven from the job queue --
+[examples/mini-js/](examples/mini-js/) is that paragraph as a working front
+end, checked against `node`. What it still had to write itself is the part
+worth knowing: truthiness, `===` and `Number::toString`, because the VM
+refuses to decide those three (`Value::truthy()` and `eval_binop` say so in
+their own comments), plus a Promise over the scheduler's three primitives.
+A managed,
 statically-typed language (a C#, Java or Go subset) is in scope too -- a
 binder that has already type-checked can erase types on the way into the
 IR, and the runtime's refcounted objects, cycle collector, `Scope`/`Defer`
