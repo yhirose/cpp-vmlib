@@ -148,7 +148,6 @@ struct FnCtx {
   int32_t next_local = 0;
   int32_t next_cell = 0;
   std::vector<std::string> local_names;
-  std::map<std::string, int32_t> helper_cells;
 
   int32_t alloc_local(const std::string& name) {
     const int32_t s = next_local++;
@@ -170,6 +169,9 @@ struct Binder {
   std::vector<int32_t> slot_of;
   std::map<std::string, int32_t> rt;
   int32_t empty_cmap = -1;
+  // One closure per runtime helper, built once at file scope into an array
+  // every function captures -- see build().
+  int32_t helpers_var = -1;
 
   // ==== Pass A: scopes, declarations, captures =============================
   //
@@ -1442,14 +1444,42 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
+  static int32_t helper_slot(const std::string& name) {
+    const auto& names = rt_names();
+    for (size_t i = 0; i < names.size(); ++i) {
+      if (names[i] == name) return static_cast<int32_t>(i);
+    }
+    coreir_rt::fail("unknown runtime helper " + name, 0, 0);
+  }
+
+  // A helper call reads the one closure that already exists rather than
+  // building another: these capture nothing, so a per-function cell meant
+  // one allocation per helper per *call* of every function that used one.
   NodeId helper(FnCtx& ctx, const std::string& name,
                 const std::vector<NodeId>& args, SrcPos p) {
     Builder b(m);
-    auto it = ctx.helper_cells.find(name);
-    const int32_t c = it != ctx.helper_cells.end()
-                          ? it->second
-                          : (ctx.helper_cells[name] = ctx.next_cell++);
-    return b.call_value(b.varref(VarKind::Cell, c, p), args, p);
+    return b.call_value(
+        b.index(read_var(helpers_var, ctx, p),
+                b.literal(helper_slot(name), p), p),
+        args, p);
+  }
+
+
+  // File scope builds every helper's closure once, into the array above.
+  void fill_helpers(std::vector<NodeId>& out, SrcPos p) {
+    Builder b(m);
+    std::vector<NodeId> vals;
+    for (const std::string& n : rt_names()) {
+      // A helper that takes captures is built at the site that has them,
+      // never fetched from here, so its slot stays nil.
+      const size_t idx = static_cast<size_t>(rt.at(n));
+      vals.push_back(m.funcs[idx].num_captures == 0
+                         ? b.make_closure(rt.at(n), empty_cmap, p)
+                         : b.nil_literal(p));
+    }
+    const int32_t c = fns[0].cell_index.at(helpers_var);
+    out.push_back(b.cell_fresh(c, p));
+    out.push_back(b.assign(VarKind::Cell, c, b.array_lit(vals, p), p));
   }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
@@ -2335,6 +2365,9 @@ struct Binder {
       (void)v;
       pre.push_back(b.cell_fresh(c, p));
     }
+    // After the freshes above, which would otherwise reset it, and before
+    // the prologue below, which may call a helper itself.
+    if (f == 0) fill_helpers(pre, p);
     for (const int32_t v : fi.params) {
       if (slot_of[static_cast<size_t>(v)] >= 0) continue;  // &blk aliases
       const int32_t s = ctx.alloc_local(vars[static_cast<size_t>(v)].name);
@@ -2382,10 +2415,6 @@ struct Binder {
     const NodeId body = emit_body(*fi.body, ctx);
 
     std::vector<NodeId> head;
-    for (const auto& [name, cell] : ctx.helper_cells) {
-      head.push_back(b.assign(VarKind::Cell, cell,
-                              b.make_closure(rt.at(name), empty_cmap, p), p));
-    }
     head.insert(head.end(), pre.begin(), pre.end());
     head.insert(head.end(), stmts.begin(), stmts.end());
     // A Ruby method answers its body's last value.
@@ -2439,7 +2468,22 @@ struct Binder {
       m.funcs.push_back({});
     }
 
+    // One binding, owned by file scope and captured by every function: the
+    // array of runtime-helper closures. Declared after resolution so no
+    // source name can collide with it, and before number_captures so the
+    // ordinary capture machinery threads it like any other free variable.
+    helpers_var = static_cast<int32_t>(vars.size());
+    vars.push_back({"$helpers", 0});
+    for (size_t f = 1; f < fns.size(); ++f) fns[f].free.insert(helpers_var);
+
     number_captures();
+    // A cell whether or not anything captured it: file scope reads it
+    // itself, and a program with no nested function has no free set to put
+    // it in.
+    if (!fns[0].cell_index.count(helpers_var)) {
+      fns[0].cell_index[helpers_var] =
+          static_cast<int32_t>(fns[0].cell_index.size());
+    }
     empty_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back({});
     emit_runtime();
