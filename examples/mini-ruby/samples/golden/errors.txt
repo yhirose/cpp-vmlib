@@ -1,0 +1,11 @@
+2
+rescued: boom
+["body", "rescue thrown", "ensure", "after"]
+returned
+["body", "ensure on return"]
+rescued: deep
+["ensure on raise"]
+["body 0", "ensure 0", "body 99", "ensure 99"]
+["inner saw inner", "inner ensure", "outer saw rethrown"]
+rescued: at 1
+rescued: divided by 0

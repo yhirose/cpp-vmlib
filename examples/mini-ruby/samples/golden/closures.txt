@@ -1,0 +1,14 @@
+1
+2
+1
+3
+10
+outer
+2
+6
+11
+true
+false
+hi there
+HI THERE
+3628800

@@ -1,0 +1,18 @@
+(1, 2)
+1
+2
+(10, 2)
+true
+false
+Generic makes a sound
+Rex makes a sound (specifically, a bark)
+Rex is a Dog
+Generic makes a sound
+Rex makes a sound (specifically, a bark)
+true
+true
+false
+true
+false
+5
+Empty

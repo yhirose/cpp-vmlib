@@ -1,0 +1,25 @@
+zero
+small
+medium
+large
+big
+odd
+pos
+yes
+unless-yes
+5
+5
+hello
+1
+2
+true
+false
+Hello, Ada!
+Hi, Ada!
+Hi, Ada?
+[5, 6]
+[5, 9]
+round
+boxy
+unknown
+in range
