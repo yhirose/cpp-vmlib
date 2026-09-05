@@ -6076,7 +6076,16 @@ struct Exec {
           f.regs[in.a] = f.regs[in.b];
           break;
         case Op::ClearRegs:
-          for (int32_t i = in.a; i < in.b; ++i) f.regs[i] = Value();
+          // Only the ones holding something. A statement's dead registers
+          // are scratch the next statement writes before it reads, so what
+          // this is for is dropping the *references* they still hold --
+          // an int or a bool left behind pins nothing and is not a root the
+          // collector can trip over. Clearing those too was a Value
+          // assignment, refcount branch and all, per register per
+          // statement, and statements are 15-25% of everything executed.
+          for (int32_t i = in.a; i < in.b; ++i) {
+            if (f.regs[i].is_heap()) f.regs[i] = Value();
+          }
           break;
         case Op::ClearLocals:
           // Last declared, first released: a value whose release runs a
