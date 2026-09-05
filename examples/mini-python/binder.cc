@@ -2932,10 +2932,19 @@ struct Binder {
   // ==== Pass B: emit ======================================================
 
   // The index of a helper in the file-scope array build() fills in.
-  static int32_t helper_slot(const std::string& name) {
+  // Where a helper sits in the array fill_helpers builds. A helper that
+  // takes captures has no closure there to fetch -- it is built at the
+  // site that has them -- so asking for one is a mistake in this binder,
+  // and saying so here beats the "cannot call nil" it would otherwise be
+  // at run time.
+  int32_t helper_slot(const std::string& name) const {
     const auto& names = rt_names();
     for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] == name) return static_cast<int32_t>(i);
+      if (names[i] != name) continue;
+      if (m.funcs[static_cast<size_t>(rt.at(name))].num_captures != 0) {
+        coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
+      }
+      return static_cast<int32_t>(i);
     }
     coreir_rt::fail("unknown runtime helper " + name, 0, 0);
   }
@@ -2962,9 +2971,9 @@ struct Binder {
     for (const std::string& n : rt_names()) {
       // A helper that takes captures is built at the site that has them
       // (RT::clos), never fetched from here, so its slot stays nil.
-      const size_t idx = static_cast<size_t>(rt.at(n));
-      vals.push_back(m.funcs[idx].num_captures == 0
-                         ? b.make_closure(rt.at(n), empty_cmap, p)
+      const int32_t g = rt.at(n);
+      vals.push_back(m.funcs[static_cast<size_t>(g)].num_captures == 0
+                         ? b.make_closure(g, empty_cmap, p)
                          : b.nil_literal(p));
     }
     out.push_back(write_var(helpers_var, b.array_lit(vals, p), ctx, p));

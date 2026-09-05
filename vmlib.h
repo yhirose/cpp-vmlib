@@ -5692,6 +5692,16 @@ struct Exec {
   // the list it spelled out in list order. A released cell is replaced by
   // a fresh one -- what CellFresh does -- so the slot always holds a cell
   // and a closure that captured the old one keeps it, value and all.
+  // Drop what a range of registers still holds. Only the ones holding a
+  // reference: an immediate pins nothing and is not a root, and a dead
+  // register is scratch the next write covers, so clearing those too was a
+  // Value assignment -- refcount branch and all -- for nothing.
+  static void clear_refs(Frame& f, size_t first, size_t end) {
+    for (size_t i = first; i < end; ++i) {
+      if (f.regs[i].is_heap()) f.regs[i] = Value();
+    }
+  }
+
   void release_range(Frame& f, int32_t first, int32_t end) {
     for (int32_t i = end; i-- > first;) f.locals[i] = Value::uninit();
   }
@@ -5786,10 +5796,7 @@ struct Exec {
             r = std::move(replacement);
           }
         }
-        for (size_t i = static_cast<size_t>(cl.regs_base); i < f.regs.size();
-             ++i) {
-          f.regs[i] = Value();
-        }
+        clear_refs(f, static_cast<size_t>(cl.regs_base), f.regs.size());
         if (cl.release_list >= 0) {
           release_list(f, cl.release_list);
         } else {
@@ -6076,13 +6083,12 @@ struct Exec {
           f.regs[in.a] = f.regs[in.b];
           break;
         case Op::ClearRegs:
-          // Only the ones holding something. A statement's dead registers
-          // are scratch the next statement writes before it reads, so what
-          // this is for is dropping the *references* they still hold --
-          // an int or a bool left behind pins nothing and is not a root the
-          // collector can trip over. Clearing those too was a Value
-          // assignment, refcount branch and all, per register per
-          // statement, and statements are 15-25% of everything executed.
+          // A statement's temporaries, at the point the statement ended --
+          // 15-25% of everything these front ends execute is this
+          // instruction, so it is written out here rather than going
+          // through clear_refs: the call costs about 5% of the arithmetic
+          // and variable-access benchmarks, which is the whole of what
+          // dropping the immediates won in the first place.
           for (int32_t i = in.a; i < in.b; ++i) {
             if (f.regs[i].is_heap()) f.regs[i] = Value();
           }
@@ -6450,13 +6456,8 @@ struct Exec {
           // clobbered under them -- and copying them out would be an
           // allocation per call, on the one path that exists to make a call
           // loop cheap.
-          for (int32_t r = 0; r < in.c; ++r) {
-            f.regs[static_cast<size_t>(r)] = Value();
-          }
-          for (size_t r = static_cast<size_t>(in.c + in.d); r < f.regs.size();
-               ++r) {
-            f.regs[r] = Value();
-          }
+          clear_refs(f, 0, static_cast<size_t>(in.c));
+          clear_refs(f, static_cast<size_t>(in.c + in.d), f.regs.size());
           release_range(f, 0, static_cast<int32_t>(f.locals.size()));
           while (!f.owned_marks.empty()) leave_scope_owned(f);
           // The new activation, in place: ret_reg, gen_self, coro_self and

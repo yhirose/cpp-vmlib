@@ -966,10 +966,19 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
-  static int32_t helper_slot(const std::string& name) {
+  // Where a helper sits in the array fill_helpers builds. A helper that
+  // takes captures has no closure there to fetch -- it is built at the
+  // site that has them -- so asking for one is a mistake in this binder,
+  // and saying so here beats the "cannot call nil" it would otherwise be
+  // at run time.
+  int32_t helper_slot(const std::string& name) const {
     const auto& names = rt_names();
     for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] == name) return static_cast<int32_t>(i);
+      if (names[i] != name) continue;
+      if (m.funcs[static_cast<size_t>(rt.at(name))].num_captures != 0) {
+        coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
+      }
+      return static_cast<int32_t>(i);
     }
     coreir_rt::fail("unknown runtime helper " + name, 0, 0);
   }
@@ -988,15 +997,15 @@ struct Binder {
 
 
   // File scope builds every helper's closure once, into the array above.
-  void fill_helpers(FnCtx& ctx, std::vector<NodeId>& out, SrcPos p) {
+  void fill_helpers(std::vector<NodeId>& out, SrcPos p) {
     Builder b(m);
     std::vector<NodeId> vals;
     for (const std::string& n : rt_names()) {
       // A helper that takes captures is built at the site that has them
       // (RT::clos), never fetched from here, so its slot stays nil.
-      const size_t idx = static_cast<size_t>(rt.at(n));
-      vals.push_back(m.funcs[idx].num_captures == 0
-                         ? b.make_closure(rt.at(n), empty_cmap, p)
+      const int32_t g = rt.at(n);
+      vals.push_back(m.funcs[static_cast<size_t>(g)].num_captures == 0
+                         ? b.make_closure(g, empty_cmap, p)
                          : b.nil_literal(p));
     }
     const int32_t c = fns[0].cell_index.at(helpers_var);
@@ -1940,7 +1949,7 @@ struct Binder {
     const NodeId body = emit_block(*fi.body, ctx);
 
     std::vector<NodeId> stmts;
-    if (f == 0) fill_helpers(ctx, stmts, p);
+    if (f == 0) fill_helpers(stmts, p);
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
     // Falling off the end returns no values, which under this front end's
@@ -1991,15 +2000,13 @@ struct Binder {
     helpers_var = static_cast<int32_t>(vars.size());
     vars.push_back({"$helpers", top});
     for (size_t f = 1; f < fns.size(); ++f) fns[f].free.insert(helpers_var);
-
-    number_captures();
     // A cell whether or not anything captured it: file scope reads it
     // itself, and a program with no nested function has no free set to put
-    // it in.
-    if (!fns[0].cell_index.count(helpers_var)) {
-      fns[0].cell_index[helpers_var] =
-          static_cast<int32_t>(fns[0].cell_index.size());
-    }
+    // it in. number_captures below finds it already there.
+    fns[0].cell_index[helpers_var] =
+        static_cast<int32_t>(fns[0].cell_index.size());
+
+    number_captures();
     empty_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back({});
     emit_runtime();
