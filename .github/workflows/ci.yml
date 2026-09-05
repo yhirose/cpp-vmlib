@@ -70,8 +70,15 @@ jobs:
   # (reports "-") whatever it does not find, which is what keeps a local
   # run honest when one of these is missing there. (Go needs no go.mod
   # here: `go build prog.go` names its file explicitly, which works outside
-  # a module.) Both benchmarks land in
-  # the job summary as tables, not as an artifact nobody opens.
+  # a module.)
+  #
+  # Both tables go through `tee -a "$GITHUB_STEP_SUMMARY"` rather than a
+  # plain append, so they land in the step log as well as on the run's own
+  # summary page. GitHub has no API for reading a step summary back -- only
+  # the browser can -- and the log is what makes the numbers reachable from
+  # a terminal (`gh run view --job=<id> --log`, which is what
+  # .claude/commands/ci-bench.md drives). They are still tables in the job
+  # summary, not an artifact nobody opens.
   bench:
     runs-on: ubuntu-latest
     steps:
@@ -91,15 +98,22 @@ jobs:
           culebra --version
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
       - run: cmake --build build -j
+      # `shell: bash` for its `-o pipefail`: the default `run:` shell does
+      # not have it, and both commands below end in a pipe -- without it a
+      # crashed bench or a run.sh that failed outright would be reported as
+      # a passing step with an empty table. A *slow* number still gates
+      # nothing; that is the part this job does not judge.
       - name: executor benchmarks
+        shell: bash
         run: |
           {
             echo '## vmlib executor'
             build/bench/bench --reps 5 | awk -F'\t' 'NR==1{printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""; printf "|"; for(i=1;i<=NF;i++) printf " --- |"; print ""; next} {printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""}'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: language front ends vs. the language they imitate
+        shell: bash
         run: |
           {
             echo '## front ends vs. the real language'
             bench/languages/run.sh --reps 3 | awk -F'\t' 'NR==1{printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""; printf "|"; for(i=1;i<=NF;i++) printf " --- |"; print ""; next} {printf "| "; for(i=1;i<=NF;i++) printf "%s | ", $i; print ""}'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

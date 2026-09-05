@@ -575,7 +575,12 @@ happens to be missing.
 Run it as `bench/languages/run.sh --reps N` after building with
 `-DVMLIB_BUILD_EXAMPLES=ON`; CI runs both this and `bench/bench.cc` on every
 push and puts the results in the job summary, not in an artifact nobody
-opens.
+opens. They go there through `tee`, so the same two tables are in the
+`bench` job's step log as well -- GitHub has no API for reading a step
+summary back, and the log is what makes the numbers reachable without a
+browser (`gh run view --job=<id> --log`; `.claude/commands/ci-bench.md` is
+that, as a `/ci-bench` slash command that resolves the run and reads the
+tables out for you).
 
 ## Front ends
 
