@@ -118,32 +118,22 @@ bool is_global(const std::string& n) {
 
 // -- The resolution model ---------------------------------------------------
 //
-// One VarInfo per *declaration*, named by an index every reference to it
-// resolves to. That indirection is what lets pass A answer "is anything
-// nested inside this function reading this variable?" -- the question that
-// decides between a Local slot and a Cell -- before any IR exists.
-struct VarInfo {
-  std::string name;
-  int32_t owner = 0;  // the function whose body declares it
-  bool is_const = false;
-};
-
-// A function, in the same sense the source language means: a declaration, a
-// function expression, an arrow, and -- because it is compiled to a closure
-// the Scope defers -- a `finally` block. `free` is every variable it reads
-// that an enclosing function owns; `capture_index` numbers those, and that
-// numbering is the contract between MakeClosure's capture map (built at the
-// site, in the enclosing frame) and VarKind::Capture inside the body.
+// coreir::Resolver holds it: one Var per *declaration*, named by an index
+// every reference to it resolves to, and per function the free set, the
+// capture numbering and the cell numbering. That indirection is what lets
+// pass A answer "is anything nested inside this function reading this
+// variable?" -- the question that decides between a Local slot and a Cell --
+// before any IR exists.
+//
+// What stays here is what the resolver has no opinion about: a function in
+// the sense *this* source language means it -- a declaration, a function
+// expression, an arrow, and, because it is compiled to a closure the Scope
+// defers, a `finally` block.
 struct FnInfo {
-  int32_t parent = -1;
-  int32_t index = -1;  // into Module::funcs
   bool is_generator = false;
   bool is_async = false;
   bool is_method = false;  // params[0] is `this`, synthetic -- no source ident
   std::string name = "<anon>";
-  std::set<int32_t> free;
-  std::map<int32_t, int32_t> capture_index;
-  std::map<int32_t, int32_t> cell_index;
   std::vector<int32_t> params;  // VarIds, in order
   const Ast* body = nullptr;    // the `block` (or an arrow's expression)
 };
@@ -158,85 +148,43 @@ struct ClassInfo {
 
 // While a body is being emitted: where the next local slot comes from, and
 // how high the frame has to be.
-struct FnCtx {
+struct FnCtx : FrameLayout {
   int32_t fn = 0;
-  int32_t next_local = 0;
-  int32_t high_local = 0;
   int32_t next_cell = 0;
-  std::vector<std::string> local_names;
-
-  int32_t alloc_local(const std::string& name) {
-    const int32_t s = next_local++;
-    if (next_local > high_local) high_local = next_local;
-    if (static_cast<size_t>(s) >= local_names.size()) {
-      local_names.resize(static_cast<size_t>(s) + 1, "");
-    }
-    local_names[static_cast<size_t>(s)] = name;
-    return s;
-  }
 };
 
 struct Binder {
   Module m;
-  std::vector<VarInfo> vars;
-  std::vector<FnInfo> fns;
+  Resolver rs;
+  std::vector<FnInfo> fns;  // parallel to rs.fns
   std::map<const Ast*, int32_t> ref_of;   // an ident in expression position
   std::map<const Ast*, int32_t> decl_of;  // an ident in declaring position
   std::map<const Ast*, int32_t> fn_of;    // a function-shaped node
-  std::vector<int32_t> slot_of;           // VarId -> local slot, during emit
   std::map<std::string, int32_t> rt;      // $helper name -> Module::funcs index
   int32_t empty_cmap = -1;
-  // One closure per runtime helper, built once at file scope into an array
-  // every function captures -- see build().
-  int32_t helpers_var = -1;
 
   // ==== Pass A: scopes, declarations, captures =============================
 
-  struct ScopeA {
-    int32_t fn;
-    std::map<std::string, int32_t> names;
-  };
-  std::vector<ScopeA> scopes;
 
-  int32_t declare(const std::string& name, int32_t fn, bool is_const,
+  // `const` is the one fact about a binding this front end needs that
+  // Resolver::Var does not carry, so it rides beside it, indexed by the
+  // same VarId.
+  std::vector<char> is_const;
+
+  int32_t declare(const std::string& name, int32_t fn, bool constant,
                   const Ast& at) {
-    if (scopes.back().names.count(name)) {
+    if (rs.declared_here(name)) {
       fail(at, "'" + name + "' is already declared in this scope");
     }
-    const int32_t v = static_cast<int32_t>(vars.size());
-    vars.push_back({name, fn, is_const});
-    scopes.back().names[name] = v;
+    const int32_t v = rs.declare(name, fn);
+    is_const.resize(rs.vars.size(), 0);
+    is_const[static_cast<size_t>(v)] = constant ? 1 : 0;
     return v;
   }
 
-  // Walking outward until the name is found, then marking every function
-  // between the reader and the owner: each of them has to *carry* the
-  // variable, because a closure's capture map is expressed in the frame
-  // that builds it, and the frame two levels down cannot name a cell it
-  // does not own. That is the whole propagation -- no fixpoint, because
-  // lexical nesting is a tree (examples/pl0 needs one only because a PL/0
-  // procedure's captures travel through calls rather than through nesting).
-  std::optional<int32_t> resolve(const std::string& name, int32_t fn) {
-    for (size_t i = scopes.size(); i-- > 0;) {
-      auto it = scopes[i].names.find(name);
-      if (it == scopes[i].names.end()) continue;
-      const int32_t v = it->second;
-      const int32_t owner = vars[static_cast<size_t>(v)].owner;
-      if (owner != fn) {
-        for (int32_t k = fn; k != owner && k >= 0;
-             k = fns[static_cast<size_t>(k)].parent) {
-          fns[static_cast<size_t>(k)].free.insert(v);
-        }
-      }
-      return v;
-    }
-    return std::nullopt;
-  }
-
   int32_t new_fn(int32_t parent, const std::string& name) {
-    const int32_t f = static_cast<int32_t>(fns.size());
+    const int32_t f = rs.new_fn(parent);
     fns.push_back({});
-    fns[static_cast<size_t>(f)].parent = parent;
     fns[static_cast<size_t>(f)].name = name;
     return f;
   }
@@ -257,10 +205,10 @@ struct Binder {
   }
 
   void resolve_block(const Ast& block, int32_t fn) {
-    scopes.push_back({fn, {}});
+    rs.push_scope();
     hoist_funcdecls(block.nodes, fn);
     for (const auto& s : block.nodes) resolve_stmt(*s, fn);
-    scopes.pop_back();
+    rs.pop_scope();
   }
 
   // A function-shaped node -- funcdecl, funcexpr, arrow, or a `finally`
@@ -277,14 +225,13 @@ struct Binder {
     fns[static_cast<size_t>(f)].body = &body;
     fn_of[&node] = f;
 
-    scopes.push_back({f, {}});
+    rs.push_scope();
     if (is_method) {
       // `this`: synthetic, so there is no source identifier to hang a
       // decl_of entry on -- a method reaches it through `thisexpr`
       // instead, always at params[0].
-      const int32_t tv = static_cast<int32_t>(vars.size());
-      vars.push_back({"this", f, false});
-      scopes.back().names["this"] = tv;
+      const int32_t tv = rs.declare("this", f);
+      is_const.resize(rs.vars.size(), 0);
       fns[static_cast<size_t>(f)].params.push_back(tv);
     }
     const auto param = [&](const Ast& id) {
@@ -306,7 +253,7 @@ struct Binder {
     } else {
       resolve_expr(body, f);  // an arrow's expression body
     }
-    scopes.pop_back();
+    rs.pop_scope();
     return f;
   }
 
@@ -386,7 +333,7 @@ struct Binder {
       case "forstmt"_: {
         // The head's own scope: `for (let i = 0; ...)` declares i for the
         // condition, the update and the body, and for nothing after.
-        scopes.push_back({fn, {}});
+        rs.push_scope();
         // forinit keeps its wrapper (no_ast_opt), so its one child -- a
         // vardeclbare or a plain expression -- is what to walk, and an
         // empty head simply has none.
@@ -403,17 +350,17 @@ struct Binder {
         for (const auto& c : a.nodes[1]->nodes) resolve_expr(*c, fn);
         for (const auto& c : a.nodes[2]->nodes) resolve_expr(*c, fn);
         resolve_stmt(*a.nodes[3], fn);
-        scopes.pop_back();
+        rs.pop_scope();
         return;
       }
       case "forof"_: {
         resolve_expr(*a.nodes[2], fn);
-        scopes.push_back({fn, {}});
+        rs.push_scope();
         decl_of[a.nodes[1].get()] =
             declare(std::string(a.nodes[1]->token), fn,
                     a.nodes[0]->token == "const", *a.nodes[1]);
         resolve_stmt(*a.nodes[3], fn);
-        scopes.pop_back();
+        rs.pop_scope();
         return;
       }
       case "retstmt"_:
@@ -426,11 +373,11 @@ struct Binder {
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const Ast& c = *a.nodes[i];
           if (c.tag == "catchcl"_) {
-            scopes.push_back({fn, {}});
+            rs.push_scope();
             decl_of[c.nodes[0].get()] = declare(
                 std::string(c.nodes[0]->token), fn, false, *c.nodes[0]);
             resolve_block(*c.nodes[1], fn);
-            scopes.pop_back();
+            rs.pop_scope();
           } else {  // finallycl -- a function, because Defer takes a callable
             resolve_fn(c, fn, "<finally>", nullptr, *c.nodes[0], false, false);
           }
@@ -450,7 +397,7 @@ struct Binder {
         return;
       case "ident"_: {
         const std::string n(a.token);
-        if (auto v = resolve(n, fn)) {
+        if (auto v = rs.resolve(n, fn)) {
           ref_of[&a] = *v;
           return;
         }
@@ -460,9 +407,9 @@ struct Binder {
       case "thisexpr"_: {
         // `this` is an ordinary scoped variable, `is_method` planted --
         // which is what makes an arrow inside a method inherit it lexically
-        // through the same `resolve()` every other closed-over name uses,
+        // through the same `rs.resolve()` every other closed-over name uses,
         // JavaScript's own rule for an arrow's `this`.
-        const auto v = resolve("this", fn);
+        const auto v = rs.resolve("this", fn);
         if (!v) fail(a, "'this' used outside a method");
         ref_of[&a] = *v;
         return;
@@ -514,44 +461,6 @@ struct Binder {
     }
   }
 
-  // Every function's capture numbering and cell numbering, fixed once the
-  // whole program has been walked: `free` is a std::set, so its order is
-  // stable, and that order *is* the capture index every MakeClosure site
-  // and every VarKind::Capture inside the body agree on.
-  void number_captures() {
-    for (size_t f = 0; f < fns.size(); ++f) {
-      int32_t i = 0;
-      for (const int32_t v : fns[f].free) {
-        fns[f].capture_index[v] = i++;
-        m.funcs[static_cast<size_t>(fns[f].index)].capture_names.push_back(
-            vars[static_cast<size_t>(v)].name);
-      }
-      m.funcs[static_cast<size_t>(fns[f].index)].num_captures = i;
-    }
-    // A variable anyone captures cannot stay a slot in its owner's frame:
-    // the closure may outlive that frame. Walking every function's free
-    // set rather than each function's own declarations, because "is this
-    // captured" is a fact about the readers.
-    for (const auto& fi : fns) {
-      for (const int32_t v : fi.free) {
-        auto& own = fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)]
-                        .cell_index;
-        if (!own.count(v)) own[v] = static_cast<int32_t>(own.size());
-      }
-    }
-  }
-
-  std::pair<VarKind, int32_t> access(int32_t f, int32_t v) const {
-    if (vars[static_cast<size_t>(v)].owner == f) {
-      const auto& ci = fns[static_cast<size_t>(f)].cell_index;
-      const auto it = ci.find(v);
-      if (it != ci.end()) return {VarKind::Cell, it->second};
-      return {VarKind::Local, slot_of[static_cast<size_t>(v)]};
-    }
-    return {VarKind::Capture,
-            fns[static_cast<size_t>(f)].capture_index.at(v)};
-  }
-
   // ==== The runtime this front end writes in its own IR ====================
   //
   // Every rule here is JavaScript's, not the VM's, which is exactly why it
@@ -577,20 +486,13 @@ struct Binder {
   // One runtime func under construction. The short names are deliberate:
   // these bodies are dense trees, and spelling `b.binary(BinOp::Eq, ...)`
   // at every node buries what the code says under how it is built.
-  struct RT {
+  // The front end's own additions to coreir::FuncWriter: the helpers
+  // that have to reach this binder's own tables.
+  struct RT : FuncWriter {
     Binder& bd;
-    Builder b;
-    SrcPos p{0, 0};
-    std::vector<NodeId> body;
 
-    explicit RT(Binder& bd_) : bd(bd_), b(bd_.m) {}
+    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
 
-    NodeId L(int32_t i) { return b.varref(VarKind::Local, i, p); }
-    NodeId C(int32_t i) { return b.varref(VarKind::Cell, i, p); }
-    NodeId P(int32_t i) { return b.varref(VarKind::Capture, i, p); }
-    NodeId setc(int32_t i, NodeId v) {
-      return b.block({b.cell_fresh(i, p), b.assign(VarKind::Cell, i, v, p)}, p);
-    }
     // A closure over this func's own cells: the capture map belongs to the
     // site building it, which is here.
     NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
@@ -599,65 +501,18 @@ struct Binder {
       for (const int32_t c : cells) cs.push_back({VarKind::Cell, c});
       const int32_t cm = static_cast<int32_t>(bd.m.capture_maps.size());
       bd.m.capture_maps.push_back(cs);
-      return b.make_closure(bd.rt.at(name), cm, p);
+      return b.make_closure(bd.rt.at(name), cm);
     }
-    NodeId S(const std::string& s) { return b.str_literal(s, p); }
-    NodeId D(double d) { return b.double_literal(d, p); }
-    NodeId I(int64_t v) { return b.literal(v, p); }
-    NodeId Nil() { return b.nil_literal(p); }
-    NodeId Bo(bool v) { return b.bool_literal(v, p); }
-    NodeId in(IntrinsicId id, const std::vector<NodeId>& a) {
-      return b.intrinsic(id, a, p);
-    }
-    NodeId bin(BinOp op, NodeId x, NodeId y) { return b.binary(op, x, y, p); }
-    NodeId set(int32_t s, NodeId v) {
-      return b.assign(VarKind::Local, s, v, p);
-    }
-    NodeId ret(NodeId v) { return b.make_return(v, p); }
-    NodeId blk(const std::vector<NodeId>& v) { return b.block(v, p); }
-    NodeId iff(NodeId c, NodeId t) { return b.make_if(c, t, NodeId{}, p); }
-    NodeId iff(NodeId c, NodeId t, NodeId e) { return b.make_if(c, t, e, p); }
-    NodeId idx(NodeId r, NodeId k) { return b.index(r, k, p); }
-    NodeId idx(NodeId r, const std::string& k) { return b.index(r, S(k), p); }
-    NodeId sidx(NodeId r, const std::string& k, NodeId v) {
-      return b.set_index(r, S(k), v, p);
-    }
-    NodeId obj(const std::vector<std::pair<std::string, NodeId>>& kvs) {
-      std::vector<std::pair<NodeId, NodeId>> out;
-      for (const auto& kv : kvs) out.emplace_back(S(kv.first), kv.second);
-      return b.object_lit(out, p);
-    }
-    NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
-    NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
-    NodeId is(NodeId v, const std::string& s) { return bin(BinOp::Eq, v, S(s)); }
-    NodeId isnt(NodeId v, const std::string& s) {
-      return bin(BinOp::Ne, v, S(s));
-    }
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(
-          b.make_closure(bd.rt.at(name), bd.empty_cmap, p), a, p);
-    }
-    void add(NodeId n) { body.push_back(n); }
 
-    void finish(const std::string& name, int32_t nparams, int32_t nlocals,
-                std::vector<std::string> names, int32_t ncells = 0,
+    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
+      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
+    }
+
+    // The counts and the name table come from param()/local().
+    void finish(const std::string& name, int32_t ncells = 0,
                 int32_t ncaps = 0) {
-      Func& f = bd.m.funcs[static_cast<size_t>(bd.rt.at(name))];
-      f.name = name;
-      f.num_params = nparams;
-      f.num_locals = nlocals;
-      // verify() requires both name tables to be exactly as long as the
-      // counts they describe -- they are diagnostics, but a diagnostic
-      // that has drifted out of step with the slots is worse than none.
-      names.resize(static_cast<size_t>(nlocals), "");
-      f.local_names = std::move(names);
-      f.num_cells = ncells;
-      f.num_captures = ncaps;
-      for (int32_t i = 0; i < ncaps; ++i) {
-        f.capture_names.push_back("c" + std::to_string(i));
-      }
-      f.lenient_arity = true;
-      f.body = b.scope(0, nlocals, blk(body), p);
+      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
+            ncaps);
     }
   };
 
@@ -666,19 +521,20 @@ struct Binder {
   // names JavaScript as the reason it refuses to decide.
   void rt_truthy() {
     RT r(*this);
+    const auto [v] = r.params("v");
     std::vector<std::pair<NodeId, NodeId>> arms;
-    arms.emplace_back(r.S("bool"), r.ret(r.L(0)));
-    arms.emplace_back(r.S("int"), r.ret(r.bin(BinOp::Ne, r.L(0), r.I(0))));
+    arms.emplace_back(r.S("bool"), r.ret(r.L(v)));
+    arms.emplace_back(r.S("int"), r.ret(r.bin(BinOp::Ne, r.L(v), r.I(0))));
     // NaN is the one double that is not equal to itself, and it is falsy.
     arms.emplace_back(
         r.S("double"),
-        r.ret(r.iff(r.bin(BinOp::Eq, r.L(0), r.L(0)),
-                    r.bin(BinOp::Ne, r.L(0), r.D(0.0)), r.Bo(false))));
+        r.ret(r.iff(r.bin(BinOp::Eq, r.L(v), r.L(v)),
+                    r.bin(BinOp::Ne, r.L(v), r.D(0.0)), r.Bo(false))));
     arms.emplace_back(r.S("string"),
-                      r.ret(r.bin(BinOp::Gt, r.len(r.L(0)), r.I(0))));
+                      r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0))));
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(false)));
-    r.add(r.b.make_switch(r.typ(r.L(0)), arms, r.ret(r.Bo(true)), r.p));
-    r.finish("$truthy", 1, 1, {"v"});
+    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.Bo(true))));
+    r.finish("$truthy");
   }
 
   // `===`, ES2023 7.2.16. BinOp::Eq refuses two values of different types
@@ -688,25 +544,27 @@ struct Binder {
   // what IntrinsicId::Same is for.
   void rt_seq() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(2), r.L(3)), r.ret(r.Bo(false))));
-    const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(0), r.L(1)));
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb] = r.locals("ta", "tb");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
+    const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)));
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(true)));
     for (const char* t : {"bool", "int", "double", "string"}) {
       arms.emplace_back(r.S(t), scalar);
     }
-    r.add(r.b.make_switch(r.L(2), arms,
-                          r.ret(r.in(IntrinsicId::Same, {r.L(0), r.L(1)})),
-                          r.p));
-    r.finish("$seq", 2, 4, {"a", "b", "ta", "tb"});
+    r.add(r.b.make_switch(r.L(ta), arms,
+                          r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}))));
+    r.finish("$seq");
   }
 
   // `typeof`, ES2023 13.5.3. TypeOf answers in the VM's own vocabulary
   // ("nil", "double", "array"); this is the mapping onto JavaScript's.
   void rt_typeof() {
     RT r(*this);
+    const auto [v] = r.params("v");
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.S("undefined")));
     arms.emplace_back(r.S("bool"), r.ret(r.S("boolean")));
@@ -715,8 +573,8 @@ struct Binder {
     arms.emplace_back(r.S("double"), num);
     arms.emplace_back(r.S("string"), r.ret(r.S("string")));
     arms.emplace_back(r.S("function"), r.ret(r.S("function")));
-    r.add(r.b.make_switch(r.typ(r.L(0)), arms, r.ret(r.S("object")), r.p));
-    r.finish("$typeof", 1, 1, {"v"});
+    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.S("object"))));
+    r.finish("$typeof");
   }
 
   // Number::toString, ES2023 6.1.6.1.20, for the range the samples reach.
@@ -729,62 +587,64 @@ struct Binder {
   void rt_numstr() {
     const double inf = std::numeric_limits<double>::infinity();
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(0), r.L(0)), r.ret(r.S("NaN"))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(0), r.D(inf)), r.ret(r.S("Infinity"))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(0), r.D(-inf)), r.ret(r.S("-Infinity"))));
+    const auto [d] = r.params("d");
+    const auto [i] = r.locals("i");
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)), r.ret(r.S("NaN"))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(inf)), r.ret(r.S("Infinity"))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(-inf)), r.ret(r.S("-Infinity"))));
     const double lim = 9007199254740992.0;  // 2^53
     r.add(r.iff(
-        r.bin(BinOp::Gt, r.L(0), r.D(-lim)),
-        r.iff(r.bin(BinOp::Lt, r.L(0), r.D(lim)),
-              r.blk({r.set(1, r.in(IntrinsicId::ToInt, {r.L(0)})),
+        r.bin(BinOp::Gt, r.L(d), r.D(-lim)),
+        r.iff(r.bin(BinOp::Lt, r.L(d), r.D(lim)),
+              r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(d)})),
                      r.iff(r.bin(BinOp::Eq,
-                                 r.in(IntrinsicId::ToDouble, {r.L(1)}),
-                                 r.L(0)),
-                           r.ret(r.in(IntrinsicId::ToStr, {r.L(1)})))}))));
-    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(0)})));
-    r.finish("$numstr", 1, 2, {"d", "i"});
+                                 r.in(IntrinsicId::ToDouble, {r.L(i)}), r.L(d)),
+                           r.ret(r.in(IntrinsicId::ToStr, {r.L(i)})))}))));
+    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(d)})));
+    r.finish("$numstr");
   }
 
   // String(v), ES2023 22.1.1.1 -- for the values this subset has.
   void rt_str() {
     RT r(*this);
+    const auto [v] = r.params("v");
     std::vector<std::pair<NodeId, NodeId>> arms;
-    arms.emplace_back(r.S("string"), r.ret(r.L(0)));
+    arms.emplace_back(r.S("string"), r.ret(r.L(v)));
     arms.emplace_back(r.S("nil"), r.ret(r.S("undefined")));
-    const NodeId tostr = r.ret(r.in(IntrinsicId::ToStr, {r.L(0)}));
+    const NodeId tostr = r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}));
     arms.emplace_back(r.S("bool"), tostr);
     arms.emplace_back(r.S("int"), tostr);
-    arms.emplace_back(r.S("double"), r.ret(r.call("$numstr", {r.L(0)})));
+    arms.emplace_back(r.S("double"), r.ret(r.call("$numstr", {r.L(v)})));
     arms.emplace_back(r.S("function"), r.ret(r.S("[Function]")));
     // Array::toString is Array::join with ",", which is why these two are
     // mutually recursive -- and why every $helper's Module::funcs slot is
     // reserved before any body is built.
-    arms.emplace_back(r.S("array"), r.ret(r.call("$join", {r.L(0), r.S(",")})));
-    r.add(r.b.make_switch(r.typ(r.L(0)), arms, r.ret(r.S("[object Object]")),
-                          r.p));
-    r.finish("$str", 1, 1, {"v"});
+    arms.emplace_back(r.S("array"), r.ret(r.call("$join", {r.L(v), r.S(",")})));
+    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.S("[object Object]"))));
+    r.finish("$str");
   }
 
   // Array::join, ES2023 23.1.3.18: undefined and null render as the empty
   // string rather than as "undefined".
   void rt_join() {
     RT r(*this);
-    r.add(r.set(3, r.S("")));
-    r.add(r.set(2, r.I(0)));
+    const auto [a, sep] = r.params("a", "sep");
+    const auto [i, out, e] = r.locals("i", "out", "e");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(0)));
     r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
         r.blk({
-            r.iff(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                  r.set(3, r.bin(BinOp::Add, r.L(3), r.L(1)))),
-            r.set(4, r.idx(r.L(0), r.L(2))),
-            r.iff(r.isnt(r.typ(r.L(4)), "nil"),
-                  r.set(3, r.bin(BinOp::Add, r.L(3),
-                                 r.call("$str", {r.L(4)})))),
-            r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1))),
-        }),
-        r.p));
-    r.add(r.ret(r.L(3)));
-    r.finish("$join", 2, 5, {"a", "sep", "i", "out", "e"});
+            r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                  r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
+            r.set(e, r.idx(r.L(a), r.L(i))),
+            r.iff(r.isnt(r.typ(r.L(e)), "nil"),
+                  r.set(out,
+                        r.bin(BinOp::Add, r.L(out), r.call("$str", {r.L(e)})))),
+            r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
+        })));
+    r.add(r.ret(r.L(out)));
+    r.finish("$join");
   }
 
   // `+`, ES2023 13.15.3: a string on either side makes it concatenation,
@@ -792,19 +652,21 @@ struct Binder {
   // (`[] + {}`, `1 + null`) is what README.md lists as out of scope.
   void rt_add() {
     RT r(*this);
-    const NodeId cat = r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(0)}),
-                                   r.call("$str", {r.L(1)})));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"), cat));
-    r.add(r.iff(r.is(r.typ(r.L(1)), "string"), cat));
-    r.add(r.ret(r.bin(BinOp::Add, r.L(0), r.L(1))));
-    r.finish("$add", 2, 2, {"a", "b"});
+    const auto [a, b] = r.params("a", "b");
+    const NodeId cat = r.ret(
+        r.bin(BinOp::Add, r.call("$str", {r.L(a)}), r.call("$str", {r.L(b)})));
+    r.add(r.iff(r.is(r.typ(r.L(a)), "string"), cat));
+    r.add(r.iff(r.is(r.typ(r.L(b)), "string"), cat));
+    r.add(r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))));
+    r.finish("$add");
   }
 
   void rt_throwtype() {
     RT r(*this);
+    const auto [msg] = r.params("msg");
     r.add(r.b.make_throw(
-        r.obj({{"name", r.S("TypeError")}, {"message", r.L(0)}}), r.p));
-    r.finish("$throwtype", 1, 1, {"msg"});
+        r.obj({{"name", r.S("TypeError")}, {"message", r.L(msg)}})));
+    r.finish("$throwtype");
   }
 
   // Reading a property, member or indexed -- the same operation in
@@ -815,25 +677,27 @@ struct Binder {
   // absent.
   void rt_index() {
     RT r(*this);
+    const auto [recv, key] = r.params("recv", "key");
+    const auto [t, tk, i, n, k] = r.locals("t", "tk", "i", "n", "k");
     std::vector<std::pair<NodeId, NodeId>> arms;
     const NodeId seq = r.blk({
-        r.set(3, r.typ(r.L(1))),
-        r.iff(r.is(r.L(3), "string"),
-              r.blk({r.iff(r.is(r.L(1), "length"),
+        r.set(tk, r.typ(r.L(key))),
+        r.iff(r.is(r.L(tk), "string"),
+              r.blk({r.iff(r.is(r.L(key), "length"),
                            r.ret(r.in(IntrinsicId::ToDouble,
-                                      {r.len(r.L(0))}))),
+                                      {r.len(r.L(recv))}))),
                      r.ret(r.Nil())})),
-        r.iff(r.isnt(r.L(3), "double"),
-              r.iff(r.isnt(r.L(3), "int"), r.ret(r.Nil()))),
-        r.iff(r.bin(BinOp::Ne, r.L(1), r.L(1)), r.ret(r.Nil())),
-        r.set(5, r.len(r.L(0))),
-        r.iff(r.bin(BinOp::Lt, r.L(1), r.I(0)), r.ret(r.Nil())),
-        r.iff(r.bin(BinOp::Ge, r.L(1), r.in(IntrinsicId::ToDouble, {r.L(5)})),
+        r.iff(r.isnt(r.L(tk), "double"),
+              r.iff(r.isnt(r.L(tk), "int"), r.ret(r.Nil()))),
+        r.iff(r.bin(BinOp::Ne, r.L(key), r.L(key)), r.ret(r.Nil())),
+        r.set(n, r.len(r.L(recv))),
+        r.iff(r.bin(BinOp::Lt, r.L(key), r.I(0)), r.ret(r.Nil())),
+        r.iff(r.bin(BinOp::Ge, r.L(key), r.in(IntrinsicId::ToDouble, {r.L(n)})),
               r.ret(r.Nil())),
-        r.set(4, r.in(IntrinsicId::ToInt, {r.L(1)})),
-        r.iff(r.bin(BinOp::Ne, r.in(IntrinsicId::ToDouble, {r.L(4)}), r.L(1)),
+        r.set(i, r.in(IntrinsicId::ToInt, {r.L(key)})),
+        r.iff(r.bin(BinOp::Ne, r.in(IntrinsicId::ToDouble, {r.L(i)}), r.L(key)),
               r.ret(r.Nil())),
-        r.ret(r.idx(r.L(0), r.L(4))),
+        r.ret(r.idx(r.L(recv), r.L(i))),
     });
     arms.emplace_back(r.S("array"), seq);
     arms.emplace_back(r.S("string"), seq);
@@ -843,50 +707,51 @@ struct Binder {
     arms.emplace_back(
         r.S("object"),
         r.blk({
-            r.set(6, r.call("$str", {r.L(1)})),
-            r.iff(r.is(r.L(6), "size"),
-                  r.blk({r.iff(r.in(IntrinsicId::ObjectHas,
-                                    {r.L(0), r.S("$map")}),
-                               r.ret(r.in(IntrinsicId::ToDouble,
-                                          {r.len(r.idx(r.L(0), "$map"))}))),
-                         r.iff(r.in(IntrinsicId::ObjectHas,
-                                    {r.L(0), r.S("$set")}),
-                               r.ret(r.in(IntrinsicId::ToDouble,
-                                          {r.len(r.idx(r.L(0), "$set"))})))})),
-            r.ret(r.idx(r.L(0), r.L(6))),
+            r.set(k, r.call("$str", {r.L(key)})),
+            r.iff(
+                r.is(r.L(k), "size"),
+                r.blk({r.iff(r.in(IntrinsicId::ObjectHas,
+                                  {r.L(recv), r.S("$map")}),
+                             r.ret(r.in(IntrinsicId::ToDouble,
+                                        {r.len(r.idx(r.L(recv), "$map"))}))),
+                       r.iff(r.in(IntrinsicId::ObjectHas,
+                                  {r.L(recv), r.S("$set")}),
+                             r.ret(r.in(IntrinsicId::ToDouble,
+                                        {r.len(r.idx(r.L(recv), "$set"))})))})),
+            r.ret(r.idx(r.L(recv), r.L(k))),
         }));
     arms.emplace_back(
         r.S("nil"),
         r.ret(r.call("$throwtype",
                      {r.S("cannot read a property of undefined")})));
-    r.add(r.b.make_switch(r.typ(r.L(0)), arms, r.ret(r.Nil()), r.p));
-    r.finish("$index", 2, 7,
-             {"recv", "key", "t", "tk", "i", "n", "k"});
+    r.add(r.b.make_switch(r.typ(r.L(recv)), arms, r.ret(r.Nil())));
+    r.finish("$index");
   }
 
   void rt_setidx() {
     RT r(*this);
+    const auto [recv, key, val] = r.params("recv", "key", "val");
+    const auto [t, n, i] = r.locals("t", "n", "i");
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
         r.S("array"),
-        r.blk({r.set(4, r.len(r.L(0))),
-               r.set(5, r.in(IntrinsicId::ToInt, {r.L(1)})),
-               r.iff(r.bin(BinOp::Eq, r.L(5), r.L(4)),
-                     r.in(IntrinsicId::ArrayPush, {r.L(0), r.L(2)}),
-                     r.b.set_index(r.L(0), r.L(5), r.L(2), r.p)),
-               r.ret(r.L(2))}));
+        r.blk({r.set(n, r.len(r.L(recv))),
+               r.set(i, r.in(IntrinsicId::ToInt, {r.L(key)})),
+               r.iff(r.bin(BinOp::Eq, r.L(i), r.L(n)),
+                     r.in(IntrinsicId::ArrayPush, {r.L(recv), r.L(val)}),
+                     r.b.set_index(r.L(recv), r.L(i), r.L(val))),
+               r.ret(r.L(val))}));
     arms.emplace_back(
         r.S("object"),
-        r.blk({r.b.set_index(r.L(0), r.call("$str", {r.L(1)}), r.L(2), r.p),
-               r.ret(r.L(2))}));
+        r.blk({r.b.set_index(r.L(recv), r.call("$str", {r.L(key)}), r.L(val)),
+               r.ret(r.L(val))}));
     arms.emplace_back(
         r.S("map"),
-        r.blk({r.b.set_index(r.L(0), r.L(1), r.L(2), r.p), r.ret(r.L(2))}));
+        r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
     r.add(r.b.make_switch(
-        r.typ(r.L(0)), arms,
-        r.ret(r.call("$throwtype", {r.S("cannot set a property on this")})),
-        r.p));
-    r.finish("$setidx", 3, 6, {"recv", "key", "val", "t", "n", "i"});
+        r.typ(r.L(recv)), arms,
+        r.ret(r.call("$throwtype", {r.S("cannot set a property on this")}))));
+    r.finish("$setidx");
   }
 
   // Array::prototype::slice / String::prototype::slice, ES2023 23.1.3.27
@@ -896,33 +761,36 @@ struct Binder {
   // that clamps or counts from the end normalizes in its own lowering").
   void rt_slice() {
     RT r(*this);
-    auto norm = [&](int32_t out, int32_t arg, NodeId dflt) {
-      return r.iff(r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
-                   r.blk({r.set(out, r.in(IntrinsicId::ToInt, {r.L(arg)})),
-                          r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
-                                r.set(out, r.bin(BinOp::Add, r.L(3),
-                                                 r.L(out)))),
-                          r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
-                                r.set(out, r.I(0))),
-                          r.iff(r.bin(BinOp::Gt, r.L(out), r.L(3)),
-                                r.set(out, r.L(3)))}));
+    const auto [v, i, j] = r.params("v", "i", "j");
+    const auto [n, a, b] = r.locals("n", "a", "b");
+    const auto norm = [&](FuncWriter::Slot out, FuncWriter::Slot arg,
+                          NodeId dflt) {
+      return r.iff(
+          r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
+          r.blk(
+              {r.set(out, r.in(IntrinsicId::ToInt, {r.L(arg)})),
+               r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
+                     r.set(out, r.bin(BinOp::Add, r.L(n), r.L(out)))),
+               r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)), r.set(out, r.I(0))),
+               r.iff(r.bin(BinOp::Gt, r.L(out), r.L(n)), r.set(out, r.L(n)))}));
     };
-    r.add(r.set(3, r.len(r.L(0))));
-    r.add(norm(4, 1, r.I(0)));
-    r.add(norm(5, 2, r.L(3)));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(5), r.L(4)), r.set(5, r.L(4))));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"),
-                r.ret(r.in(IntrinsicId::StrSlice, {r.L(0), r.L(4), r.L(5)})),
-                r.ret(r.in(IntrinsicId::ArraySlice,
-                           {r.L(0), r.L(4), r.L(5)}))));
-    r.finish("$slice", 3, 6, {"v", "i", "j", "n", "a", "b"});
+    r.add(r.set(n, r.len(r.L(v))));
+    r.add(norm(a, i, r.I(0)));
+    r.add(norm(b, j, r.L(n)));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(b), r.L(a)), r.set(b, r.L(a))));
+    r.add(
+        r.iff(r.is(r.typ(r.L(v)), "string"),
+              r.ret(r.in(IntrinsicId::StrSlice, {r.L(v), r.L(a), r.L(b)})),
+              r.ret(r.in(IntrinsicId::ArraySlice, {r.L(v), r.L(a), r.L(b)}))));
+    r.finish("$slice");
   }
 
   void rt_push() {
     RT r(*this);
-    r.add(r.in(IntrinsicId::ArrayPush, {r.L(0), r.L(1)}));
-    r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.len(r.L(0))})));
-    r.finish("$push", 2, 2, {"a", "v"});
+    const auto [a, v] = r.params("a", "v");
+    r.add(r.in(IntrinsicId::ArrayPush, {r.L(a), r.L(v)}));
+    r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.len(r.L(a))})));
+    r.finish("$push");
   }
 
   // The iteration protocol, ES2023 7.4 -- as a state object rather than as
@@ -932,61 +800,63 @@ struct Binder {
   // done} answer already *is* the shape this returns.
   void rt_iter() {
     RT r(*this);
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "generator"),
-                r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(0)}}))));
-    const NodeId over = r.ret(
-        r.obj({{"k", r.S("a")}, {"v", r.L(0)}, {"i", r.I(0)}}));
-    r.add(r.iff(r.is(r.L(1), "array"), over));
-    r.add(r.iff(r.is(r.L(1), "string"), over));
+    const auto [v] = r.params("v");
+    const auto [t, mm, ks, out, i, k] =
+        r.locals("t", "mm", "ks", "out", "i", "k");
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "generator"),
+                r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
+    const NodeId over =
+        r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}));
+    r.add(r.iff(r.is(r.L(t), "array"), over));
+    r.add(r.iff(r.is(r.L(t), "string"), over));
     r.add(r.iff(
-        r.is(r.L(1), "object"),
+        r.is(r.L(t), "object"),
         r.blk({
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(0), r.S("$set")}),
+            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$set")}),
                   r.ret(r.obj({{"k", r.S("a")},
                                {"v", r.in(IntrinsicId::ObjectKeys,
-                                          {r.idx(r.L(0), "$set")})},
+                                          {r.idx(r.L(v), "$set")})},
                                {"i", r.I(0)}}))),
             // A Map iterates [key, value] pairs; materializing them up
             // front keeps $iternext one shape rather than three.
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(0), r.S("$map")}),
+            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$map")}),
                   r.blk({
-                      r.set(2, r.idx(r.L(0), "$map")),
-                      r.set(3, r.in(IntrinsicId::ObjectKeys, {r.L(2)})),
-                      r.set(4, r.b.array_lit({}, r.p)),
-                      r.set(5, r.I(0)),
+                      r.set(mm, r.idx(r.L(v), "$map")),
+                      r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(mm)})),
+                      r.set(out, r.b.array_lit({})),
+                      r.set(i, r.I(0)),
                       r.b.make_while(
-                          r.bin(BinOp::Lt, r.L(5), r.len(r.L(3))),
-                          r.blk({r.set(6, r.idx(r.L(3), r.L(5))),
+                          r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+                          r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
                                  r.in(IntrinsicId::ArrayPush,
-                                      {r.L(4), r.b.array_lit(
-                                                   {r.L(6),
-                                                    r.idx(r.L(2), r.L(6))},
-                                                   r.p)}),
-                                 r.set(5, r.bin(BinOp::Add, r.L(5), r.I(1)))}),
-                          r.p),
-                      r.ret(r.obj({{"k", r.S("a")},
-                                   {"v", r.L(4)},
-                                   {"i", r.I(0)}})),
+                                      {r.L(out),
+                                       r.b.array_lit(
+                                           {r.L(k), r.idx(r.L(mm), r.L(k))})}),
+                                 r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+                      r.ret(r.obj(
+                          {{"k", r.S("a")}, {"v", r.L(out)}, {"i", r.I(0)}})),
                   })),
         })));
     r.add(r.ret(r.call("$throwtype", {r.S("value is not iterable")})));
-    r.finish("$iter", 1, 7, {"v", "t", "mm", "ks", "out", "i", "k"});
+    r.finish("$iter");
   }
 
   void rt_iternext() {
     RT r(*this);
-    r.add(r.iff(r.is(r.idx(r.L(0), "k"), "g"),
-                r.ret(r.in(IntrinsicId::GenResume,
-                           {r.idx(r.L(0), "v"), r.Nil()}))));
-    r.add(r.set(1, r.idx(r.L(0), "v")));
-    r.add(r.set(2, r.idx(r.L(0), "i")));
-    r.add(r.iff(r.bin(BinOp::Ge, r.L(2), r.len(r.L(1))),
+    const auto [it] = r.params("it");
+    const auto [a, i] = r.locals("a", "i");
+    r.add(r.iff(
+        r.is(r.idx(r.L(it), "k"), "g"),
+        r.ret(r.in(IntrinsicId::GenResume, {r.idx(r.L(it), "v"), r.Nil()}))));
+    r.add(r.set(a, r.idx(r.L(it), "v")));
+    r.add(r.set(i, r.idx(r.L(it), "i")));
+    r.add(r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(a))),
                 r.ret(r.obj({{"value", r.Nil()}, {"done", r.Bo(true)}}))));
-    r.add(r.sidx(r.L(0), "i", r.bin(BinOp::Add, r.L(2), r.I(1))));
-    r.add(r.ret(r.obj({{"value", r.idx(r.L(1), r.L(2))},
-                       {"done", r.Bo(false)}})));
-    r.finish("$iternext", 1, 3, {"it", "a", "i"});
+    r.add(r.sidx(r.L(it), "i", r.bin(BinOp::Add, r.L(i), r.I(1))));
+    r.add(r.ret(
+        r.obj({{"value", r.idx(r.L(a), r.L(i))}, {"done", r.Bo(false)}})));
+    r.finish("$iternext");
   }
 
   // Map and Set. The wrapper object is what makes `typeof m === 'object'`
@@ -996,53 +866,62 @@ struct Binder {
   // that is the same distinction JavaScript draws.
   void rt_minner() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "object"),
-                r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(0), r.S("$map")}),
-                             r.ret(r.idx(r.L(0), "$map"))),
-                       r.iff(r.in(IntrinsicId::ObjectHas, {r.L(0), r.S("$set")}),
-                             r.ret(r.idx(r.L(0), "$set")))})));
+    const auto [o] = r.params("o");
+    r.add(
+        r.iff(r.is(r.typ(r.L(o)), "object"),
+              r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$map")}),
+                           r.ret(r.idx(r.L(o), "$map"))),
+                     r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$set")}),
+                           r.ret(r.idx(r.L(o), "$set")))})));
     r.add(r.ret(r.call("$throwtype", {r.S("not a Map or a Set")})));
-    r.finish("$minner", 1, 1, {"o"});
+    r.finish("$minner");
   }
 
   void rt_mget() {
     RT r(*this);
-    r.add(r.set(2, r.call("$minner", {r.L(0)})));
-    r.add(r.iff(r.in(IntrinsicId::ObjectHas, {r.L(2), r.L(1)}),
-                r.ret(r.idx(r.L(2), r.L(1)))));
+    const auto [o, k] = r.params("o", "k");
+    const auto [mm] = r.locals("mm");
+    r.add(r.set(mm, r.call("$minner", {r.L(o)})));
+    r.add(r.iff(r.in(IntrinsicId::ObjectHas, {r.L(mm), r.L(k)}),
+                r.ret(r.idx(r.L(mm), r.L(k)))));
     r.add(r.ret(r.Nil()));
-    r.finish("$mget", 2, 3, {"o", "k", "mm"});
+    r.finish("$mget");
   }
 
   void rt_mset() {
     RT r(*this);
-    r.add(r.b.set_index(r.call("$minner", {r.L(0)}), r.L(1), r.L(2), r.p));
-    r.add(r.ret(r.L(0)));
-    r.finish("$mset", 3, 3, {"o", "k", "v"});
+    const auto [o, k, v] = r.params("o", "k", "v");
+    r.add(r.b.set_index(r.call("$minner", {r.L(o)}), r.L(k), r.L(v)));
+    r.add(r.ret(r.L(o)));
+    r.finish("$mset");
   }
 
   void rt_mhas() {
     RT r(*this);
-    r.add(r.ret(r.in(IntrinsicId::ObjectHas,
-                     {r.call("$minner", {r.L(0)}), r.L(1)})));
-    r.finish("$mhas", 2, 2, {"o", "k"});
+    const auto [o, k] = r.params("o", "k");
+    r.add(r.ret(
+        r.in(IntrinsicId::ObjectHas, {r.call("$minner", {r.L(o)}), r.L(k)})));
+    r.finish("$mhas");
   }
 
   void rt_mdel() {
     RT r(*this);
-    r.add(r.set(2, r.call("$minner", {r.L(0)})));
-    r.add(r.iff(r.in(IntrinsicId::ObjectHas, {r.L(2), r.L(1)}),
-                r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(2), r.L(1)}),
+    const auto [o, k] = r.params("o", "k");
+    const auto [mm] = r.locals("mm");
+    r.add(r.set(mm, r.call("$minner", {r.L(o)})));
+    r.add(r.iff(r.in(IntrinsicId::ObjectHas, {r.L(mm), r.L(k)}),
+                r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(mm), r.L(k)}),
                        r.ret(r.Bo(true))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$mdel", 2, 3, {"o", "k", "mm"});
+    r.finish("$mdel");
   }
 
   void rt_sadd() {
     RT r(*this);
-    r.add(r.b.set_index(r.call("$minner", {r.L(0)}), r.L(1), r.Bo(true), r.p));
-    r.add(r.ret(r.L(0)));
-    r.finish("$sadd", 2, 2, {"o", "v"});
+    const auto [o, v] = r.params("o", "v");
+    r.add(r.b.set_index(r.call("$minner", {r.L(o)}), r.L(v), r.Bo(true)));
+    r.add(r.ret(r.L(o)));
+    r.finish("$sadd");
   }
 
   // -- Promises, async and await ------------------------------------------
@@ -1072,56 +951,64 @@ struct Binder {
 
   void rt_pnew() {
     RT r(*this);
+
     r.add(r.ret(r.obj({{"$promise", r.Bo(true)},
                        {"s", r.I(0)},
                        {"v", r.Nil()},
-                       {"cbs", r.b.array_lit({}, r.p)}})));
-    r.finish("$pnew", 0, 0, {});
+                       {"cbs", r.b.array_lit({})}})));
+    r.finish("$pnew");
   }
 
   void rt_ispromise() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "object"),
-                r.ret(r.in(IntrinsicId::ObjectHas, {r.L(0), r.S("$promise")}))));
+    const auto [v] = r.params("v");
+    r.add(
+        r.iff(r.is(r.typ(r.L(v)), "object"),
+              r.ret(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$promise")}))));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$ispromise", 1, 1, {"v"});
+    r.finish("$ispromise");
   }
 
   // Settling is once and for all: a second resolve, or a reject after a
   // resolve, is ignored -- ES2023 27.2.1.3's "alreadyResolved".
   void rt_psettle() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Ne, r.idx(r.L(0), "s"), r.I(0)), r.ret(r.Nil())));
-    r.add(r.sidx(r.L(0), "s", r.L(1)));
-    r.add(r.sidx(r.L(0), "v", r.L(2)));
-    r.add(r.set(3, r.idx(r.L(0), "cbs")));
-    r.add(r.sidx(r.L(0), "cbs", r.b.array_lit({}, r.p)));
-    r.add(r.set(4, r.I(0)));
+    const auto [p, st, v] = r.params("p", "st", "v");
+    const auto [cbs, i] = r.locals("cbs", "i");
+    r.add(r.iff(r.bin(BinOp::Ne, r.idx(r.L(p), "s"), r.I(0)), r.ret(r.Nil())));
+    r.add(r.sidx(r.L(p), "s", r.L(st)));
+    r.add(r.sidx(r.L(p), "v", r.L(v)));
+    r.add(r.set(cbs, r.idx(r.L(p), "cbs")));
+    r.add(r.sidx(r.L(p), "cbs", r.b.array_lit({})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(4), r.len(r.L(3))),
-        r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(3), r.L(4))}),
-               r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))}),
-        r.p));
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(cbs))),
+        r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(cbs), r.L(i))}),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$psettle", 3, 5, {"p", "st", "v", "cbs", "i"});
+    r.finish("$psettle");
   }
 
   void rt_pon() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Ne, r.idx(r.L(0), "s"), r.I(0)),
-                r.blk({r.in(IntrinsicId::Enqueue, {r.L(1)}), r.ret(r.Nil())})));
-    r.add(r.in(IntrinsicId::ArrayPush, {r.idx(r.L(0), "cbs"), r.L(1)}));
+    const auto [p, cb] = r.params("p", "cb");
+    r.add(
+        r.iff(r.bin(BinOp::Ne, r.idx(r.L(p), "s"), r.I(0)),
+              r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
+    r.add(r.in(IntrinsicId::ArrayPush, {r.idx(r.L(p), "cbs"), r.L(cb)}));
     r.add(r.ret(r.Nil()));
-    r.finish("$pon", 2, 2, {"p", "cb"});
+    r.finish("$pon");
   }
 
   void rt_topromise() {
     RT r(*this);
-    r.add(r.iff(r.call("$ispromise", {r.L(0)}), r.ret(r.L(0))));
-    r.add(r.set(1, r.call("$pnew", {})));
-    r.add(r.call("$psettle", {r.L(1), r.I(1), r.L(0)}));
-    r.add(r.ret(r.L(1)));
-    r.finish("$topromise", 1, 2, {"v", "p"});
+    const auto [v] = r.params("v");
+    const auto [p] = r.locals("p");
+    r.add(r.iff(r.call("$ispromise", {r.L(v)}), r.ret(r.L(v))));
+    r.add(r.set(p, r.call("$pnew", {})));
+    r.add(r.call("$psettle", {r.L(p), r.I(1), r.L(v)}));
+    r.add(r.ret(r.L(p)));
+    r.finish("$topromise");
   }
 
   // Resolving with a promise adopts its state (ES2023 27.2.1.3.2) rather
@@ -1129,33 +1016,36 @@ struct Binder {
   // async function that returns a promise flatten instead of nesting.
   void rt_presolve() {
     RT r(*this);
-    r.add(r.iff(
-        r.call("$ispromise", {r.L(1)}),
-        r.blk({r.setc(0, r.L(0)), r.setc(1, r.L(1)),
-               r.call("$pon", {r.L(1), r.clos("$adopt", {0, 1})}),
-               r.ret(r.Nil())})));
-    r.add(r.call("$psettle", {r.L(0), r.I(1), r.L(1)}));
+    const auto [q, v] = r.params("q", "v");
+    r.add(r.iff(r.call("$ispromise", {r.L(v)}),
+                r.blk({r.setc(0, r.L(q)), r.setc(1, r.L(v)),
+                       r.call("$pon", {r.L(v), r.clos("$adopt", {0, 1})}),
+                       r.ret(r.Nil())})));
+    r.add(r.call("$psettle", {r.L(q), r.I(1), r.L(v)}));
     r.add(r.ret(r.Nil()));
-    r.finish("$presolve", 2, 2, {"q", "v"}, 2);
+    r.finish("$presolve", 2);
   }
 
   void rt_adopt() {
     RT r(*this);
+
     r.add(r.call("$psettle",
                  {r.P(0), r.idx(r.P(1), "s"), r.idx(r.P(1), "v")}));
-    r.finish("$adopt", 0, 0, {}, 0, 2);
+    r.finish("$adopt", 0, 2);
   }
 
   void rt_then() {
     RT r(*this);
-    r.add(r.set(3, r.call("$pnew", {})));
-    r.add(r.setc(0, r.L(0)));
-    r.add(r.setc(1, r.L(3)));
-    r.add(r.setc(2, r.L(1)));
-    r.add(r.setc(3, r.L(2)));
-    r.add(r.call("$pon", {r.L(0), r.clos("$react", {0, 1, 2, 3})}));
-    r.add(r.ret(r.L(3)));
-    r.finish("$then", 3, 4, {"p", "onF", "onR", "q"}, 4);
+    const auto [p, onF, onR] = r.params("p", "onF", "onR");
+    const auto [q] = r.locals("q");
+    r.add(r.set(q, r.call("$pnew", {})));
+    r.add(r.setc(0, r.L(p)));
+    r.add(r.setc(1, r.L(q)));
+    r.add(r.setc(2, r.L(onF)));
+    r.add(r.setc(3, r.L(onR)));
+    r.add(r.call("$pon", {r.L(p), r.clos("$react", {0, 1, 2, 3})}));
+    r.add(r.ret(r.L(q)));
+    r.finish("$then", 4);
   }
 
   // captures: 0 = the settled promise, 1 = the promise this reaction
@@ -1164,12 +1054,13 @@ struct Binder {
   // "if IsCallable(handler) is false".
   void rt_react() {
     RT r(*this);
+    const auto [e] = r.locals("e");
     const auto arm = [&](int32_t h, bool fulfilled) {
       const NodeId run = r.b.make_try(
           0,
           r.call("$presolve",
-                 {r.P(1), r.b.call_value(r.P(h), {r.idx(r.P(0), "v")}, r.p)}),
-          r.call("$psettle", {r.P(1), r.I(2), r.L(0)}), r.p);
+                 {r.P(1), r.b.call_value(r.P(h), {r.idx(r.P(0), "v")})}),
+          r.call("$psettle", {r.P(1), r.I(2), r.L(e)}));
       const NodeId pass =
           fulfilled ? r.call("$presolve", {r.P(1), r.idx(r.P(0), "v")})
                     : r.call("$psettle",
@@ -1178,7 +1069,7 @@ struct Binder {
     };
     r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.P(0), "s"), r.I(1)), arm(2, true),
                 arm(3, false)));
-    r.finish("$react", 0, 1, {"e"}, 0, 4);
+    r.finish("$react", 0, 4);
   }
 
   // The two halves of `new Promise((resolve, reject) => ...)`, each a
@@ -1186,14 +1077,16 @@ struct Binder {
   // promise (emit_new).
   void rt_presolve1() {
     RT r(*this);
-    r.add(r.call("$presolve", {r.P(0), r.L(0)}));
-    r.finish("$presolve1", 1, 1, {"v"}, 0, 1);
+    const auto [v] = r.params("v");
+    r.add(r.call("$presolve", {r.P(0), r.L(v)}));
+    r.finish("$presolve1", 0, 1);
   }
 
   void rt_preject1() {
     RT r(*this);
-    r.add(r.call("$psettle", {r.P(0), r.I(2), r.L(0)}));
-    r.finish("$preject1", 1, 1, {"e"}, 0, 1);
+    const auto [e] = r.params("e");
+    r.add(r.call("$psettle", {r.P(0), r.I(2), r.L(e)}));
+    r.finish("$preject1", 0, 1);
   }
 
   // `await`. CoroCurrent is the coroutine the async call spawned; parking
@@ -1202,21 +1095,25 @@ struct Binder {
   // front end writes.
   void rt_await() {
     RT r(*this);
-    r.add(r.set(1, r.call("$topromise", {r.L(0)})));
-    r.add(r.call("$pon", {r.L(1), r.in(IntrinsicId::CoroCurrent, {})}));
+    const auto [v] = r.params("v");
+    const auto [p] = r.locals("p");
+    r.add(r.set(p, r.call("$topromise", {r.L(v)})));
+    r.add(r.call("$pon", {r.L(p), r.in(IntrinsicId::CoroCurrent, {})}));
     r.add(r.in(IntrinsicId::CoroYield, {r.Nil()}));
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(1), "s"), r.I(2)),
-                r.b.make_throw(r.idx(r.L(1), "v"), r.p)));
-    r.add(r.ret(r.idx(r.L(1), "v")));
-    r.finish("$await", 1, 2, {"v", "p"});
+    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(p), "s"), r.I(2)),
+                r.b.make_throw(r.idx(r.L(p), "v"))));
+    r.add(r.ret(r.idx(r.L(p), "v")));
+    r.finish("$await");
   }
 
   void rt_prejected() {
     RT r(*this);
-    r.add(r.set(1, r.call("$pnew", {})));
-    r.add(r.call("$psettle", {r.L(1), r.I(2), r.L(0)}));
-    r.add(r.ret(r.L(1)));
-    r.finish("$prejected", 1, 2, {"e", "p"});
+    const auto [e] = r.params("e");
+    const auto [p] = r.locals("p");
+    r.add(r.set(p, r.call("$pnew", {})));
+    r.add(r.call("$psettle", {r.L(p), r.I(2), r.L(e)}));
+    r.add(r.ret(r.L(p)));
+    r.finish("$prejected");
   }
 
   void emit_runtime() {
@@ -1255,58 +1152,25 @@ struct Binder {
     rt_prejected();
   }
 
+  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
+  // sets it), so all these MakeClosures name the one closure the executor
+  // built at the first of them -- which is what the array of pre-built
+  // closures at file scope used to buy, at the cost of a synthetic variable
+  // every function had to capture. One that *does* take captures is built at
+  // the site that has them (RT::clos) and never reaches here; saying so
+  // beats the "cannot call nil" it would otherwise be at run time.
+  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
+                SrcPos p) {
+    const auto it = rt.find(name);
+    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
+    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
+      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
+    }
+    auto b = Builder(m).at(p);
+    return b.call_value(b.make_closure(it->second, empty_cmap), args);
+  }
+
   // ==== Pass B: emit ======================================================
-
-  // Where a helper sits in the file-scope array every function captures.
-  // Every condition in the program is a $truthy call, so what this is
-  // worth is that none of them allocates: the closure was built once, at
-  // file scope, rather than once per activation of every function that
-  // uses one.
-  // Where a helper sits in the array fill_helpers builds. A helper that
-  // takes captures has no closure there to fetch -- it is built at the
-  // site that has them -- so asking for one is a mistake in this binder,
-  // and saying so here beats the "cannot call nil" it would otherwise be
-  // at run time.
-  int32_t helper_slot(const std::string& name) const {
-    const auto& names = rt_names();
-    for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] != name) continue;
-      if (m.funcs[static_cast<size_t>(rt.at(name))].num_captures != 0) {
-        coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-      }
-      return static_cast<int32_t>(i);
-    }
-    coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-  }
-
-  // A helper call reads the one closure that already exists rather than
-  // building another: these capture nothing, so a per-function cell meant
-  // one allocation per helper per *call* of every function that used one.
-  NodeId helper(FnCtx& ctx, const std::string& name,
-                const std::vector<NodeId>& args, SrcPos p) {
-    Builder b(m);
-    return b.call_value(
-        b.index(read_var(helpers_var, ctx, p),
-                b.literal(helper_slot(name), p), p),
-        args, p);
-  }
-
-
-  // File scope builds every helper's closure once, into the array above.
-  void fill_helpers(FnCtx& ctx, std::vector<NodeId>& out, SrcPos p) {
-    Builder b(m);
-    std::vector<NodeId> vals;
-    for (const std::string& n : rt_names()) {
-      // A helper that takes captures is built at the site that has them,
-      // never fetched from here, so its slot stays nil.
-      const int32_t g = rt.at(n);
-      vals.push_back(m.funcs[static_cast<size_t>(g)].num_captures == 0
-                         ? b.make_closure(g, empty_cmap, p)
-                         : b.nil_literal(p));
-    }
-    out.push_back(b.cell_fresh(fns[0].cell_index.at(helpers_var), p));
-    out.push_back(write_var(helpers_var, b.array_lit(vals, p), ctx, p));
-  }
 
   // A value used as a condition. A comparison already produced a bool, and
   // JavaScript's ToBoolean is the identity on those, so the call is
@@ -1317,20 +1181,13 @@ struct Binder {
       return v;
     }
     if (n.tag == Tag::Literal && m.const_kind(v) == ConstKind::Bool) return v;
-    return helper(ctx, "$truthy", {v}, p);
+    return helper("$truthy", {v}, p);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    std::vector<CaptureSrc> cs;
-    cs.reserve(fns[static_cast<size_t>(g)].free.size());
-    for (const int32_t v : fns[static_cast<size_t>(g)].free) {
-      const auto [k, i] = access(ctx.fn, v);
-      cs.push_back({k, i});
-    }
-    const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(cs);
-    return b.make_closure(fns[static_cast<size_t>(g)].index, cm, p);
+    auto b = Builder(m).at(p);
+    return b.make_closure(rs.fns[static_cast<size_t>(g)].index,
+                          rs.capture_map(m, ctx.fn, g));
   }
 
   // Giving a declaration its storage, and initializing it. A captured one
@@ -1341,30 +1198,29 @@ struct Binder {
   // (absent here) does not promise.
   NodeId bind_decl(int32_t v, NodeId value, FnCtx& ctx, SrcPos p,
                    bool fresh = true) {
-    Builder b(m);
-    const auto& ci = fns[static_cast<size_t>(ctx.fn)].cell_index;
+    auto b = Builder(m).at(p);
+    const auto& ci = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     const auto it = ci.find(v);
     if (it != ci.end()) {
-      if (!fresh) return b.assign(VarKind::Cell, it->second, value, p);
-      return b.block({b.cell_fresh(it->second, p),
-                      b.assign(VarKind::Cell, it->second, value, p)},
-                     p);
+      if (!fresh) return b.assign(VarKind::Cell, it->second, value);
+      return b.block({b.cell_fresh(it->second),
+                      b.assign(VarKind::Cell, it->second, value)});
     }
-    const int32_t s = ctx.alloc_local(vars[static_cast<size_t>(v)].name);
-    slot_of[static_cast<size_t>(v)] = s;
-    return b.assign(VarKind::Local, s, value, p);
+    const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
+    rs.vars[static_cast<size_t>(v)].slot = s;
+    return b.assign(VarKind::Local, s, value);
   }
 
   NodeId read_var(int32_t v, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto [k, i] = access(ctx.fn, v);
-    return b.varref(k, i, p);
+    auto b = Builder(m).at(p);
+    const auto [k, i] = rs.access(ctx.fn, v);
+    return b.varref(k, i);
   }
 
   NodeId write_var(int32_t v, NodeId value, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto [k, i] = access(ctx.fn, v);
-    return b.assign(k, i, value, p);
+    auto b = Builder(m).at(p);
+    const auto [k, i] = rs.access(ctx.fn, v);
+    return b.assign(k, i, value);
   }
 
   // A brace block, as a Scope owning exactly the slots its own
@@ -1372,9 +1228,9 @@ struct Binder {
   // restored on the way out), which is what keeps a frame's width the
   // deepest nesting rather than the total number of declarations.
   NodeId emit_block(const Ast& block, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(block);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     std::vector<NodeId> out;
 
     // Every binding this block declares is *created* on entry, and only
@@ -1386,7 +1242,7 @@ struct Binder {
     // capture the closure is already holding. Doing it here also keeps
     // the per-iteration binding for free -- a loop body *is* a block, so
     // entering it again is exactly when JavaScript wants new bindings.
-    const auto& cells = fns[static_cast<size_t>(ctx.fn)].cell_index;
+    const auto& cells = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     const auto declared_by = [&](const Ast& s) -> const Ast* {
       if (s.tag == "funcdecl"_) return find_child(s, "ident");
       if (s.tag == "vardecl"_) return s.nodes[1].get();
@@ -1399,7 +1255,7 @@ struct Binder {
       const auto d = decl_of.find(id);
       if (d == decl_of.end()) continue;
       const auto c = cells.find(d->second);
-      if (c != cells.end()) out.push_back(b.cell_fresh(c->second, p));
+      if (c != cells.end()) out.push_back(b.cell_fresh(c->second));
     }
     for (const auto& s : block.nodes) {
       if (s->tag != "funcdecl"_) continue;
@@ -1412,10 +1268,9 @@ struct Binder {
       if (s->tag == "funcdecl"_) continue;
       out.push_back(emit_stmt(*s, ctx));
     }
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    if (end > mark) return b.scope(mark, end, b.block(out, p), p);
-    return b.block(out, p);
+    const int32_t end = ctx.release(mark);
+    if (end > mark) return b.scope(mark, end, b.block(out));
+    return b.block(out);
   }
 
   // A statement that is a block in its own right (`if (c) x = 1;` has no
@@ -1434,28 +1289,27 @@ struct Binder {
 
   NodeId arg_or_nil(const std::vector<NodeId>& a, size_t i, SrcPos p) {
     if (i < a.size()) return a[i];
-    Builder b(m);
-    return b.nil_literal(p);
+    auto b = Builder(m).at(p);
+    return b.nil_literal();
   }
 
   // -- Statements ---------------------------------------------------------
   NodeId emit_stmt(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "funcdecl"_:
-        return b.block({}, p);  // hoisted; emit_block already bound it
+        return b.block({});  // hoisted; emit_block already bound it
       case "classdecl"_:
         return emit_classdecl(a, ctx);
       case "emptystmt"_:
-        return b.block({}, p);
+        return b.block({});
       case "block"_:
         return emit_block(a, ctx);
       case "vardecl"_: {
         const int32_t v = decl_of.at(a.nodes[1].get());
-        const NodeId value = a.nodes.size() > 2
-                                 ? emit_expr(*a.nodes[2], ctx)
-                                 : b.nil_literal(p);
+        const NodeId value =
+            a.nodes.size() > 2 ? emit_expr(*a.nodes[2], ctx) : b.nil_literal();
         // false: the cell already exists -- emit_block created it on the
         // way in, along with every other binding this block declares.
         return bind_decl(v, value, ctx, p, false);
@@ -1465,26 +1319,25 @@ struct Binder {
         const NodeId t = emit_body(*a.nodes[1], ctx);
         NodeId e;
         if (a.nodes.size() > 2) e = emit_body(*a.nodes[2], ctx);
-        return b.make_if(c, t, e, p);
+        return b.make_if(c, t, e);
       }
       case "whilestmt"_: {
         const NodeId c = truthy(emit_expr(*a.nodes[0], ctx), ctx, p);
-        return b.make_while(c, emit_body(*a.nodes[1], ctx), p);
+        return b.make_while(c, emit_body(*a.nodes[1], ctx));
       }
       case "forstmt"_:
         return emit_for(a, ctx);
       case "forof"_:
         return emit_forof(a, ctx);
       case "retstmt"_:
-        return b.make_return(
-            a.nodes.empty() ? b.nil_literal(p) : emit_expr(*a.nodes[0], ctx),
-            p);
+        return b.make_return(a.nodes.empty() ? b.nil_literal()
+                                             : emit_expr(*a.nodes[0], ctx));
       case "throwstmt"_:
-        return b.make_throw(emit_expr(*a.nodes[0], ctx), p);
+        return b.make_throw(emit_expr(*a.nodes[0], ctx));
       case "breakstmt"_:
-        return b.make_break(p);
+        return b.make_break();
       case "contstmt"_:
-        return b.make_continue(p);
+        return b.make_continue();
       case "trystmt"_:
         return emit_try(a, ctx);
       case "exprstmt"_:
@@ -1507,12 +1360,12 @@ struct Binder {
   }
 
   NodeId emit_incdec(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const bool up = a.nodes.back()->token == "++";
     return emit_store(a, a.nodes.size() - 1, ctx, p, [&](auto&& cur) {
-      return up ? helper(ctx, "$add", {cur(), b.double_literal(1.0, p)}, p)
-                : b.binary(BinOp::Sub, cur(), b.double_literal(1.0, p), p);
+      return up ? helper("$add", {cur(), b.double_literal(1.0)}, p)
+                : b.binary(BinOp::Sub, cur(), b.double_literal(1.0));
     });
   }
 
@@ -1537,9 +1390,9 @@ struct Binder {
   // seeded from the previous one, which is why a closure made in iteration
   // 2 sees 2 forever rather than the loop's final value.
   NodeId emit_for(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     std::vector<NodeId> out;
 
     int32_t loopvar = -1;
@@ -1553,18 +1406,18 @@ struct Binder {
       }
     }
     const int32_t first = ctx.alloc_local("$first");
-    out.push_back(b.assign(VarKind::Local, first, b.bool_literal(true, p), p));
+    out.push_back(b.assign(VarKind::Local, first, b.bool_literal(true)));
 
     std::vector<NodeId> step;
-    const auto& cells = fns[static_cast<size_t>(ctx.fn)].cell_index;
+    const auto& cells = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     if (loopvar >= 0 && cells.count(loopvar)) {
       const int32_t c = cells.at(loopvar);
       const int32_t carry = ctx.alloc_local("$carry");
       step.push_back(
-          b.assign(VarKind::Local, carry, b.varref(VarKind::Cell, c, p), p));
-      step.push_back(b.cell_fresh(c, p));
-      step.push_back(b.assign(VarKind::Cell, c,
-                              b.varref(VarKind::Local, carry, p), p));
+          b.assign(VarKind::Local, carry, b.varref(VarKind::Cell, c)));
+      step.push_back(b.cell_fresh(c));
+      step.push_back(
+          b.assign(VarKind::Cell, c, b.varref(VarKind::Local, carry)));
     }
     for (const auto& c : a.nodes[2]->nodes) {
       step.push_back(emit_expr_stmt(*c, ctx));
@@ -1572,50 +1425,44 @@ struct Binder {
 
     std::vector<NodeId> loop;
     loop.push_back(b.make_if(
-        b.varref(VarKind::Local, first, p),
-        b.assign(VarKind::Local, first, b.bool_literal(false, p), p),
-        b.block(step, p), p));
+        b.varref(VarKind::Local, first),
+        b.assign(VarKind::Local, first, b.bool_literal(false)), b.block(step)));
     if (!a.nodes[1]->nodes.empty()) {
       const NodeId c = truthy(emit_expr(*a.nodes[1]->nodes[0], ctx), ctx, p);
-      loop.push_back(b.make_if(
-          b.binary(BinOp::Eq, c, b.bool_literal(false, p), p),
-          b.make_break(p), NodeId{}, p));
+      loop.push_back(b.make_if(b.binary(BinOp::Eq, c, b.bool_literal(false)),
+                               b.make_break(), NodeId{}));
     }
     loop.push_back(emit_body(*a.nodes[3], ctx));
-    out.push_back(b.make_while(b.bool_literal(true, p), b.block(loop, p), p));
+    out.push_back(b.make_while(b.bool_literal(true), b.block(loop)));
 
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   NodeId emit_forof(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
     std::vector<NodeId> out;
     out.push_back(b.assign(VarKind::Local, it,
-                           helper(ctx, "$iter", {emit_expr(*a.nodes[2], ctx)}, p),
-                           p));
+                           helper("$iter", {emit_expr(*a.nodes[2], ctx)}, p)));
     std::vector<NodeId> loop;
-    loop.push_back(b.assign(
-        VarKind::Local, st,
-        helper(ctx, "$iternext", {b.varref(VarKind::Local, it, p)}, p), p));
-    loop.push_back(b.make_if(
-        b.index(b.varref(VarKind::Local, st, p), b.str_literal("done", p), p),
-        b.make_break(p), NodeId{}, p));
+    loop.push_back(
+        b.assign(VarKind::Local, st,
+                 helper("$iternext", {b.varref(VarKind::Local, it)}, p)));
+    loop.push_back(
+        b.make_if(b.index(b.varref(VarKind::Local, st), b.str_literal("done")),
+                  b.make_break(), NodeId{}));
     loop.push_back(bind_decl(
         decl_of.at(a.nodes[1].get()),
-        b.index(b.varref(VarKind::Local, st, p), b.str_literal("value", p), p),
-        ctx, p));
+        b.index(b.varref(VarKind::Local, st), b.str_literal("value")), ctx, p));
     loop.push_back(emit_body(*a.nodes[3], ctx));
-    out.push_back(b.make_while(b.bool_literal(true, p), b.block(loop, p), p));
+    out.push_back(b.make_while(b.bool_literal(true), b.block(loop)));
 
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   // try/catch/finally. `finally` is a Defer, not a copy of the block down
@@ -1625,8 +1472,8 @@ struct Binder {
   // resolved as a function of its own (a Defer takes a callable, and a
   // callable can only reach the enclosing frame through cells).
   NodeId emit_try(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const Ast* cat = nullptr;
     const Ast* fin = nullptr;
     for (size_t i = 1; i < a.nodes.size(); ++i) {
@@ -1636,55 +1483,51 @@ struct Binder {
         fin = a.nodes[i].get();
       }
     }
-    const int32_t mark = ctx.next_local;
+    const int32_t mark = ctx.mark();
     const int32_t exc = ctx.alloc_local("$exc");
     std::vector<NodeId> out;
     if (fin != nullptr) {
-      out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p), p));
+      out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p)));
     }
     const NodeId body = emit_block(*a.nodes[0], ctx);
     NodeId handler;
     if (cat != nullptr) {
-      const int32_t hmark = ctx.next_local;
+      const int32_t hmark = ctx.mark();
       std::vector<NodeId> hs;
       hs.push_back(bind_decl(decl_of.at(cat->nodes[0].get()),
-                             b.varref(VarKind::Local, exc, p), ctx, p));
+                             b.varref(VarKind::Local, exc), ctx, p));
       hs.push_back(emit_block(*cat->nodes[1], ctx));
-      const int32_t hend = ctx.next_local;
-      ctx.next_local = hmark;
-      handler = hend > hmark ? b.scope(hmark, hend, b.block(hs, p), p)
-                             : b.block(hs, p);
+      const int32_t hend = ctx.release(hmark);
+      handler = hend > hmark ? b.scope(hmark, hend, b.block(hs)) : b.block(hs);
     } else {
       // `try`/`finally` with no catch: the Defer still has to run, so the
       // throw is caught and re-raised rather than left to unwind past the
       // Scope uncaught.
-      handler = b.make_throw(b.varref(VarKind::Local, exc, p), p);
+      handler = b.make_throw(b.varref(VarKind::Local, exc));
     }
-    out.push_back(b.make_try(exc, body, handler, p));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+    out.push_back(b.make_try(exc, body, handler));
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   // -- Expressions --------------------------------------------------------
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
         // Every number is a double: JavaScript has one numeric type, and
         // keeping ints out of the frame is what makes `1 === 1.0` and
         // `String(3)` need no special case.
-        return b.double_literal(std::strtod(std::string(a.token).c_str(),
-                                            nullptr),
-                                p);
+        return b.double_literal(
+            std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token), a), p);
+        return b.str_literal(unescape(std::string(a.token), a));
       case "literal"_: {
         const std::string t(a.token);
-        if (t == "true") return b.bool_literal(true, p);
-        if (t == "false") return b.bool_literal(false, p);
-        return b.nil_literal(p);  // null and undefined are the same value here
+        if (t == "true") return b.bool_literal(true);
+        if (t == "false") return b.bool_literal(false);
+        return b.nil_literal();  // null and undefined are the same value here
       }
       case "ident"_: {
         const auto it = ref_of.find(&a);
@@ -1702,29 +1545,28 @@ struct Binder {
         if (!fns[static_cast<size_t>(ctx.fn)].is_generator) {
           fail(a, "'yield' outside a generator function");
         }
-        return b.make_yield(
-            a.nodes.size() > 1 ? emit_expr(*a.nodes[1], ctx) : b.nil_literal(p),
-            p);
+        return b.make_yield(a.nodes.size() > 1 ? emit_expr(*a.nodes[1], ctx)
+                                               : b.nil_literal());
       }
       case "notexpr"_:
         return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
-                        b.bool_literal(false, p), p);
+                        b.bool_literal(false));
       case "negexpr"_:
-        return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx), p);
+        return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "typeofexpr"_:
-        return helper(ctx, "$typeof", {emit_expr(*a.nodes[0], ctx)}, p);
+        return helper("$typeof", {emit_expr(*a.nodes[0], ctx)}, p);
       case "newexpr"_:
         return emit_new(*a.nodes[0], ctx);
       case "awaitexpr"_: {
         if (!fns[static_cast<size_t>(ctx.fn)].is_async) {
           fail(a, "'await' outside an async function");
         }
-        return helper(ctx, "$await", {emit_expr(*a.nodes[0], ctx)}, p);
+        return helper("$await", {emit_expr(*a.nodes[0], ctx)}, p);
       }
       case "cond"_:
         return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
                          emit_expr(*a.nodes[1], ctx),
-                         emit_expr(*a.nodes[2], ctx), p);
+                         emit_expr(*a.nodes[2], ctx));
       // `a || b` answers one of its operands, not a bool, so the left one
       // is kept in a slot to be tested and then handed back.
       case "logor"_:
@@ -1734,12 +1576,10 @@ struct Binder {
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t, p);
-          acc = b.block(
-              {b.assign(VarKind::Local, t, acc, p),
-               b.make_if(truthy(keep, ctx, p), is_or ? keep : rhs,
-                         is_or ? rhs : keep, p)},
-              p);
+          const NodeId keep = b.varref(VarKind::Local, t);
+          acc = b.block({b.assign(VarKind::Local, t, acc),
+                         b.make_if(truthy(keep, ctx, p), is_or ? keep : rhs,
+                                   is_or ? rhs : keep)});
         }
         return acc;
       }
@@ -1753,10 +1593,10 @@ struct Binder {
                          "==' -- see README.md");
           }
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = helper(ctx, "$seq", {acc, rhs}, pos_of(op));
+          const NodeId eq = helper("$seq", {acc, rhs}, pos_of(op));
           acc = t == "===" ? eq
-                           : b.binary(BinOp::Eq, eq, b.bool_literal(false, p),
-                                      pos_of(op));
+                           : b.at(pos_of(op))
+                                 .binary(BinOp::Eq, eq, b.bool_literal(false));
         }
         return acc;
       }
@@ -1769,7 +1609,8 @@ struct Binder {
                           : t == "<=" ? BinOp::Le
                           : t == ">" ? BinOp::Gt
                                      : BinOp::Ge;
-          acc = b.binary(o, acc, emit_expr(*a.nodes[i + 1], ctx), pos_of(op));
+          acc =
+              b.at(pos_of(op)).binary(o, acc, emit_expr(*a.nodes[i + 1], ctx));
         }
         return acc;
       }
@@ -1778,9 +1619,8 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          acc = op.token == "+"
-                    ? helper(ctx, "$add", {acc, rhs}, pos_of(op))
-                    : b.binary(BinOp::Sub, acc, rhs, pos_of(op));
+          acc = op.token == "+" ? helper("$add", {acc, rhs}, pos_of(op))
+                                : b.at(pos_of(op)).binary(BinOp::Sub, acc, rhs);
         }
         return acc;
       }
@@ -1792,10 +1632,10 @@ struct Binder {
           const std::string t(op.token);
           // `%` is fmod, not truncation: BinOp::Mod refuses doubles, and
           // JavaScript's own `-7 % 3` is -1, which is fmod's answer.
-          acc = t == "*"   ? b.binary(BinOp::Mul, acc, rhs, pos_of(op))
-                : t == "/" ? b.binary(BinOp::Div, acc, rhs, pos_of(op))
-                           : b.intrinsic(IntrinsicId::FMod, {acc, rhs},
-                                         pos_of(op));
+          acc = t == "*" ? b.at(pos_of(op)).binary(BinOp::Mul, acc, rhs)
+                : t == "/"
+                    ? b.at(pos_of(op)).binary(BinOp::Div, acc, rhs)
+                    : b.at(pos_of(op)).intrinsic(IntrinsicId::FMod, {acc, rhs});
         }
         return acc;
       }
@@ -1807,7 +1647,7 @@ struct Binder {
         std::vector<NodeId> items;
         items.reserve(a.nodes.size());
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
-        return b.array_lit(items, p);
+        return b.array_lit(items);
       }
       case "objectlit"_: {
         std::vector<std::pair<NodeId, NodeId>> kvs;
@@ -1816,9 +1656,9 @@ struct Binder {
           const std::string k = key.tag == "string"_
                                     ? unescape(std::string(key.token), key)
                                     : std::string(key.token);
-          kvs.emplace_back(b.str_literal(k, p), emit_expr(*c->nodes[1], ctx));
+          kvs.emplace_back(b.str_literal(k), emit_expr(*c->nodes[1], ctx));
         }
-        return b.object_lit(kvs, p);
+        return b.object_lit(kvs);
       }
       default:
         fail(a, "cannot evaluate " + a.name);
@@ -1829,14 +1669,14 @@ struct Binder {
   // can be (`console.log`, `new Map()`) is a shape emit_postfix or
   // emit_new recognizes, not a value this could hand back.
   NodeId emit_global_value(const Ast& a, FnCtx&) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const std::string n(a.token);
     if (n == "NaN") {
-      return b.double_literal(std::numeric_limits<double>::quiet_NaN(), p);
+      return b.double_literal(std::numeric_limits<double>::quiet_NaN());
     }
     if (n == "Infinity") {
-      return b.double_literal(std::numeric_limits<double>::infinity(), p);
+      return b.double_literal(std::numeric_limits<double>::infinity());
     }
     fail(a, "'" + n + "' is only supported in a call or a `new` here");
   }
@@ -1855,19 +1695,19 @@ struct Binder {
   // variable outside the class would be capturing across a boundary Pass
   // A never knew to thread it through.
   NodeId emit_classdecl(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const ClassInfo& ci = classes.at(&a);
     std::vector<std::pair<NodeId, NodeId>> kvs;
     if (ci.ctor_fn >= 0) {
-      kvs.emplace_back(b.str_literal("constructor", p),
+      kvs.emplace_back(b.str_literal("constructor"),
                        emit_closure(ci.ctor_fn, ctx, p));
     }
     for (const auto& [name, g] : ci.methods) {
-      kvs.emplace_back(b.str_literal(name, p), emit_closure(g, ctx, p));
+      kvs.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
     }
-    return bind_decl(decl_of.at(a.nodes[0].get()), b.object_lit(kvs, p), ctx,
-                     p, false);
+    return bind_decl(decl_of.at(a.nodes[0].get()), b.object_lit(kvs), ctx, p,
+                     false);
   }
 
   // `new Foo(x).bar()`: `new` binds to the *nearest* constructor call in
@@ -1876,8 +1716,8 @@ struct Binder {
   // builds from exactly `a.nodes[0..2)` and hands the rest of `a` to
   // `apply_suffixes`.
   NodeId emit_new(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     if (a.tag != "postfix"_ || a.nodes[0]->tag != "ident"_ ||
         a.nodes.size() < 2 || a.nodes[1]->tag != "callsfx"_) {
       fail(a, "`new` takes a constructor call here");
@@ -1889,13 +1729,11 @@ struct Binder {
     };
     if (n == "Map") {
       return chain(b.object_lit(
-          {{b.str_literal("$map", p),
-            b.intrinsic(IntrinsicId::MapNew, {}, p)}}, p));
+          {{b.str_literal("$map"), b.intrinsic(IntrinsicId::MapNew, {})}}));
     }
     if (n == "Set") {
       return chain(b.object_lit(
-          {{b.str_literal("$set", p),
-            b.intrinsic(IntrinsicId::MapNew, {}, p)}}, p));
+          {{b.str_literal("$set"), b.intrinsic(IntrinsicId::MapNew, {})}}));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
     // over a cell of *this* frame holding the promise, which is the one
@@ -1909,21 +1747,17 @@ struct Binder {
       const int32_t cm2 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
       return chain(b.block(
-          {b.cell_fresh(c, p),
-           b.assign(VarKind::Cell, c, helper(ctx, "$pnew", {}, p), p),
+          {b.cell_fresh(c), b.assign(VarKind::Cell, c, helper("$pnew", {}, p)),
            b.call_value(arg_or_nil(args, 0, p),
-                        {b.make_closure(rt.at("$presolve1"), cm1, p),
-                         b.make_closure(rt.at("$preject1"), cm2, p)},
-                        p),
-           b.varref(VarKind::Cell, c, p)},
-          p));
+                        {b.make_closure(rt.at("$presolve1"), cm1),
+                         b.make_closure(rt.at("$preject1"), cm2)}),
+           b.varref(VarKind::Cell, c)}));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
-      return chain(b.object_lit(
-          {{b.str_literal("name", p), b.str_literal(n, p)},
-           {b.str_literal("message", p),
-            helper(ctx, "$str", {arg_or_nil(args, 0, p)}, p)}},
-          p));
+      return chain(
+          b.object_lit({{b.str_literal("name"), b.str_literal(n)},
+                        {b.str_literal("message"),
+                         helper("$str", {arg_or_nil(args, 0, p)}, p)}}));
     }
     // `new SomeClass(...)`: not a builtin, so it has to be a class -- and
     // one this call site can see statically, because binding `this` needs
@@ -1945,13 +1779,11 @@ struct Binder {
     const int32_t ccell = ctx.next_cell++;
     const int32_t tcell = ctx.next_cell++;
     const int32_t tv = ctx.alloc_local("$this");
-    const NodeId T = b.varref(VarKind::Local, tv, p);
+    const NodeId T = b.varref(VarKind::Local, tv);
     std::vector<NodeId> steps{
-        b.cell_fresh(ccell, p),
-        b.assign(VarKind::Cell, ccell, cls, p),
-        b.cell_fresh(tcell, p),
-        b.assign(VarKind::Cell, tcell, b.object_lit({}, p), p),
-        b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell, p), p)};
+        b.cell_fresh(ccell), b.assign(VarKind::Cell, ccell, cls),
+        b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
+        b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
     for (const auto& [name, g] : ci.methods) {
       const int32_t nparams =
           static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
@@ -1963,43 +1795,36 @@ struct Binder {
       wf.num_captures = 2;
       wf.capture_names = {"cls", "self"};
       wf.lenient_arity = true;
-      std::vector<NodeId> wargs{b.varref(VarKind::Capture, 1, p)};
+      std::vector<NodeId> wargs{b.varref(VarKind::Capture, 1)};
       for (int32_t k = 0; k < nparams; ++k) {
-        wargs.push_back(b.varref(VarKind::Local, k, p));
+        wargs.push_back(b.varref(VarKind::Local, k));
       }
       wf.body = b.scope(
           0, nparams,
-          b.make_return(
-              b.call_value(
-                  b.index(b.varref(VarKind::Capture, 0, p),
-                         b.str_literal(name, p), p),
-                  wargs, p),
-              p),
-          p);
+          b.make_return(b.call_value(
+              b.index(b.varref(VarKind::Capture, 0), b.str_literal(name)),
+              wargs)));
       const int32_t widx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(wf));
       const int32_t wcm = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(
           {{VarKind::Cell, ccell}, {VarKind::Cell, tcell}});
       steps.push_back(helper(
-          ctx, "$setidx",
-          {T, b.str_literal(name, p), b.make_closure(widx, wcm, p)}, p));
+          "$setidx", {T, b.str_literal(name), b.make_closure(widx, wcm)}, p));
     }
-    steps.push_back(helper(ctx, "$setidx", {T, b.str_literal("constructor", p),
-                                            b.varref(VarKind::Cell, ccell, p)},
-                           p));
+    steps.push_back(helper(
+        "$setidx",
+        {T, b.str_literal("constructor"), b.varref(VarKind::Cell, ccell)}, p));
     if (ci.ctor_fn >= 0) {
-      const NodeId ctorClosure =
-          helper(ctx, "$index",
-                {b.varref(VarKind::Cell, ccell, p),
-                 b.str_literal("constructor", p)},
-                p);
+      const NodeId ctorClosure = helper(
+          "$index",
+          {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
       std::vector<NodeId> ca{T};
       ca.insert(ca.end(), args.begin(), args.end());
-      steps.push_back(b.call_value(ctorClosure, ca, p));
+      steps.push_back(b.call_value(ctorClosure, ca));
     }
     steps.push_back(T);
-    return chain(b.block(steps, p));
+    return chain(b.block(steps));
   }
 
   // A primary followed by `limit - 1` suffixes. The limit is what lets an
@@ -2025,11 +1850,11 @@ struct Binder {
             ++i;
             break;
           }
-          cur = helper(ctx, "$index", {cur, b.str_literal(name, p)}, p);
+          cur = helper("$index", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_:
-          cur = helper(ctx, "$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = helper("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_:
           cur = b.call_value(cur, emit_args(*sfx.nodes[0], ctx), p);
@@ -2078,7 +1903,7 @@ struct Binder {
       if (c == nullptr) fail(prim, "String must be called here");
       i = 2;
       const std::vector<NodeId> args = emit_args(*c->nodes[0], ctx);
-      return helper(ctx, "$str", {arg_or_nil(args, 0, p)}, p);
+      return helper("$str", {arg_or_nil(args, 0, p)}, p);
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
@@ -2094,7 +1919,7 @@ struct Binder {
         for (size_t k = 0; k < args.size(); ++k) {
           if (k > 0) msg = b.binary(BinOp::Add, msg, b.str_literal(" ", p), p);
           msg = b.binary(BinOp::Add, msg,
-                         helper(ctx, "$str", {args[k]}, p), p);
+                         helper("$str", {args[k]}, p), p);
         }
         return b.intrinsic(IntrinsicId::Print, {msg}, p);
       }
@@ -2103,10 +1928,10 @@ struct Binder {
                            {arg_or_nil(args, 0, p)}, p);
       }
       if (g == "Promise" && mem == "resolve") {
-        return helper(ctx, "$topromise", {arg_or_nil(args, 0, p)}, p);
+        return helper("$topromise", {arg_or_nil(args, 0, p)}, p);
       }
       if (g == "Promise" && mem == "reject") {
-        return helper(ctx, "$prejected", {arg_or_nil(args, 0, p)}, p);
+        return helper("$prejected", {arg_or_nil(args, 0, p)}, p);
       }
       if (g == "Array" && mem == "isArray") {
         return b.binary(BinOp::Eq,
@@ -2125,47 +1950,46 @@ struct Binder {
   // must not put a function under one of these names.
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
                      const Ast& at, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(at);
+    auto b = Builder(m).at(p);
     const std::vector<NodeId> args = emit_args(*call.nodes[0], ctx);
     const auto a0 = [&] { return arg_or_nil(args, 0, p); };
     const auto a1 = [&] { return arg_or_nil(args, 1, p); };
 
-    if (name == "push") return helper(ctx, "$push", {recv, a0()}, p);
-    if (name == "pop") return b.intrinsic(IntrinsicId::ArrayPop, {recv}, p);
-    if (name == "slice") return helper(ctx, "$slice", {recv, a0(), a1()}, p);
+    if (name == "push") return helper("$push", {recv, a0()}, p);
+    if (name == "pop") return b.intrinsic(IntrinsicId::ArrayPop, {recv});
+    if (name == "slice") return helper("$slice", {recv, a0(), a1()}, p);
     if (name == "join") {
-      return helper(ctx, "$join",
-                    {recv, args.empty() ? b.str_literal(",", p) : args[0]}, p);
+      return helper("$join",
+                    {recv, args.empty() ? b.str_literal(",") : args[0]}, p);
     }
     // The generator protocol is GenResume/GenReturn/GenThrow, whose
     // {value, done} answer already is what `g.next()` evaluates to in
     // JavaScript -- no translation, which is the point.
     if (name == "next") {
-      return b.intrinsic(IntrinsicId::GenResume, {recv, a0()}, p);
+      return b.intrinsic(IntrinsicId::GenResume, {recv, a0()});
     }
     if (name == "return") {
-      return b.intrinsic(IntrinsicId::GenReturn, {recv, a0()}, p);
+      return b.intrinsic(IntrinsicId::GenReturn, {recv, a0()});
     }
     if (name == "throw") {
-      return b.intrinsic(IntrinsicId::GenThrow, {recv, a0()}, p);
+      return b.intrinsic(IntrinsicId::GenThrow, {recv, a0()});
     }
     // A Promise's two combinators. Everything they do -- adopting a
     // returned promise, passing a rejection through a handler-less link,
     // turning a handler's throw into the next rejection -- is $then/$react,
     // written in IR above.
-    if (name == "then") return helper(ctx, "$then", {recv, a0(), a1()}, p);
+    if (name == "then") return helper("$then", {recv, a0(), a1()}, p);
     if (name == "catch") {
-      return helper(ctx, "$then", {recv, b.nil_literal(p), a0()}, p);
+      return helper("$then", {recv, b.nil_literal(), a0()}, p);
     }
-    if (name == "get") return helper(ctx, "$mget", {recv, a0()}, p);
-    if (name == "set") return helper(ctx, "$mset", {recv, a0(), a1()}, p);
-    if (name == "has") return helper(ctx, "$mhas", {recv, a0()}, p);
-    if (name == "delete") return helper(ctx, "$mdel", {recv, a0()}, p);
-    if (name == "add") return helper(ctx, "$sadd", {recv, a0()}, p);
+    if (name == "get") return helper("$mget", {recv, a0()}, p);
+    if (name == "set") return helper("$mset", {recv, a0(), a1()}, p);
+    if (name == "has") return helper("$mhas", {recv, a0()}, p);
+    if (name == "delete") return helper("$mdel", {recv, a0()}, p);
+    if (name == "add") return helper("$sadd", {recv, a0()}, p);
 
-    return b.call_value(helper(ctx, "$index", {recv, b.str_literal(name, p)}, p),
-                        args, p);
+    return b.call_value(helper("$index", {recv, b.str_literal(name)}, p), args);
   }
 
   // Assignment, in the one shape both a variable and a property need: let
@@ -2177,7 +2001,7 @@ struct Binder {
   template <typename Combine>
   NodeId emit_store(const Ast& target, size_t limit, FnCtx& ctx, SrcPos p,
                     Combine combine) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     // `i++` hands over the whole postfix node with its `++` cut off, and
     // what is left may be a bare primary -- which optimize_ast folded, so
     // it is an "ident" wearing a "postfix" parent rather than a suffix
@@ -2189,9 +2013,9 @@ struct Binder {
       const auto it = ref_of.find(&target);
       if (it == ref_of.end()) fail(target, "cannot assign to this");
       const int32_t v = it->second;
-      if (vars[static_cast<size_t>(v)].is_const) {
+      if (is_const[static_cast<size_t>(v)]) {
         fail(target, "cannot assign to constant '" +
-                         vars[static_cast<size_t>(v)].name + "'");
+                         rs.vars[static_cast<size_t>(v)].name + "'");
       }
       const auto read = [&] { return read_var(v, ctx, p); };
       return write_var(v, combine(read), ctx, p);
@@ -2202,7 +2026,7 @@ struct Binder {
     const Ast& last = *target.nodes[limit - 1];
     NodeId key;
     if (last.tag == "membersfx"_) {
-      key = b.str_literal(std::string(last.nodes[0]->token), p);
+      key = b.str_literal(std::string(last.nodes[0]->token));
     } else if (last.tag == "indexsfx"_) {
       key = emit_expr(*last.nodes[0], ctx);
     } else {
@@ -2213,18 +2037,17 @@ struct Binder {
     const int32_t tr = ctx.alloc_local("$recv");
     const int32_t tk = ctx.alloc_local("$key");
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr, p);
-    const NodeId K = b.varref(VarKind::Local, tk, p);
-    const auto read = [&] { return helper(ctx, "$index", {R, K}, p); };
-    return b.block({b.assign(VarKind::Local, tr, recv, p),
-                    b.assign(VarKind::Local, tk, key, p),
-                    helper(ctx, "$setidx", {R, K, combine(read)}, p)},
-                   p);
+    const NodeId R = b.varref(VarKind::Local, tr);
+    const NodeId K = b.varref(VarKind::Local, tk);
+    const auto read = [&] { return helper("$index", {R, K}, p); };
+    return b.block({b.assign(VarKind::Local, tr, recv),
+                    b.assign(VarKind::Local, tk, key),
+                    helper("$setidx", {R, K, combine(read)}, p)});
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const std::string op(a.nodes[1]->token);
     const Ast& rhs = *a.nodes[2];
     const Ast& target = *a.nodes[0];
@@ -2232,11 +2055,11 @@ struct Binder {
     return emit_store(target, limit, ctx, p, [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(rhs, ctx);
       if (op == "=") return v;
-      if (op == "+=") return helper(ctx, "$add", {cur(), v}, p);
-      if (op == "-=") return b.binary(BinOp::Sub, cur(), v, p);
-      if (op == "*=") return b.binary(BinOp::Mul, cur(), v, p);
-      if (op == "/=") return b.binary(BinOp::Div, cur(), v, p);
-      return b.intrinsic(IntrinsicId::FMod, {cur(), v}, p);
+      if (op == "+=") return helper("$add", {cur(), v}, p);
+      if (op == "-=") return b.binary(BinOp::Sub, cur(), v);
+      if (op == "*=") return b.binary(BinOp::Mul, cur(), v);
+      if (op == "/=") return b.binary(BinOp::Div, cur(), v);
+      return b.intrinsic(IntrinsicId::FMod, {cur(), v});
     });
   }
 
@@ -2245,38 +2068,38 @@ struct Binder {
     FnCtx ctx;
     ctx.fn = f;
     const FnInfo& fi = fns[static_cast<size_t>(f)];
-    ctx.next_cell = static_cast<int32_t>(fi.cell_index.size());
-    Builder b(m);
+    const Resolver::Fn& rf = rs.fns[static_cast<size_t>(f)];
+    ctx.next_cell = rs.num_cells(f);
     const SrcPos p = fi.body != nullptr ? pos_of(*fi.body) : SrcPos{0, 0};
+    auto b = Builder(m).at(p);
 
     std::vector<NodeId> pre;
     for (const int32_t v : fi.params) {
-      const int32_t s = ctx.alloc_local(vars[static_cast<size_t>(v)].name);
-      slot_of[static_cast<size_t>(v)] = s;
+      const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
+      rs.vars[static_cast<size_t>(v)].slot = s;
       // The calling convention fills locals, so a captured parameter is
       // copied into its cell on entry -- the header's own note that "an
       // argument that needs capturing is copied into a cell by the front
       // end and the calling convention itself stays about locals only".
-      const auto it = fi.cell_index.find(v);
-      if (it != fi.cell_index.end()) {
-        pre.push_back(b.cell_fresh(it->second, p));
-        pre.push_back(b.assign(VarKind::Cell, it->second,
-                               b.varref(VarKind::Local, s, p), p));
+      const auto it = rf.cell_index.find(v);
+      if (it != rf.cell_index.end()) {
+        pre.push_back(b.cell_fresh(it->second));
+        pre.push_back(
+            b.assign(VarKind::Cell, it->second, b.varref(VarKind::Local, s)));
       }
     }
-    const int32_t nparams = ctx.next_local;
+    const int32_t nparams = ctx.mark();
 
     NodeId body;
     if (fi.body->tag == "block"_ || fi.body->tag == "program"_) {
       body = emit_block(*fi.body, ctx);
     } else {
-      body = b.make_return(emit_expr(*fi.body, ctx), p);  // an arrow's expr
+      body = b.make_return(emit_expr(*fi.body, ctx));  // an arrow's expr
     }
 
     // The preamble, once the body is known: one MakeClosure per $helper
     // this body reaches, into the cell every call site reads it back from.
     std::vector<NodeId> stmts;
-    if (f == 0) fill_helpers(ctx, stmts, p);
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
 
@@ -2284,28 +2107,28 @@ struct Binder {
     built.name = fi.name;
     built.num_params = nparams;
     built.num_locals = ctx.high_local;
-    ctx.local_names.resize(static_cast<size_t>(ctx.high_local), "");
-    built.local_names = ctx.local_names;
+    built.local_names = ctx.names();
     built.num_cells = ctx.next_cell;
     built.lenient_arity = true;  // JavaScript's own arity rule
     built.is_generator = fi.is_generator;
-    built.body = b.scope(0, nparams, b.block(stmts, p), p);
+    built.body = b.scope(0, nparams, b.block(stmts));
 
     // number_captures() already put this function's capture numbering on
     // its Module::funcs entry, and that numbering is what the body's own
     // VarKind::Capture nodes were emitted against -- so it travels with
     // the body wherever the body ends up.
-    const int32_t ncaps = m.funcs[static_cast<size_t>(fi.index)].num_captures;
+    const int32_t ncaps = m.funcs[static_cast<size_t>(rf.index)].num_captures;
     std::vector<std::string> capnames =
-        m.funcs[static_cast<size_t>(fi.index)].capture_names;
+        m.funcs[static_cast<size_t>(rf.index)].capture_names;
     built.num_captures = ncaps;
     built.capture_names = capnames;
 
     if (!fi.is_async) {
-      m.funcs[static_cast<size_t>(fi.index)] = std::move(built);
+      m.funcs[static_cast<size_t>(rf.index)] = std::move(built);
       return;
     }
-    emit_async(fi, std::move(built), nparams, ncaps, std::move(capnames), p);
+    emit_async(fi, rf.index, std::move(built), nparams, ncaps,
+               std::move(capnames), p);
   }
 
   // An async function is three funcs, because calling one has to *return*
@@ -2324,9 +2147,10 @@ struct Binder {
   // async call are the same primitive with different rules layered on
   // top. The rules are the difference: a goroutine's result goes nowhere,
   // where this one settles a promise somebody may be awaiting.
-  void emit_async(const FnInfo& fi, Func body, int32_t nparams, int32_t ncaps,
+  void emit_async(const FnInfo& fi, int32_t index, Func body,
+                  int32_t nparams, int32_t ncaps,
                   std::vector<std::string> capnames, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     body.name = fi.name + "$body";
     const int32_t body_idx = static_cast<int32_t>(m.funcs.size());
     m.funcs.push_back(std::move(body));
@@ -2335,28 +2159,28 @@ struct Binder {
 
     const auto rtcall = [&](const std::string& name,
                             const std::vector<NodeId>& args) {
-      return b.call_value(b.make_closure(rt.at(name), empty_cmap, p), args, p);
+      return b.call_value(b.make_closure(rt.at(name), empty_cmap), args);
     };
 
     // f: cells 0 = the promise, 1 = the body closure, 2.. = the arguments.
     // The arguments are copied out at the call, JavaScript's own rule, and
     // into fresh cells so that two calls in flight at once do not share.
     std::vector<NodeId> launch;
-    launch.push_back(b.cell_fresh(0, p));
-    launch.push_back(b.assign(VarKind::Cell, 0, rtcall("$pnew", {}), p));
+    launch.push_back(b.cell_fresh(0));
+    launch.push_back(b.assign(VarKind::Cell, 0, rtcall("$pnew", {})));
     std::vector<CaptureSrc> fwd;
     fwd.reserve(static_cast<size_t>(ncaps));
     for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
     const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back(fwd);
-    launch.push_back(b.cell_fresh(1, p));
-    launch.push_back(b.assign(VarKind::Cell, 1,
-                              b.make_closure(body_idx, fwd_cmap, p), p));
+    launch.push_back(b.cell_fresh(1));
+    launch.push_back(
+        b.assign(VarKind::Cell, 1, b.make_closure(body_idx, fwd_cmap)));
     std::vector<CaptureSrc> runcap{{VarKind::Cell, 1}, {VarKind::Cell, 0}};
     for (int32_t i = 0; i < nparams; ++i) {
-      launch.push_back(b.cell_fresh(2 + i, p));
-      launch.push_back(b.assign(VarKind::Cell, 2 + i,
-                                b.varref(VarKind::Local, i, p), p));
+      launch.push_back(b.cell_fresh(2 + i));
+      launch.push_back(
+          b.assign(VarKind::Cell, 2 + i, b.varref(VarKind::Local, i)));
       runcap.push_back({VarKind::Cell, 2 + i});
     }
     const int32_t run_cmap = static_cast<int32_t>(m.capture_maps.size());
@@ -2370,33 +2194,32 @@ struct Binder {
     // promise it parked on enqueues it. A body with no `await` at all never
     // yields, so this resume runs it to its end and the promise is already
     // settled when the call returns -- which is what JavaScript does too.
-    launch.push_back(b.intrinsic(
-        IntrinsicId::CoroResume,
-        {b.intrinsic(IntrinsicId::CoroCreate,
-                     {b.make_closure(run_idx, run_cmap, p)}, p),
-         b.nil_literal(p)},
-        p));
-    launch.push_back(b.make_return(b.varref(VarKind::Cell, 0, p), p));
+    launch.push_back(
+        b.intrinsic(IntrinsicId::CoroResume,
+                    {b.intrinsic(IntrinsicId::CoroCreate,
+                                 {b.make_closure(run_idx, run_cmap)}),
+                     b.nil_literal()}));
+    launch.push_back(b.make_return(b.varref(VarKind::Cell, 0)));
 
     Func f;
     f.name = fi.name;
     f.num_params = nparams;
     f.num_locals = nparams;
     for (const int32_t v : fi.params) {
-      f.local_names.push_back(vars[static_cast<size_t>(v)].name);
+      f.local_names.push_back(rs.vars[static_cast<size_t>(v)].name);
     }
     f.num_cells = 2 + nparams;
     f.num_captures = ncaps;
     f.capture_names = capnames;
     f.lenient_arity = true;
-    f.body = b.scope(0, nparams, b.block(launch, p), p);
-    m.funcs[static_cast<size_t>(fi.index)] = std::move(f);
+    f.body = b.scope(0, nparams, b.block(launch));
+    m.funcs[static_cast<size_t>(index)] = std::move(f);
 
     // f$run: captures 0 = the body closure, 1 = the promise, 2.. = args.
     std::vector<NodeId> callargs;
     callargs.reserve(static_cast<size_t>(nparams));
     for (int32_t i = 0; i < nparams; ++i) {
-      callargs.push_back(b.varref(VarKind::Capture, 2 + i, p));
+      callargs.push_back(b.varref(VarKind::Capture, 2 + i));
     }
     Func run;
     run.name = fi.name + "$run";
@@ -2407,7 +2230,7 @@ struct Binder {
     run.capture_names.push_back("$body");
     run.capture_names.push_back("$promise");
     for (const int32_t v : fi.params) {
-      run.capture_names.push_back(vars[static_cast<size_t>(v)].name);
+      run.capture_names.push_back(rs.vars[static_cast<size_t>(v)].name);
     }
     run.lenient_arity = true;  // the scheduler resumes it as f(nil)
     run.body = b.scope(
@@ -2415,14 +2238,10 @@ struct Binder {
         b.make_try(
             0,
             rtcall("$presolve",
-                   {b.varref(VarKind::Capture, 1, p),
-                    b.call_value(b.varref(VarKind::Capture, 0, p), callargs,
-                                 p)}),
-            rtcall("$psettle", {b.varref(VarKind::Capture, 1, p),
-                                b.literal(2, p),
-                                b.varref(VarKind::Local, 0, p)}),
-            p),
-        p);
+                   {b.varref(VarKind::Capture, 1),
+                    b.call_value(b.varref(VarKind::Capture, 0), callargs)}),
+            rtcall("$psettle", {b.varref(VarKind::Capture, 1), b.literal(2),
+                                b.varref(VarKind::Local, 0)})));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
   }
 
@@ -2431,44 +2250,31 @@ struct Binder {
     const int32_t top = new_fn(-1, "main");
     fns[static_cast<size_t>(top)].body = &program;
 
-    scopes.push_back({top, {}});
+    rs.push_scope();
     hoist_funcdecls(program.nodes, top);
     for (const auto& s : program.nodes) resolve_stmt(*s, top);
-    scopes.pop_back();
+    rs.pop_scope();
 
-    // Module slots: the entry point, then the $helpers (reserved together
-    // so they may call each other), then every function the source
-    // declared.
+    // Module slots: the entry point, then the runtime helpers (reserved
+    // together so they may call each other), then every function the
+    // source declared.
     m.funcs.push_back({});
-    fns[static_cast<size_t>(top)].index = 0;
+    rs.fns[static_cast<size_t>(top)].index = 0;
     for (const std::string& n : rt_names()) {
       rt[n] = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
     for (size_t f = 1; f < fns.size(); ++f) {
-      fns[f].index = static_cast<int32_t>(m.funcs.size());
+      rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
 
-    // One binding, owned by file scope and captured by every function: the
-    // array of runtime-helper closures. Declared after resolution so no
-    // source name can collide with it, and before number_captures so the
-    // ordinary capture machinery threads it like any other free variable.
-    helpers_var = static_cast<int32_t>(vars.size());
-    vars.push_back({"$helpers", 0});
-    for (size_t f = 1; f < fns.size(); ++f) fns[f].free.insert(helpers_var);
-    // A cell whether or not anything captured it: file scope reads it
-    // itself, and a program with no nested function has no free set to put
-    // it in. number_captures below finds it already there.
-    fns[0].cell_index[helpers_var] =
-        static_cast<int32_t>(fns[0].cell_index.size());
 
-    number_captures();
+    rs.number_captures(m);
     empty_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back({});
     emit_runtime();
 
-    slot_of.assign(vars.size(), -1);
     for (size_t f = 0; f < fns.size(); ++f) {
       emit_fn(static_cast<int32_t>(f));
     }

@@ -44,21 +44,22 @@ build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] PROGRAM.go
 `main`. `--dump-ir` on it shows the Static calls recipe concretely:
 
 ```
-makeclosure square #1 cmap=0  @9:1     ; main's preamble, once
+func #2 square  locals=1 captures=0 singleton
 ...
 callvalue  @20:14
-  varref cell[0]  @20:14               ; square(50000)
+  makeclosure square #2 cmap=0  @20:14   ; square(50000)
 ...
 callvalue  @21:14
-  varref cell[0]  @21:14               ; square(3)
+  makeclosure square #2 cmap=0  @21:14   ; square(3)
 ```
 
-One `MakeClosure`, in a preamble `main`'s binder emits ahead of the body for
-every distinct function it calls; both call sites read the same `Cell`
-rather than each building their own closure over an empty capture map. PL/0
-does not need this -- its procedures are called once each in every sample
-it has -- but a Go-shaped call site, possibly reached many times, is
-exactly the case Static calls describes.
+Two `MakeClosure` nodes, one closure: `square` is marked `singleton`, so the
+executor builds its closure at whichever site runs first and hands the same
+object to the other. The binder writes nothing extra -- no cell reserved in
+`main`'s frame, no preamble ahead of its body -- and a call site reached a
+million times still allocates once. PL/0 does not need this (its procedures
+are called once each in every sample it has), but a Go-shaped call site,
+possibly reached many times, is exactly the case Static calls describes.
 
 `samples/switch/switch.go`'s `classify` has a `case 1, 2:` -- one body,
 two keys. `--dump-ir` shows the two keys pointing at the identical `block`
@@ -141,7 +142,7 @@ pending in a goroutine.
 unbuffered channel is `{recvq: [...], sendq: [...]}`, each queue holding
 `{co, value}` waiters. `$chan_send` and `$chan_recv`
 (`Binder::emit_channel_runtime`) are ordinary funcs built once per module
-and called through the same Static calls cells any user func is; the `$`
+and marked `singleton` the way any user func here is; the `$`
 keeps them out of the source language's reach. Go's rendezvous rule -- a
 sender with a receiver waiting hands the value over, wakes it with
 `Enqueue`, and goes on; one without parks itself (`CoroCurrent()` into

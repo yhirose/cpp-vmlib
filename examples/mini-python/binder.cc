@@ -181,11 +181,6 @@ bool is_method_name(const std::string& n) {
          n == "lower" || n == "join";
 }
 
-struct VarInfo {
-  std::string name;
-  int32_t owner = 0;
-};
-
 // A parameter, in the four shapes `def` allows. A default is evaluated
 // where the `def` *stands*, once, when the `def` runs -- not at each call --
 // so its value lives in a cell of the enclosing function that the body
@@ -201,14 +196,9 @@ struct ParamInfo {
 };
 
 struct FnInfo {
-  int32_t parent = -1;
-  int32_t index = -1;
   bool is_generator = false;
   bool is_synth = false;  // a `with`'s exit thunk: no body to walk
   std::string name = "?";
-  std::set<int32_t> free;
-  std::map<int32_t, int32_t> capture_index;
-  std::map<int32_t, int32_t> cell_index;
   std::vector<ParamInfo> params;
   // `global x` and `nonlocal x` -- the two statements that say a name is
   // *not* this function's, which is the only way Python has to say it.
@@ -217,28 +207,15 @@ struct FnInfo {
   const Ast* body = nullptr;
 };
 
-struct FnCtx {
+struct FnCtx : FrameLayout {
   int32_t fn = 0;
-  int32_t next_local = 0;
-  int32_t high_local = 0;
   int32_t next_cell = 0;
-  std::vector<std::string> local_names;
-
-  int32_t alloc_local(const std::string& name) {
-    const int32_t s = next_local++;
-    if (next_local > high_local) high_local = next_local;
-    if (static_cast<size_t>(s) >= local_names.size()) {
-      local_names.resize(static_cast<size_t>(s) + 1, "");
-    }
-    local_names[static_cast<size_t>(s)] = name;
-    return s;
-  }
 };
 
 struct Binder {
   Module m;
-  std::vector<VarInfo> vars;
-  std::vector<FnInfo> fns;
+  Resolver rs;
+  std::vector<FnInfo> fns;  // parallel to rs.fns
   std::map<const Ast*, int32_t> ref_of;
   std::map<const Ast*, int32_t> decl_of;
   std::map<const Ast*, int32_t> fn_of;
@@ -256,15 +233,10 @@ struct Binder {
   };
   std::map<const Ast*, ClassInfo> class_info;
   std::map<int32_t, const Ast*> class_by_var;  // name binding -> its classdef
-  std::set<int32_t> force_cells;
   std::vector<const Ast*> class_stack;
-  std::vector<int32_t> slot_of;
   std::map<std::string, int32_t> rt;
   std::map<std::string, int32_t> builtin_fn;
   int32_t empty_cmap = -1;
-  // The one closure per runtime helper, built once at file scope into an
-  // array every function captures -- see build().
-  int32_t helpers_var = -1;
 
   // ==== Pass A: scopes, declarations, captures =============================
   //
@@ -275,11 +247,6 @@ struct Binder {
   // it -- the opposite of every other front end here, where a declaration
   // is a statement with a keyword in front of it.
 
-  struct ScopeA {
-    int32_t fn;
-    std::map<std::string, int32_t> names;
-  };
-  std::vector<ScopeA> scopes;
 
   static const Ast* fn_ident(const Ast& a) {
     for (const auto& c : a.nodes) {
@@ -295,50 +262,29 @@ struct Binder {
     return nullptr;
   }
 
-  int32_t declare(const std::string& name, int32_t fn) {
-    auto it = scopes.back().names.find(name);
-    if (it != scopes.back().names.end()) return it->second;
-    const int32_t v = static_cast<int32_t>(vars.size());
-    vars.push_back({name, fn});
-    scopes.back().names[name] = v;
+  // Python has no declaration keyword: an assignment binds, and a second
+  // assignment to the same name in the same scope is the same binding.
+  std::optional<int32_t> resolve(const std::string& name, int32_t fn) {
+    // `global x` skips every enclosing function and lands at the module,
+    // even when one of them has an `x` of its own -- which is why this
+    // looks the name up itself rather than calling Resolver::resolve.
+    const std::optional<int32_t> v =
+        fns[static_cast<size_t>(fn)].globals.count(name) ? rs.lookup(name, 0)
+                                                         : rs.lookup(name);
+    if (v) rs.use(*v, fn);
     return v;
   }
 
-  // Reading a binding from `fn`: if it belongs to an enclosing function it
-  // becomes a cell there and a capture in every function on the way down.
-  void use_var(int32_t v, int32_t fn) {
-    const int32_t owner = vars[static_cast<size_t>(v)].owner;
-    if (owner == fn) return;
-    for (int32_t k = fn; k != owner && k >= 0;
-         k = fns[static_cast<size_t>(k)].parent) {
-      fns[static_cast<size_t>(k)].free.insert(v);
-    }
-  }
-
-  std::optional<int32_t> resolve(const std::string& name, int32_t fn) {
-    // `global x` skips every enclosing function and lands at the module,
-    // even when one of them has an `x` of its own.
-    if (fns[static_cast<size_t>(fn)].globals.count(name)) {
-      const auto it = scopes[0].names.find(name);
-      if (it == scopes[0].names.end()) return std::nullopt;
-      use_var(it->second, fn);
-      return it->second;
-    }
-    for (size_t i = scopes.size(); i-- > 0;) {
-      auto it = scopes[i].names.find(name);
-      if (it == scopes[i].names.end()) continue;
-      use_var(it->second, fn);
-      return it->second;
-    }
-    return std::nullopt;
-  }
-
   int32_t new_fn(int32_t parent, const std::string& name) {
-    const int32_t f = static_cast<int32_t>(fns.size());
+    const int32_t f = rs.new_fn(parent);
     fns.push_back({});
-    fns[static_cast<size_t>(f)].parent = parent;
     fns[static_cast<size_t>(f)].name = name;
     return f;
+  }
+
+  int32_t declare(const std::string& name, int32_t fn) {
+    if (const auto v = rs.declared_here(name)) return *v;
+    return rs.declare(name, fn);
   }
 
   // Every name a body assigns to, at any depth short of a nested `def` --
@@ -400,11 +346,9 @@ struct Binder {
     // A `global` name is the module's, and an assignment to one in a
     // function is what creates it there -- so it is declared at the top.
     for (const std::string& g : fi.globals) {
-      if (!scopes[0].names.count(g)) {
-        const int32_t v = static_cast<int32_t>(vars.size());
-        vars.push_back({g, scopes[0].fn});
-        scopes[0].names[g] = v;
-      }
+      // Scope 0 is the module's, and funcs[0] is the function that owns
+      // it -- build() pushes the two together.
+      if (!rs.scopes[0].count(g)) rs.declare_in(0, g, 0);
     }
     std::vector<const Ast*> names;
     for (const auto& s : body.nodes) collect_bindings(*s, names);
@@ -429,7 +373,7 @@ struct Binder {
     // capture rather than as anything the body computes.
     std::vector<ParamInfo> plist;
     if (params != nullptr) collect_params(*params, parent, f, plist);
-    scopes.push_back({f, {}});
+    rs.push_scope();
     for (ParamInfo& pi : plist) {
       pi.var = declare(pi.name, f);
       decl_of[pi.id] = pi.var;
@@ -441,7 +385,7 @@ struct Binder {
       bind_names(body, f);
       for (const auto& s : body.nodes) resolve_stmt(*s, f);
     }
-    scopes.pop_back();
+    rs.pop_scope();
     return f;
   }
 
@@ -483,9 +427,9 @@ struct Binder {
         resolve_expr(*pi.def, parent);
         // A synthetic binding of the enclosing function, captured by this
         // one: that is what makes the default a def-time value.
-        pi.def_var = static_cast<int32_t>(vars.size());
-        vars.push_back({"$def." + std::string(pi.id->token), parent});
-        fns[static_cast<size_t>(f)].free.insert(pi.def_var);
+        pi.def_var = static_cast<int32_t>(rs.vars.size());
+        rs.vars.push_back({"$def." + std::string(pi.id->token), parent, -1});
+        rs.fns[static_cast<size_t>(f)].free.insert(pi.def_var);
       }
       pi.name = std::string(pi.id->token);
       out.push_back(pi);
@@ -545,15 +489,15 @@ struct Binder {
           const ClassInfo& base = class_info.at(bc->second);
           ci.base_var = base.table_var;
           ci.is_exc = base.is_exc;
-          use_var(ci.base_var, fn);
+          rs.use(ci.base_var, fn);
           break;
         }
         // The synthetic binding that holds the method table. It is always a
         // cell: the constructor captures it, and so does any method that
         // says `super()`.
-        ci.table_var = static_cast<int32_t>(vars.size());
-        vars.push_back({"$cls." + cname, fn});
-        force_cells.insert(ci.table_var);
+        ci.table_var = static_cast<int32_t>(rs.vars.size());
+        rs.vars.push_back({"$cls." + cname, fn, -1});
+        rs.force_cell(ci.table_var);
         class_info[&a] = ci;
         class_by_var[decl_of.at(a.nodes[0].get())] = &a;
 
@@ -678,7 +622,7 @@ struct Binder {
           }
           const int32_t tv = class_info.at(class_stack.back()).table_var;
           ref_of[&a] = tv;
-          use_var(tv, fn);
+          rs.use(tv, fn);
           return;
         }
         if (is_builtin(n)) return;
@@ -720,7 +664,7 @@ struct Binder {
     fns[static_cast<size_t>(f)].is_generator =
         a.tag == "gencomp"_ || a.tag == "bargen"_;
     fn_of[&a] = f;
-    scopes.push_back({f, {}});
+    rs.push_scope();
     for (const auto& c : a.nodes) {
       if (c->tag != "compfor"_) continue;
       for (const auto& t : c->nodes[0]->nodes) {
@@ -736,46 +680,7 @@ struct Binder {
         resolve_expr(*c, f);
       }
     }
-    scopes.pop_back();
-  }
-
-  void number_captures() {
-    for (size_t f = 0; f < fns.size(); ++f) {
-      int32_t i = 0;
-      for (const int32_t v : fns[f].free) {
-        fns[f].capture_index[v] = i++;
-        m.funcs[static_cast<size_t>(fns[f].index)].capture_names.push_back(
-            vars[static_cast<size_t>(v)].name);
-      }
-      m.funcs[static_cast<size_t>(fns[f].index)].num_captures = i;
-    }
-    for (const auto& fi : fns) {
-      for (const int32_t v : fi.free) {
-        auto& own = fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)]
-                        .cell_index;
-        if (!own.count(v)) own[v] = static_cast<int32_t>(own.size());
-      }
-    }
-    // A class table is a cell whether or not a method captured it, because
-    // its constructor always does -- and that closure is built by hand,
-    // outside the free-set machinery above.
-    for (const int32_t v : force_cells) {
-      auto& own =
-          fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)]
-              .cell_index;
-      if (!own.count(v)) own[v] = static_cast<int32_t>(own.size());
-    }
-  }
-
-  std::pair<VarKind, int32_t> access(int32_t f, int32_t v) const {
-    if (vars[static_cast<size_t>(v)].owner == f) {
-      const auto& ci = fns[static_cast<size_t>(f)].cell_index;
-      const auto it = ci.find(v);
-      if (it != ci.end()) return {VarKind::Cell, it->second};
-      return {VarKind::Local, slot_of[static_cast<size_t>(v)]};
-    }
-    return {VarKind::Capture,
-            fns[static_cast<size_t>(f)].capture_index.at(v)};
+    rs.pop_scope();
   }
 
   // ==== The runtime this front end writes in its own IR ====================
@@ -820,76 +725,22 @@ struct Binder {
     return names;
   }
 
-  struct RT {
+  // The front end's own additions to coreir::FuncWriter: the helpers
+  // that have to reach this binder's own tables.
+  struct RT : FuncWriter {
     Binder& bd;
-    Builder b;
-    SrcPos p{0, 0};
-    std::vector<NodeId> body;
 
-    explicit RT(Binder& bd_) : bd(bd_), b(bd_.m) {}
+    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
 
-    NodeId L(int32_t i) { return b.varref(VarKind::Local, i, p); }
-    NodeId S(const std::string& s) { return b.str_literal(s, p); }
-    NodeId D(double d) { return b.double_literal(d, p); }
-    NodeId I(int64_t v) { return b.literal(v, p); }
-    NodeId Nil() { return b.nil_literal(p); }
-    NodeId Bo(bool v) { return b.bool_literal(v, p); }
-    NodeId arr(const std::vector<NodeId>& v) { return b.array_lit(v, p); }
-    NodeId in(IntrinsicId id, const std::vector<NodeId>& a) {
-      return b.intrinsic(id, a, p);
-    }
-    NodeId bin(BinOp op, NodeId x, NodeId y) { return b.binary(op, x, y, p); }
-    NodeId set(int32_t s, NodeId v) {
-      return b.assign(VarKind::Local, s, v, p);
-    }
-    NodeId ret(NodeId v) { return b.make_return(v, p); }
-    NodeId blk(const std::vector<NodeId>& v) { return b.block(v, p); }
-    NodeId iff(NodeId c, NodeId t) { return b.make_if(c, t, NodeId{}, p); }
-    NodeId iff(NodeId c, NodeId t, NodeId e) { return b.make_if(c, t, e, p); }
-    NodeId wh(NodeId c, NodeId body_) { return b.make_while(c, body_, p); }
-    NodeId idx(NodeId r, NodeId k) { return b.index(r, k, p); }
-    NodeId idx(NodeId r, const std::string& k) { return b.index(r, S(k), p); }
-    NodeId sidx(NodeId r, NodeId k, NodeId v) {
-      return b.set_index(r, k, v, p);
-    }
-    NodeId obj(const std::vector<std::pair<std::string, NodeId>>& kvs) {
-      std::vector<std::pair<NodeId, NodeId>> out;
-      for (const auto& kv : kvs) out.emplace_back(S(kv.first), kv.second);
-      return b.object_lit(out, p);
-    }
-    NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
-    NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
-    NodeId push(NodeId a, NodeId v) {
-      return in(IntrinsicId::ArrayPush, {a, v});
-    }
-    NodeId is(NodeId v, const std::string& s) { return bin(BinOp::Eq, v, S(s)); }
-    NodeId isnt(NodeId v, const std::string& s) {
-      return bin(BinOp::Ne, v, S(s));
-    }
-    NodeId has(NodeId t, NodeId k) {
-      return in(IntrinsicId::ObjectHas, {t, k});
-    }
-    NodeId both(NodeId x, NodeId y) { return b.make_if(x, y, Bo(false), p); }
-    NodeId either(NodeId x, NodeId y) { return b.make_if(x, Bo(true), y, p); }
     NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(
-          b.make_closure(bd.rt.at(name), bd.empty_cmap, p), a, p);
+      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
     }
-    NodeId nat(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.native_ref(b.declare_native(name), p), a, p);
-    }
-    void add(NodeId n) { body.push_back(n); }
 
-    void finish(const std::string& name, int32_t nparams, int32_t nlocals,
-                std::vector<std::string> names) {
-      Func& f = bd.m.funcs[static_cast<size_t>(bd.rt.at(name))];
-      f.name = name;
-      f.num_params = nparams;
-      f.num_locals = nlocals;
-      names.resize(static_cast<size_t>(nlocals), "");
-      f.local_names = std::move(names);
-      f.lenient_arity = true;
-      f.body = b.scope(0, nlocals, blk(body), p);
+    // The counts and the name table come from param()/local().
+    void finish(const std::string& name, int32_t ncells = 0,
+                int32_t ncaps = 0) {
+      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
+            ncaps);
     }
   };
 
@@ -902,29 +753,33 @@ struct Binder {
 
   void rt_isbig() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "object"),
-                r.ret(r.has(r.L(0), r.S(kBigKey)))));
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "object"),
+                r.ret(r.has(r.L(v), r.S(kBigKey)))));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$isbig", 1, 1, {"v"});
+    r.finish("$isbig");
   }
 
   void rt_abs() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(0), r.I(0)),
-                r.ret(r.b.unary(UnOp::Neg, r.L(0), r.p))));
-    r.add(r.ret(r.L(0)));
-    r.finish("$abs", 1, 1, {"i"});
+    const auto [i] = r.params("i");
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                r.ret(r.b.unary(UnOp::Neg, r.L(i)))));
+    r.add(r.ret(r.L(i)));
+    r.finish("$abs");
   }
 
   void rt_tolimbs() {
     RT r(*this);
-    r.add(r.set(1, r.arr({})));
-    r.add(r.set(2, r.L(0)));
-    r.add(r.wh(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-               r.blk({r.push(r.L(1), r.bin(BinOp::Mod, r.L(2), r.I(kBase))),
-                      r.set(2, r.bin(BinOp::Div, r.L(2), r.I(kBase)))})));
-    r.add(r.ret(r.L(1)));
-    r.finish("$tolimbs", 1, 3, {"n", "out", "i"});
+    const auto [n] = r.params("n");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.L(n)));
+    r.add(r.wh(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+               r.blk({r.push(r.L(out), r.bin(BinOp::Mod, r.L(i), r.I(kBase))),
+                      r.set(i, r.bin(BinOp::Div, r.L(i), r.I(kBase)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$tolimbs");
   }
 
   // The demotion rule, and the reason ordinary arithmetic does not pay for
@@ -932,237 +787,255 @@ struct Binder {
   // int64 with room to spare, so anything that short comes back as one.
   void rt_mkbig() {
     RT r(*this);
-    r.add(r.set(2, r.len(r.L(0))));
-    r.add(r.wh(r.both(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                      r.bin(BinOp::Eq,
-                            r.idx(r.L(0), r.bin(BinOp::Sub, r.L(2), r.I(1))),
-                            r.I(0))),
-               r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-                r.set(0, r.in(IntrinsicId::ArraySlice,
-                              {r.L(0), r.I(0), r.L(2)}))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(2), r.I(0)), r.ret(r.I(0))));
+    const auto [limbs, sign] = r.params("limbs", "sign");
+    const auto [n, v] = r.locals("n", "v");
+    r.add(r.set(n, r.len(r.L(limbs))));
+    r.add(
+        r.wh(r.both(r.bin(BinOp::Gt, r.L(n), r.I(0)),
+                    r.bin(BinOp::Eq,
+                          r.idx(r.L(limbs), r.bin(BinOp::Sub, r.L(n), r.I(1))),
+                          r.I(0))),
+             r.set(n, r.bin(BinOp::Sub, r.L(n), r.I(1)))));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(n), r.len(r.L(limbs))),
+                r.set(limbs, r.in(IntrinsicId::ArraySlice,
+                                  {r.L(limbs), r.I(0), r.L(n)}))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)), r.ret(r.I(0))));
     r.add(r.iff(
-        r.bin(BinOp::Le, r.L(2), r.I(2)),
-        r.blk({r.set(3, r.idx(r.L(0), r.I(0))),
-               r.iff(r.bin(BinOp::Eq, r.L(2), r.I(2)),
-                     r.set(3, r.bin(BinOp::Add, r.L(3),
-                                    r.bin(BinOp::Mul, r.idx(r.L(0), r.I(1)),
+        r.bin(BinOp::Le, r.L(n), r.I(2)),
+        r.blk({r.set(v, r.idx(r.L(limbs), r.I(0))),
+               r.iff(r.bin(BinOp::Eq, r.L(n), r.I(2)),
+                     r.set(v, r.bin(BinOp::Add, r.L(v),
+                                    r.bin(BinOp::Mul, r.idx(r.L(limbs), r.I(1)),
                                           r.I(kBase))))),
-               r.iff(r.bin(BinOp::Lt, r.L(1), r.I(0)),
-                     r.set(3, r.b.unary(UnOp::Neg, r.L(3), r.p))),
-               r.ret(r.L(3))})));
-    r.add(r.ret(r.obj({{kBigKey, r.L(0)}, {kSignKey, r.L(1)}})));
-    r.finish("$mkbig", 2, 4, {"limbs", "sign", "n", "v"});
+               r.iff(r.bin(BinOp::Lt, r.L(sign), r.I(0)),
+                     r.set(v, r.b.unary(UnOp::Neg, r.L(v)))),
+               r.ret(r.L(v))})));
+    r.add(r.ret(r.obj({{kBigKey, r.L(limbs)}, {kSignKey, r.L(sign)}})));
+    r.finish("$mkbig");
   }
 
   void rt_biglimbs() {
     RT r(*this);
-    r.add(r.iff(r.call("$isbig", {r.L(0)}), r.ret(r.idx(r.L(0), kBigKey))));
-    r.add(r.ret(r.call("$tolimbs", {r.call("$abs", {r.L(0)})})));
-    r.finish("$biglimbs", 1, 1, {"v"});
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.idx(r.L(v), kBigKey))));
+    r.add(r.ret(r.call("$tolimbs", {r.call("$abs", {r.L(v)})})));
+    r.finish("$biglimbs");
   }
 
   void rt_bigsign() {
     RT r(*this);
-    r.add(r.iff(r.call("$isbig", {r.L(0)}), r.ret(r.idx(r.L(0), kSignKey))));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(0), r.I(0)), r.ret(r.I(-1))));
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.idx(r.L(v), kSignKey))));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(v), r.I(0)), r.ret(r.I(-1))));
     r.add(r.ret(r.I(1)));
-    r.finish("$bigsign", 1, 1, {"v"});
+    r.finish("$bigsign");
   }
 
   void rt_ucmp() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Ne, r.len(r.L(0)), r.len(r.L(1))),
-                r.ret(r.iff(r.bin(BinOp::Lt, r.len(r.L(0)), r.len(r.L(1))),
+    const auto [x, y] = r.params("x", "y");
+    const auto [i] = r.locals("i");
+    r.add(r.iff(r.bin(BinOp::Ne, r.len(r.L(x)), r.len(r.L(y))),
+                r.ret(r.iff(r.bin(BinOp::Lt, r.len(r.L(x)), r.len(r.L(y))),
                             r.I(-1), r.I(1)))));
-    r.add(r.set(2, r.bin(BinOp::Sub, r.len(r.L(0)), r.I(1))));
-    r.add(r.wh(r.bin(BinOp::Ge, r.L(2), r.I(0)),
-               r.blk({r.iff(r.bin(BinOp::Ne, r.idx(r.L(0), r.L(2)),
-                                  r.idx(r.L(1), r.L(2))),
-                            r.ret(r.iff(r.bin(BinOp::Lt,
-                                              r.idx(r.L(0), r.L(2)),
-                                              r.idx(r.L(1), r.L(2))),
+    r.add(r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))));
+    r.add(r.wh(r.bin(BinOp::Ge, r.L(i), r.I(0)),
+               r.blk({r.iff(r.bin(BinOp::Ne, r.idx(r.L(x), r.L(i)),
+                                  r.idx(r.L(y), r.L(i))),
+                            r.ret(r.iff(r.bin(BinOp::Lt, r.idx(r.L(x), r.L(i)),
+                                              r.idx(r.L(y), r.L(i))),
                                         r.I(-1), r.I(1)))),
-                      r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))})));
+                      r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})));
     r.add(r.ret(r.I(0)));
-    r.finish("$ucmp", 2, 3, {"x", "y", "i"});
+    r.finish("$ucmp");
   }
 
   void rt_uadd() {
     RT r(*this);
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));  // carry
-    r.add(r.set(4, r.I(0)));  // i
+    const auto [x, y] = r.params("x", "y");
+    const auto [out, carry, i, s] = r.locals("out", "carry", "i", "s");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(carry, r.I(0)));  // carry
+    r.add(r.set(i, r.I(0)));      // i
     r.add(r.wh(
-        r.either(r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
-                 r.either(r.bin(BinOp::Lt, r.L(4), r.len(r.L(1))),
-                          r.bin(BinOp::Gt, r.L(3), r.I(0)))),
-        r.blk({r.set(5, r.L(3)),
-               r.iff(r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
-                     r.set(5, r.bin(BinOp::Add, r.L(5),
-                                    r.idx(r.L(0), r.L(4))))),
-               r.iff(r.bin(BinOp::Lt, r.L(4), r.len(r.L(1))),
-                     r.set(5, r.bin(BinOp::Add, r.L(5),
-                                    r.idx(r.L(1), r.L(4))))),
-               r.push(r.L(2), r.bin(BinOp::Mod, r.L(5), r.I(kBase))),
-               r.set(3, r.bin(BinOp::Div, r.L(5), r.I(kBase))),
-               r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$uadd", 2, 6, {"x", "y", "out", "carry", "i", "s"});
+        r.either(r.bin(BinOp::Lt, r.L(i), r.len(r.L(x))),
+                 r.either(r.bin(BinOp::Lt, r.L(i), r.len(r.L(y))),
+                          r.bin(BinOp::Gt, r.L(carry), r.I(0)))),
+        r.blk(
+            {r.set(s, r.L(carry)),
+             r.iff(r.bin(BinOp::Lt, r.L(i), r.len(r.L(x))),
+                   r.set(s, r.bin(BinOp::Add, r.L(s), r.idx(r.L(x), r.L(i))))),
+             r.iff(r.bin(BinOp::Lt, r.L(i), r.len(r.L(y))),
+                   r.set(s, r.bin(BinOp::Add, r.L(s), r.idx(r.L(y), r.L(i))))),
+             r.push(r.L(out), r.bin(BinOp::Mod, r.L(s), r.I(kBase))),
+             r.set(carry, r.bin(BinOp::Div, r.L(s), r.I(kBase))),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$uadd");
   }
 
   // x >= y, which every caller checks with $ucmp first.
   void rt_usub() {
     RT r(*this);
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));  // borrow
-    r.add(r.set(4, r.I(0)));
+    const auto [x, y] = r.params("x", "y");
+    const auto [out, borrow, i, d] = r.locals("out", "borrow", "i", "d");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(borrow, r.I(0)));  // borrow
+    r.add(r.set(i, r.I(0)));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
-        r.blk({r.set(5, r.bin(BinOp::Sub, r.idx(r.L(0), r.L(4)), r.L(3))),
-               r.iff(r.bin(BinOp::Lt, r.L(4), r.len(r.L(1))),
-                     r.set(5, r.bin(BinOp::Sub, r.L(5),
-                                    r.idx(r.L(1), r.L(4))))),
-               r.iff(r.bin(BinOp::Lt, r.L(5), r.I(0)),
-                     r.blk({r.set(5, r.bin(BinOp::Add, r.L(5), r.I(kBase))),
-                            r.set(3, r.I(1))}),
-                     r.set(3, r.I(0))),
-               r.push(r.L(2), r.L(5)),
-               r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$usub", 2, 6, {"x", "y", "out", "borrow", "i", "d"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(x))),
+        r.blk(
+            {r.set(d, r.bin(BinOp::Sub, r.idx(r.L(x), r.L(i)), r.L(borrow))),
+             r.iff(r.bin(BinOp::Lt, r.L(i), r.len(r.L(y))),
+                   r.set(d, r.bin(BinOp::Sub, r.L(d), r.idx(r.L(y), r.L(i))))),
+             r.iff(r.bin(BinOp::Lt, r.L(d), r.I(0)),
+                   r.blk({r.set(d, r.bin(BinOp::Add, r.L(d), r.I(kBase))),
+                          r.set(borrow, r.I(1))}),
+                   r.set(borrow, r.I(0))),
+             r.push(r.L(out), r.L(d)),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$usub");
   }
 
   // Schoolbook, which is what base 10^9 was chosen for: one limb product
   // plus two carries is under 10^18 + 2*10^9, comfortably inside int64.
   void rt_umul() {
     RT r(*this);
-    r.add(r.iff(r.either(r.bin(BinOp::Eq, r.len(r.L(0)), r.I(0)),
-                         r.bin(BinOp::Eq, r.len(r.L(1)), r.I(0))),
+    const auto [x, y] = r.params("x", "y");
+    const auto [out, i, j, carry, cur, k] =
+        r.locals("out", "i", "j", "carry", "cur", "k");
+    r.add(r.iff(r.either(r.bin(BinOp::Eq, r.len(r.L(x)), r.I(0)),
+                         r.bin(BinOp::Eq, r.len(r.L(y)), r.I(0))),
                 r.ret(r.arr({}))));
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3),
-                     r.bin(BinOp::Add, r.len(r.L(0)), r.len(r.L(1)))),
-               r.blk({r.push(r.L(2), r.I(0)),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.set(3, r.I(0)));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i),
+                     r.bin(BinOp::Add, r.len(r.L(x)), r.len(r.L(y)))),
+               r.blk({r.push(r.L(out), r.I(0)),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(3), r.len(r.L(0))),
-        r.blk({
-            r.set(5, r.I(0)),  // carry
-            r.set(4, r.I(0)),  // j
-            r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(1))),
-                 r.blk({r.set(7, r.bin(BinOp::Add, r.L(3), r.L(4))),
-                        r.set(6, r.bin(BinOp::Add,
-                                       r.bin(BinOp::Add,
-                                             r.idx(r.L(2), r.L(7)),
-                                             r.bin(BinOp::Mul,
-                                                   r.idx(r.L(0), r.L(3)),
-                                                   r.idx(r.L(1), r.L(4)))),
-                                       r.L(5))),
-                        r.sidx(r.L(2), r.L(7),
-                               r.bin(BinOp::Mod, r.L(6), r.I(kBase))),
-                        r.set(5, r.bin(BinOp::Div, r.L(6), r.I(kBase))),
-                        r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})),
-            r.set(7, r.bin(BinOp::Add, r.L(3), r.len(r.L(1)))),
-            r.wh(r.bin(BinOp::Gt, r.L(5), r.I(0)),
-                 r.blk({r.set(6, r.bin(BinOp::Add, r.idx(r.L(2), r.L(7)),
-                                       r.L(5))),
-                        r.sidx(r.L(2), r.L(7),
-                               r.bin(BinOp::Mod, r.L(6), r.I(kBase))),
-                        r.set(5, r.bin(BinOp::Div, r.L(6), r.I(kBase))),
-                        r.set(7, r.bin(BinOp::Add, r.L(7), r.I(1)))})),
-            r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$umul", 2, 8, {"x", "y", "out", "i", "j", "carry", "cur", "k"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(x))),
+        r.blk(
+            {r.set(carry, r.I(0)),  // carry
+             r.set(j, r.I(0)),      // j
+             r.wh(r.bin(BinOp::Lt, r.L(j), r.len(r.L(y))),
+                  r.blk({r.set(k, r.bin(BinOp::Add, r.L(i), r.L(j))),
+                         r.set(cur,
+                               r.bin(BinOp::Add,
+                                     r.bin(BinOp::Add, r.idx(r.L(out), r.L(k)),
+                                           r.bin(BinOp::Mul,
+                                                 r.idx(r.L(x), r.L(i)),
+                                                 r.idx(r.L(y), r.L(j)))),
+                                     r.L(carry))),
+                         r.sidx(r.L(out), r.L(k),
+                                r.bin(BinOp::Mod, r.L(cur), r.I(kBase))),
+                         r.set(carry, r.bin(BinOp::Div, r.L(cur), r.I(kBase))),
+                         r.set(j, r.bin(BinOp::Add, r.L(j), r.I(1)))})),
+             r.set(k, r.bin(BinOp::Add, r.L(i), r.len(r.L(y)))),
+             r.wh(r.bin(BinOp::Gt, r.L(carry), r.I(0)),
+                  r.blk({r.set(cur, r.bin(BinOp::Add, r.idx(r.L(out), r.L(k)),
+                                          r.L(carry))),
+                         r.sidx(r.L(out), r.L(k),
+                                r.bin(BinOp::Mod, r.L(cur), r.I(kBase))),
+                         r.set(carry, r.bin(BinOp::Div, r.L(cur), r.I(kBase))),
+                         r.set(k, r.bin(BinOp::Add, r.L(k), r.I(1)))})),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$umul");
   }
 
   void rt_bigadd() {
     RT r(*this);
-    r.add(r.set(2, r.call("$bigsign", {r.L(0)})));
-    r.add(r.set(3, r.call("$bigsign", {r.L(1)})));
-    r.add(r.set(4, r.call("$biglimbs", {r.L(0)})));
-    r.add(r.set(5, r.call("$biglimbs", {r.L(1)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(2), r.L(3)),
+    const auto [a, b] = r.params("a", "b");
+    const auto [sa, sb, xa, xb, c] = r.locals("sa", "sb", "xa", "xb", "c");
+    r.add(r.set(sa, r.call("$bigsign", {r.L(a)})));
+    r.add(r.set(sb, r.call("$bigsign", {r.L(b)})));
+    r.add(r.set(xa, r.call("$biglimbs", {r.L(a)})));
+    r.add(r.set(xb, r.call("$biglimbs", {r.L(b)})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(sa), r.L(sb)),
                 r.ret(r.call("$mkbig",
-                             {r.call("$uadd", {r.L(4), r.L(5)}), r.L(2)}))));
-    r.add(r.set(6, r.call("$ucmp", {r.L(4), r.L(5)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(6), r.I(0)), r.ret(r.I(0))));
-    r.add(r.iff(r.bin(BinOp::Gt, r.L(6), r.I(0)),
+                             {r.call("$uadd", {r.L(xa), r.L(xb)}), r.L(sa)}))));
+    r.add(r.set(c, r.call("$ucmp", {r.L(xa), r.L(xb)})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(c), r.I(0)), r.ret(r.I(0))));
+    r.add(r.iff(r.bin(BinOp::Gt, r.L(c), r.I(0)),
                 r.ret(r.call("$mkbig",
-                             {r.call("$usub", {r.L(4), r.L(5)}), r.L(2)}))));
-    r.add(r.ret(r.call("$mkbig",
-                       {r.call("$usub", {r.L(5), r.L(4)}), r.L(3)})));
-    r.finish("$bigadd", 2, 7, {"a", "b", "sa", "sb", "xa", "xb", "c"});
+                             {r.call("$usub", {r.L(xa), r.L(xb)}), r.L(sa)}))));
+    r.add(r.ret(
+        r.call("$mkbig", {r.call("$usub", {r.L(xb), r.L(xa)}), r.L(sb)})));
+    r.finish("$bigadd");
   }
 
   void rt_bigmul() {
     RT r(*this);
-    r.add(r.ret(r.call(
-        "$mkbig",
-        {r.call("$umul", {r.call("$biglimbs", {r.L(0)}),
-                          r.call("$biglimbs", {r.L(1)})}),
-         r.bin(BinOp::Mul, r.call("$bigsign", {r.L(0)}),
-               r.call("$bigsign", {r.L(1)}))})));
-    r.finish("$bigmul", 2, 2, {"a", "b"});
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.ret(
+        r.call("$mkbig", {r.call("$umul", {r.call("$biglimbs", {r.L(a)}),
+                                           r.call("$biglimbs", {r.L(b)})}),
+                          r.bin(BinOp::Mul, r.call("$bigsign", {r.L(a)}),
+                                r.call("$bigsign", {r.L(b)}))})));
+    r.finish("$bigmul");
   }
 
   // Nine decimal digits per limb, zero-padded except for the top one --
   // the printing that base 10^9 makes free of division.
   void rt_bstr() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Eq, r.call("$isbig", {r.L(0)}), r.Bo(false)),
-                r.ret(r.in(IntrinsicId::ToStr, {r.L(0)}))));
-    r.add(r.set(1, r.idx(r.L(0), kBigKey)));
-    r.add(r.set(2, r.bin(BinOp::Sub, r.len(r.L(1)), r.I(1))));
-    r.add(r.set(3, r.in(IntrinsicId::ToStr, {r.idx(r.L(1), r.L(2))})));
-    r.add(r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1))));
-    r.add(r.wh(
-        r.bin(BinOp::Ge, r.L(2), r.I(0)),
-        r.blk({r.set(4, r.in(IntrinsicId::ToStr, {r.idx(r.L(1), r.L(2))})),
-               r.wh(r.bin(BinOp::Lt, r.len(r.L(4)), r.I(9)),
-                    r.set(4, r.bin(BinOp::Add, r.S("0"), r.L(4)))),
-               r.set(3, r.bin(BinOp::Add, r.L(3), r.L(4))),
-               r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))})));
-    r.add(r.iff(r.bin(BinOp::Lt, r.idx(r.L(0), kSignKey), r.I(0)),
-                r.set(3, r.bin(BinOp::Add, r.S("-"), r.L(3)))));
-    r.add(r.ret(r.L(3)));
-    r.finish("$bstr", 1, 5, {"v", "x", "i", "out", "t"});
+    const auto [v] = r.params("v");
+    const auto [x, i, out, t] = r.locals("x", "i", "out", "t");
+    r.add(r.iff(r.bin(BinOp::Eq, r.call("$isbig", {r.L(v)}), r.Bo(false)),
+                r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
+    r.add(r.set(x, r.idx(r.L(v), kBigKey)));
+    r.add(r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))));
+    r.add(r.set(out, r.in(IntrinsicId::ToStr, {r.idx(r.L(x), r.L(i))})));
+    r.add(r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1))));
+    r.add(
+        r.wh(r.bin(BinOp::Ge, r.L(i), r.I(0)),
+             r.blk({r.set(t, r.in(IntrinsicId::ToStr, {r.idx(r.L(x), r.L(i))})),
+                    r.wh(r.bin(BinOp::Lt, r.len(r.L(t)), r.I(9)),
+                         r.set(t, r.bin(BinOp::Add, r.S("0"), r.L(t)))),
+                    r.set(out, r.bin(BinOp::Add, r.L(out), r.L(t))),
+                    r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})));
+    r.add(r.iff(r.bin(BinOp::Lt, r.idx(r.L(v), kSignKey), r.I(0)),
+                r.set(out, r.bin(BinOp::Add, r.S("-"), r.L(out)))));
+    r.add(r.ret(r.L(out)));
+    r.finish("$bstr");
   }
 
   void rt_tofloat() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "double"), r.ret(r.L(0))));
+    const auto [v] = r.params("v");
+    const auto [x, acc, i] = r.locals("x", "acc", "i");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "double"), r.ret(r.L(v))));
     r.add(r.iff(
-        r.call("$isbig", {r.L(0)}),
-        r.blk({r.set(1, r.idx(r.L(0), kBigKey)),
-               r.set(2, r.D(0.0)),
-               r.set(3, r.bin(BinOp::Sub, r.len(r.L(1)), r.I(1))),
-               r.wh(r.bin(BinOp::Ge, r.L(3), r.I(0)),
-                    r.blk({r.set(2, r.bin(BinOp::Add,
-                                          r.bin(BinOp::Mul, r.L(2),
-                                                r.D(1e9)),
+        r.call("$isbig", {r.L(v)}),
+        r.blk(
+            {r.set(x, r.idx(r.L(v), kBigKey)), r.set(acc, r.D(0.0)),
+             r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))),
+             r.wh(r.bin(BinOp::Ge, r.L(i), r.I(0)),
+                  r.blk({r.set(acc, r.bin(BinOp::Add,
+                                          r.bin(BinOp::Mul, r.L(acc), r.D(1e9)),
                                           r.in(IntrinsicId::ToDouble,
-                                               {r.idx(r.L(1), r.L(3))}))),
-                           r.set(3, r.bin(BinOp::Sub, r.L(3), r.I(1)))})),
-               r.iff(r.bin(BinOp::Lt, r.idx(r.L(0), kSignKey), r.I(0)),
-                     r.set(2, r.b.unary(UnOp::Neg, r.L(2), r.p))),
-               r.ret(r.L(2))})));
-    r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.L(0)})));
-    r.finish("$tofloat", 1, 4, {"v", "x", "acc", "i"});
+                                               {r.idx(r.L(x), r.L(i))}))),
+                         r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})),
+             r.iff(r.bin(BinOp::Lt, r.idx(r.L(v), kSignKey), r.I(0)),
+                   r.set(acc, r.b.unary(UnOp::Neg, r.L(acc)))),
+             r.ret(r.L(acc))})));
+    r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.L(v)})));
+    r.finish("$tofloat");
   }
 
   void rt_neg() {
     RT r(*this);
-    r.add(r.iff(r.call("$isbig", {r.L(0)}),
-                r.ret(r.obj({{kBigKey, r.idx(r.L(0), kBigKey)},
-                             {kSignKey, r.b.unary(UnOp::Neg,
-                                                  r.idx(r.L(0), kSignKey),
-                                                  r.p)}}))));
-    r.add(r.ret(r.b.unary(UnOp::Neg, r.L(0), r.p)));
-    r.finish("$neg", 1, 1, {"v"});
+    const auto [v] = r.params("v");
+    r.add(r.iff(
+        r.call("$isbig", {r.L(v)}),
+        r.ret(r.obj(
+            {{kBigKey, r.idx(r.L(v), kBigKey)},
+             {kSignKey, r.b.unary(UnOp::Neg, r.idx(r.L(v), kSignKey))}}))));
+    r.add(r.ret(r.b.unary(UnOp::Neg, r.L(v))));
+    r.finish("$neg");
   }
 
   // -- Arithmetic, dispatching on what the operands turn out to be --------
@@ -1178,282 +1051,297 @@ struct Binder {
 
   void rt_add() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
-    r.add(r.iff(r.both(r.is(r.L(2), "string"), r.is(r.L(3), "string")),
-                r.ret(r.bin(BinOp::Add, r.L(0), r.L(1)))));
-    r.add(r.iff(r.both(r.is(r.L(2), "array"), r.is(r.L(3), "array")),
-                r.ret(r.call("$listadd", {r.L(0), r.L(1)}))));
-    r.add(r.iff(r.both(r.call("$istup", {r.L(0)}), r.call("$istup", {r.L(1)})),
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb] = r.locals("ta", "tb");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
+    r.add(r.iff(r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "string")),
+                r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
+    r.add(r.iff(r.both(r.is(r.L(ta), "array"), r.is(r.L(tb), "array")),
+                r.ret(r.call("$listadd", {r.L(a), r.L(b)}))));
+    r.add(r.iff(r.both(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
                 r.ret(r.call("$tuple",
-                             {r.call("$listadd", {r.idx(r.L(0), kTupKey),
-                                                  r.idx(r.L(1), kTupKey)})}))));
-    r.add(r.iff(r.either(r.is(r.L(2), "double"), r.is(r.L(3), "double")),
-                r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(0)}),
-                            r.call("$tofloat", {r.L(1)})))));
+                             {r.call("$listadd", {r.idx(r.L(a), kTupKey),
+                                                  r.idx(r.L(b), kTupKey)})}))));
+    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+                r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
+                            r.call("$tofloat", {r.L(b)})))));
     r.add(r.iff(
-        int_pair(r, r.L(2), r.L(3)),
-        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(0)}), r.I(kAddSafe)),
-                     r.bin(BinOp::Lt, r.call("$abs", {r.L(1)}),
-                           r.I(kAddSafe))),
-              r.ret(r.bin(BinOp::Add, r.L(0), r.L(1))))));
-    r.add(r.ret(r.call("$bigadd", {r.L(0), r.L(1)})));
-    r.finish("$add", 2, 4, {"a", "b", "ta", "tb"});
+        int_pair(r, r.L(ta), r.L(tb)),
+        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kAddSafe)),
+                     r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kAddSafe))),
+              r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))))));
+    r.add(r.ret(r.call("$bigadd", {r.L(a), r.L(b)})));
+    r.finish("$add");
   }
 
   void rt_sub() {
     RT r(*this);
-    r.add(r.ret(r.call("$add", {r.L(0), r.call("$neg", {r.L(1)})})));
-    r.finish("$sub", 2, 2, {"a", "b"});
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.ret(r.call("$add", {r.L(a), r.call("$neg", {r.L(b)})})));
+    r.finish("$sub");
   }
 
   void rt_mul() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
-    r.add(r.iff(r.both(r.is(r.L(2), "string"), r.is(r.L(3), "int")),
-                r.ret(r.call("$strmul", {r.L(0), r.L(1)}))));
-    r.add(r.iff(r.both(r.is(r.L(2), "array"), r.is(r.L(3), "int")),
-                r.ret(r.call("$listmul", {r.L(0), r.L(1)}))));
-    r.add(r.iff(r.either(r.is(r.L(2), "double"), r.is(r.L(3), "double")),
-                r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(0)}),
-                            r.call("$tofloat", {r.L(1)})))));
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb] = r.locals("ta", "tb");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
+    r.add(r.iff(r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "int")),
+                r.ret(r.call("$strmul", {r.L(a), r.L(b)}))));
+    r.add(r.iff(r.both(r.is(r.L(ta), "array"), r.is(r.L(tb), "int")),
+                r.ret(r.call("$listmul", {r.L(a), r.L(b)}))));
+    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+                r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(a)}),
+                            r.call("$tofloat", {r.L(b)})))));
     r.add(r.iff(
-        int_pair(r, r.L(2), r.L(3)),
-        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(0)}), r.I(kMulSafe)),
-                     r.bin(BinOp::Lt, r.call("$abs", {r.L(1)}),
-                           r.I(kMulSafe))),
-              r.ret(r.bin(BinOp::Mul, r.L(0), r.L(1))))));
-    r.add(r.ret(r.call("$bigmul", {r.L(0), r.L(1)})));
-    r.finish("$mul", 2, 4, {"a", "b", "ta", "tb"});
+        int_pair(r, r.L(ta), r.L(tb)),
+        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kMulSafe)),
+                     r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kMulSafe))),
+              r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b))))));
+    r.add(r.ret(r.call("$bigmul", {r.L(a), r.L(b)})));
+    r.finish("$mul");
   }
 
   void rt_strmul() {
     RT r(*this);
-    r.add(r.set(2, r.S("")));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.L(1)),
-               r.blk({r.set(2, r.bin(BinOp::Add, r.L(2), r.L(0))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$strmul", 2, 4, {"s", "n", "out", "i"});
+    const auto [s, n] = r.params("s", "n");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.L(n)),
+               r.blk({r.set(out, r.bin(BinOp::Add, r.L(out), r.L(s))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$strmul");
   }
 
   void rt_listmul() {
     RT r(*this);
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.L(1)),
-               r.blk({r.set(4, r.I(0)),
-                      r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
-                           r.blk({r.push(r.L(2), r.idx(r.L(0), r.L(4))),
-                                  r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$listmul", 2, 5, {"a", "n", "out", "i", "j"});
+    const auto [a, n] = r.params("a", "n");
+    const auto [out, i, j] = r.locals("out", "i", "j");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(
+        r.wh(r.bin(BinOp::Lt, r.L(i), r.L(n)),
+             r.blk({r.set(j, r.I(0)),
+                    r.wh(r.bin(BinOp::Lt, r.L(j), r.len(r.L(a))),
+                         r.blk({r.push(r.L(out), r.idx(r.L(a), r.L(j))),
+                                r.set(j, r.bin(BinOp::Add, r.L(j), r.I(1)))})),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$listmul");
   }
 
   void rt_listadd() {
     RT r(*this);
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(0))),
-               r.blk({r.push(r.L(2), r.idx(r.L(0), r.L(3))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-               r.blk({r.push(r.L(2), r.idx(r.L(1), r.L(3))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$listadd", 2, 4, {"a", "b", "out", "i"});
+    const auto [a, b] = r.params("a", "b");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+               r.blk({r.push(r.L(out), r.idx(r.L(a), r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(b))),
+               r.blk({r.push(r.L(out), r.idx(r.L(b), r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$listadd");
   }
 
   void rt_fdiv() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tofloat", {r.L(1)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(2), r.D(0.0)),
+    const auto [a, b] = r.params("a", "b");
+    const auto [d] = r.locals("d");
+    r.add(r.set(d, r.call("$tofloat", {r.L(b)})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(0.0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("division by zero")}))));
-    r.add(r.ret(r.bin(BinOp::Div, r.call("$tofloat", {r.L(0)}), r.L(2))));
-    r.finish("$fdiv", 2, 3, {"a", "b", "d"});
+    r.add(r.ret(r.bin(BinOp::Div, r.call("$tofloat", {r.L(a)}), r.L(d))));
+    r.finish("$fdiv");
   }
 
   // `//` and `%` floor, like Lua's and unlike C's, so both correct the
   // truncating forms BinOp gives when the signs disagree.
   void rt_idiv() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(1), r.I(0)),
+    const auto [a, b] = r.params("a", "b");
+    const auto [q] = r.locals("q");
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("integer division or modulo by "
                                           "zero")}))));
-    r.add(r.set(2, r.bin(BinOp::Div, r.L(0), r.L(1))));
-    r.add(r.iff(r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(2), r.L(1)),
-                             r.L(0)),
-                       r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(0), r.L(1)),
-                             r.I(0))),
-                r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))));
-    r.add(r.ret(r.L(2)));
-    r.finish("$idiv", 2, 3, {"a", "b", "q"});
+    r.add(r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))));
+    r.add(r.iff(
+        r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
+               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(a), r.L(b)), r.I(0))),
+        r.set(q, r.bin(BinOp::Sub, r.L(q), r.I(1)))));
+    r.add(r.ret(r.L(q)));
+    r.finish("$idiv");
   }
 
   void rt_mod() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(1), r.I(0)),
+    const auto [a, b] = r.params("a", "b");
+    const auto [m] = r.locals("m");
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("integer division or modulo by "
                                           "zero")}))));
-    r.add(r.set(2, r.bin(BinOp::Mod, r.L(0), r.L(1))));
-    r.add(r.iff(r.both(r.bin(BinOp::Ne, r.L(2), r.I(0)),
-                       r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(2), r.L(1)),
-                             r.I(0))),
-                r.set(2, r.bin(BinOp::Add, r.L(2), r.L(1)))));
-    r.add(r.ret(r.L(2)));
-    r.finish("$mod", 2, 3, {"a", "b", "m"});
+    r.add(r.set(m, r.bin(BinOp::Mod, r.L(a), r.L(b))));
+    r.add(r.iff(
+        r.both(r.bin(BinOp::Ne, r.L(m), r.I(0)),
+               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(m), r.L(b)), r.I(0))),
+        r.set(m, r.bin(BinOp::Add, r.L(m), r.L(b)))));
+    r.add(r.ret(r.L(m)));
+    r.finish("$mod");
   }
 
   // Repeated squaring, over $mul -- so the promotion rule applies at every
   // step and `2 ** 100` is exact without anything here knowing it will be.
   void rt_pow() {
     RT r(*this);
-    r.add(r.iff(r.either(r.is(r.typ(r.L(0)), "double"),
-                         r.either(r.is(r.typ(r.L(1)), "double"),
-                                  r.bin(BinOp::Lt, r.L(1), r.I(0)))),
-                r.ret(r.in(IntrinsicId::Pow,
-                           {r.call("$tofloat", {r.L(0)}),
-                            r.call("$tofloat", {r.L(1)})}))));
-    r.add(r.set(2, r.I(1)));
-    r.add(r.set(3, r.L(0)));
-    r.add(r.set(4, r.L(1)));
-    r.add(r.wh(r.bin(BinOp::Gt, r.L(4), r.I(0)),
-               r.blk({r.iff(r.bin(BinOp::Eq, r.bin(BinOp::Mod, r.L(4), r.I(2)),
+    const auto [a, b] = r.params("a", "b");
+    const auto [acc, sq, e] = r.locals("acc", "sq", "e");
+    r.add(r.iff(r.either(r.is(r.typ(r.L(a)), "double"),
+                         r.either(r.is(r.typ(r.L(b)), "double"),
+                                  r.bin(BinOp::Lt, r.L(b), r.I(0)))),
+                r.ret(r.in(IntrinsicId::Pow, {r.call("$tofloat", {r.L(a)}),
+                                              r.call("$tofloat", {r.L(b)})}))));
+    r.add(r.set(acc, r.I(1)));
+    r.add(r.set(sq, r.L(a)));
+    r.add(r.set(e, r.L(b)));
+    r.add(r.wh(r.bin(BinOp::Gt, r.L(e), r.I(0)),
+               r.blk({r.iff(r.bin(BinOp::Eq, r.bin(BinOp::Mod, r.L(e), r.I(2)),
                                   r.I(1)),
-                            r.set(2, r.call("$mul", {r.L(2), r.L(3)}))),
-                      r.set(3, r.call("$mul", {r.L(3), r.L(3)})),
-                      r.set(4, r.bin(BinOp::Div, r.L(4), r.I(2)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$pow", 2, 5, {"a", "b", "acc", "sq", "e"});
+                            r.set(acc, r.call("$mul", {r.L(acc), r.L(sq)}))),
+                      r.set(sq, r.call("$mul", {r.L(sq), r.L(sq)})),
+                      r.set(e, r.bin(BinOp::Div, r.L(e), r.I(2)))})));
+    r.add(r.ret(r.L(acc)));
+    r.finish("$pow");
   }
 
   // -1, 0 or 1 -- what every ordering operator is built from.
   void rt_cmp() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb, fa, fb, sa, sb, c, xa, xb, i, e] =
+        r.locals("ta", "tb", "fa", "fb", "sa", "sb", "c", "xa", "xb", "i", "e");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
     // A list or a tuple compares element by element, which is what makes
     // `sorted` work on a list of pairs.
     r.add(r.iff(
-        r.both(r.either(r.is(r.L(2), "array"), r.call("$istup", {r.L(0)})),
-               r.either(r.is(r.L(3), "array"), r.call("$istup", {r.L(1)}))),
-        r.blk({r.set(9, r.call("$untup", {r.L(0)})),
-               r.set(10, r.call("$untup", {r.L(1)})),
-               r.set(11, r.I(0)),
-               r.wh(r.both(r.bin(BinOp::Lt, r.L(11), r.len(r.L(9))),
-                           r.bin(BinOp::Lt, r.L(11), r.len(r.L(10)))),
-                    r.blk({r.set(12, r.call("$cmp",
-                                            {r.idx(r.L(9), r.L(11)),
-                                             r.idx(r.L(10), r.L(11))})),
-                           r.iff(r.bin(BinOp::Ne, r.L(12), r.I(0)),
-                                 r.ret(r.L(12))),
-                           r.set(11, r.bin(BinOp::Add, r.L(11), r.I(1)))})),
-               r.ret(r.iff(r.bin(BinOp::Lt, r.len(r.L(9)), r.len(r.L(10))),
-                           r.I(-1),
-                           r.iff(r.bin(BinOp::Gt, r.len(r.L(9)),
-                                       r.len(r.L(10))),
-                                 r.I(1), r.I(0))))})));
-    r.add(r.iff(r.both(r.is(r.L(2), "string"), r.is(r.L(3), "string")),
-                r.ret(r.iff(r.bin(BinOp::Lt, r.L(0), r.L(1)), r.I(-1),
-                            r.iff(r.bin(BinOp::Gt, r.L(0), r.L(1)), r.I(1),
-                                  r.I(0))))));
+        r.both(r.either(r.is(r.L(ta), "array"), r.call("$istup", {r.L(a)})),
+               r.either(r.is(r.L(tb), "array"), r.call("$istup", {r.L(b)}))),
+        r.blk(
+            {r.set(xa, r.call("$untup", {r.L(a)})),
+             r.set(xb, r.call("$untup", {r.L(b)})), r.set(i, r.I(0)),
+             r.wh(r.both(r.bin(BinOp::Lt, r.L(i), r.len(r.L(xa))),
+                         r.bin(BinOp::Lt, r.L(i), r.len(r.L(xb)))),
+                  r.blk({r.set(e, r.call("$cmp", {r.idx(r.L(xa), r.L(i)),
+                                                  r.idx(r.L(xb), r.L(i))})),
+                         r.iff(r.bin(BinOp::Ne, r.L(e), r.I(0)), r.ret(r.L(e))),
+                         r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+             r.ret(r.iff(r.bin(BinOp::Lt, r.len(r.L(xa)), r.len(r.L(xb))),
+                         r.I(-1),
+                         r.iff(r.bin(BinOp::Gt, r.len(r.L(xa)), r.len(r.L(xb))),
+                               r.I(1), r.I(0))))})));
+    r.add(r.iff(
+        r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "string")),
+        r.ret(r.iff(r.bin(BinOp::Lt, r.L(a), r.L(b)), r.I(-1),
+                    r.iff(r.bin(BinOp::Gt, r.L(a), r.L(b)), r.I(1), r.I(0))))));
     // Two integers that both fit are compared directly; anything wider goes
     // through the limbs, sign first.
     r.add(r.iff(
-        int_pair(r, r.L(2), r.L(3)),
-        r.ret(r.iff(r.bin(BinOp::Lt, r.L(0), r.L(1)), r.I(-1),
-                    r.iff(r.bin(BinOp::Gt, r.L(0), r.L(1)), r.I(1), r.I(0))))));
+        int_pair(r, r.L(ta), r.L(tb)),
+        r.ret(r.iff(r.bin(BinOp::Lt, r.L(a), r.L(b)), r.I(-1),
+                    r.iff(r.bin(BinOp::Gt, r.L(a), r.L(b)), r.I(1), r.I(0))))));
+    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+                r.blk({r.set(fa, r.call("$tofloat", {r.L(a)})),
+                       r.set(fb, r.call("$tofloat", {r.L(b)})),
+                       r.ret(r.iff(r.bin(BinOp::Lt, r.L(fa), r.L(fb)), r.I(-1),
+                                   r.iff(r.bin(BinOp::Gt, r.L(fa), r.L(fb)),
+                                         r.I(1), r.I(0))))})));
+    r.add(r.set(sa, r.call("$bigsign", {r.L(a)})));
+    r.add(r.set(sb, r.call("$bigsign", {r.L(b)})));
     r.add(r.iff(
-        r.either(r.is(r.L(2), "double"), r.is(r.L(3), "double")),
-        r.blk({r.set(4, r.call("$tofloat", {r.L(0)})),
-               r.set(5, r.call("$tofloat", {r.L(1)})),
-               r.ret(r.iff(r.bin(BinOp::Lt, r.L(4), r.L(5)), r.I(-1),
-                           r.iff(r.bin(BinOp::Gt, r.L(4), r.L(5)), r.I(1),
-                                 r.I(0))))})));
-    r.add(r.set(6, r.call("$bigsign", {r.L(0)})));
-    r.add(r.set(7, r.call("$bigsign", {r.L(1)})));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(6), r.L(7)),
-                r.ret(r.iff(r.bin(BinOp::Lt, r.L(6), r.L(7)), r.I(-1),
-                            r.I(1)))));
-    r.add(r.set(8, r.call("$ucmp", {r.call("$biglimbs", {r.L(0)}),
-                                    r.call("$biglimbs", {r.L(1)})})));
-    r.add(r.ret(r.bin(BinOp::Mul, r.L(8), r.L(6))));
-    r.finish("$cmp", 2, 13,
-             {"a", "b", "ta", "tb", "fa", "fb", "sa", "sb", "c", "xa", "xb",
-              "i", "e"});
+        r.bin(BinOp::Ne, r.L(sa), r.L(sb)),
+        r.ret(r.iff(r.bin(BinOp::Lt, r.L(sa), r.L(sb)), r.I(-1), r.I(1)))));
+    r.add(r.set(c, r.call("$ucmp", {r.call("$biglimbs", {r.L(a)}),
+                                    r.call("$biglimbs", {r.L(b)})})));
+    r.add(r.ret(r.bin(BinOp::Mul, r.L(c), r.L(sa))));
+    r.finish("$cmp");
   }
 
   void rt_eq() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb, i, ks, k, f_] =
+        r.locals("ta", "tb", "i", "ks", "k", "f");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
     const auto numeric = [&](NodeId t, NodeId v) {
       return r.either(r.is(t, "int"),
                       r.either(r.is(t, "double"), r.call("$isbig", {v})));
     };
-    r.add(r.iff(r.both(numeric(r.L(2), r.L(0)), numeric(r.L(3), r.L(1))),
-                r.ret(r.bin(BinOp::Eq, r.call("$cmp", {r.L(0), r.L(1)}),
-                            r.I(0)))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(2), r.L(3)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(2), "nil"), r.ret(r.Bo(true))));
-    r.add(r.iff(r.either(r.is(r.L(2), "bool"), r.is(r.L(2), "string")),
-                r.ret(r.bin(BinOp::Eq, r.L(0), r.L(1)))));
     r.add(r.iff(
-        r.is(r.L(2), "array"),
-        r.blk({r.iff(r.bin(BinOp::Ne, r.len(r.L(0)), r.len(r.L(1))),
+        r.both(numeric(r.L(ta), r.L(a)), numeric(r.L(tb), r.L(b))),
+        r.ret(r.bin(BinOp::Eq, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0)))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.L(ta), "nil"), r.ret(r.Bo(true))));
+    r.add(r.iff(r.either(r.is(r.L(ta), "bool"), r.is(r.L(ta), "string")),
+                r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    r.add(r.iff(
+        r.is(r.L(ta), "array"),
+        r.blk({r.iff(r.bin(BinOp::Ne, r.len(r.L(a)), r.len(r.L(b))),
                      r.ret(r.Bo(false))),
-               r.set(4, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
+               r.set(i, r.I(0)),
+               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
                     r.blk({r.iff(r.bin(BinOp::Eq,
-                                       r.call("$eq", {r.idx(r.L(0), r.L(4)),
-                                                      r.idx(r.L(1), r.L(4))}),
+                                       r.call("$eq", {r.idx(r.L(a), r.L(i)),
+                                                      r.idx(r.L(b), r.L(i))}),
                                        r.Bo(false)),
                                  r.ret(r.Bo(false))),
-                           r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})),
+                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                r.ret(r.Bo(true))})));
     r.add(r.iff(
-        r.is(r.L(2), "map"),
-        r.blk({r.set(5, r.in(IntrinsicId::ObjectKeys, {r.L(0)})),
-               r.iff(r.bin(BinOp::Ne, r.len(r.L(5)),
-                           r.len(r.in(IntrinsicId::ObjectKeys, {r.L(1)}))),
+        r.is(r.L(ta), "map"),
+        r.blk({r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
+               r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
+                           r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
                      r.ret(r.Bo(false))),
-               r.set(4, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(5))),
-                    r.blk({r.set(6, r.idx(r.L(5), r.L(4))),
-                           r.iff(r.bin(BinOp::Eq, r.has(r.L(1), r.L(6)),
+               r.set(i, r.I(0)),
+               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+                    r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
+                           r.iff(r.bin(BinOp::Eq, r.has(r.L(b), r.L(k)),
                                        r.Bo(false)),
                                  r.ret(r.Bo(false))),
                            r.iff(r.bin(BinOp::Eq,
-                                       r.call("$eq", {r.idx(r.L(0), r.L(6)),
-                                                      r.idx(r.L(1), r.L(6))}),
+                                       r.call("$eq", {r.idx(r.L(a), r.L(k)),
+                                                      r.idx(r.L(b), r.L(k))}),
                                        r.Bo(false)),
                                  r.ret(r.Bo(false))),
-                           r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})),
+                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                r.ret(r.Bo(true))})));
-    r.add(r.iff(
-        r.either(r.call("$istup", {r.L(0)}), r.call("$istup", {r.L(1)})),
-        r.blk({r.iff(r.bin(BinOp::Eq,
-                           r.both(r.call("$istup", {r.L(0)}),
-                                  r.call("$istup", {r.L(1)})),
-                           r.Bo(false)),
-                     r.ret(r.Bo(false))),
-               r.ret(r.call("$eq", {r.idx(r.L(0), kTupKey),
-                                    r.idx(r.L(1), kTupKey)}))})));
-    r.add(r.set(7, r.call("$dunder", {r.L(0), r.S("\x02__eq__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(7)), "nil"),
+    r.add(
+        r.iff(r.either(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
+              r.blk({r.iff(r.bin(BinOp::Eq,
+                                 r.both(r.call("$istup", {r.L(a)}),
+                                        r.call("$istup", {r.L(b)})),
+                                 r.Bo(false)),
+                           r.ret(r.Bo(false))),
+                     r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
+                                          r.idx(r.L(b), kTupKey)}))})));
+    r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S("\x02__eq__")})));
+    r.add(r.iff(r.isnt(r.typ(r.L(f_)), "nil"),
                 r.ret(r.call("$truthy",
-                             {r.b.call_value(
-                                 r.L(7), {r.arr({r.L(0), r.L(1)}), r.Nil()},
-                                 r.p)}))));
-    r.add(r.ret(r.in(IntrinsicId::Same, {r.L(0), r.L(1)})));
-    r.finish("$eq", 2, 8, {"a", "b", "ta", "tb", "i", "ks", "k", "f"});
+                             {r.b.call_value(r.L(f_), {r.arr({r.L(a), r.L(b)}),
+                                                       r.Nil()})}))));
+    r.add(r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)})));
+    r.finish("$eq");
   }
 
   // Python's truthiness: 0, "", [], {} and None are false. Value::truthy()
@@ -1461,17 +1349,19 @@ struct Binder {
   // own comment names as the reason it will not decide.
   void rt_truthy() {
     RT r(*this);
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(1), "bool"), r.ret(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "int"), r.ret(r.bin(BinOp::Ne, r.L(0), r.I(0)))));
-    r.add(r.iff(r.is(r.L(1), "double"),
-                r.ret(r.bin(BinOp::Ne, r.L(0), r.D(0.0)))));
-    r.add(r.iff(r.either(r.is(r.L(1), "string"),
-                         r.either(r.is(r.L(1), "array"), r.is(r.L(1), "map"))),
-                r.ret(r.bin(BinOp::Gt, r.len(r.L(0)), r.I(0)))));
+    const auto [v] = r.params("v");
+    const auto [t] = r.locals("t");
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.L(t), "bool"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "int"), r.ret(r.bin(BinOp::Ne, r.L(v), r.I(0)))));
+    r.add(r.iff(r.is(r.L(t), "double"),
+                r.ret(r.bin(BinOp::Ne, r.L(v), r.D(0.0)))));
+    r.add(r.iff(r.either(r.is(r.L(t), "string"),
+                         r.either(r.is(r.L(t), "array"), r.is(r.L(t), "map"))),
+                r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0)))));
     r.add(r.ret(r.Bo(true)));
-    r.finish("$truthy", 1, 2, {"v", "t"});
+    r.finish("$truthy");
   }
 
   // -- Display -------------------------------------------------------------
@@ -1482,141 +1372,156 @@ struct Binder {
   void rt_fstr() {
     const double lim = 9007199254740992.0;
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(0), r.L(0)), r.ret(r.S("nan"))));
-    r.add(r.iff(r.in(IntrinsicId::Same, {r.L(0), r.D(-0.0)}),
+    const auto [d] = r.params("d");
+    const auto [i] = r.locals("i");
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)), r.ret(r.S("nan"))));
+    r.add(r.iff(r.in(IntrinsicId::Same, {r.L(d), r.D(-0.0)}),
                 r.ret(r.S("-0.0"))));
     r.add(r.iff(
-        r.both(r.bin(BinOp::Gt, r.L(0), r.D(-lim)),
-               r.bin(BinOp::Lt, r.L(0), r.D(lim))),
-        r.blk({r.set(1, r.in(IntrinsicId::ToInt, {r.L(0)})),
-               r.iff(r.bin(BinOp::Eq, r.in(IntrinsicId::ToDouble, {r.L(1)}),
-                           r.L(0)),
-                     r.ret(r.bin(BinOp::Add,
-                                 r.in(IntrinsicId::ToStr, {r.L(1)}),
+        r.both(r.bin(BinOp::Gt, r.L(d), r.D(-lim)),
+               r.bin(BinOp::Lt, r.L(d), r.D(lim))),
+        r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(d)})),
+               r.iff(r.bin(BinOp::Eq, r.in(IntrinsicId::ToDouble, {r.L(i)}),
+                           r.L(d)),
+                     r.ret(r.bin(BinOp::Add, r.in(IntrinsicId::ToStr, {r.L(i)}),
                                  r.S(".0"))))})));
-    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(0)})));
-    r.finish("$fstr", 1, 2, {"d", "i"});
+    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(d)})));
+    r.finish("$fstr");
   }
 
   void rt_str() {
     RT r(*this);
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "string"), r.ret(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "nil"), r.ret(r.S("None"))));
-    r.add(r.iff(r.is(r.L(1), "bool"),
-                r.ret(r.iff(r.L(0), r.S("True"), r.S("False")))));
-    r.add(r.iff(r.is(r.L(1), "int"), r.ret(r.in(IntrinsicId::ToStr, {r.L(0)}))));
-    r.add(r.iff(r.is(r.L(1), "double"), r.ret(r.call("$fstr", {r.L(0)}))));
-    r.add(r.iff(r.is(r.L(1), "array"), r.ret(r.call("$liststr", {r.L(0)}))));
-    r.add(r.iff(r.is(r.L(1), "map"), r.ret(r.call("$dictstr", {r.L(0)}))));
-    r.add(r.iff(r.is(r.L(1), "function"), r.ret(r.S("<function>"))));
-    r.add(r.iff(r.is(r.L(1), "generator"), r.ret(r.S("<generator>"))));
-    r.add(r.iff(r.call("$isbig", {r.L(0)}), r.ret(r.call("$bstr", {r.L(0)}))));
-    r.add(r.iff(r.has(r.L(0), r.S(kTupKey)),
-                r.ret(r.call("$tupstr", {r.idx(r.L(0), kTupKey)}))));
-    r.add(r.iff(r.has(r.L(0), r.S(kExcKey)),
-                r.ret(r.call("$str", {r.idx(r.L(0), kMsgKey)}))));
-    r.add(r.set(2, r.call("$dunder", {r.L(0), r.S("\x02__str__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(2)), "nil"),
-                r.ret(r.call("$str", {r.b.call_value(
-                                 r.L(2), {r.arr({r.L(0)}), r.Nil()}, r.p)}))));
+    const auto [v] = r.params("v");
+    const auto [t, f] = r.locals("t", "f");
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S("None"))));
+    r.add(r.iff(r.is(r.L(t), "bool"),
+                r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
+    r.add(
+        r.iff(r.is(r.L(t), "int"), r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
+    r.add(r.iff(r.is(r.L(t), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.L(t), "array"), r.ret(r.call("$liststr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.call("$dictstr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.L(t), "function"), r.ret(r.S("<function>"))));
+    r.add(r.iff(r.is(r.L(t), "generator"), r.ret(r.S("<generator>"))));
+    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.call("$bstr", {r.L(v)}))));
+    r.add(r.iff(r.has(r.L(v), r.S(kTupKey)),
+                r.ret(r.call("$tupstr", {r.idx(r.L(v), kTupKey)}))));
+    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
+                r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__str__")})));
+    r.add(r.iff(r.isnt(r.typ(r.L(f)), "nil"),
+                r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
+                                                              r.Nil()})}))));
     // A class of the program's own that derives from a builtin exception
     // displays as its message, the way the builtin ones do.
-    r.add(r.iff(r.has(r.L(0), r.S(kMsgKey)),
-                r.ret(r.call("$str", {r.idx(r.L(0), kMsgKey)}))));
-    r.add(r.iff(r.has(r.L(0), r.S("__name__")),
+    r.add(r.iff(r.has(r.L(v), r.S(kMsgKey)),
+                r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
+    r.add(r.iff(r.has(r.L(v), r.S("__name__")),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<class '"),
-                                  r.idx(r.L(0), r.S("__name__"))),
+                                  r.idx(r.L(v), r.S("__name__"))),
                             r.S("'>")))));
-    r.add(r.iff(r.has(r.L(0), r.S(kClassKey)),
+    r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<"),
-                                  r.idx(r.idx(r.L(0), kClassKey), kNameKey)),
+                                  r.idx(r.idx(r.L(v), kClassKey), kNameKey)),
                             r.S(" object>")))));
     r.add(r.ret(r.S("<object>")));
-    r.finish("$str", 1, 3, {"v", "t", "f"});
+    r.finish("$str");
   }
 
   void rt_repr() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"),
-                r.ret(r.bin(BinOp::Add,
-                            r.bin(BinOp::Add, r.S("'"), r.L(0)), r.S("'")))));
-    r.add(r.set(1, r.call("$dunder", {r.L(0), r.S("\x02__repr__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(1)), "nil"),
-                r.ret(r.call("$str", {r.b.call_value(
-                                 r.L(1), {r.arr({r.L(0)}), r.Nil()}, r.p)}))));
-    r.add(r.ret(r.call("$str", {r.L(0)})));
-    r.finish("$repr", 1, 2, {"v", "f"});
+    const auto [v] = r.params("v");
+    const auto [f] = r.locals("f");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "string"),
+                r.ret(r.bin(BinOp::Add, r.bin(BinOp::Add, r.S("'"), r.L(v)),
+                            r.S("'")))));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__repr__")})));
+    r.add(r.iff(r.isnt(r.typ(r.L(f)), "nil"),
+                r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
+                                                              r.Nil()})}))));
+    r.add(r.ret(r.call("$str", {r.L(v)})));
+    r.finish("$repr");
   }
 
   void rt_liststr() {
     RT r(*this);
-    r.add(r.set(1, r.S("[")));
-    r.add(r.set(2, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-               r.blk({r.iff(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                            r.set(1, r.bin(BinOp::Add, r.L(1), r.S(", ")))),
-                      r.set(1, r.bin(BinOp::Add, r.L(1),
-                                     r.call("$repr", {r.idx(r.L(0), r.L(2))}))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
-    r.add(r.ret(r.bin(BinOp::Add, r.L(1), r.S("]"))));
-    r.finish("$liststr", 1, 3, {"a", "out", "i"});
+    const auto [a] = r.params("a");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("[")));
+    r.add(r.set(i, r.I(0)));
+    r.add(
+        r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+             r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                          r.set(out, r.bin(BinOp::Add, r.L(out), r.S(", ")))),
+                    r.set(out, r.bin(BinOp::Add, r.L(out),
+                                     r.call("$repr", {r.idx(r.L(a), r.L(i))}))),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.bin(BinOp::Add, r.L(out), r.S("]"))));
+    r.finish("$liststr");
   }
 
   void rt_dictstr() {
     RT r(*this);
-    r.add(r.set(1, r.S("{")));
-    r.add(r.set(2, r.I(0)));
-    r.add(r.set(3, r.in(IntrinsicId::ObjectKeys, {r.L(0)})));
+    const auto [d] = r.params("d");
+    const auto [out, i, ks, k] = r.locals("out", "i", "ks", "k");
+    r.add(r.set(out, r.S("{")));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(d)})));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(2), r.len(r.L(3))),
-        r.blk({r.iff(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                     r.set(1, r.bin(BinOp::Add, r.L(1), r.S(", ")))),
-               r.set(4, r.idx(r.L(3), r.L(2))),
-               r.set(1, r.bin(BinOp::Add, r.L(1),
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+        r.blk(
+            {r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                   r.set(out, r.bin(BinOp::Add, r.L(out), r.S(", ")))),
+             r.set(k, r.idx(r.L(ks), r.L(i))),
+             r.set(out, r.bin(BinOp::Add, r.L(out),
                               r.bin(BinOp::Add,
-                                    r.bin(BinOp::Add,
-                                          r.call("$repr", {r.L(4)}),
+                                    r.bin(BinOp::Add, r.call("$repr", {r.L(k)}),
                                           r.S(": ")),
-                                    r.call("$repr", {r.idx(r.L(0), r.L(4))})))),
-               r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
-    r.add(r.ret(r.bin(BinOp::Add, r.L(1), r.S("}"))));
-    r.finish("$dictstr", 1, 5, {"d", "out", "i", "ks", "k"});
+                                    r.call("$repr", {r.idx(r.L(d), r.L(k))})))),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.bin(BinOp::Add, r.L(out), r.S("}"))));
+    r.finish("$dictstr");
   }
 
   // -- Containers, attributes, iteration, exceptions ----------------------
 
   void rt_exc() {
     RT r(*this);
-    r.add(r.b.make_throw(r.obj({{kExcKey, r.L(0)}, {kMsgKey, r.L(1)}}), r.p));
-    r.finish("$exc", 2, 2, {"name", "msg"});
+    const auto [name, msg] = r.params("name", "msg");
+    r.add(r.b.make_throw(r.obj({{kExcKey, r.L(name)}, {kMsgKey, r.L(msg)}})));
+    r.finish("$exc");
   }
 
   // `except Exception` catches everything, which is close enough to
   // Python's hierarchy for a subset with no inheritance.
   void rt_isexc() {
     RT r(*this);
+    const auto [e, name] = r.params("e", "name");
     // A builtin exception travels as its name; a class of the program's own
     // travels as its value, and then the test is the identity walk.
-    r.add(r.iff(r.isnt(r.typ(r.L(1)), "string"),
-                r.ret(r.call("$isinstv", {r.L(0), r.L(1)}))));
-    r.add(r.iff(r.is(r.L(1), "Exception"), r.ret(r.Bo(true))));
-    r.add(r.ret(r.call("$isname", {r.L(0), r.L(1)})));
-    r.finish("$isexc", 2, 2, {"e", "name"});
+    r.add(r.iff(r.isnt(r.typ(r.L(name)), "string"),
+                r.ret(r.call("$isinstv", {r.L(e), r.L(name)}))));
+    r.add(r.iff(r.is(r.L(name), "Exception"), r.ret(r.Bo(true))));
+    r.add(r.ret(r.call("$isname", {r.L(e), r.L(name)})));
+    r.finish("$isexc");
   }
 
   void rt_len() {
     RT r(*this);
-    r.add(r.set(0, r.call("$untup", {r.L(0)})));
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.either(r.is(r.L(1), "string"),
-                         r.either(r.is(r.L(1), "array"), r.is(r.L(1), "map"))),
-                r.ret(r.len(r.L(0)))));
+    const auto [v] = r.params("v");
+    const auto [t] = r.locals("t");
+    r.add(r.set(v, r.call("$untup", {r.L(v)})));
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.either(r.is(r.L(t), "string"),
+                         r.either(r.is(r.L(t), "array"), r.is(r.L(t), "map"))),
+                r.ret(r.len(r.L(v)))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object has no len()")})));
-    r.finish("$len", 1, 2, {"v", "t"});
+    r.finish("$len");
   }
 
   // A negative index counts from the end, and out of range raises rather
@@ -1624,190 +1529,206 @@ struct Binder {
   // own comment says a language that wants them normalizes first.
   void rt_idx() {
     RT r(*this);
-    r.add(r.set(0, r.call("$untup", {r.L(0)})));
-    r.add(r.set(2, r.typ(r.L(0))));
+    const auto [v, k] = r.params("v", "k");
+    const auto [t, i] = r.locals("t", "i");
+    r.add(r.set(v, r.call("$untup", {r.L(v)})));
+    r.add(r.set(t, r.typ(r.L(v))));
     r.add(r.iff(
-        r.either(r.is(r.L(2), "array"), r.is(r.L(2), "string")),
-        r.blk({r.set(3, r.L(1)),
-               r.iff(r.bin(BinOp::Lt, r.L(3), r.I(0)),
-                     r.set(3, r.bin(BinOp::Add, r.L(3), r.len(r.L(0))))),
-               r.iff(r.either(r.bin(BinOp::Lt, r.L(3), r.I(0)),
-                              r.bin(BinOp::Ge, r.L(3), r.len(r.L(0)))),
-                     r.ret(r.call(
-                         "$exc",
-                         {r.S("IndexError"),
-                          r.iff(r.is(r.L(2), "array"),
-                                r.S("list index out of range"),
-                                r.S("string index out of range"))}))),
-               r.ret(r.idx(r.L(0), r.L(3)))})));
-    r.add(r.iff(r.is(r.L(2), "map"),
-                r.blk({r.iff(r.has(r.L(0), r.L(1)),
-                             r.ret(r.idx(r.L(0), r.L(1)))),
-                       r.ret(r.call("$exc", {r.S("KeyError"),
-                                             r.call("$repr", {r.L(1)})}))})));
+        r.either(r.is(r.L(t), "array"), r.is(r.L(t), "string")),
+        r.blk({r.set(i, r.L(k)),
+               r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                     r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
+               r.iff(r.either(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                              r.bin(BinOp::Ge, r.L(i), r.len(r.L(v)))),
+                     r.ret(r.call("$exc",
+                                  {r.S("IndexError"),
+                                   r.iff(r.is(r.L(t), "array"),
+                                         r.S("list index out of range"),
+                                         r.S("string index out of range"))}))),
+               r.ret(r.idx(r.L(v), r.L(i)))})));
+    r.add(r.iff(
+        r.is(r.L(t), "map"),
+        r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
+               r.ret(r.call("$exc",
+                            {r.S("KeyError"), r.call("$repr", {r.L(k)})}))})));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object is not subscriptable")})));
-    r.finish("$idx", 2, 4, {"v", "k", "t", "i"});
+    r.finish("$idx");
   }
 
   void rt_setidx() {
     RT r(*this);
-    r.add(r.set(3, r.typ(r.L(0))));
+    const auto [v, k, val] = r.params("v", "k", "val");
+    const auto [t, i] = r.locals("t", "i");
+    r.add(r.set(t, r.typ(r.L(v))));
     r.add(r.iff(
-        r.is(r.L(3), "array"),
-        r.blk({r.set(4, r.L(1)),
-               r.iff(r.bin(BinOp::Lt, r.L(4), r.I(0)),
-                     r.set(4, r.bin(BinOp::Add, r.L(4), r.len(r.L(0))))),
-               r.iff(r.either(r.bin(BinOp::Lt, r.L(4), r.I(0)),
-                              r.bin(BinOp::Ge, r.L(4), r.len(r.L(0)))),
-                     r.ret(r.call("$exc",
-                                  {r.S("IndexError"),
-                                   r.S("list assignment index out of "
-                                       "range")}))),
-               r.sidx(r.L(0), r.L(4), r.L(2)), r.ret(r.L(2))})));
-    r.add(r.iff(r.is(r.L(3), "map"),
-                r.blk({r.sidx(r.L(0), r.L(1), r.L(2)), r.ret(r.L(2))})));
+        r.is(r.L(t), "array"),
+        r.blk({r.set(i, r.L(k)),
+               r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                     r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
+               r.iff(r.either(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                              r.bin(BinOp::Ge, r.L(i), r.len(r.L(v)))),
+                     r.ret(r.call("$exc", {r.S("IndexError"),
+                                           r.S("list assignment index out of "
+                                               "range")}))),
+               r.sidx(r.L(v), r.L(i), r.L(val)), r.ret(r.L(val))})));
+    r.add(r.iff(r.is(r.L(t), "map"),
+                r.blk({r.sidx(r.L(v), r.L(k), r.L(val)), r.ret(r.L(val))})));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object does not support item "
                                     "assignment")})));
-    r.finish("$setidx", 3, 5, {"v", "k", "val", "t", "i"});
+    r.finish("$setidx");
   }
 
   // Python's slice: absent ends default, a negative one counts from the
   // end, and both are clamped rather than refused.
   void rt_slice() {
     RT r(*this);
-    auto norm = [&](int32_t out, int32_t arg, NodeId dflt) {
-      return r.iff(r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
-                   r.blk({r.set(out, r.L(arg)),
-                          r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
-                                r.set(out, r.bin(BinOp::Add, r.L(3),
-                                                 r.L(out)))),
-                          r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
-                                r.set(out, r.I(0))),
-                          r.iff(r.bin(BinOp::Gt, r.L(out), r.L(3)),
-                                r.set(out, r.L(3)))}));
+    const auto [v, i, j] = r.params("v", "i", "j");
+    const auto [n, a, b] = r.locals("n", "a", "b");
+    const auto norm = [&](FuncWriter::Slot out, FuncWriter::Slot arg,
+                          NodeId dflt) {
+      return r.iff(
+          r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
+          r.blk(
+              {r.set(out, r.L(arg)),
+               r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
+                     r.set(out, r.bin(BinOp::Add, r.L(n), r.L(out)))),
+               r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)), r.set(out, r.I(0))),
+               r.iff(r.bin(BinOp::Gt, r.L(out), r.L(n)), r.set(out, r.L(n)))}));
     };
     // A slice of a tuple is a tuple.
-    r.add(r.iff(r.call("$istup", {r.L(0)}),
-                r.ret(r.call("$tuple",
-                             {r.call("$slice", {r.idx(r.L(0), kTupKey),
-                                                r.L(1), r.L(2)})}))));
-    r.add(r.set(3, r.len(r.L(0))));
-    r.add(norm(4, 1, r.I(0)));
-    r.add(norm(5, 2, r.L(3)));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(5), r.L(4)), r.set(5, r.L(4))));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"),
-                r.ret(r.in(IntrinsicId::StrSlice, {r.L(0), r.L(4), r.L(5)})),
-                r.ret(r.in(IntrinsicId::ArraySlice,
-                           {r.L(0), r.L(4), r.L(5)}))));
-    r.finish("$slice", 3, 6, {"v", "i", "j", "n", "a", "b"});
+    r.add(
+        r.iff(r.call("$istup", {r.L(v)}),
+              r.ret(r.call("$tuple", {r.call("$slice", {r.idx(r.L(v), kTupKey),
+                                                        r.L(i), r.L(j)})}))));
+    r.add(r.set(n, r.len(r.L(v))));
+    r.add(norm(a, i, r.I(0)));
+    r.add(norm(b, j, r.L(n)));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(b), r.L(a)), r.set(b, r.L(a))));
+    r.add(
+        r.iff(r.is(r.typ(r.L(v)), "string"),
+              r.ret(r.in(IntrinsicId::StrSlice, {r.L(v), r.L(a), r.L(b)})),
+              r.ret(r.in(IntrinsicId::ArraySlice, {r.L(v), r.L(a), r.L(b)}))));
+    r.finish("$slice");
   }
 
   void rt_in() {
     RT r(*this);
-    r.add(r.set(1, r.call("$untup", {r.L(1)})));
-    r.add(r.set(2, r.typ(r.L(1))));
-    r.add(r.iff(r.is(r.L(2), "map"), r.ret(r.has(r.L(1), r.L(0)))));
+    const auto [needle, hay] = r.params("needle", "hay");
+    const auto [t, i] = r.locals("t", "i");
+    r.add(r.set(hay, r.call("$untup", {r.L(hay)})));
+    r.add(r.set(t, r.typ(r.L(hay))));
+    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.has(r.L(hay), r.L(needle)))));
     // `"e" in "hello"` is a substring test, not a membership one.
+    r.add(
+        r.iff(r.is(r.L(t), "string"),
+              r.blk({r.set(i, r.I(0)),
+                     r.wh(r.bin(BinOp::Le,
+                                r.bin(BinOp::Add, r.L(i), r.len(r.L(needle))),
+                                r.len(r.L(hay))),
+                          r.blk({r.iff(r.bin(BinOp::Eq,
+                                             r.in(IntrinsicId::StrSlice,
+                                                  {r.L(hay), r.L(i),
+                                                   r.bin(BinOp::Add, r.L(i),
+                                                         r.len(r.L(needle)))}),
+                                             r.L(needle)),
+                                       r.ret(r.Bo(true))),
+                                 r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+                     r.ret(r.Bo(false))})));
     r.add(r.iff(
-        r.is(r.L(2), "string"),
-        r.blk({r.set(3, r.I(0)),
-               r.wh(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(3), r.len(r.L(0))),
-                          r.len(r.L(1))),
-                    r.blk({r.iff(r.bin(BinOp::Eq,
-                                       r.in(IntrinsicId::StrSlice,
-                                            {r.L(1), r.L(3),
-                                             r.bin(BinOp::Add, r.L(3),
-                                                   r.len(r.L(0)))}),
-                                       r.L(0)),
+        r.is(r.L(t), "array"),
+        r.blk({r.set(i, r.I(0)),
+               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(hay))),
+                    r.blk({r.iff(r.call("$eq",
+                                        {r.L(needle), r.idx(r.L(hay), r.L(i))}),
                                  r.ret(r.Bo(true))),
-                           r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})),
-               r.ret(r.Bo(false))})));
-    r.add(r.iff(
-        r.is(r.L(2), "array"),
-        r.blk({r.set(3, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-                    r.blk({r.iff(r.call("$eq", {r.L(0), r.idx(r.L(1), r.L(3))}),
-                                 r.ret(r.Bo(true))),
-                           r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})),
+                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                r.ret(r.Bo(false))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$in", 2, 4, {"needle", "hay", "t", "i"});
+    r.finish("$in");
   }
 
   void rt_getattr() {
     RT r(*this);
+    const auto [o, name] = r.params("o", "name");
+    const auto [cls, key] = r.locals("cls", "key");
     r.add(r.iff(
-        r.is(r.typ(r.L(0)), "object"),
-        r.blk({r.iff(r.has(r.L(0), r.L(1)), r.ret(r.idx(r.L(0), r.L(1)))),
-               r.iff(r.has(r.L(0), r.S(kClassKey)),
-                     r.blk({r.set(3, r.bin(BinOp::Add, r.S("\x02"), r.L(1))),
-                            r.set(2, r.call("$clsfind",
-                                            {r.idx(r.L(0), kClassKey),
-                                             r.L(3)})),
-                            r.iff(r.isnt(r.typ(r.L(2)), "nil"),
-                                  r.ret(r.L(2)))}))})));
-    r.add(r.ret(r.call("$exc",
-                       {r.S("AttributeError"),
-                        r.bin(BinOp::Add, r.S("no attribute "), r.L(1))})));
-    r.finish("$getattr", 2, 4, {"o", "name", "cls", "key"});
+        r.is(r.typ(r.L(o)), "object"),
+        r.blk(
+            {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
+             r.iff(
+                 r.has(r.L(o), r.S(kClassKey)),
+                 r.blk({r.set(key, r.bin(BinOp::Add, r.S("\x02"), r.L(name))),
+                        r.set(cls, r.call("$clsfind", {r.idx(r.L(o), kClassKey),
+                                                       r.L(key)})),
+                        r.iff(r.isnt(r.typ(r.L(cls)), "nil"),
+                              r.ret(r.L(cls)))}))})));
+    r.add(r.ret(
+        r.call("$exc", {r.S("AttributeError"),
+                        r.bin(BinOp::Add, r.S("no attribute "), r.L(name))})));
+    r.finish("$getattr");
   }
 
   void rt_setattr() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "object"),
-                r.blk({r.sidx(r.L(0), r.L(1), r.L(2)), r.ret(r.L(2))})));
+    const auto [o, name, val] = r.params("o", "name", "val");
+    r.add(r.iff(r.is(r.typ(r.L(o)), "object"),
+                r.blk({r.sidx(r.L(o), r.L(name), r.L(val)), r.ret(r.L(val))})));
     r.add(r.ret(r.call("$exc", {r.S("AttributeError"),
                                 r.S("cannot set attribute")})));
-    r.finish("$setattr", 3, 3, {"o", "name", "val"});
+    r.finish("$setattr");
   }
 
   void rt_iter() {
     RT r(*this);
-    r.add(r.set(0, r.call("$untup", {r.L(0)})));
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "generator"),
-                r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(0)}}))));
-    r.add(r.iff(r.is(r.L(1), "map"),
+    const auto [v] = r.params("v");
+    const auto [t] = r.locals("t");
+    r.add(r.set(v, r.call("$untup", {r.L(v)})));
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "generator"),
+                r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
+    r.add(r.iff(r.is(r.L(t), "map"),
                 r.ret(r.obj({{"k", r.S("a")},
-                             {"v", r.in(IntrinsicId::ObjectKeys, {r.L(0)})},
+                             {"v", r.in(IntrinsicId::ObjectKeys, {r.L(v)})},
                              {"i", r.I(0)}}))));
-    r.add(r.iff(r.either(r.is(r.L(1), "array"), r.is(r.L(1), "string")),
-                r.ret(r.obj({{"k", r.S("a")},
-                             {"v", r.L(0)},
-                             {"i", r.I(0)}}))));
+    r.add(r.iff(r.either(r.is(r.L(t), "array"), r.is(r.L(t), "string")),
+                r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object is not iterable")})));
-    r.finish("$iter", 1, 2, {"v", "t"});
+    r.finish("$iter");
   }
 
   void rt_iternext() {
     RT r(*this);
-    r.add(r.iff(r.is(r.idx(r.L(0), "k"), "g"),
-                r.ret(r.in(IntrinsicId::GenResume,
-                           {r.idx(r.L(0), "v"), r.Nil()}))));
-    r.add(r.set(1, r.idx(r.L(0), "v")));
-    r.add(r.set(2, r.idx(r.L(0), "i")));
-    r.add(r.iff(r.bin(BinOp::Ge, r.L(2), r.len(r.L(1))),
+    const auto [it] = r.params("it");
+    const auto [a, i] = r.locals("a", "i");
+    r.add(r.iff(
+        r.is(r.idx(r.L(it), "k"), "g"),
+        r.ret(r.in(IntrinsicId::GenResume, {r.idx(r.L(it), "v"), r.Nil()}))));
+    r.add(r.set(a, r.idx(r.L(it), "v")));
+    r.add(r.set(i, r.idx(r.L(it), "i")));
+    r.add(r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(a))),
                 r.ret(r.obj({{"value", r.Nil()}, {"done", r.Bo(true)}}))));
-    r.add(r.sidx(r.L(0), r.S("i"), r.bin(BinOp::Add, r.L(2), r.I(1))));
-    r.add(r.ret(r.obj({{"value", r.idx(r.L(1), r.L(2))},
-                       {"done", r.Bo(false)}})));
-    r.finish("$iternext", 1, 3, {"it", "a", "i"});
+    r.add(r.sidx(r.L(it), r.S("i"), r.bin(BinOp::Add, r.L(i), r.I(1))));
+    r.add(r.ret(
+        r.obj({{"value", r.idx(r.L(a), r.L(i))}, {"done", r.Bo(false)}})));
+    r.finish("$iternext");
   }
 
   void rt_range() {
     RT r(*this);
-    r.add(r.set(3, r.arr({})));
-    r.add(r.set(4, r.L(0)));
-    r.add(r.wh(r.iff(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                     r.bin(BinOp::Lt, r.L(4), r.L(1)),
-                     r.bin(BinOp::Gt, r.L(4), r.L(1))),
-               r.blk({r.push(r.L(3), r.L(4)),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.L(2)))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$range", 3, 5, {"start", "stop", "step", "out", "i"});
+    const auto [start, stop, step] = r.params("start", "stop", "step");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.L(start)));
+    r.add(r.wh(r.iff(r.bin(BinOp::Gt, r.L(step), r.I(0)),
+                     r.bin(BinOp::Lt, r.L(i), r.L(stop)),
+                     r.bin(BinOp::Gt, r.L(i), r.L(stop))),
+               r.blk({r.push(r.L(out), r.L(i)),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.L(step)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$range");
   }
 
   // Python's type names, which are neither the VM's nor visible to it: a
@@ -1815,117 +1736,126 @@ struct Binder {
   // instance answers its own class's name.
   void rt_typename() {
     RT r(*this);
-    r.add(r.set(1, r.typ(r.L(0))));
-    r.add(r.iff(r.is(r.L(1), "nil"), r.ret(r.S("NoneType"))));
-    r.add(r.iff(r.is(r.L(1), "bool"), r.ret(r.S("bool"))));
-    r.add(r.iff(r.is(r.L(1), "int"), r.ret(r.S("int"))));
-    r.add(r.iff(r.is(r.L(1), "double"), r.ret(r.S("float"))));
-    r.add(r.iff(r.is(r.L(1), "string"), r.ret(r.S("str"))));
-    r.add(r.iff(r.is(r.L(1), "array"), r.ret(r.S("list"))));
-    r.add(r.iff(r.is(r.L(1), "map"), r.ret(r.S("dict"))));
-    r.add(r.iff(r.is(r.L(1), "function"), r.ret(r.S("function"))));
-    r.add(r.iff(r.is(r.L(1), "generator"), r.ret(r.S("generator"))));
-    r.add(r.iff(r.call("$isbig", {r.L(0)}), r.ret(r.S("int"))));
-    r.add(r.iff(r.call("$istup", {r.L(0)}), r.ret(r.S("tuple"))));
-    r.add(r.iff(r.has(r.L(0), r.S(kExcKey)), r.ret(r.idx(r.L(0), kExcKey))));
-    r.add(r.iff(r.has(r.L(0), r.S(kClassKey)),
-                r.ret(r.idx(r.idx(r.L(0), kClassKey), kNameKey))));
+    const auto [v] = r.params("v");
+    const auto [t] = r.locals("t");
+    r.add(r.set(t, r.typ(r.L(v))));
+    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S("NoneType"))));
+    r.add(r.iff(r.is(r.L(t), "bool"), r.ret(r.S("bool"))));
+    r.add(r.iff(r.is(r.L(t), "int"), r.ret(r.S("int"))));
+    r.add(r.iff(r.is(r.L(t), "double"), r.ret(r.S("float"))));
+    r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.S("str"))));
+    r.add(r.iff(r.is(r.L(t), "array"), r.ret(r.S("list"))));
+    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.S("dict"))));
+    r.add(r.iff(r.is(r.L(t), "function"), r.ret(r.S("function"))));
+    r.add(r.iff(r.is(r.L(t), "generator"), r.ret(r.S("generator"))));
+    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.S("int"))));
+    r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.S("tuple"))));
+    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kExcKey))));
+    r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
+                r.ret(r.idx(r.idx(r.L(v), kClassKey), kNameKey))));
     r.add(r.ret(r.S("object")));
-    r.finish("$typename", 1, 2, {"v", "t"});
+    r.finish("$typename");
   }
 
   void rt_type() {
     RT r(*this);
-    r.add(r.ret(r.obj({{"__name__", r.call("$typename", {r.L(0)})}})));
-    r.finish("$type", 1, 1, {"v"});
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.obj({{"__name__", r.call("$typename", {r.L(v)})}})));
+    r.finish("$type");
   }
 
   void rt_join() {
     RT r(*this);
-    r.add(r.set(2, r.S("")));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-               r.blk({r.iff(r.bin(BinOp::Gt, r.L(3), r.I(0)),
-                            r.set(2, r.bin(BinOp::Add, r.L(2), r.L(0)))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2),
-                                     r.idx(r.L(1), r.L(3)))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$join", 2, 4, {"sep", "xs", "out", "i"});
+    const auto [sep, xs] = r.params("sep", "xs");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(xs))),
+        r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                     r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
+               r.set(out, r.bin(BinOp::Add, r.L(out), r.idx(r.L(xs), r.L(i)))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$join");
   }
 
   void rt_dget() {
     RT r(*this);
-    r.add(r.iff(r.has(r.L(0), r.L(1)), r.ret(r.idx(r.L(0), r.L(1)))));
-    r.add(r.ret(r.L(2)));
-    r.finish("$dget", 3, 3, {"d", "k", "dflt"});
+    const auto [d, k, dflt] = r.params("d", "k", "dflt");
+    r.add(r.iff(r.has(r.L(d), r.L(k)), r.ret(r.idx(r.L(d), r.L(k)))));
+    r.add(r.ret(r.L(dflt)));
+    r.finish("$dget");
   }
 
   void rt_tolist() {
     RT r(*this);
-    r.add(r.set(1, r.arr({})));
-    r.add(r.set(2, r.call("$iter", {r.L(0)})));
-    r.add(r.wh(r.Bo(true),
-               r.blk({r.set(3, r.call("$iternext", {r.L(2)})),
-                      r.iff(r.idx(r.L(3), "done"), r.b.make_break(r.p)),
-                      r.push(r.L(1), r.idx(r.L(3), "value"))})));
-    r.add(r.ret(r.L(1)));
-    r.finish("$tolist", 1, 4, {"v", "out", "it", "st"});
+    const auto [v] = r.params("v");
+    const auto [out, it, st] = r.locals("out", "it", "st");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(it, r.call("$iter", {r.L(v)})));
+    r.add(
+        r.wh(r.Bo(true), r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
+                                r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
+                                r.push(r.L(out), r.idx(r.L(st), "value"))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$tolist");
   }
 
   void rt_toint() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "double"),
-                r.ret(r.in(IntrinsicId::ToInt, {r.L(0)}))));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "bool"),
-                r.ret(r.iff(r.L(0), r.I(1), r.I(0)))));
+    const auto [v] = r.params("v");
+    const auto [s, i, neg, acc, c] = r.locals("s", "i", "neg", "acc", "c");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "double"),
+                r.ret(r.in(IntrinsicId::ToInt, {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(r.L(v)), "bool"),
+                r.ret(r.iff(r.L(v), r.I(1), r.I(0)))));
     // `int("...")` accumulates through $mul and $add, so a literal too big
     // for an int64 becomes a bignum with nothing further to say about it.
     r.add(r.iff(
-        r.is(r.typ(r.L(0)), "string"),
-        r.blk({r.set(1, r.call("$strip", {r.L(0), r.I(0)})),
-               r.set(2, r.I(0)),
-               r.set(3, r.Bo(false)),
-               r.iff(r.bin(BinOp::Gt, r.len(r.L(1)), r.I(0)),
-                     r.blk({r.iff(r.bin(BinOp::Eq,
-                                        r.in(IntrinsicId::StrSlice,
-                                             {r.L(1), r.I(0), r.I(1)}),
-                                        r.S("-")),
-                                  r.blk({r.set(3, r.Bo(true)),
-                                         r.set(2, r.I(1))})),
-                            r.iff(r.bin(BinOp::Eq,
-                                        r.in(IntrinsicId::StrSlice,
-                                             {r.L(1), r.I(0), r.I(1)}),
-                                        r.S("+")),
-                                  r.set(2, r.I(1)))})),
-               r.iff(r.bin(BinOp::Ge, r.L(2), r.len(r.L(1))),
-                     r.call("$intfail", {r.L(0)})),
-               r.set(4, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(1))),
-                    r.blk({r.set(5, r.in(IntrinsicId::StrByte,
-                                         {r.L(1), r.L(2)})),
-                           r.iff(r.either(r.bin(BinOp::Lt, r.L(5), r.I(48)),
-                                          r.bin(BinOp::Gt, r.L(5), r.I(57))),
-                                 r.call("$intfail", {r.L(0)})),
-                           r.set(4, r.call("$add",
-                                           {r.call("$mul", {r.L(4), r.I(10)}),
-                                            r.bin(BinOp::Sub, r.L(5),
-                                                  r.I(48))})),
-                           r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})),
-               r.ret(r.iff(r.L(3), r.call("$neg", {r.L(4)}), r.L(4)))})));
-    r.add(r.ret(r.L(0)));
-    r.finish("$toint", 1, 6, {"v", "s", "i", "neg", "acc", "c"});
+        r.is(r.typ(r.L(v)), "string"),
+        r.blk(
+            {r.set(s, r.call("$strip", {r.L(v), r.I(0)})), r.set(i, r.I(0)),
+             r.set(neg, r.Bo(false)),
+             r.iff(r.bin(BinOp::Gt, r.len(r.L(s)), r.I(0)),
+                   r.blk({r.iff(r.bin(BinOp::Eq,
+                                      r.in(IntrinsicId::StrSlice,
+                                           {r.L(s), r.I(0), r.I(1)}),
+                                      r.S("-")),
+                                r.blk({r.set(neg, r.Bo(true)),
+                                       r.set(i, r.I(1))})),
+                          r.iff(r.bin(BinOp::Eq,
+                                      r.in(IntrinsicId::StrSlice,
+                                           {r.L(s), r.I(0), r.I(1)}),
+                                      r.S("+")),
+                                r.set(i, r.I(1)))})),
+             r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(s))),
+                   r.call("$intfail", {r.L(v)})),
+             r.set(acc, r.I(0)),
+             r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
+                  r.blk(
+                      {r.set(c, r.in(IntrinsicId::StrByte, {r.L(s), r.L(i)})),
+                       r.iff(r.either(r.bin(BinOp::Lt, r.L(c), r.I(48)),
+                                      r.bin(BinOp::Gt, r.L(c), r.I(57))),
+                             r.call("$intfail", {r.L(v)})),
+                       r.set(acc, r.call("$add",
+                                         {r.call("$mul", {r.L(acc), r.I(10)}),
+                                          r.bin(BinOp::Sub, r.L(c), r.I(48))})),
+                       r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+             r.ret(r.iff(r.L(neg), r.call("$neg", {r.L(acc)}), r.L(acc)))})));
+    r.add(r.ret(r.L(v)));
+    r.finish("$toint");
   }
 
   void rt_intfail() {
     RT r(*this);
-    r.add(r.call("$exc",
-                 {r.S("ValueError"),
-                  r.bin(BinOp::Add,
-                        r.S("invalid literal for int() with base 10: "),
-                        r.call("$repr", {r.L(0)}))}));
+    const auto [v] = r.params("v");
+    r.add(r.call("$exc", {r.S("ValueError"),
+                          r.bin(BinOp::Add,
+                                r.S("invalid literal for int() with base 10: "),
+                                r.call("$repr", {r.L(v)}))}));
     r.add(r.ret(r.Nil()));
-    r.finish("$intfail", 1, 1, {"v"});
+    r.finish("$intfail");
   }
 
   // -- The calling convention, written over the IR's ----------------------
@@ -1946,103 +1876,120 @@ struct Binder {
 
   void rt_acons() {  // [x] + a, for a method call's receiver
     RT r(*this);
-    r.add(r.set(2, r.arr({r.L(0)})));
-    r.add(r.iff(r.isnt(r.typ(r.L(1)), "array"), r.ret(r.L(2))));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-               r.blk({r.push(r.L(2), r.idx(r.L(1), r.L(3))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$acons", 2, 4, {"x", "a", "out", "i"});
+    const auto [x, a] = r.params("x", "a");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.arr({r.L(x)})));
+    r.add(r.iff(r.isnt(r.typ(r.L(a)), "array"), r.ret(r.L(out))));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+               r.blk({r.push(r.L(out), r.idx(r.L(a), r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$acons");
   }
 
   void rt_aext() {  // `f(*xs)` -- any iterable, not only a list
     RT r(*this);
-    r.add(r.set(2, r.call("$iter", {r.L(1)})));
-    r.add(r.wh(r.Bo(true),
-               r.blk({r.set(3, r.call("$iternext", {r.L(2)})),
-                      r.iff(r.idx(r.L(3), "done"), r.b.make_break(r.p)),
-                      r.push(r.L(0), r.idx(r.L(3), "value"))})));
-    r.add(r.ret(r.L(0)));
-    r.finish("$aext", 2, 4, {"dst", "src", "it", "st"});
+    const auto [dst, src] = r.params("dst", "src");
+    const auto [it, st] = r.locals("it", "st");
+    r.add(r.set(it, r.call("$iter", {r.L(src)})));
+    r.add(
+        r.wh(r.Bo(true), r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
+                                r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
+                                r.push(r.L(dst), r.idx(r.L(st), "value"))})));
+    r.add(r.ret(r.L(dst)));
+    r.finish("$aext");
   }
 
   void rt_rest() {  // `*rest` -- what the declared parameters did not take
     RT r(*this);
-    r.add(r.set(2, r.len(r.L(0))));
-    r.add(r.iff(r.bin(BinOp::Le, r.L(2), r.L(1)), r.ret(r.arr({}))));
-    r.add(r.ret(r.in(IntrinsicId::ArraySlice, {r.L(0), r.L(1), r.L(2)})));
-    r.finish("$rest", 2, 3, {"a", "i", "n"});
+    const auto [a, i] = r.params("a", "i");
+    const auto [n] = r.locals("n");
+    r.add(r.set(n, r.len(r.L(a))));
+    r.add(r.iff(r.bin(BinOp::Le, r.L(n), r.L(i)), r.ret(r.arr({}))));
+    r.add(r.ret(r.in(IntrinsicId::ArraySlice, {r.L(a), r.L(i), r.L(n)})));
+    r.finish("$rest");
   }
 
   void rt_kwhas() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "nil"), r.ret(r.Bo(false))));
-    r.add(r.ret(r.has(r.L(0), r.L(1))));
-    r.finish("$kwhas", 2, 2, {"k", "n"});
+    const auto [k, n] = r.params("k", "n");
+    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.Bo(false))));
+    r.add(r.ret(r.has(r.L(k), r.L(n))));
+    r.finish("$kwhas");
   }
 
   void rt_hasname() {
     RT r(*this);
-    r.add(r.set(2, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-               r.blk({r.iff(r.bin(BinOp::Eq, r.idx(r.L(0), r.L(2)), r.L(1)),
+    const auto [names, n] = r.params("names", "n");
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(names))),
+               r.blk({r.iff(r.bin(BinOp::Eq, r.idx(r.L(names), r.L(i)), r.L(n)),
                             r.ret(r.Bo(true))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$hasname", 2, 3, {"names", "n", "i"});
+    r.finish("$hasname");
   }
 
   void rt_kwrest() {  // `**opts` -- a real dict, so the body can iterate it
     RT r(*this);
-    r.add(r.set(2, r.in(IntrinsicId::MapNew, {})));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "nil"), r.ret(r.L(2))));
-    r.add(r.set(3, r.in(IntrinsicId::ObjectKeys, {r.L(0)})));
-    r.add(r.set(4, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(3))),
-               r.blk({r.set(5, r.idx(r.L(3), r.L(4))),
-                      r.iff(r.bin(BinOp::Eq,
-                                  r.call("$hasname", {r.L(1), r.L(5)}),
-                                  r.Bo(false)),
-                            r.sidx(r.L(2), r.L(5), r.idx(r.L(0), r.L(5)))),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$kwrest", 2, 6, {"k", "names", "out", "ks", "i", "key"});
+    const auto [k, names] = r.params("k", "names");
+    const auto [out, ks, i, key] = r.locals("out", "ks", "i", "key");
+    r.add(r.set(out, r.in(IntrinsicId::MapNew, {})));
+    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.L(out))));
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(k)})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+        r.blk(
+            {r.set(key, r.idx(r.L(ks), r.L(i))),
+             r.iff(r.bin(BinOp::Eq, r.call("$hasname", {r.L(names), r.L(key)}),
+                         r.Bo(false)),
+                   r.sidx(r.L(out), r.L(key), r.idx(r.L(k), r.L(key)))),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$kwrest");
   }
 
   void rt_kwcheck() {  // no `**kwargs`: an unexpected keyword is a TypeError
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "nil"), r.ret(r.Nil())));
-    r.add(r.set(3, r.in(IntrinsicId::ObjectKeys, {r.L(0)})));
-    r.add(r.set(4, r.I(0)));
+    const auto [k, names, fn] = r.params("k", "names", "fn");
+    const auto [ks, i, key] = r.locals("ks", "i", "key");
+    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.Nil())));
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(k)})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(4), r.len(r.L(3))),
-        r.blk({r.set(5, r.idx(r.L(3), r.L(4))),
-               r.iff(r.bin(BinOp::Eq, r.call("$hasname", {r.L(1), r.L(5)}),
-                           r.Bo(false)),
-                     r.call("$exc",
-                            {r.S("TypeError"),
-                             r.bin(BinOp::Add,
-                                   r.bin(BinOp::Add, r.L(2),
-                                         r.S("() got an unexpected keyword "
-                                             "argument '")),
-                                   r.bin(BinOp::Add, r.L(5), r.S("'")))})),
-               r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+        r.blk(
+            {r.set(key, r.idx(r.L(ks), r.L(i))),
+             r.iff(r.bin(BinOp::Eq, r.call("$hasname", {r.L(names), r.L(key)}),
+                         r.Bo(false)),
+                   r.call("$exc",
+                          {r.S("TypeError"),
+                           r.bin(BinOp::Add,
+                                 r.bin(BinOp::Add, r.L(fn),
+                                       r.S("() got an unexpected keyword "
+                                           "argument '")),
+                                 r.bin(BinOp::Add, r.L(key), r.S("'")))})),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$kwcheck", 3, 6, {"k", "names", "fn", "ks", "i", "key"});
+    r.finish("$kwcheck");
   }
 
   void rt_kwmerge() {  // `f(**d)`
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(1)), "nil"), r.ret(r.L(0))));
-    r.add(r.set(2, r.in(IntrinsicId::ObjectKeys, {r.L(1)})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(2))),
-               r.blk({r.set(4, r.idx(r.L(2), r.L(3))),
-                      r.sidx(r.L(0), r.L(4), r.idx(r.L(1), r.L(4))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(0)));
-    r.finish("$kwmerge", 2, 5, {"dst", "src", "ks", "i", "key"});
+    const auto [dst, src] = r.params("dst", "src");
+    const auto [ks, i, key] = r.locals("ks", "i", "key");
+    r.add(r.iff(r.is(r.typ(r.L(src)), "nil"), r.ret(r.L(dst))));
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(src)})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+               r.blk({r.set(key, r.idx(r.L(ks), r.L(i))),
+                      r.sidx(r.L(dst), r.L(key), r.idx(r.L(src), r.L(key))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(dst)));
+    r.finish("$kwmerge");
   }
 
   // Both diagnostics are Python's own, down to the comma before "and" and
@@ -2052,82 +1999,83 @@ struct Binder {
   // parameter, by name, and whether it had a default.
   void rt_missing() {
     RT r(*this);
+    const auto [fn, names, idxs, a, k] =
+        r.params("fn", "names", "idxs", "a", "k");
+    const auto [miss, i, n, c, s] = r.locals("miss", "i", "n", "c", "s");
     // Every required parameter no positional and no keyword answered.
-    r.add(r.set(5, r.arr({})));
-    r.add(r.set(6, r.I(0)));
-    r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(6), r.len(r.L(1))),
-        r.blk({r.set(7, r.idx(r.L(1), r.L(6))),
-               r.iff(r.bin(BinOp::Eq,
-                           r.either(r.bin(BinOp::Gt, r.len(r.L(3)),
-                                          r.idx(r.L(2), r.L(6))),
-                                    r.call("$kwhas", {r.L(4), r.L(7)})),
-                           r.Bo(false)),
-                     r.push(r.L(5), r.bin(BinOp::Add,
-                                          r.bin(BinOp::Add, r.S("'"), r.L(7)),
-                                          r.S("'")))),
-               r.set(6, r.bin(BinOp::Add, r.L(6), r.I(1)))})));
-    r.add(r.set(8, r.len(r.L(5))));
+    r.add(r.set(miss, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(names))),
+               r.blk({r.set(n, r.idx(r.L(names), r.L(i))),
+                      r.iff(r.bin(BinOp::Eq,
+                                  r.either(r.bin(BinOp::Gt, r.len(r.L(a)),
+                                                 r.idx(r.L(idxs), r.L(i))),
+                                           r.call("$kwhas", {r.L(k), r.L(n)})),
+                                  r.Bo(false)),
+                            r.push(r.L(miss),
+                                   r.bin(BinOp::Add,
+                                         r.bin(BinOp::Add, r.S("'"), r.L(n)),
+                                         r.S("'")))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.set(c, r.len(r.L(miss))));
     // "'a'", "'a' and 'b'", "'a', 'b', and 'c'" -- three shapes, and the
     // last one keeps the serial comma.
-    r.add(r.set(9, r.idx(r.L(5), r.I(0))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(8), r.I(2)),
-                r.set(9, r.bin(BinOp::Add, r.L(9),
+    r.add(r.set(s, r.idx(r.L(miss), r.I(0))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(c), r.I(2)),
+                r.set(s, r.bin(BinOp::Add, r.L(s),
                                r.bin(BinOp::Add, r.S(" and "),
-                                     r.idx(r.L(5), r.I(1)))))));
+                                     r.idx(r.L(miss), r.I(1)))))));
     r.add(r.iff(
-        r.bin(BinOp::Gt, r.L(8), r.I(2)),
-        r.blk({r.set(6, r.I(1)),
-               r.wh(r.bin(BinOp::Lt, r.L(6),
-                          r.bin(BinOp::Sub, r.L(8), r.I(1))),
-                    r.blk({r.set(9, r.bin(BinOp::Add, r.L(9),
+        r.bin(BinOp::Gt, r.L(c), r.I(2)),
+        r.blk({r.set(i, r.I(1)),
+               r.wh(r.bin(BinOp::Lt, r.L(i), r.bin(BinOp::Sub, r.L(c), r.I(1))),
+                    r.blk({r.set(s, r.bin(BinOp::Add, r.L(s),
                                           r.bin(BinOp::Add, r.S(", "),
-                                                r.idx(r.L(5), r.L(6))))),
-                           r.set(6, r.bin(BinOp::Add, r.L(6), r.I(1)))})),
-               r.set(9, r.bin(BinOp::Add, r.L(9),
+                                                r.idx(r.L(miss), r.L(i))))),
+                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+               r.set(s, r.bin(BinOp::Add, r.L(s),
                               r.bin(BinOp::Add, r.S(", and "),
-                                    r.idx(r.L(5), r.L(6)))))})));
+                                    r.idx(r.L(miss), r.L(i)))))})));
     r.add(r.call(
         "$exc",
         {r.S("TypeError"),
-         r.bin(BinOp::Add,
-               r.bin(BinOp::Add, r.L(0), r.S("() missing ")),
-               r.bin(BinOp::Add,
-                     r.call("$str", {r.L(8)}),
+         r.bin(BinOp::Add, r.bin(BinOp::Add, r.L(fn), r.S("() missing ")),
+               r.bin(BinOp::Add, r.call("$str", {r.L(c)}),
                      r.bin(BinOp::Add,
-                           r.iff(r.bin(BinOp::Eq, r.L(8), r.I(1)),
+                           r.iff(r.bin(BinOp::Eq, r.L(c), r.I(1)),
                                  r.S(" required positional argument: "),
                                  r.S(" required positional arguments: ")),
-                           r.L(9))))}));
-    r.finish("$missing", 5, 10,
-             {"fn", "names", "idxs", "a", "k", "miss", "i", "n", "c", "s"});
+                           r.L(s))))}));
+    r.finish("$missing");
   }
 
   void rt_toomany() {
     RT r(*this);
+    const auto [fn, lo, hi, got] = r.params("fn", "lo", "hi", "got");
+    const auto [s] = r.locals("s");
     // "takes 2 positional arguments", or "takes from 1 to 3" when some of
     // them had defaults.
-    r.add(r.set(4, r.bin(BinOp::Add, r.call("$str", {r.L(2)}),
-                         r.iff(r.bin(BinOp::Eq, r.L(2), r.I(1)),
+    r.add(r.set(s, r.bin(BinOp::Add, r.call("$str", {r.L(hi)}),
+                         r.iff(r.bin(BinOp::Eq, r.L(hi), r.I(1)),
                                r.S(" positional argument but "),
                                r.S(" positional arguments but ")))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(1), r.L(2)),
-                r.set(4, r.bin(BinOp::Add,
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(lo), r.L(hi)),
+                r.set(s, r.bin(BinOp::Add,
                                r.bin(BinOp::Add, r.S("from "),
-                                     r.call("$str", {r.L(1)})),
+                                     r.call("$str", {r.L(lo)})),
                                r.bin(BinOp::Add,
                                      r.bin(BinOp::Add, r.S(" to "),
-                                           r.call("$str", {r.L(2)})),
+                                           r.call("$str", {r.L(hi)})),
                                      r.S(" positional arguments but "))))));
     r.add(r.call(
         "$exc",
         {r.S("TypeError"),
-         r.bin(BinOp::Add, r.bin(BinOp::Add, r.L(0), r.S("() takes ")),
-               r.bin(BinOp::Add, r.L(4),
-                     r.bin(BinOp::Add, r.call("$str", {r.L(3)}),
-                           r.iff(r.bin(BinOp::Eq, r.L(3), r.I(1)),
+         r.bin(BinOp::Add, r.bin(BinOp::Add, r.L(fn), r.S("() takes ")),
+               r.bin(BinOp::Add, r.L(s),
+                     r.bin(BinOp::Add, r.call("$str", {r.L(got)}),
+                           r.iff(r.bin(BinOp::Eq, r.L(got), r.I(1)),
                                  r.S(" was given"), r.S(" were given")))))}));
-    r.finish("$toomany", 4, 5, {"fn", "lo", "hi", "got", "s"});
+    r.finish("$toomany");
   }
 
   // -- Inheritance ---------------------------------------------------------
@@ -2140,16 +2088,18 @@ struct Binder {
 
   void rt_clsfind() {  // the method `key` names, from `t` or an ancestor
     RT r(*this);
-    r.add(r.set(2, r.L(0)));
-    r.add(r.wh(r.is(r.typ(r.L(2)), "object"),
-               r.blk({r.iff(r.has(r.L(2), r.L(1)),
-                            r.ret(r.idx(r.L(2), r.L(1)))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(2), r.S(kBaseKey)),
-                                  r.Bo(false)),
-                            r.b.make_break(r.p)),
-                      r.set(2, r.idx(r.L(2), kBaseKey))})));
+    const auto [t, key] = r.params("t", "key");
+    const auto [c] = r.locals("c");
+    r.add(r.set(c, r.L(t)));
+    r.add(r.wh(
+        r.is(r.typ(r.L(c)), "object"),
+        r.blk(
+            {r.iff(r.has(r.L(c), r.L(key)), r.ret(r.idx(r.L(c), r.L(key)))),
+             r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.S(kBaseKey)), r.Bo(false)),
+                   r.b.make_break()),
+             r.set(c, r.idx(r.L(c), kBaseKey))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$clsfind", 2, 3, {"t", "key", "c"});
+    r.finish("$clsfind");
   }
 
   // A builtin exception is not a class here, so `except ValueError` matches
@@ -2157,54 +2107,59 @@ struct Binder {
   // marked with the name it was rooted at, which is what this also finds.
   void rt_isname() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "object"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.has(r.L(0), r.S(kExcKey)),
-                r.ret(r.bin(BinOp::Eq, r.idx(r.L(0), kExcKey), r.L(1)))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(0), r.S(kClassKey)), r.Bo(false)),
+    const auto [v, name] = r.params("v", "name");
+    const auto [t] = r.locals("t");
+    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
+                r.ret(r.bin(BinOp::Eq, r.idx(r.L(v), kExcKey), r.L(name)))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
-    r.add(r.set(2, r.idx(r.L(0), kClassKey)));
-    r.add(r.wh(r.is(r.typ(r.L(2)), "object"),
-               r.blk({r.iff(r.both(r.has(r.L(2), r.S(kRootKey)),
-                                   r.bin(BinOp::Eq, r.idx(r.L(2), kRootKey),
-                                         r.L(1))),
-                            r.ret(r.Bo(true))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(2), r.S(kBaseKey)),
-                                  r.Bo(false)),
-                            r.b.make_break(r.p)),
-                      r.set(2, r.idx(r.L(2), kBaseKey))})));
+    r.add(r.set(t, r.idx(r.L(v), kClassKey)));
+    r.add(r.wh(
+        r.is(r.typ(r.L(t)), "object"),
+        r.blk(
+            {r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
+                          r.bin(BinOp::Eq, r.idx(r.L(t), kRootKey), r.L(name))),
+                   r.ret(r.Bo(true))),
+             r.iff(r.bin(BinOp::Eq, r.has(r.L(t), r.S(kBaseKey)), r.Bo(false)),
+                   r.b.make_break()),
+             r.set(t, r.idx(r.L(t), kBaseKey))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$isname", 2, 3, {"v", "name", "t"});
+    r.finish("$isname");
   }
 
   // The identity walk: a class value *is* its constructor closure, so two
   // classes are the same class when `Same` says the closures are.
   void rt_isinstv() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "object"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(0), r.S(kClassKey)), r.Bo(false)),
+    const auto [v, cls] = r.params("v", "cls");
+    const auto [t] = r.locals("t");
+    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
-    r.add(r.set(2, r.idx(r.L(0), kClassKey)));
-    r.add(r.wh(r.is(r.typ(r.L(2)), "object"),
-               r.blk({r.iff(r.both(r.has(r.L(2), r.S(kIdKey)),
+    r.add(r.set(t, r.idx(r.L(v), kClassKey)));
+    r.add(r.wh(r.is(r.typ(r.L(t)), "object"),
+               r.blk({r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
                                    r.in(IntrinsicId::Same,
-                                        {r.idx(r.L(2), kIdKey), r.L(1)})),
+                                        {r.idx(r.L(t), kIdKey), r.L(cls)})),
                             r.ret(r.Bo(true))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(2), r.S(kBaseKey)),
+                      r.iff(r.bin(BinOp::Eq, r.has(r.L(t), r.S(kBaseKey)),
                                   r.Bo(false)),
-                            r.b.make_break(r.p)),
-                      r.set(2, r.idx(r.L(2), kBaseKey))})));
+                            r.b.make_break()),
+                      r.set(t, r.idx(r.L(t), kBaseKey))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$isinstv", 2, 3, {"v", "cls", "t"});
+    r.finish("$isinstv");
   }
 
   void rt_isinst() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(1)), "string"),
-                r.ret(r.either(r.bin(BinOp::Eq, r.call("$typename", {r.L(0)}),
-                                     r.L(1)),
-                               r.call("$isname", {r.L(0), r.L(1)})))));
-    r.add(r.ret(r.call("$isinstv", {r.L(0), r.L(1)})));
-    r.finish("$isinst", 2, 2, {"v", "cls"});
+    const auto [v, cls] = r.params("v", "cls");
+    r.add(r.iff(r.is(r.typ(r.L(cls)), "string"),
+                r.ret(r.either(
+                    r.bin(BinOp::Eq, r.call("$typename", {r.L(v)}), r.L(cls)),
+                    r.call("$isname", {r.L(v), r.L(cls)})))));
+    r.add(r.ret(r.call("$isinstv", {r.L(v), r.L(cls)})));
+    r.finish("$isinst");
   }
 
   // `super().m(...)`. The base may be nothing at all -- a class rooted at a
@@ -2213,51 +2168,56 @@ struct Binder {
   // something: it is what stores the message.
   void rt_supercall() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(1)), "object"),
-                r.blk({r.set(5, r.call("$clsfind", {r.L(1), r.L(2)})),
-                       r.iff(r.isnt(r.typ(r.L(5)), "nil"),
+    const auto [self, base, key, a, k] =
+        r.params("self", "base", "key", "a", "k");
+    const auto [f] = r.locals("f");
+    r.add(r.iff(r.is(r.typ(r.L(base)), "object"),
+                r.blk({r.set(f, r.call("$clsfind", {r.L(base), r.L(key)})),
+                       r.iff(r.isnt(r.typ(r.L(f)), "nil"),
                              r.ret(r.b.call_value(
-                                 r.L(5),
-                                 {r.call("$acons", {r.L(0), r.L(3)}), r.L(4)},
-                                 r.p)))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(2), r.S("\x02__init__")),
-                r.ret(r.call("$excinit", {r.L(0), r.L(3)}))));
-    r.add(r.ret(r.call("$exc",
-                       {r.S("AttributeError"),
-                        r.bin(BinOp::Add, r.S("'super' object has no attribute "),
-                              r.in(IntrinsicId::StrSlice,
-                                   {r.L(2), r.I(1), r.len(r.L(2))}))})));
-    r.finish("$supercall", 5, 6, {"self", "base", "key", "a", "k", "f"});
+                                 r.L(f), {r.call("$acons", {r.L(self), r.L(a)}),
+                                          r.L(k)})))})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S("\x02__init__")),
+                r.ret(r.call("$excinit", {r.L(self), r.L(a)}))));
+    r.add(r.ret(r.call(
+        "$exc", {r.S("AttributeError"),
+                 r.bin(BinOp::Add, r.S("'super' object has no attribute "),
+                       r.in(IntrinsicId::StrSlice,
+                            {r.L(key), r.I(1), r.len(r.L(key))}))})));
+    r.finish("$supercall");
   }
 
   void rt_excinit() {
     RT r(*this);
-    r.add(r.sidx(r.L(0), r.S(kMsgKey),
-                 r.iff(r.bin(BinOp::Gt, r.len(r.L(1)), r.I(0)),
-                       r.idx(r.L(1), r.I(0)), r.S(""))));
+    const auto [self, a] = r.params("self", "a");
+    r.add(r.sidx(r.L(self), r.S(kMsgKey),
+                 r.iff(r.bin(BinOp::Gt, r.len(r.L(a)), r.I(0)),
+                       r.idx(r.L(a), r.I(0)), r.S(""))));
     r.add(r.ret(r.Nil()));
-    r.finish("$excinit", 2, 2, {"self", "a"});
+    r.finish("$excinit");
   }
 
   void rt_noinit() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(1)), r.I(0)),
+    const auto [cls, a] = r.params("cls", "a");
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(a)), r.I(0)),
                 r.call("$exc", {r.S("TypeError"),
-                                r.bin(BinOp::Add, r.L(0),
+                                r.bin(BinOp::Add, r.L(cls),
                                       r.S("() takes no arguments"))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$noinit", 2, 2, {"cls", "a"});
+    r.finish("$noinit");
   }
 
   // `__str__`, `__repr__`, `__eq__`: found the same way any method is, and
   // called through the same convention.
   void rt_dunder() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "object"), r.ret(r.Nil())));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(0), r.S(kClassKey)), r.Bo(false)),
+    const auto [v, key] = r.params("v", "key");
+    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Nil())));
+    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Nil())));
-    r.add(r.ret(r.call("$clsfind", {r.idx(r.L(0), kClassKey), r.L(1)})));
-    r.finish("$dunder", 2, 2, {"v", "key"});
+    r.add(r.ret(r.call("$clsfind", {r.idx(r.L(v), kClassKey), r.L(key)})));
+    r.finish("$dunder");
   }
 
   // -- Tuples --------------------------------------------------------------
@@ -2269,130 +2229,144 @@ struct Binder {
 
   void rt_tuple() {
     RT r(*this);
-    r.add(r.ret(r.obj({{kTupKey, r.L(0)}})));
-    r.finish("$tuple", 1, 1, {"a"});
+    const auto [a] = r.params("a");
+    r.add(r.ret(r.obj({{kTupKey, r.L(a)}})));
+    r.finish("$tuple");
   }
 
   void rt_untup() {
     RT r(*this);
-    r.add(r.iff(r.call("$istup", {r.L(0)}), r.ret(r.idx(r.L(0), kTupKey))));
-    r.add(r.ret(r.L(0)));
-    r.finish("$untup", 1, 1, {"v"});
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.idx(r.L(v), kTupKey))));
+    r.add(r.ret(r.L(v)));
+    r.finish("$untup");
   }
 
   void rt_istup() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "object"), r.ret(r.Bo(false))));
-    r.add(r.ret(r.has(r.L(0), r.S(kTupKey))));
-    r.finish("$istup", 1, 1, {"v"});
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.ret(r.has(r.L(v), r.S(kTupKey))));
+    r.finish("$istup");
   }
 
   void rt_tupstr() {
     RT r(*this);
-    r.add(r.set(1, r.S("(")));
-    r.add(r.set(2, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-               r.blk({r.iff(r.bin(BinOp::Gt, r.L(2), r.I(0)),
-                            r.set(1, r.bin(BinOp::Add, r.L(1), r.S(", ")))),
-                      r.set(1, r.bin(BinOp::Add, r.L(1),
-                                     r.call("$repr",
-                                            {r.idx(r.L(0), r.L(2))}))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
+    const auto [a] = r.params("a");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("(")));
+    r.add(r.set(i, r.I(0)));
+    r.add(
+        r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+             r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                          r.set(out, r.bin(BinOp::Add, r.L(out), r.S(", ")))),
+                    r.set(out, r.bin(BinOp::Add, r.L(out),
+                                     r.call("$repr", {r.idx(r.L(a), r.L(i))}))),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     // `(1,)` -- the comma is what makes a one-element tuple a tuple.
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(0)), r.I(1)),
-                r.set(1, r.bin(BinOp::Add, r.L(1), r.S(",")))));
-    r.add(r.ret(r.bin(BinOp::Add, r.L(1), r.S(")"))));
-    r.finish("$tupstr", 1, 3, {"a", "out", "i"});
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(1)),
+                r.set(out, r.bin(BinOp::Add, r.L(out), r.S(",")))));
+    r.add(r.ret(r.bin(BinOp::Add, r.L(out), r.S(")"))));
+    r.finish("$tupstr");
   }
 
   // `a, b = expr`: any iterable, and exactly as many values as targets.
   void rt_unpack() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tolist", {r.L(0)})));
-    r.add(r.iff(r.bin(BinOp::Lt, r.len(r.L(2)), r.L(1)),
-                r.call("$exc",
-                       {r.S("ValueError"),
+    const auto [v, n] = r.params("v", "n");
+    const auto [a] = r.locals("a");
+    r.add(r.set(a, r.call("$tolist", {r.L(v)})));
+    r.add(r.iff(
+        r.bin(BinOp::Lt, r.len(r.L(a)), r.L(n)),
+        r.call("$exc", {r.S("ValueError"),
                         r.bin(BinOp::Add,
                               r.bin(BinOp::Add,
                                     r.S("not enough values to unpack "
                                         "(expected "),
-                                    r.call("$str", {r.L(1)})),
+                                    r.call("$str", {r.L(n)})),
                               r.bin(BinOp::Add,
                                     r.bin(BinOp::Add, r.S(", got "),
-                                          r.call("$str",
-                                                 {r.len(r.L(2))})),
+                                          r.call("$str", {r.len(r.L(a))})),
                                     r.S(")")))})));
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(2)), r.L(1)),
-                r.call("$exc",
-                       {r.S("ValueError"),
-                        r.bin(BinOp::Add,
-                              r.bin(BinOp::Add,
-                                    r.S("too many values to unpack "
-                                        "(expected "),
-                                    r.call("$str", {r.L(1)})),
-                              r.S(")"))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$unpack", 2, 3, {"v", "n", "a"});
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(a)), r.L(n)),
+                r.call("$exc", {r.S("ValueError"),
+                                r.bin(BinOp::Add,
+                                      r.bin(BinOp::Add,
+                                            r.S("too many values to unpack "
+                                                "(expected "),
+                                            r.call("$str", {r.L(n)})),
+                                      r.S(")"))})));
+    r.add(r.ret(r.L(a)));
+    r.finish("$unpack");
   }
 
   void rt_items() {
     RT r(*this);
-    r.add(r.set(1, r.in(IntrinsicId::ObjectKeys, {r.L(0)})));
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-               r.blk({r.push(r.L(2),
-                             r.call("$tuple",
-                                    {r.arr({r.idx(r.L(1), r.L(3)),
-                                            r.idx(r.L(0),
-                                                  r.idx(r.L(1), r.L(3)))})})),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$items", 1, 4, {"d", "ks", "out", "i"});
+    const auto [d] = r.params("d");
+    const auto [ks, out, i] = r.locals("ks", "out", "i");
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(d)})));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+        r.blk({r.push(r.L(out),
+                      r.call("$tuple",
+                             {r.arr({r.idx(r.L(ks), r.L(i)),
+                                     r.idx(r.L(d), r.idx(r.L(ks), r.L(i)))})})),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$items");
   }
 
   void rt_values() {
     RT r(*this);
-    r.add(r.set(1, r.in(IntrinsicId::ObjectKeys, {r.L(0)})));
-    r.add(r.set(2, r.arr({})));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-               r.blk({r.push(r.L(2), r.idx(r.L(0), r.idx(r.L(1), r.L(3)))),
-                      r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))})));
-    r.add(r.ret(r.L(2)));
-    r.finish("$values", 1, 4, {"d", "ks", "out", "i"});
+    const auto [d] = r.params("d");
+    const auto [ks, out, i] = r.locals("ks", "out", "i");
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(d)})));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+               r.blk({r.push(r.L(out), r.idx(r.L(d), r.idx(r.L(ks), r.L(i)))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$values");
   }
 
   void rt_enumerate() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tolist", {r.L(0)})));
-    r.add(r.set(3, r.arr({})));
-    r.add(r.set(4, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(2))),
-               r.blk({r.push(r.L(3),
-                             r.call("$tuple",
-                                    {r.arr({r.bin(BinOp::Add, r.L(1), r.L(4)),
-                                            r.idx(r.L(2), r.L(4))})})),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$enumerate", 2, 5, {"v", "start", "a", "out", "i"});
+    const auto [v, start] = r.params("v", "start");
+    const auto [a, out, i] = r.locals("a", "out", "i");
+    r.add(r.set(a, r.call("$tolist", {r.L(v)})));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(
+        r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+             r.blk({r.push(r.L(out),
+                           r.call("$tuple",
+                                  {r.arr({r.bin(BinOp::Add, r.L(start), r.L(i)),
+                                          r.idx(r.L(a), r.L(i))})})),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$enumerate");
   }
 
   void rt_zip() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tolist", {r.L(0)})));
-    r.add(r.set(3, r.call("$tolist", {r.L(1)})));
-    r.add(r.set(4, r.arr({})));
-    r.add(r.set(5, r.I(0)));
-    r.add(r.wh(r.both(r.bin(BinOp::Lt, r.L(5), r.len(r.L(2))),
-                      r.bin(BinOp::Lt, r.L(5), r.len(r.L(3)))),
-               r.blk({r.push(r.L(4),
-                             r.call("$tuple",
-                                    {r.arr({r.idx(r.L(2), r.L(5)),
-                                            r.idx(r.L(3), r.L(5))})})),
-                      r.set(5, r.bin(BinOp::Add, r.L(5), r.I(1)))})));
-    r.add(r.ret(r.L(4)));
-    r.finish("$zip", 2, 6, {"a", "b", "xs", "ys", "out", "i"});
+    const auto [a, b] = r.params("a", "b");
+    const auto [xs, ys, out, i] = r.locals("xs", "ys", "out", "i");
+    r.add(r.set(xs, r.call("$tolist", {r.L(a)})));
+    r.add(r.set(ys, r.call("$tolist", {r.L(b)})));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(
+        r.wh(r.both(r.bin(BinOp::Lt, r.L(i), r.len(r.L(xs))),
+                    r.bin(BinOp::Lt, r.L(i), r.len(r.L(ys)))),
+             r.blk({r.push(r.L(out),
+                           r.call("$tuple", {r.arr({r.idx(r.L(xs), r.L(i)),
+                                                    r.idx(r.L(ys), r.L(i))})})),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$zip");
   }
 
   // An insertion sort over the values and their keys at once. Python's is
@@ -2400,100 +2374,110 @@ struct Binder {
   // program can see -- see README.md for what it is not.
   void rt_sorted() {
     RT r(*this);
-    r.add(r.set(3, r.call("$tolist", {r.L(0)})));
-    r.add(r.set(4, r.arr({})));
-    r.add(r.set(5, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(5), r.len(r.L(3))),
-               r.blk({r.push(r.L(4),
-                             r.iff(r.is(r.typ(r.L(1)), "nil"),
-                                   r.idx(r.L(3), r.L(5)),
-                                   r.b.call_value(
-                                       r.L(1),
-                                       {r.arr({r.idx(r.L(3), r.L(5))}),
-                                        r.Nil()},
-                                       r.p))),
-                      r.set(5, r.bin(BinOp::Add, r.L(5), r.I(1)))})));
-    r.add(r.set(5, r.I(1)));
+    const auto [v, key, rev] = r.params("v", "key", "rev");
+    const auto [a, ks, i, vx, kx, j] =
+        r.locals("a", "ks", "i", "vx", "kx", "j");
+    r.add(r.set(a, r.call("$tolist", {r.L(v)})));
+    r.add(r.set(ks, r.arr({})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(5), r.len(r.L(3))),
-        r.blk({r.set(6, r.idx(r.L(3), r.L(5))), r.set(7, r.idx(r.L(4), r.L(5))),
-               r.set(8, r.bin(BinOp::Sub, r.L(5), r.I(1))),
-               r.wh(r.both(r.bin(BinOp::Ge, r.L(8), r.I(0)),
-                           r.bin(BinOp::Gt,
-                                 r.call("$cmp", {r.idx(r.L(4), r.L(8)),
-                                                 r.L(7)}),
-                                 r.I(0))),
-                    r.blk({r.sidx(r.L(3), r.bin(BinOp::Add, r.L(8), r.I(1)),
-                                  r.idx(r.L(3), r.L(8))),
-                           r.sidx(r.L(4), r.bin(BinOp::Add, r.L(8), r.I(1)),
-                                  r.idx(r.L(4), r.L(8))),
-                           r.set(8, r.bin(BinOp::Sub, r.L(8), r.I(1)))})),
-               r.sidx(r.L(3), r.bin(BinOp::Add, r.L(8), r.I(1)), r.L(6)),
-               r.sidx(r.L(4), r.bin(BinOp::Add, r.L(8), r.I(1)), r.L(7)),
-               r.set(5, r.bin(BinOp::Add, r.L(5), r.I(1)))})));
-    r.add(r.iff(r.call("$truthy", {r.L(2)}),
-                r.blk({r.set(4, r.arr({})), r.set(5, r.len(r.L(3))),
-                       r.wh(r.bin(BinOp::Gt, r.L(5), r.I(0)),
-                            r.blk({r.set(5, r.bin(BinOp::Sub, r.L(5), r.I(1))),
-                                   r.push(r.L(4), r.idx(r.L(3), r.L(5)))})),
-                       r.ret(r.L(4))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$sorted", 3, 9,
-             {"v", "key", "rev", "a", "ks", "i", "vx", "kx", "j"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+        r.blk({r.push(r.L(ks),
+                      r.iff(r.is(r.typ(r.L(key)), "nil"), r.idx(r.L(a), r.L(i)),
+                            r.b.call_value(
+                                r.L(key),
+                                {r.arr({r.idx(r.L(a), r.L(i))}), r.Nil()}))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.set(i, r.I(1)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+        r.blk({r.set(vx, r.idx(r.L(a), r.L(i))),
+               r.set(kx, r.idx(r.L(ks), r.L(i))),
+               r.set(j, r.bin(BinOp::Sub, r.L(i), r.I(1))),
+               r.wh(r.both(
+                        r.bin(BinOp::Ge, r.L(j), r.I(0)),
+                        r.bin(BinOp::Gt,
+                              r.call("$cmp", {r.idx(r.L(ks), r.L(j)), r.L(kx)}),
+                              r.I(0))),
+                    r.blk({r.sidx(r.L(a), r.bin(BinOp::Add, r.L(j), r.I(1)),
+                                  r.idx(r.L(a), r.L(j))),
+                           r.sidx(r.L(ks), r.bin(BinOp::Add, r.L(j), r.I(1)),
+                                  r.idx(r.L(ks), r.L(j))),
+                           r.set(j, r.bin(BinOp::Sub, r.L(j), r.I(1)))})),
+               r.sidx(r.L(a), r.bin(BinOp::Add, r.L(j), r.I(1)), r.L(vx)),
+               r.sidx(r.L(ks), r.bin(BinOp::Add, r.L(j), r.I(1)), r.L(kx)),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.iff(r.call("$truthy", {r.L(rev)}),
+                r.blk({r.set(ks, r.arr({})), r.set(i, r.len(r.L(a))),
+                       r.wh(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                            r.blk({r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1))),
+                                   r.push(r.L(ks), r.idx(r.L(a), r.L(i)))})),
+                       r.ret(r.L(ks))})));
+    r.add(r.ret(r.L(a)));
+    r.finish("$sorted");
   }
 
   // `next(it)` -- and `next(it, default)`, which is the difference between
   // a StopIteration and a value.
   void rt_next() {
     RT r(*this);
-    r.add(r.set(3, r.call("$iternext", {r.call("$iter", {r.L(0)})})));
-    r.add(r.iff(r.idx(r.L(3), "done"),
-                r.blk({r.iff(r.L(2), r.ret(r.L(1))),
+    const auto [g, dflt, hasdflt] = r.params("g", "dflt", "hasdflt");
+    const auto [st] = r.locals("st");
+    r.add(r.set(st, r.call("$iternext", {r.call("$iter", {r.L(g)})})));
+    r.add(r.iff(r.idx(r.L(st), "done"),
+                r.blk({r.iff(r.L(hasdflt), r.ret(r.L(dflt))),
                        r.call("$exc", {r.S("StopIteration"), r.S("")})})));
-    r.add(r.ret(r.idx(r.L(3), "value")));
-    r.finish("$next", 3, 4, {"g", "dflt", "hasdflt", "st"});
+    r.add(r.ret(r.idx(r.L(st), "value")));
+    r.finish("$next");
   }
 
   void rt_sum() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tolist", {r.L(0)})));
-    r.add(r.set(3, r.L(1)));
-    r.add(r.set(4, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(2))),
-               r.blk({r.set(3, r.call("$add", {r.L(3), r.idx(r.L(2), r.L(4))})),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$sum", 2, 5, {"v", "start", "a", "acc", "i"});
+    const auto [v, start] = r.params("v", "start");
+    const auto [a, acc, i] = r.locals("a", "acc", "i");
+    r.add(r.set(a, r.call("$tolist", {r.L(v)})));
+    r.add(r.set(acc, r.L(start)));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+        r.blk({r.set(acc, r.call("$add", {r.L(acc), r.idx(r.L(a), r.L(i))})),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(acc)));
+    r.finish("$sum");
   }
 
   void rt_minmax() {
     RT r(*this);
-    r.add(r.set(2, r.call("$tolist", {r.L(0)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(2)), r.I(0)),
-                r.call("$exc", {r.S("ValueError"),
-                                r.S("arg is an empty sequence")})));
-    r.add(r.set(3, r.idx(r.L(2), r.I(0))));
-    r.add(r.set(4, r.I(1)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(2))),
-               r.blk({r.set(5, r.call("$cmp", {r.idx(r.L(2), r.L(4)), r.L(3)})),
-                      r.iff(r.iff(r.L(1), r.bin(BinOp::Gt, r.L(5), r.I(0)),
-                                  r.bin(BinOp::Lt, r.L(5), r.I(0))),
-                            r.set(3, r.idx(r.L(2), r.L(4)))),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$minmax", 2, 6, {"v", "ismax", "a", "best", "i", "c"});
+    const auto [v, ismax] = r.params("v", "ismax");
+    const auto [a, best, i, c] = r.locals("a", "best", "i", "c");
+    r.add(r.set(a, r.call("$tolist", {r.L(v)})));
+    r.add(r.iff(
+        r.bin(BinOp::Eq, r.len(r.L(a)), r.I(0)),
+        r.call("$exc", {r.S("ValueError"), r.S("arg is an empty sequence")})));
+    r.add(r.set(best, r.idx(r.L(a), r.I(0))));
+    r.add(r.set(i, r.I(1)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+        r.blk({r.set(c, r.call("$cmp", {r.idx(r.L(a), r.L(i)), r.L(best)})),
+               r.iff(r.iff(r.L(ismax), r.bin(BinOp::Gt, r.L(c), r.I(0)),
+                           r.bin(BinOp::Lt, r.L(c), r.I(0))),
+                     r.set(best, r.idx(r.L(a), r.L(i)))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(best)));
+    r.finish("$minmax");
   }
 
   // -- The string, list and dict methods -----------------------------------
 
   void rt_isspace() {
     RT r(*this);
-    r.add(r.ret(r.either(
-        r.bin(BinOp::Eq, r.L(0), r.S(" ")),
-        r.either(r.bin(BinOp::Eq, r.L(0), r.S("\t")),
-                 r.either(r.bin(BinOp::Eq, r.L(0), r.S("\n")),
-                          r.bin(BinOp::Eq, r.L(0), r.S("\r")))))));
-    r.finish("$isspace", 1, 1, {"c"});
+    const auto [c] = r.params("c");
+    r.add(r.ret(
+        r.either(r.bin(BinOp::Eq, r.L(c), r.S(" ")),
+                 r.either(r.bin(BinOp::Eq, r.L(c), r.S("\t")),
+                          r.either(r.bin(BinOp::Eq, r.L(c), r.S("\n")),
+                                   r.bin(BinOp::Eq, r.L(c), r.S("\r")))))));
+    r.finish("$isspace");
   }
 
   // `s.split()` runs on whitespace and drops the empties; `s.split(sep)`
@@ -2501,320 +2485,342 @@ struct Binder {
   // Python's choice and not this one's.
   void rt_split() {
     RT r(*this);
+    const auto [s, sep, hassep] = r.params("s", "sep", "hassep");
+    const auto [out, i, cur, st] = r.locals("out", "i", "cur", "st");
     const auto ch = [&](NodeId str, NodeId i) {
       return r.in(IntrinsicId::StrSlice,
                   {str, i, r.bin(BinOp::Add, i, r.I(1))});
     };
-    r.add(r.set(3, r.arr({})));
-    r.add(r.set(4, r.I(0)));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.iff(
-        r.bin(BinOp::Eq, r.L(2), r.Bo(false)),
-        r.blk({r.set(5, r.S("")),
-               r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
-                    r.blk({r.iff(r.call("$isspace", {ch(r.L(0), r.L(4))}),
-                                 r.blk({r.iff(r.bin(BinOp::Gt, r.len(r.L(5)),
-                                                    r.I(0)),
-                                              r.blk({r.push(r.L(3), r.L(5)),
-                                                     r.set(5, r.S(""))}))}),
-                                 r.set(5, r.bin(BinOp::Add, r.L(5),
-                                                ch(r.L(0), r.L(4))))),
-                           r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})),
-               r.iff(r.bin(BinOp::Gt, r.len(r.L(5)), r.I(0)),
-                     r.push(r.L(3), r.L(5))),
-               r.ret(r.L(3))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(1)), r.I(0)),
+        r.bin(BinOp::Eq, r.L(hassep), r.Bo(false)),
+        r.blk({r.set(cur, r.S("")),
+               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
+                    r.blk({r.iff(r.call("$isspace", {ch(r.L(s), r.L(i))}),
+                                 r.blk({r.iff(
+                                     r.bin(BinOp::Gt, r.len(r.L(cur)), r.I(0)),
+                                     r.blk({r.push(r.L(out), r.L(cur)),
+                                            r.set(cur, r.S(""))}))}),
+                                 r.set(cur, r.bin(BinOp::Add, r.L(cur),
+                                                  ch(r.L(s), r.L(i))))),
+                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+               r.iff(r.bin(BinOp::Gt, r.len(r.L(cur)), r.I(0)),
+                     r.push(r.L(out), r.L(cur))),
+               r.ret(r.L(out))})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(sep)), r.I(0)),
                 r.call("$exc", {r.S("ValueError"), r.S("empty separator")})));
-    r.add(r.set(6, r.I(0)));
-    r.add(r.wh(
-        r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(4), r.len(r.L(1))),
-              r.len(r.L(0))),
-        r.blk({r.iff(r.bin(BinOp::Eq,
-                           r.in(IntrinsicId::StrSlice,
-                                {r.L(0), r.L(4),
-                                 r.bin(BinOp::Add, r.L(4), r.len(r.L(1)))}),
-                           r.L(1)),
-                     r.blk({r.push(r.L(3), r.in(IntrinsicId::StrSlice,
-                                                {r.L(0), r.L(6), r.L(4)})),
-                            r.set(4, r.bin(BinOp::Add, r.L(4),
-                                           r.len(r.L(1)))),
-                            r.set(6, r.L(4))}),
-                     r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1))))})));
-    r.add(r.push(r.L(3), r.in(IntrinsicId::StrSlice,
-                              {r.L(0), r.L(6), r.len(r.L(0))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$split", 3, 7, {"s", "sep", "hassep", "out", "i", "cur", "st"});
+    r.add(r.set(st, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(i), r.len(r.L(sep))),
+                     r.len(r.L(s))),
+               r.blk({r.iff(
+                   r.bin(BinOp::Eq,
+                         r.in(IntrinsicId::StrSlice,
+                              {r.L(s), r.L(i),
+                               r.bin(BinOp::Add, r.L(i), r.len(r.L(sep)))}),
+                         r.L(sep)),
+                   r.blk({r.push(r.L(out), r.in(IntrinsicId::StrSlice,
+                                                {r.L(s), r.L(st), r.L(i)})),
+                          r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(sep)))),
+                          r.set(st, r.L(i))}),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))))})));
+    r.add(r.push(r.L(out), r.in(IntrinsicId::StrSlice,
+                                {r.L(s), r.L(st), r.len(r.L(s))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$split");
   }
 
   void rt_strip() {  // mode 0 both, 1 left, 2 right
     RT r(*this);
+    const auto [s, mode] = r.params("s", "mode");
+    const auto [i, j] = r.locals("i", "j");
     const auto ch = [&](NodeId i) {
       return r.in(IntrinsicId::StrSlice,
-                  {r.L(0), i, r.bin(BinOp::Add, i, r.I(1))});
+                  {r.L(s), i, r.bin(BinOp::Add, i, r.I(1))});
     };
-    r.add(r.set(2, r.I(0)));
-    r.add(r.set(3, r.len(r.L(0))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(1), r.I(2)),
-                r.wh(r.both(r.bin(BinOp::Lt, r.L(2), r.L(3)),
-                            r.call("$isspace", {ch(r.L(2))})),
-                     r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1))))));
-    r.add(r.iff(
-        r.bin(BinOp::Ne, r.L(1), r.I(1)),
-        r.wh(r.both(r.bin(BinOp::Gt, r.L(3), r.L(2)),
-                    r.call("$isspace",
-                           {ch(r.bin(BinOp::Sub, r.L(3), r.I(1)))})),
-             r.set(3, r.bin(BinOp::Sub, r.L(3), r.I(1))))));
-    r.add(r.ret(r.in(IntrinsicId::StrSlice, {r.L(0), r.L(2), r.L(3)})));
-    r.finish("$strip", 2, 4, {"s", "mode", "i", "j"});
+    r.add(r.set(i, r.I(0)));
+    r.add(r.set(j, r.len(r.L(s))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(mode), r.I(2)),
+                r.wh(r.both(r.bin(BinOp::Lt, r.L(i), r.L(j)),
+                            r.call("$isspace", {ch(r.L(i))})),
+                     r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(mode), r.I(1)),
+                r.wh(r.both(r.bin(BinOp::Gt, r.L(j), r.L(i)),
+                            r.call("$isspace",
+                                   {ch(r.bin(BinOp::Sub, r.L(j), r.I(1)))})),
+                     r.set(j, r.bin(BinOp::Sub, r.L(j), r.I(1))))));
+    r.add(r.ret(r.in(IntrinsicId::StrSlice, {r.L(s), r.L(i), r.L(j)})));
+    r.finish("$strip");
   }
 
   void rt_replace() {
     RT r(*this);
-    r.add(r.set(3, r.S("")));
-    r.add(r.set(4, r.I(0)));
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(1)), r.I(0)),
-                r.ret(r.L(0))));
+    const auto [s, a, b] = r.params("s", "a", "b");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(0)), r.ret(r.L(s))));
     r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(4), r.len(r.L(0))),
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
         r.blk({r.iff(
-                   r.both(r.bin(BinOp::Le,
-                                r.bin(BinOp::Add, r.L(4), r.len(r.L(1))),
-                                r.len(r.L(0))),
-                          r.bin(BinOp::Eq,
-                                r.in(IntrinsicId::StrSlice,
-                                     {r.L(0), r.L(4),
-                                      r.bin(BinOp::Add, r.L(4),
-                                            r.len(r.L(1)))}),
-                                r.L(1))),
-                   r.blk({r.set(3, r.bin(BinOp::Add, r.L(3), r.L(2))),
-                          r.set(4, r.bin(BinOp::Add, r.L(4),
-                                         r.len(r.L(1))))}),
-                   r.blk({r.set(3, r.bin(BinOp::Add, r.L(3),
-                                         r.in(IntrinsicId::StrSlice,
-                                              {r.L(0), r.L(4),
-                                               r.bin(BinOp::Add, r.L(4),
-                                                     r.I(1))}))),
-                          r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))}))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$replace", 3, 5, {"s", "a", "b", "out", "i"});
+            r.both(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(i), r.len(r.L(a))),
+                         r.len(r.L(s))),
+                   r.bin(BinOp::Eq,
+                         r.in(IntrinsicId::StrSlice,
+                              {r.L(s), r.L(i),
+                               r.bin(BinOp::Add, r.L(i), r.len(r.L(a)))}),
+                         r.L(a))),
+            r.blk({r.set(out, r.bin(BinOp::Add, r.L(out), r.L(b))),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(a))))}),
+            r.blk({r.set(out, r.bin(BinOp::Add, r.L(out),
+                                    r.in(IntrinsicId::StrSlice,
+                                         {r.L(s), r.L(i),
+                                          r.bin(BinOp::Add, r.L(i), r.I(1))}))),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))}))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$replace");
   }
 
   void rt_find() {
     RT r(*this);
-    r.add(r.set(2, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(2), r.len(r.L(1))),
-                     r.len(r.L(0))),
-               r.blk({r.iff(r.bin(BinOp::Eq,
-                                  r.in(IntrinsicId::StrSlice,
-                                       {r.L(0), r.L(2),
-                                        r.bin(BinOp::Add, r.L(2),
-                                              r.len(r.L(1)))}),
-                                  r.L(1)),
-                            r.ret(r.L(2))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
+    const auto [s, sub] = r.params("s", "sub");
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(i), r.len(r.L(sub))),
+              r.len(r.L(s))),
+        r.blk({r.iff(r.bin(BinOp::Eq,
+                           r.in(IntrinsicId::StrSlice,
+                                {r.L(s), r.L(i),
+                                 r.bin(BinOp::Add, r.L(i), r.len(r.L(sub)))}),
+                           r.L(sub)),
+                     r.ret(r.L(i))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.I(-1)));
-    r.finish("$find", 2, 3, {"s", "sub", "i"});
+    r.finish("$find");
   }
 
   void rt_scount() {
     RT r(*this);
-    r.add(r.set(2, r.I(0)));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(1)), r.I(0)), r.ret(r.I(0))));
-    r.add(r.wh(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(2), r.len(r.L(1))),
-                     r.len(r.L(0))),
-               r.blk({r.iff(r.bin(BinOp::Eq,
-                                  r.in(IntrinsicId::StrSlice,
-                                       {r.L(0), r.L(2),
-                                        r.bin(BinOp::Add, r.L(2),
-                                              r.len(r.L(1)))}),
-                                  r.L(1)),
-                            r.blk({r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1))),
-                                   r.set(2, r.bin(BinOp::Add, r.L(2),
-                                                  r.len(r.L(1))))}),
-                            r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1))))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$scount", 2, 4, {"s", "sub", "i", "n"});
+    const auto [s, sub] = r.params("s", "sub");
+    const auto [i, n] = r.locals("i", "n");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.set(n, r.I(0)));
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(sub)), r.I(0)), r.ret(r.I(0))));
+    r.add(
+        r.wh(r.bin(BinOp::Le, r.bin(BinOp::Add, r.L(i), r.len(r.L(sub))),
+                   r.len(r.L(s))),
+             r.blk({r.iff(
+                 r.bin(BinOp::Eq,
+                       r.in(IntrinsicId::StrSlice,
+                            {r.L(s), r.L(i),
+                             r.bin(BinOp::Add, r.L(i), r.len(r.L(sub)))}),
+                       r.L(sub)),
+                 r.blk({r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1))),
+                        r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(sub))))}),
+                 r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))))})));
+    r.add(r.ret(r.L(n)));
+    r.finish("$scount");
   }
 
   void rt_startswith() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(1)), r.len(r.L(0))),
+    const auto [s, p] = r.params("s", "p");
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(p)), r.len(r.L(s))),
                 r.ret(r.Bo(false))));
-    r.add(r.ret(r.bin(BinOp::Eq,
-                      r.in(IntrinsicId::StrSlice,
-                           {r.L(0), r.I(0), r.len(r.L(1))}),
-                      r.L(1))));
-    r.finish("$startswith", 2, 2, {"s", "p"});
+    r.add(r.ret(r.bin(
+        BinOp::Eq, r.in(IntrinsicId::StrSlice, {r.L(s), r.I(0), r.len(r.L(p))}),
+        r.L(p))));
+    r.finish("$startswith");
   }
 
   void rt_endswith() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(1)), r.len(r.L(0))),
+    const auto [s, p] = r.params("s", "p");
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(p)), r.len(r.L(s))),
                 r.ret(r.Bo(false))));
-    r.add(r.ret(r.bin(BinOp::Eq,
-                      r.in(IntrinsicId::StrSlice,
-                           {r.L(0),
-                            r.bin(BinOp::Sub, r.len(r.L(0)), r.len(r.L(1))),
-                            r.len(r.L(0))}),
-                      r.L(1))));
-    r.finish("$endswith", 2, 2, {"s", "p"});
+    r.add(r.ret(
+        r.bin(BinOp::Eq,
+              r.in(IntrinsicId::StrSlice,
+                   {r.L(s), r.bin(BinOp::Sub, r.len(r.L(s)), r.len(r.L(p))),
+                    r.len(r.L(s))}),
+              r.L(p))));
+    r.finish("$endswith");
   }
 
   void rt_apop() {
     RT r(*this);
-    r.add(r.set(3, r.len(r.L(0))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(3), r.I(0)),
-                r.call("$exc", {r.S("IndexError"),
-                                r.S("pop from empty list")})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(2), r.Bo(false)),
-                r.ret(r.in(IntrinsicId::ArrayPop, {r.L(0)}))));
-    r.add(r.set(4, r.L(1)));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(4), r.I(0)),
-                r.set(4, r.bin(BinOp::Add, r.L(4), r.L(3)))));
-    r.add(r.iff(r.either(r.bin(BinOp::Lt, r.L(4), r.I(0)),
-                         r.bin(BinOp::Ge, r.L(4), r.L(3))),
-                r.call("$exc", {r.S("IndexError"),
-                                r.S("pop index out of range")})));
-    r.add(r.set(5, r.idx(r.L(0), r.L(4))));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.bin(BinOp::Sub, r.L(3), r.I(1))),
-               r.blk({r.sidx(r.L(0), r.L(4),
-                             r.idx(r.L(0), r.bin(BinOp::Add, r.L(4), r.I(1)))),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
-    r.add(r.in(IntrinsicId::ArrayPop, {r.L(0)}));
-    r.add(r.ret(r.L(5)));
-    r.finish("$apop", 3, 6, {"a", "i", "hasi", "n", "k", "v"});
+    const auto [a, i, hasi] = r.params("a", "i", "hasi");
+    const auto [n, k, v] = r.locals("n", "k", "v");
+    r.add(r.set(n, r.len(r.L(a))));
+    r.add(
+        r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)),
+              r.call("$exc", {r.S("IndexError"), r.S("pop from empty list")})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(hasi), r.Bo(false)),
+                r.ret(r.in(IntrinsicId::ArrayPop, {r.L(a)}))));
+    r.add(r.set(k, r.L(i)));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(0)),
+                r.set(k, r.bin(BinOp::Add, r.L(k), r.L(n)))));
+    r.add(r.iff(
+        r.either(r.bin(BinOp::Lt, r.L(k), r.I(0)),
+                 r.bin(BinOp::Ge, r.L(k), r.L(n))),
+        r.call("$exc", {r.S("IndexError"), r.S("pop index out of range")})));
+    r.add(r.set(v, r.idx(r.L(a), r.L(k))));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(k), r.bin(BinOp::Sub, r.L(n), r.I(1))),
+               r.blk({r.sidx(r.L(a), r.L(k),
+                             r.idx(r.L(a), r.bin(BinOp::Add, r.L(k), r.I(1)))),
+                      r.set(k, r.bin(BinOp::Add, r.L(k), r.I(1)))})));
+    r.add(r.in(IntrinsicId::ArrayPop, {r.L(a)}));
+    r.add(r.ret(r.L(v)));
+    r.finish("$apop");
   }
 
   void rt_ainsert() {
     RT r(*this);
-    r.add(r.set(3, r.len(r.L(0))));
-    r.add(r.set(4, r.L(1)));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(4), r.I(0)),
-                r.set(4, r.bin(BinOp::Add, r.L(4), r.L(3)))));
-    r.add(r.iff(r.bin(BinOp::Lt, r.L(4), r.I(0)), r.set(4, r.I(0))));
-    r.add(r.iff(r.bin(BinOp::Gt, r.L(4), r.L(3)), r.set(4, r.L(3))));
-    r.add(r.push(r.L(0), r.L(2)));
-    r.add(r.set(5, r.L(3)));
-    r.add(r.wh(r.bin(BinOp::Gt, r.L(5), r.L(4)),
-               r.blk({r.sidx(r.L(0), r.L(5),
-                             r.idx(r.L(0), r.bin(BinOp::Sub, r.L(5), r.I(1)))),
-                      r.set(5, r.bin(BinOp::Sub, r.L(5), r.I(1)))})));
-    r.add(r.sidx(r.L(0), r.L(4), r.L(2)));
+    const auto [a, i, v] = r.params("a", "i", "v");
+    const auto [n, k, j] = r.locals("n", "k", "j");
+    r.add(r.set(n, r.len(r.L(a))));
+    r.add(r.set(k, r.L(i)));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(0)),
+                r.set(k, r.bin(BinOp::Add, r.L(k), r.L(n)))));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(0)), r.set(k, r.I(0))));
+    r.add(r.iff(r.bin(BinOp::Gt, r.L(k), r.L(n)), r.set(k, r.L(n))));
+    r.add(r.push(r.L(a), r.L(v)));
+    r.add(r.set(j, r.L(n)));
+    r.add(r.wh(r.bin(BinOp::Gt, r.L(j), r.L(k)),
+               r.blk({r.sidx(r.L(a), r.L(j),
+                             r.idx(r.L(a), r.bin(BinOp::Sub, r.L(j), r.I(1)))),
+                      r.set(j, r.bin(BinOp::Sub, r.L(j), r.I(1)))})));
+    r.add(r.sidx(r.L(a), r.L(k), r.L(v)));
     r.add(r.ret(r.Nil()));
-    r.finish("$ainsert", 3, 6, {"a", "i", "v", "n", "k", "j"});
+    r.finish("$ainsert");
   }
 
   void rt_aindex() {
     RT r(*this);
-    r.add(r.set(2, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-               r.blk({r.iff(r.call("$eq", {r.idx(r.L(0), r.L(2)), r.L(1)}),
-                            r.ret(r.L(2))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
-    r.add(r.call("$exc",
-                 {r.S("ValueError"),
-                  r.bin(BinOp::Add, r.call("$repr", {r.L(1)}),
-                        r.S(" is not in list"))}));
+    const auto [a, v] = r.params("a", "v");
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+               r.blk({r.iff(r.call("$eq", {r.idx(r.L(a), r.L(i)), r.L(v)}),
+                            r.ret(r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.call(
+        "$exc", {r.S("ValueError"), r.bin(BinOp::Add, r.call("$repr", {r.L(v)}),
+                                          r.S(" is not in list"))}));
     r.add(r.ret(r.Nil()));
-    r.finish("$aindex", 2, 3, {"a", "v", "i"});
+    r.finish("$aindex");
   }
 
   void rt_aremove() {
     RT r(*this);
+    const auto [a, v] = r.params("a", "v");
     r.add(r.call("$apop",
-                 {r.L(0), r.call("$aindex", {r.L(0), r.L(1)}), r.Bo(true)}));
+                 {r.L(a), r.call("$aindex", {r.L(a), r.L(v)}), r.Bo(true)}));
     r.add(r.ret(r.Nil()));
-    r.finish("$aremove", 2, 2, {"a", "v"});
+    r.finish("$aremove");
   }
 
   void rt_acount() {
     RT r(*this);
-    r.add(r.set(2, r.I(0)));
-    r.add(r.set(3, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-               r.blk({r.iff(r.call("$eq", {r.idx(r.L(0), r.L(2)), r.L(1)}),
-                            r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))),
-                      r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))})));
-    r.add(r.ret(r.L(3)));
-    r.finish("$acount", 2, 4, {"a", "v", "i", "n"});
+    const auto [a, v] = r.params("a", "v");
+    const auto [i, n] = r.locals("i", "n");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.set(n, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+               r.blk({r.iff(r.call("$eq", {r.idx(r.L(a), r.L(i)), r.L(v)}),
+                            r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1)))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(n)));
+    r.finish("$acount");
   }
 
   void rt_areverse() {
     RT r(*this);
-    r.add(r.set(1, r.I(0)));
-    r.add(r.set(2, r.bin(BinOp::Sub, r.len(r.L(0)), r.I(1))));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(1), r.L(2)),
-               r.blk({r.set(3, r.idx(r.L(0), r.L(1))),
-                      r.sidx(r.L(0), r.L(1), r.idx(r.L(0), r.L(2))),
-                      r.sidx(r.L(0), r.L(2), r.L(3)),
-                      r.set(1, r.bin(BinOp::Add, r.L(1), r.I(1))),
-                      r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))})));
+    const auto [a] = r.params("a");
+    const auto [i, j, t] = r.locals("i", "j", "t");
+    r.add(r.set(i, r.I(0)));
+    r.add(r.set(j, r.bin(BinOp::Sub, r.len(r.L(a)), r.I(1))));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.L(j)),
+               r.blk({r.set(t, r.idx(r.L(a), r.L(i))),
+                      r.sidx(r.L(a), r.L(i), r.idx(r.L(a), r.L(j))),
+                      r.sidx(r.L(a), r.L(j), r.L(t)),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
+                      r.set(j, r.bin(BinOp::Sub, r.L(j), r.I(1)))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$areverse", 1, 4, {"a", "i", "j", "t"});
+    r.finish("$areverse");
   }
 
   void rt_asort() {  // `xs.sort()` -- in place, so the result is copied back
     RT r(*this);
-    r.add(r.set(3, r.call("$sorted", {r.L(0), r.L(1), r.L(2)})));
-    r.add(r.set(4, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(4), r.len(r.L(3))),
-               r.blk({r.sidx(r.L(0), r.L(4), r.idx(r.L(3), r.L(4))),
-                      r.set(4, r.bin(BinOp::Add, r.L(4), r.I(1)))})));
+    const auto [a, key, rev] = r.params("a", "key", "rev");
+    const auto [s, i] = r.locals("s", "i");
+    r.add(r.set(s, r.call("$sorted", {r.L(a), r.L(key), r.L(rev)})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
+               r.blk({r.sidx(r.L(a), r.L(i), r.idx(r.L(s), r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$asort", 3, 5, {"a", "key", "rev", "s", "i"});
+    r.finish("$asort");
   }
 
   void rt_delitem() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "map"),
-                r.blk({r.iff(r.bin(BinOp::Eq, r.has(r.L(0), r.L(1)),
-                                   r.Bo(false)),
-                             r.call("$exc", {r.S("KeyError"),
-                                             r.call("$repr", {r.L(1)})})),
-                       r.in(IntrinsicId::ObjectRemove, {r.L(0), r.L(1)}),
-                       r.ret(r.Nil())})));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "array"),
-                r.blk({r.call("$apop", {r.L(0), r.L(1), r.Bo(true)}),
+    const auto [c, k] = r.params("c", "k");
+    r.add(r.iff(
+        r.is(r.typ(r.L(c)), "map"),
+        r.blk({r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.L(k)), r.Bo(false)),
+                     r.call("$exc",
+                            {r.S("KeyError"), r.call("$repr", {r.L(k)})})),
+               r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
+               r.ret(r.Nil())})));
+    r.add(r.iff(r.is(r.typ(r.L(c)), "array"),
+                r.blk({r.call("$apop", {r.L(c), r.L(k), r.Bo(true)}),
                        r.ret(r.Nil())})));
     r.add(r.call("$exc", {r.S("TypeError"),
                           r.S("object does not support item deletion")}));
     r.add(r.ret(r.Nil()));
-    r.finish("$delitem", 2, 2, {"c", "k"});
+    r.finish("$delitem");
   }
 
   void rt_dpop() {
     RT r(*this);
-    r.add(r.iff(r.has(r.L(0), r.L(1)),
-                r.blk({r.set(4, r.idx(r.L(0), r.L(1))),
-                       r.in(IntrinsicId::ObjectRemove, {r.L(0), r.L(1)}),
-                       r.ret(r.L(4))})));
-    r.add(r.iff(r.L(3), r.ret(r.L(2))));
-    r.add(r.call("$exc", {r.S("KeyError"), r.call("$repr", {r.L(1)})}));
+    const auto [d, k, dflt, hasdflt] = r.params("d", "k", "dflt", "hasdflt");
+    const auto [v] = r.locals("v");
+    r.add(r.iff(r.has(r.L(d), r.L(k)),
+                r.blk({r.set(v, r.idx(r.L(d), r.L(k))),
+                       r.in(IntrinsicId::ObjectRemove, {r.L(d), r.L(k)}),
+                       r.ret(r.L(v))})));
+    r.add(r.iff(r.L(hasdflt), r.ret(r.L(dflt))));
+    r.add(r.call("$exc", {r.S("KeyError"), r.call("$repr", {r.L(k)})}));
     r.add(r.ret(r.Nil()));
-    r.finish("$dpop", 4, 5, {"d", "k", "dflt", "hasdflt", "v"});
+    r.finish("$dpop");
   }
 
   void rt_alldigits() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(0)), r.I(0)), r.ret(r.Bo(false))));
-    r.add(r.set(1, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(1), r.len(r.L(0))),
-               r.blk({r.set(2, r.in(IntrinsicId::StrByte, {r.L(0), r.L(1)})),
-                      r.iff(r.either(r.bin(BinOp::Lt, r.L(2), r.I(48)),
-                                     r.bin(BinOp::Gt, r.L(2), r.I(57))),
+    const auto [s] = r.params("s");
+    const auto [i, c] = r.locals("i", "c");
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(s)), r.I(0)), r.ret(r.Bo(false))));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
+               r.blk({r.set(c, r.in(IntrinsicId::StrByte, {r.L(s), r.L(i)})),
+                      r.iff(r.either(r.bin(BinOp::Lt, r.L(c), r.I(48)),
+                                     r.bin(BinOp::Gt, r.L(c), r.I(57))),
                             r.ret(r.Bo(false))),
-                      r.set(1, r.bin(BinOp::Add, r.L(1), r.I(1)))})));
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Bo(true)));
-    r.finish("$alldigits", 1, 3, {"s", "i", "c"});
+    r.finish("$alldigits");
   }
 
   void rt_specerr() {
     RT r(*this);
+    const auto [spec] = r.params("spec");
     r.add(r.call("$exc", {r.S("ValueError"),
                           r.bin(BinOp::Add, r.S("unsupported format spec: "),
-                                r.L(0))}));
+                                r.L(spec))}));
     r.add(r.ret(r.Nil()));
-    r.finish("$specerr", 1, 1, {"spec"});
+    r.finish("$specerr");
   }
 
   // An f-string's format spec: a fill, an alignment, a width, and `.Nf`.
@@ -2822,6 +2828,10 @@ struct Binder {
   // is the oracle and a near miss is a wrong answer.
   void rt_fmt() {
     RT r(*this);
+    const auto [v, spec] = r.params("v", "spec");
+    const auto [s, fill, align, i, rest, t, half, w, pad, dot, prec] =
+        r.locals("s", "fill", "align", "i", "rest", "t", "half", "w", "pad",
+                 "dot", "prec");
     const auto ch = [&](NodeId str, NodeId i) {
       return r.in(IntrinsicId::StrSlice,
                   {str, i, r.bin(BinOp::Add, i, r.I(1))});
@@ -2831,77 +2841,77 @@ struct Binder {
                       r.either(r.bin(BinOp::Eq, c, r.S(">")),
                                r.bin(BinOp::Eq, c, r.S("^"))));
     };
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(1)), r.I(0)),
-                r.ret(r.call("$str", {r.L(0)}))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(spec)), r.I(0)),
+                r.ret(r.call("$str", {r.L(v)}))));
     // A number right-aligns by default and everything else left-aligns,
     // which is Python's rule and not a choice this front end gets to make.
-    r.add(r.set(3, r.S(" ")));
-    r.add(r.set(4, r.iff(r.either(r.is(r.typ(r.L(0)), "int"),
-                                  r.either(r.is(r.typ(r.L(0)), "double"),
-                                           r.call("$isbig", {r.L(0)}))),
-                         r.S(">"), r.S("<"))));
-    r.add(r.set(5, r.I(0)));
-    r.add(r.iff(r.both(r.bin(BinOp::Ge, r.len(r.L(1)), r.I(2)),
-                       is_align(ch(r.L(1), r.I(1)))),
-                r.blk({r.set(3, ch(r.L(1), r.I(0))),
-                       r.set(4, ch(r.L(1), r.I(1))), r.set(5, r.I(2))}),
-                r.iff(is_align(ch(r.L(1), r.I(0))),
-                      r.blk({r.set(4, ch(r.L(1), r.I(0))),
-                             r.set(5, r.I(1))}))));
-    r.add(r.set(6, r.in(IntrinsicId::StrSlice,
-                        {r.L(1), r.L(5), r.len(r.L(1))})));
-    r.add(r.set(12, r.I(-1)));
+    r.add(r.set(fill, r.S(" ")));
+    r.add(r.set(align, r.iff(r.either(r.is(r.typ(r.L(v)), "int"),
+                                      r.either(r.is(r.typ(r.L(v)), "double"),
+                                               r.call("$isbig", {r.L(v)}))),
+                             r.S(">"), r.S("<"))));
+    r.add(r.set(i, r.I(0)));
     r.add(r.iff(
-        r.both(r.bin(BinOp::Gt, r.len(r.L(6)), r.I(0)),
+        r.both(r.bin(BinOp::Ge, r.len(r.L(spec)), r.I(2)),
+               is_align(ch(r.L(spec), r.I(1)))),
+        r.blk({r.set(fill, ch(r.L(spec), r.I(0))),
+               r.set(align, ch(r.L(spec), r.I(1))), r.set(i, r.I(2))}),
+        r.iff(is_align(ch(r.L(spec), r.I(0))),
+              r.blk({r.set(align, ch(r.L(spec), r.I(0))), r.set(i, r.I(1))}))));
+    r.add(r.set(rest, r.in(IntrinsicId::StrSlice,
+                           {r.L(spec), r.L(i), r.len(r.L(spec))})));
+    r.add(r.set(prec, r.I(-1)));
+    r.add(r.iff(
+        r.both(r.bin(BinOp::Gt, r.len(r.L(rest)), r.I(0)),
                r.bin(BinOp::Eq,
-                     ch(r.L(6), r.bin(BinOp::Sub, r.len(r.L(6)), r.I(1))),
+                     ch(r.L(rest), r.bin(BinOp::Sub, r.len(r.L(rest)), r.I(1))),
                      r.S("f"))),
-        r.blk({r.set(6, r.in(IntrinsicId::StrSlice,
-                             {r.L(6), r.I(0),
-                              r.bin(BinOp::Sub, r.len(r.L(6)), r.I(1))})),
-               r.set(11, r.call("$find", {r.L(6), r.S(".")})),
-               r.iff(r.bin(BinOp::Lt, r.L(11), r.I(0)),
-                     r.call("$specerr", {r.L(1)})),
-               r.set(7, r.in(IntrinsicId::StrSlice,
-                             {r.L(6), r.bin(BinOp::Add, r.L(11), r.I(1)),
-                              r.len(r.L(6))})),
-               r.iff(r.bin(BinOp::Eq, r.call("$alldigits", {r.L(7)}),
+        r.blk({r.set(rest, r.in(IntrinsicId::StrSlice,
+                                {r.L(rest), r.I(0),
+                                 r.bin(BinOp::Sub, r.len(r.L(rest)), r.I(1))})),
+               r.set(dot, r.call("$find", {r.L(rest), r.S(".")})),
+               r.iff(r.bin(BinOp::Lt, r.L(dot), r.I(0)),
+                     r.call("$specerr", {r.L(spec)})),
+               r.set(t, r.in(IntrinsicId::StrSlice,
+                             {r.L(rest), r.bin(BinOp::Add, r.L(dot), r.I(1)),
+                              r.len(r.L(rest))})),
+               r.iff(r.bin(BinOp::Eq, r.call("$alldigits", {r.L(t)}),
                            r.Bo(false)),
-                     r.call("$specerr", {r.L(1)})),
-               r.set(12, r.call("$toint", {r.L(7)})),
-               r.set(6, r.in(IntrinsicId::StrSlice,
-                             {r.L(6), r.I(0), r.L(11)}))})));
-    r.add(r.iff(r.both(r.bin(BinOp::Gt, r.len(r.L(6)), r.I(0)),
-                       r.bin(BinOp::Eq, r.call("$alldigits", {r.L(6)}),
+                     r.call("$specerr", {r.L(spec)})),
+               r.set(prec, r.call("$toint", {r.L(t)})),
+               r.set(rest, r.in(IntrinsicId::StrSlice,
+                                {r.L(rest), r.I(0), r.L(dot)}))})));
+    r.add(r.iff(r.both(r.bin(BinOp::Gt, r.len(r.L(rest)), r.I(0)),
+                       r.bin(BinOp::Eq, r.call("$alldigits", {r.L(rest)}),
                              r.Bo(false))),
-                r.call("$specerr", {r.L(1)})));
-    r.add(r.set(9, r.iff(r.bin(BinOp::Eq, r.len(r.L(6)), r.I(0)), r.I(0),
-                         r.call("$toint", {r.L(6)}))));
+                r.call("$specerr", {r.L(spec)})));
+    r.add(r.set(w, r.iff(r.bin(BinOp::Eq, r.len(r.L(rest)), r.I(0)), r.I(0),
+                         r.call("$toint", {r.L(rest)}))));
     // A precision is the C library's exact decimal expansion, which is
     // what CPython's is too -- and the one thing here that is not a scan.
-    r.add(r.set(2, r.iff(r.bin(BinOp::Ge, r.L(12), r.I(0)),
-                         r.nat("ffmt", {r.call("$tofloat", {r.L(0)}), r.L(12)}),
-                         r.call("$str", {r.L(0)}))));
-    r.add(r.set(10, r.bin(BinOp::Sub, r.L(9), r.len(r.L(2)))));
-    r.add(r.iff(r.bin(BinOp::Le, r.L(10), r.I(0)), r.ret(r.L(2))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(4), r.S(">")),
-                r.ret(r.bin(BinOp::Add,
-                            r.call("$strmul", {r.L(3), r.L(10)}), r.L(2)))));
+    r.add(
+        r.set(s, r.iff(r.bin(BinOp::Ge, r.L(prec), r.I(0)),
+                       r.nat("ffmt", {r.call("$tofloat", {r.L(v)}), r.L(prec)}),
+                       r.call("$str", {r.L(v)}))));
+    r.add(r.set(pad, r.bin(BinOp::Sub, r.L(w), r.len(r.L(s)))));
+    r.add(r.iff(r.bin(BinOp::Le, r.L(pad), r.I(0)), r.ret(r.L(s))));
+    r.add(
+        r.iff(r.bin(BinOp::Eq, r.L(align), r.S(">")),
+              r.ret(r.bin(BinOp::Add, r.call("$strmul", {r.L(fill), r.L(pad)}),
+                          r.L(s)))));
     r.add(r.iff(
-        r.bin(BinOp::Eq, r.L(4), r.S("^")),
-        r.blk({r.set(7, r.call("$str", {r.bin(BinOp::Div, r.L(10), r.I(2))})),
-               r.set(8, r.bin(BinOp::Div, r.L(10), r.I(2))),
-               r.ret(r.bin(BinOp::Add,
-                           r.bin(BinOp::Add,
-                                 r.call("$strmul", {r.L(3), r.L(8)}), r.L(2)),
-                           r.call("$strmul",
-                                  {r.L(3),
-                                   r.bin(BinOp::Sub, r.L(10), r.L(8))})))})));
-    r.add(r.ret(r.bin(BinOp::Add, r.L(2),
-                      r.call("$strmul", {r.L(3), r.L(10)}))));
-    r.finish("$fmt", 2, 13,
-             {"v", "spec", "s", "fill", "align", "i", "rest", "t", "half",
-              "w", "pad", "dot", "prec"});
+        r.bin(BinOp::Eq, r.L(align), r.S("^")),
+        r.blk({r.set(t, r.call("$str", {r.bin(BinOp::Div, r.L(pad), r.I(2))})),
+               r.set(half, r.bin(BinOp::Div, r.L(pad), r.I(2))),
+               r.ret(r.bin(
+                   BinOp::Add,
+                   r.bin(BinOp::Add, r.call("$strmul", {r.L(fill), r.L(half)}),
+                         r.L(s)),
+                   r.call("$strmul", {r.L(fill), r.bin(BinOp::Sub, r.L(pad),
+                                                       r.L(half))})))})));
+    r.add(r.ret(
+        r.bin(BinOp::Add, r.L(s), r.call("$strmul", {r.L(fill), r.L(pad)}))));
+    r.finish("$fmt");
   }
 
   void emit_runtime() {
@@ -2929,84 +2939,48 @@ struct Binder {
     rt_dpop(); rt_delitem(); rt_alldigits(); rt_specerr(); rt_fmt();
   }
 
+  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
+  // sets it), so all these MakeClosures name the one closure the executor
+  // built at the first of them -- which is what the array of pre-built
+  // closures at file scope used to buy, at the cost of a synthetic variable
+  // every function had to capture. One that *does* take captures is built at
+  // the site that has them (RT::clos) and never reaches here; saying so
+  // beats the "cannot call nil" it would otherwise be at run time.
+  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
+                SrcPos p) {
+    const auto it = rt.find(name);
+    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
+    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
+      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
+    }
+    auto b = Builder(m).at(p);
+    return b.call_value(b.make_closure(it->second, empty_cmap), args);
+  }
+
   // ==== Pass B: emit ======================================================
-
-  // The index of a helper in the file-scope array build() fills in.
-  // Where a helper sits in the array fill_helpers builds. A helper that
-  // takes captures has no closure there to fetch -- it is built at the
-  // site that has them -- so asking for one is a mistake in this binder,
-  // and saying so here beats the "cannot call nil" it would otherwise be
-  // at run time.
-  int32_t helper_slot(const std::string& name) const {
-    const auto& names = rt_names();
-    for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] != name) continue;
-      if (m.funcs[static_cast<size_t>(rt.at(name))].num_captures != 0) {
-        coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-      }
-      return static_cast<int32_t>(i);
-    }
-    coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-  }
-
-  // A helper call reads the one closure that already exists rather than
-  // building another: these are captureless, so a closure per function
-  // *entry* -- which is what a per-function cell amounts to -- was one
-  // allocation per call of every function that used one. fib(28) through
-  // this front end made seventeen million of them.
-  NodeId helper(FnCtx& ctx, const std::string& name,
-                const std::vector<NodeId>& args, SrcPos p) {
-    Builder b(m);
-    return b.call_value(
-        b.index(read_var(helpers_var, ctx, p),
-                b.literal(helper_slot(name), p), p),
-        args, p);
-  }
-
-
-  // File scope builds every helper's closure once, into the array above.
-  void fill_helpers(FnCtx& ctx, std::vector<NodeId>& out, SrcPos p) {
-    Builder b(m);
-    std::vector<NodeId> vals;
-    for (const std::string& n : rt_names()) {
-      // A helper that takes captures is built at the site that has them
-      // (RT::clos), never fetched from here, so its slot stays nil.
-      const int32_t g = rt.at(n);
-      vals.push_back(m.funcs[static_cast<size_t>(g)].num_captures == 0
-                         ? b.make_closure(g, empty_cmap, p)
-                         : b.nil_literal(p));
-    }
-    out.push_back(write_var(helpers_var, b.array_lit(vals, p), ctx, p));
-  }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
-    Builder b(m);
-    return b.call_value(b.native_ref(b.declare_native(name), p), args, p);
+    auto b = Builder(m).at(p);
+    return b.call_value(b.native_ref(b.declare_native(name)), args);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    std::vector<CaptureSrc> cs;
-    for (const int32_t v : fns[static_cast<size_t>(g)].free) {
-      const auto [k, i] = access(ctx.fn, v);
-      cs.push_back({k, i});
-    }
-    const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(cs);
-    return b.make_closure(fns[static_cast<size_t>(g)].index, cm, p);
+    auto b = Builder(m).at(p);
+    return b.make_closure(rs.fns[static_cast<size_t>(g)].index,
+                          rs.capture_map(m, ctx.fn, g));
   }
 
   NodeId read_var(int32_t v, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto [k, i] = access(ctx.fn, v);
-    return b.varref(k, i, p);
+    auto b = Builder(m).at(p);
+    const auto [k, i] = rs.access(ctx.fn, v);
+    return b.varref(k, i);
   }
 
   NodeId write_var(int32_t v, NodeId value, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto [k, i] = access(ctx.fn, v);
-    return b.assign(k, i, value, p);
+    auto b = Builder(m).at(p);
+    const auto [k, i] = rs.access(ctx.fn, v);
+    return b.assign(k, i, value);
   }
 
   // A Python binding is function-scoped, not block-scoped, so a block is a
@@ -3025,12 +2999,12 @@ struct Binder {
   // `a, b` in value position -- a return, or the right of an assignment --
   // is a tuple; one expression alone is itself.
   NodeId emit_exprs(const Ast* es, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    if (es == nullptr) return b.nil_literal(p);
+    auto b = Builder(m).at(p);
+    if (es == nullptr) return b.nil_literal();
     if (es->nodes.size() == 1) return emit_expr(*es->nodes[0], ctx);
     std::vector<NodeId> items;
     for (const auto& c : es->nodes) items.push_back(emit_expr(*c, ctx));
-    return helper(ctx, "$tuple", {b.array_lit(items, p)}, p);
+    return helper("$tuple", {b.array_lit(items)}, p);
   }
 
   // The positional-only path, for the builtins -- which are emitted inline
@@ -3055,7 +3029,7 @@ struct Binder {
   std::pair<NodeId, NodeId> emit_callargs(const Ast* args, FnCtx& ctx,
                                           const std::vector<NodeId>& front,
                                           SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     std::vector<const Ast*> pos, kw;
     bool splat = false;
     bool kwsplat = false;
@@ -3076,58 +3050,55 @@ struct Binder {
     if (!splat) {
       std::vector<NodeId> items(front);
       for (const Ast* e : pos) items.push_back(emit_expr(*e, ctx));
-      A = b.array_lit(items, p);
+      A = b.array_lit(items);
     } else {
       // A `*xs` decides a count at run time, so the array is built rather
       // than written -- which is the whole reason this convention exists.
       const int32_t t = ctx.alloc_local("$args");
-      const NodeId T = b.varref(VarKind::Local, t, p);
+      const NodeId T = b.varref(VarKind::Local, t);
       std::vector<NodeId> steps{
-          b.assign(VarKind::Local, t, b.array_lit(front, p), p)};
+          b.assign(VarKind::Local, t, b.array_lit(front))};
       for (const Ast* e : pos) {
         steps.push_back(
             e->tag == "splat"_
-                ? helper(ctx, "$aext", {T, emit_expr(*e->nodes[0], ctx)}, p)
-                : b.intrinsic(IntrinsicId::ArrayPush,
-                              {T, emit_expr(*e, ctx)}, p));
+                ? helper("$aext", {T, emit_expr(*e->nodes[0], ctx)}, p)
+                : b.intrinsic(IntrinsicId::ArrayPush, {T, emit_expr(*e, ctx)}));
       }
       steps.push_back(T);
-      A = b.block(steps, p);
+      A = b.block(steps);
     }
     NodeId K;
     if (kw.empty()) {
-      K = b.nil_literal(p);
+      K = b.nil_literal();
     } else if (!kwsplat) {
       std::vector<std::pair<NodeId, NodeId>> kvs;
       for (const Ast* e : kw) {
-        kvs.emplace_back(b.str_literal(std::string(e->nodes[0]->token), p),
+        kvs.emplace_back(b.str_literal(std::string(e->nodes[0]->token)),
                          emit_expr(*e->nodes[1], ctx));
       }
-      K = b.object_lit(kvs, p);
+      K = b.object_lit(kvs);
     } else {
       const int32_t t = ctx.alloc_local("$kw");
-      const NodeId T = b.varref(VarKind::Local, t, p);
-      std::vector<NodeId> steps{
-          b.assign(VarKind::Local, t, b.object_lit({}, p), p)};
+      const NodeId T = b.varref(VarKind::Local, t);
+      std::vector<NodeId> steps{b.assign(VarKind::Local, t, b.object_lit({}))};
       for (const Ast* e : kw) {
         steps.push_back(
             e->tag == "kwsplat"_
-                ? helper(ctx, "$kwmerge", {T, emit_expr(*e->nodes[0], ctx)}, p)
-                : b.set_index(T, b.str_literal(std::string(e->nodes[0]->token),
-                                               p),
-                              emit_expr(*e->nodes[1], ctx), p));
+                ? helper("$kwmerge", {T, emit_expr(*e->nodes[0], ctx)}, p)
+                : b.set_index(T, b.str_literal(std::string(e->nodes[0]->token)),
+                              emit_expr(*e->nodes[1], ctx)));
       }
       steps.push_back(T);
-      K = b.block(steps, p);
+      K = b.block(steps);
     }
     return {A, K};
   }
 
   NodeId emit_pycall(NodeId callee, const Ast* args, FnCtx& ctx,
                      const std::vector<NodeId>& front, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const auto [A, K] = emit_callargs(args, ctx, front, p);
-    return b.call_value(callee, {A, K}, p);
+    return b.call_value(callee, {A, K});
   }
 
   // The def-time half of a default: computed where the `def` stands, into a
@@ -3135,12 +3106,12 @@ struct Binder {
   // share one box.
   void emit_defaults(int32_t g, FnCtx& ctx, std::vector<NodeId>& out,
                      SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     for (const ParamInfo& pi : fns[static_cast<size_t>(g)].params) {
       if (pi.kind != ParamInfo::Default) continue;
-      const auto [k, i] = access(ctx.fn, pi.def_var);
-      out.push_back(b.cell_fresh(i, p));
-      out.push_back(b.assign(k, i, emit_expr(*pi.def, ctx), p));
+      const auto [k, i] = rs.access(ctx.fn, pi.def_var);
+      out.push_back(b.cell_fresh(i));
+      out.push_back(b.assign(k, i, emit_expr(*pi.def, ctx)));
     }
   }
 
@@ -3153,11 +3124,11 @@ struct Binder {
 
   // -- Statements ---------------------------------------------------------
   NodeId emit_stmt(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "passstmt"_:
-        return b.block({}, p);
+        return b.block({});
       case "simpleline"_:
       case "block"_:
         return emit_block(a, ctx);
@@ -3172,78 +3143,70 @@ struct Binder {
           const Ast& ds = *a.nodes[0];
           for (size_t k = ds.nodes.size(); k-- > 0;) {
             value = b.call_value(emit_expr(*ds.nodes[k]->nodes[0], ctx),
-                                 {b.array_lit({value}, p), b.nil_literal(p)},
-                                 p);
+                                 {b.array_lit({value}), b.nil_literal()});
           }
         }
         out.push_back(write_var(decl_of.at(fn_ident(a)), value, ctx, p));
-        return b.block(out, p);
+        return b.block(out);
       }
       case "classdef"_:
         return emit_class(a, ctx);
       case "breakstmt"_:
-        return b.make_break(p);
+        return b.make_break();
       case "contstmt"_:
-        return b.make_continue(p);
+        return b.make_continue();
       case "returnstmt"_:
         return b.make_return(
-            emit_exprs(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx, p),
-            p);
+            emit_exprs(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx, p));
       case "raisestmt"_:
-        return b.make_throw(emit_expr(*a.nodes[0], ctx), p);
+        return b.make_throw(emit_expr(*a.nodes[0], ctx));
       case "yieldone"_:
-        return b.make_yield(emit_exprs(a.nodes[0].get(), ctx, p), p);
+        return b.make_yield(emit_exprs(a.nodes[0].get(), ctx, p));
       case "yieldfrom"_: {
         // `yield from it` is the loop it stands for. What the sub-generator
         // *returns* is dropped -- see README.md.
         const int32_t it = ctx.alloc_local("$it");
         const int32_t st = ctx.alloc_local("$step");
-        const NodeId I = b.varref(VarKind::Local, it, p);
-        const NodeId S = b.varref(VarKind::Local, st, p);
+        const NodeId I = b.varref(VarKind::Local, it);
+        const NodeId S = b.varref(VarKind::Local, st);
         return b.block(
             {b.assign(VarKind::Local, it,
-                      helper(ctx, "$iter", {emit_expr(*a.nodes[0], ctx)}, p),
-                      p),
+                      helper("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
              b.make_while(
-                 b.bool_literal(true, p),
-                 b.block({b.assign(VarKind::Local, st,
-                                   helper(ctx, "$iternext", {I}, p), p),
-                          b.make_if(b.index(S, b.str_literal("done", p), p),
-                                    b.make_break(p), NodeId{}, p),
-                          b.make_yield(
-                              b.index(S, b.str_literal("value", p), p), p)},
-                         p),
-                 p)},
-            p);
+                 b.bool_literal(true),
+                 b.block(
+                     {b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+                      b.make_if(b.index(S, b.str_literal("done")),
+                                b.make_break(), NodeId{}),
+                      b.make_yield(b.index(S, b.str_literal("value")))}))});
       }
       case "globalstmt"_:
       case "nonlocalstmt"_:
-        return b.block({}, p);
+        return b.block({});
       case "delstmt"_: {
         std::vector<NodeId> out;
         for (const auto& c : a.nodes) out.push_back(emit_del(*c, ctx, p));
-        return b.block(out, p);
+        return b.block(out);
       }
       case "assertstmt"_:
         return b.make_if(
             b.binary(BinOp::Eq,
-                     helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-                     b.bool_literal(false, p), p),
-            helper(ctx, "$exc",
-                   {b.str_literal("AssertionError", p),
+                     helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                     b.bool_literal(false)),
+            helper("$exc",
+                   {b.str_literal("AssertionError"),
                     a.nodes.size() > 1
-                        ? helper(ctx, "$str", {emit_expr(*a.nodes[1], ctx)}, p)
-                        : b.str_literal("", p)},
+                        ? helper("$str", {emit_expr(*a.nodes[1], ctx)}, p)
+                        : b.str_literal("")},
                    p),
-            NodeId{}, p);
+            NodeId{});
       case "exprstmt"_:
         return emit_expr(*a.nodes[0], ctx);
       case "ifstmt"_:
         return emit_if(a, ctx);
       case "whilestmt"_:
-        return b.make_while(
-            helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-            emit_block(*a.nodes[1], ctx), p);
+        return b.make_while(helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                            emit_block(*a.nodes[1], ctx));
       case "forstmt"_:
         return emit_for(a, ctx);
       case "trystmt"_:
@@ -3269,75 +3232,69 @@ struct Binder {
         sub.tag == "slicehi"_ || sub.tag == "sliceall"_) {
       fail(sub, "deleting a slice is not supported here");
     }
-    return helper(ctx, "$delitem",
+    return helper("$delitem",
                   {emit_postfix(t, t.nodes.size() - 1, ctx),
                    emit_expr(sub, ctx)},
                   p);
   }
 
   NodeId emit_if(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
-        helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+        helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
         emit_block(*a.nodes[1], ctx));
     NodeId els;
     for (size_t i = 2; i < a.nodes.size(); ++i) {
       const Ast& c = *a.nodes[i];
       if (c.tag == "elifpart"_) {
         arms.emplace_back(
-            helper(ctx, "$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+            helper("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
             emit_block(*c.nodes[1], ctx));
       } else {
         els = emit_block(*c.nodes[0], ctx);
       }
     }
     for (size_t i = arms.size(); i-- > 0;) {
-      els = b.make_if(arms[i].first, arms[i].second, els, p);
+      els = b.make_if(arms[i].first, arms[i].second, els);
     }
     return els;
   }
 
   NodeId emit_for(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it, p);
-    const NodeId S = b.varref(VarKind::Local, st, p);
+    const NodeId I = b.varref(VarKind::Local, it);
+    const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *a.nodes[0];
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper(ctx, "$iternext", {I}, p), p),
-        b.make_if(b.index(S, b.str_literal("done", p), p), b.make_break(p),
-                  NodeId{}, p)};
-    const NodeId value = b.index(S, b.str_literal("value", p), p);
+        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
+    const NodeId value = b.index(S, b.str_literal("value"));
     if (tg.nodes.size() == 1) {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
       // `for k, v in d.items()`: the same unpack an assignment does.
       const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u, p);
+      const NodeId U = b.varref(VarKind::Local, u);
       loop.push_back(b.assign(
           VarKind::Local, u,
-          helper(ctx, "$unpack",
-                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()), p)},
-                 p),
-          p));
+          helper("$unpack",
+                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
+                 p)));
       for (size_t k = 0; k < tg.nodes.size(); ++k) {
         loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
-                                 b.index(U, b.literal(static_cast<int64_t>(k),
-                                                      p),
-                                         p),
+                                 b.index(U, b.literal(static_cast<int64_t>(k))),
                                  ctx, p));
       }
     }
     loop.push_back(emit_block(*a.nodes[2], ctx));
-    return b.block(
-        {b.assign(VarKind::Local, it,
-                  helper(ctx, "$iter", {emit_expr(*a.nodes[1], ctx)}, p), p),
-         b.make_while(b.bool_literal(true, p), b.block(loop, p), p)},
-        p);
+    return b.block({b.assign(VarKind::Local, it,
+                             helper("$iter", {emit_expr(*a.nodes[1], ctx)}, p)),
+                    b.make_while(b.bool_literal(true), b.block(loop))});
   }
 
   // try/except/finally. `finally` is a Defer inside the Scope wrapping the
@@ -3345,8 +3302,8 @@ struct Binder {
   // what it does not match, which is how a subset with no exception
   // hierarchy gets the selective behaviour right.
   NodeId emit_try(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     std::vector<const Ast*> excs;
     const Ast* fin = nullptr;
     for (size_t i = 1; i < a.nodes.size(); ++i) {
@@ -3357,15 +3314,15 @@ struct Binder {
       }
     }
     const int32_t slot = ctx.alloc_local("$exc");
-    const NodeId E = b.varref(VarKind::Local, slot, p);
+    const NodeId E = b.varref(VarKind::Local, slot);
     std::vector<NodeId> out;
     if (fin != nullptr) {
-      out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p), p));
+      out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p)));
     }
     const NodeId body = emit_block(*a.nodes[0], ctx);
     // The clauses are tried in order and what none of them claims is
     // re-thrown: one nested If per clause, and nothing else.
-    NodeId handler = b.make_throw(E, p);
+    NodeId handler = b.make_throw(E);
     for (size_t k = excs.size(); k-- > 0;) {
       const Ast& ex = *excs[k];
       const bool bare = ex.nodes[0]->tag == "block"_;
@@ -3375,7 +3332,7 @@ struct Binder {
       }
       hs.push_back(emit_block(*ex.nodes.back(), ctx));
       if (bare) {
-        handler = b.block(hs, p);
+        handler = b.block(hs);
         continue;
       }
       // A builtin exception is not a class here, so it travels as its
@@ -3383,13 +3340,12 @@ struct Binder {
       const Ast& caught = *ex.nodes[0];
       const NodeId cls = ref_of.count(&caught)
                              ? read_var(ref_of.at(&caught), ctx, p)
-                             : b.str_literal(std::string(caught.token), p);
-      handler = b.make_if(helper(ctx, "$isexc", {E, cls}, p),
-                          b.block(hs, p), handler, p);
+                             : b.str_literal(std::string(caught.token));
+      handler = b.make_if(helper("$isexc", {E, cls}, p), b.block(hs), handler);
     }
-    out.push_back(b.make_try(slot, body, handler, p));
-    const int32_t n = ctx.next_local;
-    return b.scope(n, n, b.block(out, p), p);
+    out.push_back(b.make_try(slot, body, handler));
+    const int32_t n = ctx.mark();
+    return b.scope(n, n, b.block(out));
   }
 
   // `with cm as x:` -- the context manager goes into a cell so the exit
@@ -3397,16 +3353,16 @@ struct Binder {
   // "however it exits -- falling through, Break, Continue, Return, or an
   // unwinding throw", which is exactly what a context manager promises.
   NodeId emit_with(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const int32_t cell = ctx.next_cell++;
-    const NodeId C = b.varref(VarKind::Cell, cell, p);
+    const NodeId C = b.varref(VarKind::Cell, cell);
     std::vector<NodeId> out{
-        b.cell_fresh(cell, p),
-        b.assign(VarKind::Cell, cell, emit_expr(*a.nodes[0], ctx), p)};
-    const NodeId entered = b.call_value(
-        helper(ctx, "$getattr", {C, b.str_literal("__enter__", p)}, p),
-        {b.array_lit({C}, p), b.nil_literal(p)}, p);
+        b.cell_fresh(cell),
+        b.assign(VarKind::Cell, cell, emit_expr(*a.nodes[0], ctx))};
+    const NodeId entered =
+        b.call_value(helper("$getattr", {C, b.str_literal("__enter__")}, p),
+                     {b.array_lit({C}), b.nil_literal()});
     if (a.nodes.size() > 2 && a.nodes[1]->tag == "ident"_) {
       out.push_back(
           write_var(decl_of.at(a.nodes[1].get()), entered, ctx, p));
@@ -3418,11 +3374,11 @@ struct Binder {
     std::vector<CaptureSrc> cs{{VarKind::Cell, cell}};
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back(cs);
-    out.push_back(b.make_defer(
-        b.make_closure(fns[static_cast<size_t>(g)].index, cm, p), p));
+    out.push_back(
+        b.make_defer(b.make_closure(rs.fns[static_cast<size_t>(g)].index, cm)));
     out.push_back(emit_block(*a.nodes.back(), ctx));
-    const int32_t n = ctx.next_local;
-    return b.scope(n, n, b.block(out, p), p);
+    const int32_t n = ctx.mark();
+    return b.scope(n, n, b.block(out));
   }
 
   void emit_exit_thunk(int32_t g) {
@@ -3451,13 +3407,13 @@ struct Binder {
              b.nil_literal(p)},
             p),
         p);
-    m.funcs[static_cast<size_t>(fns[static_cast<size_t>(g)].index)] =
+    m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
         std::move(f);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const std::string op(a.nodes[1]->token);
     const Ast& targets = *a.nodes[0];
     const Ast& values = *a.nodes[2];
@@ -3467,20 +3423,19 @@ struct Binder {
     if (targets.nodes.size() > 1 && values.nodes.size() == 1) {
       if (op != "=") fail(a, "cannot augment a multiple assignment");
       const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u, p);
+      const NodeId U = b.varref(VarKind::Local, u);
       std::vector<NodeId> out{b.assign(
           VarKind::Local, u,
-          helper(ctx, "$unpack",
+          helper("$unpack",
                  {emit_expr(*values.nodes[0], ctx),
-                  b.literal(static_cast<int64_t>(targets.nodes.size()), p)},
-                 p),
-          p)};
+                  b.literal(static_cast<int64_t>(targets.nodes.size()))},
+                 p))};
       for (size_t i = 0; i < targets.nodes.size(); ++i) {
-        out.push_back(emit_store(
-            *targets.nodes[i],
-            b.index(U, b.literal(static_cast<int64_t>(i), p), p), ctx, p));
+        out.push_back(emit_store(*targets.nodes[i],
+                                 b.index(U, b.literal(static_cast<int64_t>(i))),
+                                 ctx, p));
       }
-      return b.block(out, p);
+      return b.block(out);
     }
     // `a, b = c, d`: every value is computed before any is stored. One
     // target and several values is not this -- it is a tuple.
@@ -3493,25 +3448,24 @@ struct Binder {
       for (const auto& v : values.nodes) {
         const int32_t t = ctx.alloc_local("$tmp");
         temps.push_back(t);
-        out.push_back(b.assign(VarKind::Local, t, emit_expr(*v, ctx), p));
+        out.push_back(b.assign(VarKind::Local, t, emit_expr(*v, ctx)));
       }
       for (size_t i = 0; i < targets.nodes.size(); ++i) {
         out.push_back(emit_store(*targets.nodes[i],
-                                 b.varref(VarKind::Local, temps[i], p), ctx,
-                                 p));
+                                 b.varref(VarKind::Local, temps[i]), ctx, p));
       }
-      return b.block(out, p);
+      return b.block(out);
     }
     const Ast& target = *targets.nodes[0];
     const auto combine = [&](NodeId cur) -> NodeId {
       const NodeId v = emit_exprs(&values, ctx, p);
       if (op == "=") return v;
-      if (op == "+=") return helper(ctx, "$add", {cur, v}, p);
-      if (op == "-=") return helper(ctx, "$sub", {cur, v}, p);
-      if (op == "*=") return helper(ctx, "$mul", {cur, v}, p);
-      if (op == "//=") return helper(ctx, "$idiv", {cur, v}, p);
-      if (op == "/=") return helper(ctx, "$fdiv", {cur, v}, p);
-      return helper(ctx, "$mod", {cur, v}, p);
+      if (op == "+=") return helper("$add", {cur, v}, p);
+      if (op == "-=") return helper("$sub", {cur, v}, p);
+      if (op == "*=") return helper("$mul", {cur, v}, p);
+      if (op == "//=") return helper("$idiv", {cur, v}, p);
+      if (op == "/=") return helper("$fdiv", {cur, v}, p);
+      return helper("$mod", {cur, v}, p);
     };
 
     if (target.tag == "ident"_) {
@@ -3527,26 +3481,23 @@ struct Binder {
     if (!attr && last.tag != "indexsfx"_) {
       fail(last, "cannot assign to this expression");
     }
-    const NodeId key =
-        attr ? b.str_literal(std::string(last.nodes[0]->token), p)
-             : emit_expr(*last.nodes[0], ctx);
+    const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
+                            : emit_expr(*last.nodes[0], ctx);
     const int32_t tr = ctx.alloc_local("$recv");
     const int32_t tk = ctx.alloc_local("$key");
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr, p);
-    const NodeId K = b.varref(VarKind::Local, tk, p);
-    const NodeId cur =
-        op == "=" ? b.nil_literal(p)
-                  : helper(ctx, attr ? "$getattr" : "$idx", {R, K}, p);
-    return b.block({b.assign(VarKind::Local, tr, recv, p),
-                    b.assign(VarKind::Local, tk, key, p),
-                    helper(ctx, attr ? "$setattr" : "$setidx",
-                           {R, K, combine(cur)}, p)},
-                   p);
+    const NodeId R = b.varref(VarKind::Local, tr);
+    const NodeId K = b.varref(VarKind::Local, tk);
+    const NodeId cur = op == "="
+                           ? b.nil_literal()
+                           : helper(attr ? "$getattr" : "$idx", {R, K}, p);
+    return b.block(
+        {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
+         helper(attr ? "$setattr" : "$setidx", {R, K, combine(cur)}, p)});
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     if (target.tag == "ident"_) {
       const auto it = decl_of.find(&target);
       const int32_t v = it != decl_of.end() ? it->second : ref_of.at(&target);
@@ -3557,10 +3508,9 @@ struct Binder {
     }
     const Ast& last = *target.nodes.back();
     const bool attr = last.tag == "dotsfx"_;
-    const NodeId key =
-        attr ? b.str_literal(std::string(last.nodes[0]->token), p)
-             : emit_expr(*last.nodes[0], ctx);
-    return helper(ctx, attr ? "$setattr" : "$setidx",
+    const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
+                            : emit_expr(*last.nodes[0], ctx);
+    return helper(attr ? "$setattr" : "$setidx",
                   {emit_postfix(target, target.nodes.size() - 1, ctx), key,
                    value},
                   p);
@@ -3570,8 +3520,8 @@ struct Binder {
   // it, exactly as examples/mini-culebra does. Python's methods declare
   // `self` themselves, so there is no implicit parameter here.
   NodeId emit_class(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const std::string cname(a.nodes[0]->token);
     const int32_t v = decl_of.at(a.nodes[0].get());
     const auto& methods = class_of.at(&a);
@@ -3586,44 +3536,41 @@ struct Binder {
     }
     const ClassInfo& ci = class_info.at(&a);
     std::vector<std::pair<NodeId, NodeId>> kvs{
-        {b.str_literal(kNameKey, p), b.str_literal(cname, p)}};
+        {b.str_literal(kNameKey), b.str_literal(cname)}};
     if (ci.base_var >= 0) {
-      kvs.emplace_back(b.str_literal(kBaseKey, p),
-                       read_var(ci.base_var, ctx, p));
+      kvs.emplace_back(b.str_literal(kBaseKey), read_var(ci.base_var, ctx, p));
     }
     if (!ci.root.empty()) {
-      kvs.emplace_back(b.str_literal(kRootKey, p),
-                       b.str_literal(ci.root, p));
+      kvs.emplace_back(b.str_literal(kRootKey), b.str_literal(ci.root));
     }
     for (const auto& [name, g] : methods) {
-      kvs.emplace_back(b.str_literal("\x02" + name, p),
-                       emit_closure(g, ctx, p));
+      kvs.emplace_back(b.str_literal("\x02" + name), emit_closure(g, ctx, p));
     }
     // The table lives in a cell -- the constructor captures it, and so does
     // any method that says `super()`.
-    const auto [ck, cell] = access(ctx.fn, ci.table_var);
+    const auto [ck, cell] = rs.access(ctx.fn, ci.table_var);
     (void)ck;
-    const NodeId T = b.varref(VarKind::Cell, cell, p);
+    const NodeId T = b.varref(VarKind::Cell, cell);
     const int32_t ctor = new_fn(ctx.fn, cname);
-    fns[static_cast<size_t>(ctor)].index = static_cast<int32_t>(m.funcs.size());
+    rs.fns[static_cast<size_t>(ctor)].index = static_cast<int32_t>(m.funcs.size());
     m.funcs.push_back({});
     emit_ctor(ctor, cname, ci.is_exc);
     std::vector<CaptureSrc> cs{{VarKind::Cell, cell}};
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back(cs);
-    out.push_back(b.cell_fresh(cell, p));
-    out.push_back(b.assign(VarKind::Cell, cell, b.object_lit(kvs, p), p));
+    out.push_back(b.cell_fresh(cell));
+    out.push_back(b.assign(VarKind::Cell, cell, b.object_lit(kvs)));
     // The class value is its constructor closure, and the table keeps a
     // reference to it: that is the identity `isinstance` and `except`
     // compare, since there is nothing else a class could be.
     const int32_t t = ctx.alloc_local("$class");
-    const NodeId K = b.varref(VarKind::Local, t, p);
-    out.push_back(b.assign(
-        VarKind::Local, t,
-        b.make_closure(fns[static_cast<size_t>(ctor)].index, cm, p), p));
-    out.push_back(b.set_index(T, b.str_literal(kIdKey, p), K, p));
+    const NodeId K = b.varref(VarKind::Local, t);
+    out.push_back(
+        b.assign(VarKind::Local, t,
+                 b.make_closure(rs.fns[static_cast<size_t>(ctor)].index, cm)));
+    out.push_back(b.set_index(T, b.str_literal(kIdKey), K));
     out.push_back(write_var(v, K, ctx, p));
-    return b.block(out, p);
+    return b.block(out);
   }
 
   // Calling a class is calling this: it makes the instance and hands the
@@ -3667,14 +3614,14 @@ struct Binder {
     f.capture_names = {cname};
     f.lenient_arity = true;
     f.body = b.scope(0, 0, b.block(body, p), p);
-    m.funcs[static_cast<size_t>(fns[static_cast<size_t>(g)].index)] =
+    m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
         std::move(f);
   }
 
   // -- Expressions --------------------------------------------------------
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_: {
         std::string t(a.token);
@@ -3686,14 +3633,14 @@ struct Binder {
       }
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr), p);
+            std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)), p);
+        return b.str_literal(unescape(std::string(a.token)));
       case "literal"_: {
         const std::string t(a.token);
-        if (t == "True") return b.bool_literal(true, p);
-        if (t == "False") return b.bool_literal(false, p);
-        return b.nil_literal(p);
+        if (t == "True") return b.bool_literal(true);
+        if (t == "False") return b.bool_literal(false);
+        return b.nil_literal();
       }
       case "ident"_: {
         const auto it = ref_of.find(&a);
@@ -3703,7 +3650,7 @@ struct Binder {
         // of its own instead, made once and shared.
         const std::string g(a.token);
         if (is_value_builtin(g)) {
-          return b.make_closure(builtin_func(g), empty_cmap, p);
+          return b.make_closure(builtin_func(g), empty_cmap);
         }
         fail(a, "'" + g + "' must be called here");
       }
@@ -3711,7 +3658,7 @@ struct Binder {
         // One concatenation per piece. `$fmt` is what applies a spec, and
         // it is called even for an empty one so that a number and a string
         // reach `$str` the same way.
-        NodeId acc = b.str_literal("", p);
+        NodeId acc = b.str_literal("");
         for (const auto& c : a.nodes) {
           NodeId piece;
           if (c->tag == "fexpr"_) {
@@ -3725,12 +3672,12 @@ struct Binder {
                 spec = std::string(c->nodes[i]->token);
               }
             }
-            if (as_repr) v = helper(ctx, "$repr", {v}, p);
-            piece = helper(ctx, "$fmt", {v, b.str_literal(spec, p)}, p);
+            if (as_repr) v = helper("$repr", {v}, p);
+            piece = helper("$fmt", {v, b.str_literal(spec)}, p);
           } else {
-            piece = b.str_literal(unescape_ftext(std::string(c->token)), p);
+            piece = b.str_literal(unescape_ftext(std::string(c->token)));
           }
-          acc = b.binary(BinOp::Add, acc, piece, p);
+          acc = b.binary(BinOp::Add, acc, piece);
         }
         return acc;
       }
@@ -3741,11 +3688,11 @@ struct Binder {
       case "gencomp"_:
       case "bargen"_:
         return b.call_value(emit_closure(fn_of.at(&a), ctx, p),
-                            {b.array_lit({}, p), b.nil_literal(p)}, p);
+                            {b.array_lit({}), b.nil_literal()});
       case "tuplelit"_: {
         std::vector<NodeId> items;
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
-        return helper(ctx, "$tuple", {b.array_lit(items, p)}, p);
+        return helper("$tuple", {b.array_lit(items)}, p);
       }
       case "lambda"_: {
         const int32_t g = fn_of.at(&a);
@@ -3753,25 +3700,24 @@ struct Binder {
         std::vector<NodeId> out;
         emit_defaults(g, ctx, out, p);
         out.push_back(emit_closure(g, ctx, p));
-        return b.block(out, p);
+        return b.block(out);
       }
       case "negexp"_:
-        return helper(ctx, "$neg", {emit_expr(*a.nodes[0], ctx)}, p);
+        return helper("$neg", {emit_expr(*a.nodes[0], ctx)}, p);
       case "notop"_:
         return b.binary(BinOp::Eq,
-                        helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)},
-                               p),
-                        b.bool_literal(false, p), p);
+                        helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                        b.bool_literal(false));
       case "powexp"_:
-        return helper(ctx, "$pow",
+        return helper("$pow",
                       {emit_expr(*a.nodes[0], ctx),
                        emit_expr(*a.nodes[1]->nodes[0], ctx)},
                       p);
       case "ternary"_:
         // `a if c else b`: the condition is the middle child.
-        return b.make_if(
-            helper(ctx, "$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
-            emit_expr(*a.nodes[0], ctx), emit_expr(*a.nodes[2], ctx), p);
+        return b.make_if(helper("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
+                         emit_expr(*a.nodes[0], ctx),
+                         emit_expr(*a.nodes[2], ctx));
       case "orexp"_:
       case "andexp"_: {
         const bool is_or = a.tag == "orexp"_;
@@ -3779,11 +3725,10 @@ struct Binder {
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t, p);
-          acc = b.block({b.assign(VarKind::Local, t, acc, p),
-                         b.make_if(helper(ctx, "$truthy", {keep}, p),
-                                   is_or ? keep : rhs, is_or ? rhs : keep, p)},
-                        p);
+          const NodeId keep = b.varref(VarKind::Local, t);
+          acc = b.block({b.assign(VarKind::Local, t, acc),
+                         b.make_if(helper("$truthy", {keep}, p),
+                                   is_or ? keep : rhs, is_or ? rhs : keep)});
         }
         return acc;
       }
@@ -3800,7 +3745,7 @@ struct Binder {
           const int32_t t = ctx.alloc_local("$cmp");
           slots.push_back(t);
           pre.push_back(
-              b.assign(VarKind::Local, t, emit_expr(*a.nodes[k], ctx), p));
+              b.assign(VarKind::Local, t, emit_expr(*a.nodes[k], ctx)));
         }
         const auto link = [&](size_t k) {
           const Ast& op = *a.nodes[k * 2 + 1];
@@ -3810,39 +3755,39 @@ struct Binder {
             t = t.find("not") != std::string::npos ? "is not" : "is";
           }
           const SrcPos op_p = pos_of(op);
-          const NodeId lhs = b.varref(VarKind::Local, slots[k], p);
-          const NodeId rhs = b.varref(VarKind::Local, slots[k + 1], p);
-          if (t == "==") return helper(ctx, "$eq", {lhs, rhs}, op_p);
+          const NodeId lhs = b.varref(VarKind::Local, slots[k]);
+          const NodeId rhs = b.varref(VarKind::Local, slots[k + 1]);
+          if (t == "==") return helper("$eq", {lhs, rhs}, op_p);
           if (t == "!=") {
-            return b.binary(BinOp::Eq, helper(ctx, "$eq", {lhs, rhs}, op_p),
-                            b.bool_literal(false, p), op_p);
+            return b.at(op_p).binary(BinOp::Eq, helper("$eq", {lhs, rhs}, op_p),
+                                     b.bool_literal(false));
           }
           // `is` is identity, which `Same` answers.
           if (t == "is" || t == "is not") {
             const NodeId same =
-                b.intrinsic(IntrinsicId::Same, {lhs, rhs}, op_p);
+                b.at(op_p).intrinsic(IntrinsicId::Same, {lhs, rhs});
             return t == "is" ? same
-                             : b.binary(BinOp::Eq, same,
-                                        b.bool_literal(false, p), op_p);
+                             : b.at(op_p).binary(BinOp::Eq, same,
+                                                 b.bool_literal(false));
           }
-          if (t == "in") return helper(ctx, "$in", {lhs, rhs}, op_p);
+          if (t == "in") return helper("$in", {lhs, rhs}, op_p);
           if (t == "not in") {
-            return b.binary(BinOp::Eq, helper(ctx, "$in", {lhs, rhs}, op_p),
-                            b.bool_literal(false, p), op_p);
+            return b.at(op_p).binary(BinOp::Eq, helper("$in", {lhs, rhs}, op_p),
+                                     b.bool_literal(false));
           }
           const BinOp o = t == "<"    ? BinOp::Lt
                           : t == "<=" ? BinOp::Le
                           : t == ">"  ? BinOp::Gt
                                       : BinOp::Ge;
-          return b.binary(o, helper(ctx, "$cmp", {lhs, rhs}, op_p),
-                          b.literal(0, p), op_p);
+          return b.at(op_p).binary(o, helper("$cmp", {lhs, rhs}, op_p),
+                                   b.literal(0));
         };
         NodeId chain = link(links - 1);
         for (size_t k = links - 1; k-- > 0;) {
-          chain = b.make_if(link(k), chain, b.bool_literal(false, p), p);
+          chain = b.make_if(link(k), chain, b.bool_literal(false));
         }
         pre.push_back(chain);
-        return b.block(pre, p);
+        return b.block(pre);
       }
       case "addexp"_:
       case "mulexp"_: {
@@ -3858,26 +3803,26 @@ struct Binder {
                           : t == "//" ? "$idiv"
                           : t == "/"  ? "$fdiv"
                                       : "$mod";
-          acc = helper(ctx, h, {acc, rhs}, op_p);
+          acc = helper(h, {acc, rhs}, op_p);
         }
         return acc;
       }
       case "listlit"_: {
         std::vector<NodeId> items;
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
-        return b.array_lit(items, p);
+        return b.array_lit(items);
       }
       case "dictlit"_: {
         const int32_t t = ctx.alloc_local("$dict");
-        const NodeId T = b.varref(VarKind::Local, t, p);
-        std::vector<NodeId> out{b.assign(
-            VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}, p), p)};
+        const NodeId T = b.varref(VarKind::Local, t);
+        std::vector<NodeId> out{
+            b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}))};
         for (const auto& c : a.nodes) {
           out.push_back(b.set_index(T, emit_expr(*c->nodes[0], ctx),
-                                    emit_expr(*c->nodes[1], ctx), p));
+                                    emit_expr(*c->nodes[1], ctx)));
         }
         out.push_back(T);
-        return b.block(out, p);
+        return b.block(out);
       }
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
@@ -3889,12 +3834,12 @@ struct Binder {
   // An integer literal too wide for an int64 becomes a bignum constant --
   // built here, at bind time, in the same limb form the runtime uses.
   NodeId int_literal(const std::string& digits, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     errno = 0;
     char* end = nullptr;
     const long long v = std::strtoll(digits.c_str(), &end, 10);
     if (errno == 0 && end == digits.c_str() + digits.size()) {
-      return b.literal(static_cast<int64_t>(v), p);
+      return b.literal(static_cast<int64_t>(v));
     }
     // Long division of the decimal string by 10^9, one pass per limb --
     // the same base the runtime works in, so the constant is already in
@@ -3910,12 +3855,11 @@ struct Binder {
         rem = cur % kBase;
         if (!q.empty() || dq != 0) q.push_back(static_cast<char>('0' + dq));
       }
-      limbs.push_back(b.literal(rem, p));
+      limbs.push_back(b.literal(rem));
       rest = q.empty() ? "0" : q;
     }
-    return b.object_lit({{b.str_literal(kBigKey, p), b.array_lit(limbs, p)},
-                         {b.str_literal(kSignKey, p), b.literal(1, p)}},
-                        p);
+    return b.object_lit({{b.str_literal(kBigKey), b.array_lit(limbs)},
+                         {b.str_literal(kSignKey), b.literal(1)}});
   }
 
   NodeId emit_postfix(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -3939,7 +3883,7 @@ struct Binder {
           callnode.nodes.empty() ? nullptr : callnode.nodes[0].get(), ctx, {},
           pos_of(prim));
       cur = helper(
-          ctx, "$supercall",
+          "$supercall",
           {read_var(params[0].var, ctx, pos_of(prim)),
            b.index(table, b.str_literal(kBaseKey, pos_of(prim)),
                    pos_of(prim)),
@@ -3964,7 +3908,7 @@ struct Binder {
             ++i;
             break;
           }
-          cur = helper(ctx, "$getattr", {cur, b.str_literal(name, p)}, p);
+          cur = helper("$getattr", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_: {
@@ -3973,32 +3917,32 @@ struct Binder {
           // a position: `slicelo` and `slicehi` are separate rules for
           // exactly that reason, since one child says nothing on its own.
           if (sub.tag == "sliceboth"_) {
-            cur = helper(ctx, "$slice",
+            cur = helper("$slice",
                          {cur, emit_expr(*sub.nodes[0], ctx),
                           emit_expr(*sub.nodes[1], ctx)},
                          p);
             break;
           }
           if (sub.tag == "slicelo"_) {
-            cur = helper(ctx, "$slice",
+            cur = helper("$slice",
                          {cur, emit_expr(*sub.nodes[0], ctx),
                           b.nil_literal(p)},
                          p);
             break;
           }
           if (sub.tag == "slicehi"_) {
-            cur = helper(ctx, "$slice",
+            cur = helper("$slice",
                          {cur, b.nil_literal(p),
                           emit_expr(*sub.nodes[0], ctx)},
                          p);
             break;
           }
           if (sub.tag == "sliceall"_) {
-            cur = helper(ctx, "$slice",
+            cur = helper("$slice",
                          {cur, b.nil_literal(p), b.nil_literal(p)}, p);
             break;
           }
-          cur = helper(ctx, "$idx", {cur, emit_expr(sub, ctx)}, p);
+          cur = helper("$idx", {cur, emit_expr(sub, ctx)}, p);
           break;
         }
         default:  // callsfx
@@ -4013,23 +3957,22 @@ struct Binder {
 
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
                      FnCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const Ast* argnode = call.nodes.empty() ? nullptr : call.nodes[0].get();
     // The receiver lands in a slot first, because both branches below
     // read it and one of them reads it twice.
     const int32_t t = ctx.alloc_local("$self");
-    const NodeId T = b.varref(VarKind::Local, t, p);
+    const NodeId T = b.varref(VarKind::Local, t);
     // A method declares `self` itself, so the receiver goes in front.
     if (!is_method_name(name)) {
       return b.block(
-          {b.assign(VarKind::Local, t, recv, p),
-           emit_pycall(helper(ctx, "$getattr", {T, b.str_literal(name, p)}, p),
-                       argnode, ctx, {T}, p)},
-          p);
+          {b.assign(VarKind::Local, t, recv),
+           emit_pycall(helper("$getattr", {T, b.str_literal(name)}, p), argnode,
+                       ctx, {T}, p)});
     }
     // `sort` takes key= and reverse=, exactly as `sorted` does.
-    NodeId sortkey = b.nil_literal(p);
-    NodeId sortrev = b.bool_literal(false, p);
+    NodeId sortkey = b.nil_literal();
+    NodeId sortrev = b.bool_literal(false);
     std::vector<NodeId> args;
     if (name == "sort" && argnode != nullptr) {
       for (const auto& c : argnode->nodes) {
@@ -4049,24 +3992,24 @@ struct Binder {
       args = emit_args(argnode, ctx);
     }
     const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal(p);
+      return k < args.size() ? args[k] : b.nil_literal();
     };
-    const auto got = [&](size_t k) { return b.bool_literal(k < args.size(), p); };
+    const auto got = [&](size_t k) { return b.bool_literal(k < args.size()); };
     std::vector<NodeId> call_args{T};
     call_args.insert(call_args.end(), args.begin(), args.end());
-    const NodeId user = b.call_value(
-        helper(ctx, "$getattr", {T, b.str_literal(name, p)}, p),
-        {b.array_lit(call_args, p), b.nil_literal(p)}, p);
+    const NodeId user =
+        b.call_value(helper("$getattr", {T, b.str_literal(name)}, p),
+                     {b.array_lit(call_args), b.nil_literal()});
 
     std::vector<std::pair<const char*, NodeId>> cands;
     const auto add = [&](const char* want, NodeId impl) {
       cands.emplace_back(want, impl);
     };
     const auto h = [&](const char* n, std::vector<NodeId> as) {
-      return helper(ctx, n, as, p);
+      return helper(n, as, p);
     };
     if (name == "append") {
-      add("array", b.intrinsic(IntrinsicId::ArrayPush, {T, a0(0)}, p));
+      add("array", b.intrinsic(IntrinsicId::ArrayPush, {T, a0(0)}));
     } else if (name == "extend") {
       add("array", h("$aext", {T, a0(0)}));
     } else if (name == "pop") {
@@ -4086,7 +4029,7 @@ struct Binder {
     } else if (name == "sort") {
       add("array", h("$asort", {T, sortkey, sortrev}));
     } else if (name == "keys") {
-      add("map", b.intrinsic(IntrinsicId::ObjectKeys, {T}, p));
+      add("map", b.intrinsic(IntrinsicId::ObjectKeys, {T}));
     } else if (name == "items") {
       add("map", h("$items", {T}));
     } else if (name == "values") {
@@ -4098,11 +4041,11 @@ struct Binder {
     } else if (name == "split") {
       add("string", h("$split", {T, a0(0), got(0)}));
     } else if (name == "strip") {
-      add("string", h("$strip", {T, b.literal(0, p)}));
+      add("string", h("$strip", {T, b.literal(0)}));
     } else if (name == "lstrip") {
-      add("string", h("$strip", {T, b.literal(1, p)}));
+      add("string", h("$strip", {T, b.literal(1)}));
     } else if (name == "rstrip") {
-      add("string", h("$strip", {T, b.literal(2, p)}));
+      add("string", h("$strip", {T, b.literal(2)}));
     } else if (name == "replace") {
       add("string", h("$replace", {T, a0(0), a0(1)}));
     } else if (name == "find") {
@@ -4120,12 +4063,11 @@ struct Binder {
     }
     NodeId cur = user;
     for (size_t k = cands.size(); k-- > 0;) {
-      cur = b.make_if(b.binary(BinOp::Eq,
-                               b.intrinsic(IntrinsicId::TypeOf, {T}, p),
-                               b.str_literal(cands[k].first, p), p),
-                      cands[k].second, cur, p);
+      cur = b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {T}),
+                               b.str_literal(cands[k].first)),
+                      cands[k].second, cur);
     }
-    return b.block({b.assign(VarKind::Local, t, recv, p), cur}, p);
+    return b.block({b.assign(VarKind::Local, t, recv), cur});
   }
 
   NodeId emit_builtin(const Ast& a, size_t limit, FnCtx& ctx, size_t& i) {
@@ -4161,7 +4103,7 @@ struct Binder {
         if (seq.v != NodeId{}.v) fail(*c, "sorted() takes one iterable here");
         seq = emit_expr(*c, ctx);
       }
-      return helper(ctx, "$sorted", {seq, key, rev}, p);
+      return helper("$sorted", {seq, key, rev}, p);
     }
     if (g == "isinstance") {
       // The second argument is usually a bare type name, which is not a
@@ -4178,7 +4120,7 @@ struct Binder {
           cls.tag == "ident"_ && !ref_of.count(&cls)
               ? b.str_literal(std::string(cls.token), p)
               : emit_expr(cls, ctx);
-      return helper(ctx, "$isinst", {emit_expr(what, ctx), cv}, p);
+      return helper("$isinst", {emit_expr(what, ctx), cv}, p);
     }
     std::vector<NodeId> args =
         emit_args(call.nodes.empty() ? nullptr : call.nodes[0].get(), ctx);
@@ -4195,55 +4137,55 @@ struct Binder {
     }
     if (g == "print") {
       std::vector<NodeId> parts;
-      for (const NodeId v : args) parts.push_back(helper(ctx, "$str", {v}, p));
+      for (const NodeId v : args) parts.push_back(helper("$str", {v}, p));
       return native("print", {b.array_lit(parts, p)}, p);
     }
-    if (g == "len") return helper(ctx, "$len", {a0(0)}, p);
-    if (g == "str") return helper(ctx, "$str", {a0(0)}, p);
-    if (g == "int") return helper(ctx, "$toint", {a0(0)}, p);
-    if (g == "float") return helper(ctx, "$tofloat", {a0(0)}, p);
-    if (g == "list") return helper(ctx, "$tolist", {a0(0)}, p);
-    if (g == "bool") return helper(ctx, "$truthy", {a0(0)}, p);
+    if (g == "len") return helper("$len", {a0(0)}, p);
+    if (g == "str") return helper("$str", {a0(0)}, p);
+    if (g == "int") return helper("$toint", {a0(0)}, p);
+    if (g == "float") return helper("$tofloat", {a0(0)}, p);
+    if (g == "list") return helper("$tolist", {a0(0)}, p);
+    if (g == "bool") return helper("$truthy", {a0(0)}, p);
     if (g == "abs") {
       return b.make_if(
-          b.binary(BinOp::Lt, helper(ctx, "$cmp", {a0(0), b.literal(0, p)}, p),
+          b.binary(BinOp::Lt, helper("$cmp", {a0(0), b.literal(0, p)}, p),
                    b.literal(0, p), p),
-          helper(ctx, "$neg", {a0(0)}, p), a0(0), p);
+          helper("$neg", {a0(0)}, p), a0(0), p);
     }
-    if (g == "type") return helper(ctx, "$type", {a0(0)}, p);
-    if (g == "repr") return helper(ctx, "$repr", {a0(0)}, p);
+    if (g == "type") return helper("$type", {a0(0)}, p);
+    if (g == "repr") return helper("$repr", {a0(0)}, p);
     if (g == "next") {
-      return helper(ctx, "$next",
+      return helper("$next",
                     {a0(0), a0(1), b.bool_literal(args.size() > 1, p)}, p);
     }
     if (g == "tuple") {
-      return helper(ctx, "$tuple", {helper(ctx, "$tolist", {a0(0)}, p)}, p);
+      return helper("$tuple", {helper("$tolist", {a0(0)}, p)}, p);
     }
     if (g == "enumerate") {
-      return helper(ctx, "$enumerate",
+      return helper("$enumerate",
                     {a0(0), args.size() > 1 ? args[1] : b.literal(0, p)}, p);
     }
     if (g == "zip") {
       if (args.size() != 2) fail(prim, "zip() takes two iterables here");
-      return helper(ctx, "$zip", {args[0], args[1]}, p);
+      return helper("$zip", {args[0], args[1]}, p);
     }
     if (g == "sum") {
-      return helper(ctx, "$sum",
+      return helper("$sum",
                     {a0(0), args.size() > 1 ? args[1] : b.literal(0, p)}, p);
     }
     if (g == "min" || g == "max") {
       const NodeId ismax = b.bool_literal(g == "max", p);
       // `min(xs)` scans one iterable; `min(a, b)` scans its own arguments.
-      return helper(ctx, "$minmax",
+      return helper("$minmax",
                     {args.size() == 1 ? args[0] : b.array_lit(args, p), ismax},
                     p);
     }
     if (g == "range") {
       if (args.size() == 1) {
-        return helper(ctx, "$range",
+        return helper("$range",
                       {b.literal(0, p), args[0], b.literal(1, p)}, p);
       }
-      return helper(ctx, "$range",
+      return helper("$range",
                     {a0(0), a0(1),
                      args.size() > 2 ? args[2] : b.literal(1, p)},
                     p);
@@ -4314,12 +4256,14 @@ struct Binder {
     // leaves a reference into it dangling. The symptom was a capture
     // reading an uninitialized cell, three functions away.
     const FnInfo fi = fns[static_cast<size_t>(f)];
+    // Same reason, and the same growth: emit_class appends to rs.fns too.
+    const Resolver::Fn rf = rs.fns[static_cast<size_t>(f)];
     if (fi.is_synth) return;  // a `with`'s exit thunk, built by emit_with
     FnCtx ctx;
     ctx.fn = f;
-    ctx.next_cell = static_cast<int32_t>(fi.cell_index.size());
-    Builder b(m);
+    ctx.next_cell = rs.num_cells(f);
     const SrcPos p = fi.body != nullptr ? pos_of(*fi.body) : SrcPos{0, 0};
+    auto b = Builder(m).at(p);
 
     std::vector<NodeId> pre;
     // Every cell this function owns is made once, at entry. Python binds
@@ -4327,24 +4271,23 @@ struct Binder {
     // binding -- a lambda made in a loop sees the loop variable's final
     // value -- so a CellFresh per iteration would be wrong here in a way
     // it is right in examples/mini-js.
-    for (const auto& [v, c] : fi.cell_index) {
+    for (const auto& [v, c] : rf.cell_index) {
       (void)v;
-      pre.push_back(b.cell_fresh(c, p));
+      pre.push_back(b.cell_fresh(c));
     }
     // Before the prologue below, which calls helpers itself.
-    if (f == 0) fill_helpers(ctx, pre, p);
     // The two slots every Python function is called with, and the prologue
     // that turns them back into the parameters the source declared.
     const int32_t sa = ctx.alloc_local("$a");
     const int32_t sk = ctx.alloc_local("$k");
-    emit_prologue(fi, ctx, pre, sa, sk, p);
+    emit_prologue(fi, rf, ctx, pre, sa, sk, p);
     // Every other binding of this function gets a slot up front too, since
     // its scope is the whole body whatever block it was assigned in.
-    for (size_t v = 0; v < vars.size(); ++v) {
-      if (vars[v].owner != f) continue;
-      if (slot_of[v] >= 0) continue;
-      if (fi.cell_index.count(static_cast<int32_t>(v))) continue;
-      slot_of[v] = ctx.alloc_local(vars[v].name);
+    for (size_t v = 0; v < rs.vars.size(); ++v) {
+      if (rs.vars[v].owner != f) continue;
+      if (rs.vars[v].slot >= 0) continue;
+      if (rf.cell_index.count(static_cast<int32_t>(v))) continue;
+      rs.vars[v].slot = ctx.alloc_local(rs.vars[v].name);
     }
 
     NodeId body;
@@ -4354,50 +4297,50 @@ struct Binder {
                fi.body->tag == "gencomp"_ || fi.body->tag == "bargen"_) {
       body = emit_comp(*fi.body, ctx, p);
     } else {
-      body = b.make_return(emit_expr(*fi.body, ctx), p);  // a lambda
+      body = b.make_return(emit_expr(*fi.body, ctx));  // a lambda
     }
 
     std::vector<NodeId> stmts;
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
-    stmts.push_back(b.make_return(b.nil_literal(p), p));
+    stmts.push_back(b.make_return(b.nil_literal()));
 
     Func fn;
     fn.name = fi.name;
     fn.num_params = 2;  // the convention, not what the source declared
     fn.num_locals = ctx.high_local;
-    ctx.local_names.resize(static_cast<size_t>(ctx.high_local), "");
-    fn.local_names = ctx.local_names;
+    fn.local_names = ctx.names();
     fn.num_cells = ctx.next_cell;
     fn.lenient_arity = true;
     fn.is_generator = fi.is_generator;
-    fn.num_captures = m.funcs[static_cast<size_t>(fi.index)].num_captures;
-    fn.capture_names = m.funcs[static_cast<size_t>(fi.index)].capture_names;
-    fn.body = b.scope(0, ctx.high_local, b.block(stmts, p), p);
-    m.funcs[static_cast<size_t>(fi.index)] = std::move(fn);
+    fn.num_captures = m.funcs[static_cast<size_t>(rf.index)].num_captures;
+    fn.capture_names = m.funcs[static_cast<size_t>(rf.index)].capture_names;
+    fn.body = b.scope(0, ctx.high_local, b.block(stmts));
+    m.funcs[static_cast<size_t>(rf.index)] = std::move(fn);
   }
 
   // Unpack the convention into the declared parameters, applying defaults,
   // matching keywords by name, and collecting what `*rest`/`**kw` asked for.
-  void emit_prologue(const FnInfo& fi, FnCtx& ctx, std::vector<NodeId>& pre,
-                     int32_t sa, int32_t sk, SrcPos p) {
-    Builder b(m);
-    const NodeId A = b.varref(VarKind::Local, sa, p);
-    const NodeId K = b.varref(VarKind::Local, sk, p);
-    const auto alen = [&] { return b.intrinsic(IntrinsicId::Len, {A}, p); };
+  void emit_prologue(const FnInfo& fi, const Resolver::Fn& rf, FnCtx& ctx,
+                     std::vector<NodeId>& pre, int32_t sa, int32_t sk,
+                     SrcPos p) {
+    auto b = Builder(m).at(p);
+    const NodeId A = b.varref(VarKind::Local, sa);
+    const NodeId K = b.varref(VarKind::Local, sk);
+    const auto alen = [&] { return b.intrinsic(IntrinsicId::Len, {A}); };
     // The entry frame is the one activation the VM builds itself rather than
     // through a call, so `lenient_arity`'s nil-fill never runs for it and
     // both slots would still be Uninit -- which the read-before-init check
     // catches on the first look. A `finally` thunk *is* called (by Defer,
     // with no arguments), so nil is what it gets and the test suffices.
-    if (fi.parent < 0) {
-      pre.push_back(b.assign(VarKind::Local, sa, b.array_lit({}, p), p));
-      pre.push_back(b.assign(VarKind::Local, sk, b.nil_literal(p), p));
+    if (rf.parent < 0) {
+      pre.push_back(b.assign(VarKind::Local, sa, b.array_lit({})));
+      pre.push_back(b.assign(VarKind::Local, sk, b.nil_literal()));
     } else {
-      pre.push_back(b.make_if(
-          b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {A}, p),
-                   b.str_literal("nil", p), p),
-          b.assign(VarKind::Local, sa, b.array_lit({}, p), p), NodeId{}, p));
+      pre.push_back(
+          b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {A}),
+                             b.str_literal("nil")),
+                    b.assign(VarKind::Local, sa, b.array_lit({})), NodeId{}));
     }
 
     // Two passes over the parameters, because Python's "missing" message
@@ -4419,25 +4362,25 @@ struct Binder {
         has_kwrest = true;
         continue;
       }
-      names.push_back(b.str_literal(pi.name, p));
+      names.push_back(b.str_literal(pi.name));
       if (pi.kind != ParamInfo::Default) {
-        reqname.push_back(b.str_literal(pi.name, p));
-        reqidx.push_back(b.literal(pos, p));
+        reqname.push_back(b.str_literal(pi.name));
+        reqidx.push_back(b.literal(pos));
         required = pos + 1;
       }
       ++pos;
     }
-    const NodeId all_names = b.array_lit(names, p);
-    const NodeId req_names = b.array_lit(reqname, p);
-    const NodeId req_idx = b.array_lit(reqidx, p);
+    const NodeId all_names = b.array_lit(names);
+    const NodeId req_names = b.array_lit(reqname);
+    const NodeId req_idx = b.array_lit(reqidx);
 
     int32_t at = 0;
     for (const ParamInfo& pi : fi.params) {
       NodeId value;
       if (pi.kind == ParamInfo::Rest) {
-        value = helper(ctx, "$rest", {A, b.literal(pos, p)}, p);
+        value = helper("$rest", {A, b.literal(pos)}, p);
       } else if (pi.kind == ParamInfo::KwRest) {
-        value = helper(ctx, "$kwrest", {K, all_names}, p);
+        value = helper("$kwrest", {K, all_names}, p);
       } else {
         // Positional, then by name, then the default -- and a TypeError
         // when none of the three answered.
@@ -4446,45 +4389,43 @@ struct Binder {
         const NodeId fallback =
             pi.kind == ParamInfo::Default
                 ? read_var(pi.def_var, ctx, p)
-                : helper(ctx, "$missing",
-                         {b.str_literal(fi.name, p), req_names, req_idx, A, K},
-                         p);
+                : helper("$missing",
+                         {b.str_literal(fi.name), req_names, req_idx, A, K}, p);
         value = b.make_if(
-            b.binary(BinOp::Gt, alen(), b.literal(at, p), p),
-            b.index(A, b.literal(at, p), p),
-            b.make_if(helper(ctx, "$kwhas", {K, b.str_literal(pi.name, p)}, p),
-                      b.index(K, b.str_literal(pi.name, p), p), fallback, p),
-            p);
+            b.binary(BinOp::Gt, alen(), b.literal(at)),
+            b.index(A, b.literal(at)),
+            b.make_if(helper("$kwhas", {K, b.str_literal(pi.name)}, p),
+                      b.index(K, b.str_literal(pi.name)), fallback));
         ++at;
       }
-      const auto it = fi.cell_index.find(pi.var);
-      if (it != fi.cell_index.end()) {
-        pre.push_back(b.assign(VarKind::Cell, it->second, value, p));
+      const auto it = rf.cell_index.find(pi.var);
+      if (it != rf.cell_index.end()) {
+        pre.push_back(b.assign(VarKind::Cell, it->second, value));
       } else {
         const int32_t s = ctx.alloc_local(pi.name);
-        slot_of[static_cast<size_t>(pi.var)] = s;
-        pre.push_back(b.assign(VarKind::Local, s, value, p));
+        rs.vars[static_cast<size_t>(pi.var)].slot = s;
+        pre.push_back(b.assign(VarKind::Local, s, value));
       }
     }
     if (!has_rest) {
-      pre.push_back(b.make_if(
-          b.binary(BinOp::Gt, alen(), b.literal(pos, p), p),
-          helper(ctx, "$toomany",
-                 {b.str_literal(fi.name, p), b.literal(required, p),
-                  b.literal(pos, p), alen()},
-                 p),
-          NodeId{}, p));
+      pre.push_back(
+          b.make_if(b.binary(BinOp::Gt, alen(), b.literal(pos)),
+                    helper("$toomany",
+                           {b.str_literal(fi.name), b.literal(required),
+                            b.literal(pos), alen()},
+                           p),
+                    NodeId{}));
     }
     if (!has_kwrest) {
-      pre.push_back(helper(ctx, "$kwcheck",
-                           {K, all_names, b.str_literal(fi.name, p)}, p));
+      pre.push_back(
+          helper("$kwcheck", {K, all_names, b.str_literal(fi.name)}, p));
     }
   }
 
   // The body of a comprehension's function: the clauses nest outward-in,
   // and what the innermost one reaches is a push, a store or a yield.
   NodeId emit_comp(const Ast& a, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const bool dict = a.tag == "dictcomp"_;
     const bool gen = a.tag == "gencomp"_ || a.tag == "bargen"_;
     const size_t head = dict ? 2 : 1;  // the element expression(s)
@@ -4495,118 +4436,99 @@ struct Binder {
     }
     int32_t acc = -1;
     if (!gen) acc = ctx.alloc_local("$acc");
-    const NodeId ACC = gen ? NodeId{} : b.varref(VarKind::Local, acc, p);
+    const NodeId ACC = gen ? NodeId{} : b.varref(VarKind::Local, acc);
 
     // Built innermost-first, so each clause wraps what it produces.
     NodeId inner;
     if (gen) {
-      inner = b.make_yield(emit_expr(*a.nodes[0], ctx), p);
+      inner = b.make_yield(emit_expr(*a.nodes[0], ctx));
     } else if (dict) {
       inner = b.set_index(ACC, emit_expr(*a.nodes[0], ctx),
-                          emit_expr(*a.nodes[1], ctx), p);
+                          emit_expr(*a.nodes[1], ctx));
     } else {
       inner = b.intrinsic(IntrinsicId::ArrayPush,
-                          {ACC, emit_expr(*a.nodes[0], ctx)}, p);
+                          {ACC, emit_expr(*a.nodes[0], ctx)});
     }
     for (size_t k = clauses.size(); k-- > 0;) {
       const Ast& c = *clauses[k];
       if (c.tag == "compif"_) {
-        inner = b.make_if(helper(ctx, "$truthy", {emit_expr(*c.nodes[0], ctx)},
-                                 p),
-                          inner, NodeId{}, p);
+        inner = b.make_if(helper("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+                          inner, NodeId{});
         continue;
       }
       inner = emit_comp_for(c, inner, ctx, p);
     }
     std::vector<NodeId> out;
     if (!gen) {
-      out.push_back(b.assign(VarKind::Local, acc,
-                             dict ? b.intrinsic(IntrinsicId::MapNew, {}, p)
-                                  : b.array_lit({}, p),
-                             p));
+      out.push_back(b.assign(
+          VarKind::Local, acc,
+          dict ? b.intrinsic(IntrinsicId::MapNew, {}) : b.array_lit({})));
     }
     out.push_back(inner);
-    out.push_back(b.make_return(gen ? b.nil_literal(p) : ACC, p));
-    return b.block(out, p);
+    out.push_back(b.make_return(gen ? b.nil_literal() : ACC));
+    return b.block(out);
   }
 
   NodeId emit_comp_for(const Ast& c, NodeId inner, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it, p);
-    const NodeId S = b.varref(VarKind::Local, st, p);
+    const NodeId I = b.varref(VarKind::Local, it);
+    const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *c.nodes[0];
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper(ctx, "$iternext", {I}, p), p),
-        b.make_if(b.index(S, b.str_literal("done", p), p), b.make_break(p),
-                  NodeId{}, p)};
-    const NodeId value = b.index(S, b.str_literal("value", p), p);
+        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
+    const NodeId value = b.index(S, b.str_literal("value"));
     if (tg.nodes.size() == 1) {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
       const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u, p);
+      const NodeId U = b.varref(VarKind::Local, u);
       loop.push_back(b.assign(
           VarKind::Local, u,
-          helper(ctx, "$unpack",
-                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()), p)},
-                 p),
-          p));
+          helper("$unpack",
+                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
+                 p)));
       for (size_t k = 0; k < tg.nodes.size(); ++k) {
-        loop.push_back(write_var(
-            decl_of.at(tg.nodes[k].get()),
-            b.index(U, b.literal(static_cast<int64_t>(k), p), p), ctx, p));
+        loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
+                                 b.index(U, b.literal(static_cast<int64_t>(k))),
+                                 ctx, p));
       }
     }
     loop.push_back(inner);
-    return b.block(
-        {b.assign(VarKind::Local, it,
-                  helper(ctx, "$iter", {emit_expr(*c.nodes[1], ctx)}, p), p),
-         b.make_while(b.bool_literal(true, p), b.block(loop, p), p)},
-        p);
+    return b.block({b.assign(VarKind::Local, it,
+                             helper("$iter", {emit_expr(*c.nodes[1], ctx)}, p)),
+                    b.make_while(b.bool_literal(true), b.block(loop))});
   }
 
   Module build(const Ast& program) {
     const int32_t top = new_fn(-1, "main");
     fns[static_cast<size_t>(top)].body = &program;
 
-    scopes.push_back({top, {}});
+    rs.push_scope();
     bind_names(program, top);
     for (const auto& s : program.nodes) resolve_stmt(*s, top);
-    scopes.pop_back();
+    rs.pop_scope();
 
     m.funcs.push_back({});
-    fns[static_cast<size_t>(top)].index = 0;
+    rs.fns[static_cast<size_t>(top)].index = 0;
     for (const std::string& n : rt_names()) {
       rt[n] = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
     const size_t declared = fns.size();
     for (size_t f = 1; f < declared; ++f) {
-      fns[f].index = static_cast<int32_t>(m.funcs.size());
+      rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
 
-    // One binding, owned by file scope and captured by every function:
-    // the array of runtime-helper closures. Declared after resolution so
-    // no source name can collide with it, and before number_captures so
-    // the ordinary capture machinery threads it like any other free
-    // variable.
-    helpers_var = static_cast<int32_t>(vars.size());
-    vars.push_back({"$helpers", top});
-    for (size_t f = 1; f < fns.size(); ++f) fns[f].free.insert(helpers_var);
-    // A cell whether or not anything captured it: file scope reads it
-    // itself, and a program with no nested function has no free set to
-    // put it in.
-    force_cells.insert(helpers_var);
 
-    number_captures();
+    rs.number_captures(m);
     empty_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back({});
     emit_runtime();
 
-    slot_of.assign(vars.size(), -1);
     for (size_t f = 0; f < declared; ++f) {
       emit_fn(static_cast<int32_t>(f));
     }

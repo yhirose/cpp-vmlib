@@ -10,18 +10,13 @@
 //     normalized operand;
 //   * every float32 var is a double re-rounded through ToFloat32 after
 //     every arithmetic op, never after a comparison;
-//   * a call to another top-level func builds that func's closure once
-//     per activation of the calling function -- into a Cell reserved in
-//     the caller's own frame -- and every call site in that body reads it
-//     back with VarRef(Cell) + CallValue instead of paying a fresh
-//     MakeClosure per call. Every current sample only has `main` (which
-//     runs exactly once) doing the calling, so this already is the
-//     README's "once, at module initialization" in practice; a func other
-//     than `main` invoked more than once, or one that recurses through
-//     `switch`, would pay the preamble again on each activation, which the
-//     stronger form (hoisted to a module-wide cell, reached through a
-//     capture) avoids at the cost of a reference cycle for any recursive
-//     call graph -- not implemented here, since no sample needs it yet;
+//   * every top-level func is a Func::singleton, so a call site is the
+//     plain MakeClosure + CallValue PL/0 writes and the closure is still
+//     built exactly once for the whole run -- no cell reserved in the
+//     caller's frame, no preamble to fill it, and no per-activation cost
+//     for a func called from a loop or through recursion. Go has no way
+//     to compare two function values, so nothing here can see that the
+//     closure is shared;
 //   * a `type ... struct` declaration assigns its fields slots in
 //     declaration order, and every field read/write goes through
 //     FieldGet/FieldSet at that slot rather than ObjectLit's key
@@ -231,21 +226,12 @@ struct FuncCtx {
   std::map<std::string, LocalInfo> locals;
   std::vector<std::string> local_names;  // parallel to Func::num_locals
   int32_t next_local = 0;
-  // The Static calls recipe's cells: one per distinct callee this body
-  // reaches, claimed the first time a call to it is emitted and filled by
-  // the preamble build() puts ahead of the body. A `go` statement claims
-  // further cells of its own for the arguments it evaluates.
-  std::map<std::string, int32_t> call_cells;  // callee name -> cell index
+  // A `go` statement's cells: one per argument it evaluates, so the
+  // wrapper closure it builds can carry them. Calls themselves need none
+  // -- every top-level func is a Func::singleton, so a call site is a
+  // plain MakeClosure the executor answers with the one closure it built.
   int32_t next_cell = 0;
   std::optional<TypeRef> ret_type;
-
-  int32_t cell_for(const std::string& callee) {
-    auto it = call_cells.find(callee);
-    if (it != call_cells.end()) return it->second;
-    const int32_t c = next_cell++;
-    call_cells[callee] = c;
-    return c;
-  }
 };
 
 struct FuncInfo {
@@ -266,6 +252,9 @@ struct StructDef { std::string name; std::vector<FieldDef> fields; };
 struct Binder {
   Module m;
   std::map<std::string, FuncInfo> funcs;
+  // The one capture map every closure here uses: nothing captures anything
+  // but a `go` wrapper's arguments, which build their own.
+  int32_t empty_cmap = -1;
   std::map<std::string, int32_t> struct_ids;  // struct name -> structs index
   std::vector<StructDef> structs;
 
@@ -363,14 +352,14 @@ struct Binder {
   // can be broken.
   TypedExpr make_struct(int32_t sid, const std::vector<NodeId>& values,
                         SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const StructDef& sd = structs[static_cast<size_t>(sid)];
     std::vector<std::pair<NodeId, NodeId>> kvs;
     kvs.reserve(sd.fields.size());
     for (size_t i = 0; i < sd.fields.size(); ++i) {
-      kvs.emplace_back(b.str_literal(sd.fields[i].name, p), values[i]);
+      kvs.emplace_back(b.str_literal(sd.fields[i].name), values[i]);
     }
-    return {b.object_lit(kvs, p), Type::Struct, sid};
+    return {b.object_lit(kvs), Type::Struct, sid};
   }
 
   // Go structs are values: `l.To = p` (or `Line{To: p}`, or `var q = p`)
@@ -388,12 +377,12 @@ struct Binder {
   TypedExpr copy_struct(TypedExpr v, SrcPos p) {
     if (v.type != Type::Struct) return v;
     if (m.at(v.node).tag == Tag::ObjectLit) return v;
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const StructDef& sd = structs[static_cast<size_t>(v.second_half)];
     std::vector<NodeId> values;
     values.reserve(sd.fields.size());
     for (const auto& fd : sd.fields) {
-      const NodeId raw = b.field_get(v.node, fd.slot, fd.name, p);
+      const NodeId raw = b.field_get(v.node, fd.slot, fd.name);
       values.push_back(copy_struct({raw, fd.type, fd.second_half}, p).node);
     }
     return make_struct(v.second_half, values, p);
@@ -432,13 +421,11 @@ struct Binder {
   // struct actually stored there rather than on a copy.
   TypedExpr walk_fields(const Ast& a, FuncCtx& ctx, size_t last, SrcPos p) {
     const LocalInfo& li = local_of(a, ctx, std::string(a.nodes[0]->token));
-    Builder b(m);
-    TypedExpr cur{b.varref(VarKind::Local, li.slot, p), li.type,
-                 li.second_half};
+    auto b = Builder(m).at(p);
+    TypedExpr cur{b.varref(VarKind::Local, li.slot), li.type, li.second_half};
     for (size_t i = 1; i < last; ++i) {
       const FieldDef& fd = field_of(a, cur, i);
-      cur = {b.field_get(cur.node, fd.slot, fd.name, p), fd.type,
-             fd.second_half};
+      cur = {b.field_get(cur.node, fd.slot, fd.name), fd.type, fd.second_half};
     }
     return cur;
   }
@@ -577,6 +564,11 @@ struct Binder {
       Func f;
       f.name = name;
       f.num_params = static_cast<int32_t>(info.param_types.size());
+      // A Go top-level func captures nothing, and no source can compare
+      // two function values here, so every call site may share one
+      // closure -- the README's Static calls recipe, as a flag rather
+      // than as a cell this binder reserves and fills.
+      f.singleton = true;
       m.funcs.push_back(f);
     }
   }
@@ -642,6 +634,7 @@ struct Binder {
       f.num_params = 2;
       f.num_locals = 3;
       f.local_names = {"ch", "v", "w"};
+      f.singleton = true;
       f.body = b.scope(0, 3,
                        b.make_if(waiting(L(0), "recvq"), b.block(handoff, p),
                                  b.block(park(L(0), "sendq", 2, L(1)), p), p),
@@ -661,6 +654,7 @@ struct Binder {
       f.num_params = 1;
       f.num_locals = 2;
       f.local_names = {"ch", "w"};
+      f.singleton = true;
       f.body = b.scope(0, 2,
                        b.make_if(waiting(L(0), "sendq"), b.block(take, p),
                                  b.block(wait, p), p),
@@ -674,11 +668,10 @@ struct Binder {
   // scheduler as a goroutine -- what `go` and the bootstrap both emit, and
   // the one place that shape is spelled out.
   NodeId spawn(int32_t func, int32_t cmap, SrcPos p) {
-    Builder b(m);
-    return b.intrinsic(IntrinsicId::Enqueue,
-                       {b.intrinsic(IntrinsicId::CoroCreate,
-                                    {b.make_closure(func, cmap, p)}, p)},
-                       p);
+    auto b = Builder(m).at(p);
+    return b.intrinsic(
+        IntrinsicId::Enqueue,
+        {b.intrinsic(IntrinsicId::CoroCreate, {b.make_closure(func, cmap)})});
   }
 
   // Go's main is a goroutine: it can block on a channel, and a program
@@ -696,8 +689,6 @@ struct Binder {
   void emit_bootstrap() {
     Builder b(m);
     const SrcPos p{0, 0};
-    const int32_t empty_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back({});
     Func w;
     w.name = "$main";
     w.lenient_arity = true;
@@ -721,7 +712,7 @@ struct Binder {
   // literal can say why better than a conversion can ("cannot use an
   // integer literal as bool" rather than "cannot convert int64 to bool").
   TypedExpr literal_as(int64_t v, Type ty, const Ast& at, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     if (ty == Type::Bool) fail_at(p, "cannot use an integer literal as bool");
     if (ty == Type::Str) {
       fail_at(p, "cannot use an integer literal as string");
@@ -729,7 +720,7 @@ struct Binder {
     if (ty == Type::Struct) {
       fail_at(p, "cannot use an integer literal as a struct");
     }
-    return emit_convert(ty, {b.literal(v, p), Type::I64}, at);
+    return emit_convert(ty, {b.literal(v), Type::I64}, at);
   }
 
   [[noreturn]] void fail_at(SrcPos p, const std::string& msg) {
@@ -744,12 +735,15 @@ struct Binder {
   // numeric type is one arm here rather than one arm in each of two
   // switches that have to be remembered together.
   NodeId normalize(Type t, NodeId raw, const Ast& at, const char* verb) {
-    Builder b(m);
     const SrcPos p = pos_of(at);
+    auto b = Builder(m).at(p);
     switch (t) {
-      case Type::I32: return b.unary(UnOp::WrapI32, raw, p);
-      case Type::U32: return b.unary(UnOp::WrapU32, raw, p);
-      case Type::F32: return b.intrinsic(IntrinsicId::ToFloat32, {raw}, p);
+      case Type::I32:
+        return b.unary(UnOp::WrapI32, raw);
+      case Type::U32:
+        return b.unary(UnOp::WrapU32, raw);
+      case Type::F32:
+        return b.intrinsic(IntrinsicId::ToFloat32, {raw});
       case Type::I64: case Type::F64: return raw;
       case Type::Bool: fail(at, std::string("cannot ") + verb + " bool");
       // `s + "x"` never reaches here -- emit_binary answers concatenation
@@ -920,8 +914,8 @@ struct Binder {
   // Go's own rule for an untyped constant. Every other node knows its type
   // from its operands or declaration and ignores the hint.
   TypedExpr emit_expr(const Ast& a, FuncCtx& ctx, std::optional<Type> hint) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_: {
         const std::string tok(a.token);
@@ -929,9 +923,9 @@ struct Binder {
           // A float literal is already a double; only F32 needs the extra
           // rounding, and only int syntax has a width to be narrowed into.
           const NodeId lit =
-              b.double_literal(std::strtod(tok.c_str(), nullptr), p);
+              b.double_literal(std::strtod(tok.c_str(), nullptr));
           if (hint == Type::F32) {
-            return {b.intrinsic(IntrinsicId::ToFloat32, {lit}, p), Type::F32};
+            return {b.intrinsic(IntrinsicId::ToFloat32, {lit}), Type::F32};
           }
           return {lit, Type::F64};
         }
@@ -941,10 +935,10 @@ struct Binder {
       // literal, this one has a type of its own already, and the
       // destination's own same_type check is what reports a mismatch.
       case "strlit"_:
-        return {b.str_literal(unescape(std::string(a.token), a), p), Type::Str};
+        return {b.str_literal(unescape(std::string(a.token), a)), Type::Str};
       case "ident"_: {
         const LocalInfo& li = local_of(a, ctx, std::string(a.token));
-        return {b.varref(VarKind::Local, li.slot, p), li.type, li.second_half};
+        return {b.varref(VarKind::Local, li.slot), li.type, li.second_half};
       }
       case "neg"_: {
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
@@ -1009,7 +1003,7 @@ struct Binder {
           }
           values.push_back(v.node);
         }
-        return {b.array_lit(values, p), Type::Slice, t.second_half};
+        return {b.array_lit(values), Type::Slice, t.second_half};
       }
       // xs[i] -- children: the slice ident and the index expression. Index
       // is the same node the executor already answers for an ArrayObj, so
@@ -1019,7 +1013,7 @@ struct Binder {
       case "index"_: {
         const LocalInfo& li = slice_local(*a.nodes[0], ctx);
         TypedExpr idx = emit_index(*a.nodes[1], ctx);
-        return {b.index(b.varref(VarKind::Local, li.slot, p), idx.node, p),
+        return {b.index(b.varref(VarKind::Local, li.slot), idx.node),
                 static_cast<Type>(li.second_half)};
       }
       // p.X, or p.From.X for a field that is itself a struct -- children:
@@ -1043,10 +1037,9 @@ struct Binder {
       case "makechan"_: {
         const TypeRef t = resolve_type(std::string(a.nodes[0]->token), a);
         if (t.type != Type::Chan) fail(a, "make takes a channel type here");
-        const NodeId ch = b.object_lit(
-            {{b.str_literal("recvq", p), b.array_lit({}, p)},
-             {b.str_literal("sendq", p), b.array_lit({}, p)}},
-            p);
+        const NodeId ch =
+            b.object_lit({{b.str_literal("recvq"), b.array_lit({})},
+                          {b.str_literal("sendq"), b.array_lit({})}});
         return {ch, Type::Chan, t.second_half};
       }
       case "call"_: {
@@ -1064,7 +1057,7 @@ struct Binder {
           if (v.type != Type::Slice && v.type != Type::Str) {
             fail(a, "len of " + describe_type(v.type, v.second_half));
           }
-          return {b.intrinsic(IntrinsicId::Len, {v.node}, p), Type::I64};
+          return {b.intrinsic(IntrinsicId::Len, {v.node}), Type::I64};
         }
         // append is a statement here, not an expression -- see
         // emit_append's own comment for why the `xs = append(xs, v)` shape
@@ -1086,8 +1079,9 @@ struct Binder {
         // The recipe: read the closure this function's preamble built once
         // (the cell claimed here, filled in build()), rather than a fresh
         // MakeClosure at every call site.
-        const NodeId closure = b.varref(VarKind::Cell, ctx.cell_for(callee), p);
-        return {b.call_value(closure, args, p), info.ret.type,
+        const NodeId closure =
+            b.make_closure(funcs.at(callee).index, empty_cmap);
+        return {b.call_value(closure, args), info.ret.type,
                 info.ret.second_half};
       }
       case "equality"_:
@@ -1185,7 +1179,7 @@ struct Binder {
   // true for the samples that happen to be here.
   NodeId emit_append(const Ast& call, FuncCtx& ctx, const Ast& target,
                      SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const Ast* argsNode = find_child(call, "args");
     if (argsNode == nullptr || argsNode->nodes.size() != 2) {
       fail(call, "append takes exactly two arguments here");
@@ -1203,7 +1197,7 @@ struct Binder {
                      " to " + describe_type(li.type, li.second_half));
     }
     return b.intrinsic(IntrinsicId::ArrayPush,
-                       {b.varref(VarKind::Local, li.slot, p), v.node}, p);
+                       {b.varref(VarKind::Local, li.slot), v.node});
   }
 
   // The local an ident names, required to be a channel -- what both ends
@@ -1222,10 +1216,11 @@ struct Binder {
   // The expression form and the discard-the-value statement form are the
   // same receive, so they are the same code.
   TypedExpr emit_chan_recv(const Ast& ident, FuncCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     const LocalInfo& li = channel_local(ident, ctx);
-    const NodeId recv = b.varref(VarKind::Cell, ctx.cell_for("$chan_recv"), p);
-    return {b.call_value(recv, {b.varref(VarKind::Local, li.slot, p)}, p),
+    const NodeId recv =
+        b.make_closure(funcs.at("$chan_recv").index, empty_cmap);
+    return {b.call_value(recv, {b.varref(VarKind::Local, li.slot)}),
             static_cast<Type>(li.second_half)};
   }
 
@@ -1239,8 +1234,8 @@ struct Binder {
 
   // -- Statements -------------------------------------------------------
   NodeId emit_stmt(const Ast& a, FuncCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       // go f(args): the arguments are evaluated now, into cells of this
       // frame (fresh ones -- CellFresh -- so a `go` inside a loop gives
@@ -1259,33 +1254,35 @@ struct Binder {
         const std::vector<NodeId> args = emit_call_args(call, ctx, info, callee);
 
         std::vector<NodeId> stmts;
-        std::vector<CaptureSrc> cmap{{VarKind::Cell, ctx.cell_for(callee)}};
+        // Only the arguments travel as captures: the callee itself is a
+        // singleton, so the wrapper's body builds it rather than being
+        // handed it.
+        std::vector<CaptureSrc> cmap;
         for (const NodeId arg : args) {
           const int32_t c = ctx.next_cell++;
-          stmts.push_back(b.cell_fresh(c, p));
-          stmts.push_back(b.assign(VarKind::Cell, c, arg, p));
+          stmts.push_back(b.cell_fresh(c));
+          stmts.push_back(b.assign(VarKind::Cell, c, arg));
           cmap.push_back({VarKind::Cell, c});
         }
 
         Func w;
         w.name = "go " + callee;
         w.num_captures = static_cast<int32_t>(cmap.size());
-        w.capture_names.push_back(callee);
         w.lenient_arity = true;
         std::vector<NodeId> wargs;
         for (size_t i = 0; i < args.size(); ++i) {
           w.capture_names.push_back("arg" + std::to_string(i));
-          wargs.push_back(
-              b.varref(VarKind::Capture, static_cast<int32_t>(i + 1), p));
+          wargs.push_back(b.varref(VarKind::Capture, static_cast<int32_t>(i)));
         }
-        w.body = b.call_value(b.varref(VarKind::Capture, 0, p), wargs, p);
+        w.body = b.call_value(
+            b.make_closure(funcs.at(callee).index, empty_cmap), wargs);
         const int32_t widx = static_cast<int32_t>(m.funcs.size());
         m.funcs.push_back(w);
         const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
         m.capture_maps.push_back(cmap);
 
         stmts.push_back(spawn(widx, cm, p));
-        return b.block(stmts, p);
+        return b.block(stmts);
       }
       // ch <- v, through $chan_send; the value takes the channel's element
       // type as its hint and must match it.
@@ -1297,9 +1294,9 @@ struct Binder {
           fail(a, "cannot send " + describe_type(v.type, v.second_half) +
                       " on " + describe_type(li.type, li.second_half));
         }
-        const NodeId send = b.varref(VarKind::Cell, ctx.cell_for("$chan_send"), p);
-        return b.call_value(send, {b.varref(VarKind::Local, li.slot, p), v.node},
-                            p);
+        const NodeId send =
+            b.make_closure(funcs.at("$chan_send").index, empty_cmap);
+        return b.call_value(send, {b.varref(VarKind::Local, li.slot), v.node});
       }
       // <-ch as a statement: receive and discard -- the same call the
       // expression form makes, with nothing reading its value.
@@ -1312,7 +1309,7 @@ struct Binder {
       case "forstmt"_: {
         TypedExpr cond = emit_expr(*a.nodes[0], ctx, std::nullopt);
         if (cond.type != Type::Bool) fail(a, "for condition must be bool");
-        return b.make_while(cond.node, emit_block(*a.nodes[1], ctx, a), p);
+        return b.make_while(cond.node, emit_block(*a.nodes[1], ctx, a));
       }
       case "ifstmt"_: {
         TypedExpr cond = emit_expr(*a.nodes[0], ctx, std::nullopt);
@@ -1320,7 +1317,7 @@ struct Binder {
         const NodeId then_ = emit_block(*a.nodes[1], ctx, a);
         NodeId els;
         if (a.nodes.size() > 2) els = emit_block(*a.nodes[2], ctx, a);
-        return b.make_if(cond.node, then_, els, p);
+        return b.make_if(cond.node, then_, els);
       }
       case "vardecl"_: {
         const std::string name(find_child(a, "ident")->token);
@@ -1338,7 +1335,7 @@ struct Binder {
         const int32_t slot = ctx.next_local++;
         ctx.locals[name] = {slot, ty.type, ty.second_half};
         ctx.local_names.push_back(name);
-        return b.assign(VarKind::Local, slot, value, p);
+        return b.assign(VarKind::Local, slot, value);
       }
       // Either a plain `x = v` (2 children: ident, expr) or a field
       // `p.X = v` / `p.From.X = v` (that same 2, plus however many
@@ -1366,8 +1363,7 @@ struct Binder {
                       " to an element of " +
                       describe_type(li.type, li.second_half));
         }
-        return b.set_index(b.varref(VarKind::Local, li.slot, p), idx.node,
-                           v.node, p);
+        return b.set_index(b.varref(VarKind::Local, li.slot), idx.node, v.node);
       }
       case "assign"_: {
         const size_t nfields = a.nodes.size() - 2;
@@ -1383,14 +1379,13 @@ struct Binder {
           }
           const LocalInfo& li = local_of(a, ctx, std::string(target.token));
           return b.assign(VarKind::Local, li.slot,
-                         emit_local_value(*a.nodes.back(), ctx, li.type,
-                                          li.second_half, a, p),
-                         p);
+                          emit_local_value(*a.nodes.back(), ctx, li.type,
+                                           li.second_half, a, p));
         }
         const TypedExpr recv = walk_fields(a, ctx, nfields, p);
         const FieldDef& fd = field_of(a, recv, nfields);
         return b.field_set(recv.node, fd.slot, fd.name,
-                           emit_field_value(*a.nodes.back(), ctx, fd, a, p), p);
+                           emit_field_value(*a.nodes.back(), ctx, fd, a, p));
       }
       case "ret"_: {
         if (!ctx.ret_type) fail(a, "this func does not return a value");
@@ -1399,7 +1394,7 @@ struct Binder {
                        ctx.ret_type->second_half)) {
           fail(a, "return type does not match the func's declared type");
         }
-        return b.make_return(val.node, p);
+        return b.make_return(val.node);
       }
       case "print"_: {
         TypedExpr val = emit_expr(*a.nodes[0], ctx, std::nullopt);
@@ -1415,7 +1410,7 @@ struct Binder {
         if (has_second_half(val.type)) {
           fail(a, "cannot print a " + describe_type(val.type, val.second_half));
         }
-        return b.intrinsic(IntrinsicId::Print, {val.node}, p);
+        return b.intrinsic(IntrinsicId::Print, {val.node});
       }
       // switch subject { case k1, k2: stmts ... [default: stmts] } --
       // README's Switch recipe, concretely: `caseval` has no string form,
@@ -1452,10 +1447,10 @@ struct Binder {
             if (!seen_keys.insert(key).second) {
               fail(*numAst, "duplicate case value " + std::to_string(key));
             }
-            arms.emplace_back(b.literal(key, pos_of(*numAst)), body);
+            arms.emplace_back(b.at(pos_of(*numAst)).literal(key), body);
           }
         }
-        return b.make_switch(subj.node, arms, default_body, p);
+        return b.make_switch(subj.node, arms, default_body);
       }
       default:
         fail(a, "cannot execute " + a.name);
@@ -1463,6 +1458,10 @@ struct Binder {
   }
 
   Module build(const Ast& program) {
+    // Every closure this front end builds captures nothing but a `go`
+    // wrapper's arguments, so one empty map serves all of them.
+    empty_cmap = static_cast<int32_t>(m.capture_maps.size());
+    m.capture_maps.push_back({});
     register_structs(program);
     // funcs[0] is vm::run's entry point and, here, the bootstrap that
     // spawns main as the first goroutine (emit_bootstrap) -- reserved now
@@ -1505,21 +1504,8 @@ struct Binder {
         stmts.push_back(emit_stmt(*s, ctx));
       }
 
-      // Then the preamble ahead of it: one MakeClosure per distinct callee
-      // into the cell the body reads -- README's Static calls recipe,
-      // concretely -- and the channel runtime's own two funcs reached the
-      // same way when the body used a channel.
       Builder b(m);
-      std::vector<NodeId> body_stmts;
-      for (const auto& [callee, cell] : ctx.call_cells) {
-        const int32_t cmap = static_cast<int32_t>(m.capture_maps.size());
-        m.capture_maps.push_back({});
-        body_stmts.push_back(b.assign(
-            VarKind::Cell, cell,
-            b.make_closure(funcs.at(callee).index, cmap, pos_of(fn)),
-            pos_of(fn)));
-      }
-      body_stmts.insert(body_stmts.end(), stmts.begin(), stmts.end());
+      const std::vector<NodeId>& body_stmts = stmts;
 
       Func& f = m.funcs[fidx];
       f.num_cells = ctx.next_cell;

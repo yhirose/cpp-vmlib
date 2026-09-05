@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -16,8 +17,10 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -1351,6 +1354,24 @@ struct Func {
   // the ordinary way and the frame returns its result. Off, a tail call
   // is a call.
   bool tail_calls = false;
+  // Every MakeClosure naming this function yields the *same* closure
+  // object, built once per run and cached by the executor. The recipe the
+  // README's Static calls section describes -- hoist the MakeClosure of a
+  // target that never changes -- without the front end reserving a cell
+  // for it and writing a module-initialization store: an IR-level helper
+  // library ($truthy, $str, the dozens each front end here writes) stops
+  // paying an allocation per call site and stops needing a plumbing pass
+  // to avoid it.
+  //
+  // Opt-in rather than an automatic optimization for capture-map-empty
+  // closures, because the sharing is observable: IntrinsicId::Same
+  // compares closures by heap identity, so two evaluations of the same
+  // `function () {}` would go from distinct to identical. A front end
+  // turns this on for a function whose closure has no identity of its own,
+  // which its own helpers are and a source-level lambda is not. Requires
+  // num_captures == 0 (verify enforces it); a generator function is fine,
+  // since the activation is built by the call, not by the closure.
+  bool singleton = false;
 };
 
 struct Node {
@@ -1367,6 +1388,14 @@ struct Module {
   std::vector<Node> nodes;
   std::vector<NodeId> child_ids;  // flat backing for every node's children
   std::vector<SrcPos> positions;
+  // Builder::intern_pos' index into `positions`, keyed by (line, col)
+  // packed into one 64-bit word. A cache, not IR: nothing reads it to
+  // execute or check anything, and a module built without it (by hand, or
+  // by a Builder that never saw a position twice) is still well formed --
+  // the only difference is duplicate entries in `positions`, which cost
+  // space and change nothing else. Held here rather than in Builder
+  // because a binder constructs a fresh Builder per node.
+  std::unordered_map<uint64_t, uint32_t> pos_index;
   std::vector<Const> consts;
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<Func> funcs;                      // funcs[0] is the entry point
@@ -1660,18 +1689,19 @@ class Builder {
 public:
   explicit Builder(Module& m) : m_(m) {}
 
-  // Linear scan: called from every node emit() builds, so this is O(n) over
-  // already-seen positions per node -- fine for PL/0's few hundred nodes, but
-  // an O(module size squared) cost if this IR is ever pointed at something
-  // large. A hash map keyed on (line, col) is the fix, if that day comes.
+  // Called from every node emit() builds, so a linear scan over the
+  // positions already seen made a module cost O(size squared) to build --
+  // which stopped being hypothetical once a front end got past PL/0's few
+  // hundred nodes (a twenty-thousand-statement file spent three quarters of
+  // its bind time here). Module::pos_index is the map that fixes it.
   uint32_t intern_pos(SrcPos p) {
-    for (uint32_t i = 0; i < m_.positions.size(); ++i) {
-      if (m_.positions[i].line == p.line && m_.positions[i].col == p.col) {
-        return i;
-      }
-    }
+    const uint64_t key = (static_cast<uint64_t>(p.line) << 32) | p.col;
+    const auto it = m_.pos_index.find(key);
+    if (it != m_.pos_index.end()) return it->second;
+    const uint32_t i = static_cast<uint32_t>(m_.positions.size());
     m_.positions.push_back(p);
-    return static_cast<uint32_t>(m_.positions.size() - 1);
+    m_.pos_index.emplace(key, i);
+    return i;
   }
 
   // Same tradeoff as intern_pos, once per numeric literal rather than per
@@ -1850,6 +1880,116 @@ public:
   }
   // Declares a host function by name (or finds the declaration already
   // made) and answers its Module::natives index -- what native_ref takes.
+
+  // The same builder with a source position already bound: every emit call
+  // above ends in the same `p`, and a binder threading it by hand writes it
+  // once per node -- about one line in thirteen across the front ends in
+  // examples/, and a wrapped argument list on many of the rest.
+  //
+  //   Builder bld(m);
+  //   auto b = bld.at(pos_of(node));
+  //   b.binary(BinOp::Add, b.varref(VarKind::Local, 0), b.literal(1))
+  //
+  // A value, not a reference: it holds the Module the Builder does, so it
+  // may be copied, returned and kept beside a position of its own.
+  class At {
+   public:
+    At(Module& m, SrcPos p) : m_(m), p_(p) {}
+
+    // The same module, at another position -- what a node whose position is
+    // not the one this builder was made for reaches for, in the middle of
+    // an expression: b.at(pos_of(op)).binary(...).
+    At at(SrcPos p) const { return At(m_, p); }
+
+    int32_t intern_str(const std::string& s) { return b().intern_str(s); }
+    int32_t declare_native(const std::string& n) { return b().declare_native(n); }
+
+    NodeId literal(int64_t v) { return b().literal(v, p_); }
+    NodeId bool_literal(bool v) { return b().bool_literal(v, p_); }
+    NodeId double_literal(double v) { return b().double_literal(v, p_); }
+    NodeId nil_literal() { return b().nil_literal(p_); }
+    NodeId str_literal(const std::string& s) { return b().str_literal(s, p_); }
+    NodeId varref(VarKind k, int32_t i) { return b().varref(k, i, p_); }
+    NodeId unary(UnOp op, NodeId x) { return b().unary(op, x, p_); }
+    NodeId binary(BinOp op, NodeId l, NodeId r) {
+      return b().binary(op, l, r, p_);
+    }
+    NodeId assign(VarKind k, int32_t i, NodeId v) {
+      return b().assign(k, i, v, p_);
+    }
+    NodeId make_if(NodeId c, NodeId t, NodeId e = NodeId{}) {
+      return b().make_if(c, t, e, p_);
+    }
+    NodeId make_while(NodeId c, NodeId body) {
+      return b().make_while(c, body, p_);
+    }
+    NodeId make_switch(NodeId subject,
+                       const std::vector<std::pair<NodeId, NodeId>>& arms,
+                       NodeId dflt) {
+      return b().make_switch(subject, arms, dflt, p_);
+    }
+    NodeId block(const std::vector<NodeId>& stmts) {
+      return b().block(stmts, p_);
+    }
+    NodeId scope(int32_t lo, int32_t hi, NodeId body) {
+      return b().scope(lo, hi, body, p_);
+    }
+    NodeId scope(int32_t lo, int32_t hi, NodeId body,
+                 const std::vector<NodeId>& release) {
+      return b().scope(lo, hi, body, release, p_);
+    }
+    NodeId make_return(NodeId v) { return b().make_return(v, p_); }
+    NodeId make_break(int32_t depth = 0) { return b().make_break(p_, depth); }
+    NodeId make_continue(int32_t depth = 0) {
+      return b().make_continue(p_, depth);
+    }
+    NodeId make_throw(NodeId v) { return b().make_throw(v, p_); }
+    NodeId make_defer(NodeId v) { return b().make_defer(v, p_); }
+    NodeId cell_fresh(int32_t cell) { return b().cell_fresh(cell, p_); }
+    NodeId make_yield(NodeId v) { return b().make_yield(v, p_); }
+    NodeId make_try(int32_t caught, NodeId body, NodeId handler) {
+      return b().make_try(caught, body, handler, p_);
+    }
+    NodeId intrinsic(IntrinsicId id, const std::vector<NodeId>& args) {
+      return b().intrinsic(id, args, p_);
+    }
+    NodeId make_closure(int32_t func, int32_t cmap) {
+      return b().make_closure(func, cmap, p_);
+    }
+    NodeId array_lit(const std::vector<NodeId>& items) {
+      return b().array_lit(items, p_);
+    }
+    NodeId object_lit(const std::vector<std::pair<NodeId, NodeId>>& kvs) {
+      return b().object_lit(kvs, p_);
+    }
+    NodeId index(NodeId recv, NodeId key) { return b().index(recv, key, p_); }
+    NodeId set_index(NodeId recv, NodeId key, NodeId v) {
+      return b().set_index(recv, key, v, p_);
+    }
+    NodeId field_get(NodeId recv, int32_t slot, const std::string& name) {
+      return b().field_get(recv, slot, name, p_);
+    }
+    NodeId field_set(NodeId recv, int32_t slot, const std::string& name,
+                     NodeId v) {
+      return b().field_set(recv, slot, name, v, p_);
+    }
+    NodeId call_value(NodeId callee, const std::vector<NodeId>& args) {
+      return b().call_value(callee, args, p_);
+    }
+    NodeId native_ref(int32_t index) { return b().native_ref(index, p_); }
+
+   private:
+    // A Module reference rather than a Builder: Builder is still an
+    // incomplete type inside its own definition, and it holds nothing but
+    // this reference anyway, so one is made per call and costs nothing.
+    Builder b() const { return Builder(m_); }
+
+    Module& m_;
+    SrcPos p_;
+  };
+
+  At at(SrcPos p) { return At(m_, p); }
+
   int32_t declare_native(const std::string& name) {
     for (size_t i = 0; i < m_.natives.size(); ++i) {
       if (m_.natives[i] == name) return static_cast<int32_t>(i);
@@ -1903,6 +2043,477 @@ const char* name_of(ConstKind k);
 // name_of over that enum's own range, so the two directions can never name
 // the same value differently.
 template <class E> std::optional<E> from_name(std::string_view s);
+
+
+// ===== coreir/resolve.h =====
+
+// Closure conversion, for a front end whose functions nest lexically.
+//
+// Optional: nothing in `coreir` or `vm` reads it, a binder may ignore it
+// entirely (examples/pl0 does -- its captures travel through calls rather
+// than through nesting, which needs a fixpoint this does not do), and it
+// knows nothing about any parse tree. What it holds is the bookkeeping every
+// front end that *does* nest lexically was writing identically: which
+// binding a name means, which of them a function reads from outside itself,
+// which of those have to become cells because a closure may outlive the
+// frame that owns them, and what `VarRef` a given function should use to
+// reach a given binding.
+//
+// The shape is two id spaces the front end also indexes its own tables by:
+// a VarId (into `vars`) per binding, an FnId (into `fns`) per function. The
+// front end keeps its own per-function record -- what parse node the body
+// is, whether it is a generator, what its parameters are -- beside this one
+// rather than inside it.
+//
+// The order of operations:
+//
+//   1. Walk the source. push_scope / pop_scope as blocks open and close,
+//      declare() at a binding, resolve() at a use. resolve() is what
+//      propagates: a name found in an enclosing function is recorded as
+//      free in every function between the reader and the owner, because a
+//      closure's capture map is expressed in the frame that builds it, and
+//      the frame two levels down cannot name a cell it does not own. No
+//      fixpoint, because lexical nesting is a tree.
+//   2. Assign each function's Module::funcs index (Fn::index).
+//   3. number_captures(m), once, after every resolve().
+//   4. Emit. access(fn, var) answers the (VarKind, index) pair a VarRef or
+//      an Assign needs; Var::slot is the front end's to fill as it lays out
+//      each frame.
+struct Resolver {
+  // A binding. `owner` is the function whose frame it belongs to; `slot` is
+  // its local slot, which only the front end's emit pass knows and so only
+  // the front end fills (a binding that became a cell never uses it).
+  struct Var {
+    std::string name;
+    int32_t owner = 0;
+    int32_t slot = -1;
+  };
+
+  // One function's closure conversion. `free` is what it reads from outside
+  // itself, `capture_index` where each of those sits in its own capture
+  // list, and `cell_index` where each binding *it* owns that somebody else
+  // reads sits among its cells. The last two are filled by number_captures.
+  struct Fn {
+    int32_t parent = -1;
+    int32_t index = -1;  // into Module::funcs, the front end's to assign
+    std::set<int32_t> free;
+    std::map<int32_t, int32_t> capture_index;
+    std::map<int32_t, int32_t> cell_index;
+  };
+
+  std::vector<Var> vars;
+  std::vector<Fn> fns;
+  // The open scopes, innermost last. Public because a front end with its own
+  // per-scope bookkeeping (a declaration order, a set of names a block has
+  // hoisted) keeps a parallel stack and needs to see this one's depth.
+  std::vector<std::map<std::string, int32_t>> scopes;
+  // Bindings that must be cells whether or not the walk above found anyone
+  // capturing them -- a table some closure built by hand reaches, say.
+  // Applied after the walk, so they take the cell indices left over.
+  std::vector<int32_t> forced_cells;
+
+  int32_t new_fn(int32_t parent) {
+    fns.push_back({});
+    fns.back().parent = parent;
+    return static_cast<int32_t>(fns.size() - 1);
+  }
+
+  void push_scope() { scopes.emplace_back(); }
+  void pop_scope() { scopes.pop_back(); }
+
+  // Whether the innermost scope already binds this name. The front end's,
+  // not this one's, because languages disagree about what a second `let x`
+  // in one block means: an error (JavaScript), a fresh binding that hides
+  // the first (Lua), or the same binding again (Python's assignment).
+  std::optional<int32_t> declared_here(const std::string& name) const {
+    const auto it = scopes.back().find(name);
+    if (it == scopes.back().end()) return std::nullopt;
+    return it->second;
+  }
+
+  // A new binding in the innermost scope, owned by `owner`. Overwrites a
+  // name the scope already had, so a language that shadows within a block
+  // gets that by default and one that refuses it checks declared_here first.
+  int32_t declare(const std::string& name, int32_t owner) {
+    return declare_in(scopes.size() - 1, name, owner);
+  }
+
+  // The same, into a scope that is not the innermost -- what Python's
+  // `global x` inside a function needs: the binding it creates belongs to
+  // the module, not to the function the statement stands in.
+  int32_t declare_in(size_t scope, const std::string& name, int32_t owner) {
+    const int32_t v = static_cast<int32_t>(vars.size());
+    vars.push_back({name, owner, -1});
+    scopes[scope][name] = v;
+    return v;
+  }
+
+  // The binding a name means, without recording the use. For a front end
+  // that has to decide something else first -- Python's `global x`, which
+  // says to skip every enclosing function and look only at scopes[0].
+  std::optional<int32_t> lookup(const std::string& name,
+                                size_t from_scope) const {
+    for (size_t i = from_scope + 1; i-- > 0;) {
+      const auto it = scopes[i].find(name);
+      if (it != scopes[i].end()) return it->second;
+    }
+    return std::nullopt;
+  }
+  std::optional<int32_t> lookup(const std::string& name) const {
+    return scopes.empty() ? std::nullopt : lookup(name, scopes.size() - 1);
+  }
+
+  // Reading `v` from `fn`: if the binding belongs to an enclosing function
+  // it becomes a cell there (number_captures) and a capture in every
+  // function on the way down, each of which has to *carry* it -- see the
+  // note on propagation above.
+  void use(int32_t v, int32_t fn) {
+    const int32_t owner = vars[static_cast<size_t>(v)].owner;
+    if (owner == fn) return;
+    for (int32_t k = fn; k != owner && k >= 0;
+         k = fns[static_cast<size_t>(k)].parent) {
+      fns[static_cast<size_t>(k)].free.insert(v);
+    }
+  }
+
+  // The pair every use site wants: which binding, and the reading recorded.
+  std::optional<int32_t> resolve(const std::string& name, int32_t fn) {
+    const std::optional<int32_t> v = lookup(name);
+    if (v) use(*v, fn);
+    return v;
+  }
+
+  void force_cell(int32_t v) { forced_cells.push_back(v); }
+
+  // Numbers every capture and every cell, and writes the capture count and
+  // the diagnostic name table into each function's Func. Call once, after
+  // the walk: a resolve() afterwards would add to a `free` set already
+  // numbered.
+  void number_captures(Module& m) {
+    for (Fn& f : fns) {
+      int32_t i = 0;
+      Func& mf = m.funcs[static_cast<size_t>(f.index)];
+      for (const int32_t v : f.free) {
+        f.capture_index[v] = i++;
+        mf.capture_names.push_back(vars[static_cast<size_t>(v)].name);
+      }
+      mf.num_captures = i;
+    }
+    // A binding anyone captures cannot stay a slot in its owner's frame:
+    // the closure may outlive that frame. Walking every function's free set
+    // rather than each function's own declarations, because "is this
+    // captured" is a fact about the readers.
+    for (const Fn& f : fns) {
+      for (const int32_t v : f.free) claim_cell(v);
+    }
+    for (const int32_t v : forced_cells) claim_cell(v);
+  }
+
+  // The capture map a closure over `target` needs, expressed in `builder`'s
+  // frame -- one entry per free variable of the target, each resolved
+  // through access() from the side that is building the closure. Appended
+  // to the module and answered by index, which is what MakeClosure wants.
+  //
+  // This is the one operation `free` and `access` exist together for: the
+  // forwarding table belongs to the site building the closure, not to the
+  // function (see the README's design note on why), so it can only be
+  // written here, once both are known.
+  int32_t capture_map(Module& m, int32_t builder, int32_t target) const {
+    std::vector<CaptureSrc> cs;
+    const std::set<int32_t>& free = fns[static_cast<size_t>(target)].free;
+    cs.reserve(free.size());
+    for (const int32_t v : free) {
+      const auto [k, i] = access(builder, v);
+      cs.push_back({k, i});
+    }
+    m.capture_maps.push_back(std::move(cs));
+    return static_cast<int32_t>(m.capture_maps.size() - 1);
+  }
+
+  // How `fn` reaches `v`: its own cell, its own local slot, or a capture.
+  std::pair<VarKind, int32_t> access(int32_t fn, int32_t v) const {
+    if (vars[static_cast<size_t>(v)].owner == fn) {
+      const auto& ci = fns[static_cast<size_t>(fn)].cell_index;
+      const auto it = ci.find(v);
+      if (it != ci.end()) return {VarKind::Cell, it->second};
+      return {VarKind::Local, vars[static_cast<size_t>(v)].slot};
+    }
+    return {VarKind::Capture,
+            fns[static_cast<size_t>(fn)].capture_index.at(v)};
+  }
+
+  // The cell index `fn` gave `v`, or -1 if `v` is not one of its cells --
+  // what a front end asks when it has to emit a CellFresh for a binding it
+  // is about to initialize.
+  int32_t cell_of(int32_t fn, int32_t v) const {
+    const auto& ci = fns[static_cast<size_t>(fn)].cell_index;
+    const auto it = ci.find(v);
+    return it == ci.end() ? -1 : it->second;
+  }
+
+  int32_t num_cells(int32_t fn) const {
+    return static_cast<int32_t>(fns[static_cast<size_t>(fn)].cell_index.size());
+  }
+
+ private:
+  void claim_cell(int32_t v) {
+    auto& own =
+        fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)].cell_index;
+    if (!own.count(v)) own[v] = static_cast<int32_t>(own.size());
+  }
+};
+
+// Local-slot bookkeeping while one function's body is emitted: where the
+// next slot comes from, how wide the frame ends up having to be, and the
+// name table Func::local_names wants.
+//
+// The mark/release pair is what makes a block's slots reusable by its
+// siblings: a block marks on the way in and releases on the way out, so the
+// frame's width is the deepest nesting rather than the total number of
+// declarations, and `release` answers the high end of the range the block's
+// own Scope node names.
+struct FrameLayout {
+  int32_t next_local = 0;
+  int32_t high_local = 0;
+  std::vector<std::string> local_names;
+
+  int32_t alloc_local(const std::string& name) {
+    const int32_t s = next_local++;
+    if (next_local > high_local) high_local = next_local;
+    if (static_cast<size_t>(s) >= local_names.size()) {
+      local_names.resize(static_cast<size_t>(s) + 1, "");
+    }
+    local_names[static_cast<size_t>(s)] = name;
+    return s;
+  }
+
+  int32_t mark() const { return next_local; }
+
+  // Gives back every slot claimed since `mark`, answering the end of the
+  // range so the caller can spell the Scope it just closed:
+  //   const int32_t lo = layout.mark();
+  //   ... emit the block, allocating slots ...
+  //   b.scope(lo, layout.release(lo), body, p)
+  int32_t release(int32_t mark_) {
+    const int32_t end = next_local;
+    next_local = mark_;
+    return end;
+  }
+
+  // The name table Func::local_names wants: exactly high_local long, which
+  // is what verify() checks it against.
+  std::vector<std::string> names() const {
+    std::vector<std::string> out = local_names;
+    out.resize(static_cast<size_t>(high_local), "");
+    return out;
+  }
+};
+
+
+// A whole function written directly in IR, rather than lowered from a parse
+// tree: the shape a front end's own runtime library takes -- the `$truthy`,
+// `$str`, `$iternext` a dynamically typed language needs and the IR has no
+// opinion about, each written once per module and called from the emit pass.
+//
+// Optional, like Resolver. What it is worth over Builder alone is two
+// things. The position is bound once (it is a Builder::At underneath), and
+// the locals have names: `local("carry")` hands back a Slot, the slot
+// numbers are assigned in call order, and finish() derives num_locals and
+// the local_names table from them. Written with bare slot numbers instead,
+// a helper's body has its indices in one place and their names in another,
+// and inserting a temporary in the middle renumbers everything after it --
+// which verify() will catch only if the *count* changed too.
+//
+// The vocabulary below is deliberately short: these are the node shapes an
+// IR-level helper actually reaches for, spelled tersely enough that a
+// twenty-node body stays readable. Anything else is `b`, the positioned
+// builder, in the open.
+class FuncWriter {
+ public:
+  explicit FuncWriter(Module& m, SrcPos p = SrcPos{0, 0})
+      : mod(m), b(Builder(m).at(p)), pos(p) {}
+
+  // Named at length on purpose: a helper body declares its slots as
+  // ordinary local names (`params("a", "b")`), and a one-letter member here
+  // would shadow the commonest of them.
+  Module& mod;
+  Builder::At b;
+  SrcPos pos;
+  std::vector<NodeId> body;
+
+  // A local slot, named. Distinct from int32_t so that a slot and any other
+  // integer cannot be swapped by accident.
+  struct Slot {
+    int32_t i = -1;
+  };
+
+  // Parameters first, in order: the IR's convention is that the first
+  // num_params locals are the parameters, so param() must be called before
+  // any local().
+  Slot param(std::string name) {
+    ++nparams_;
+    return local(std::move(name));
+  }
+  Slot local(std::string name) {
+    names_.push_back(std::move(name));
+    return Slot{static_cast<int32_t>(names_.size() - 1)};
+  }
+
+  // The same, several at once, so a helper declares its frame in a line or
+  // two rather than one line per slot:
+  //
+  //   const auto [x, y] = w.params("x", "y");
+  //   const auto [out, i] = w.locals("out", "i");
+  //
+  // Order is the argument order, which is the slot order.
+  template <class... Names>
+  std::array<Slot, sizeof...(Names)> params(Names&&... names) {
+    return {param(std::string(names))...};
+  }
+  template <class... Names>
+  std::array<Slot, sizeof...(Names)> locals(Names&&... names) {
+    return {local(std::string(names))...};
+  }
+
+  // -- reads and writes ----------------------------------------------------
+  NodeId L(Slot s) { return b.varref(VarKind::Local, s.i); }
+  NodeId L(int32_t i) { return b.varref(VarKind::Local, i); }
+  NodeId P(int32_t i) { return b.varref(VarKind::Capture, i); }
+  NodeId set(Slot s, NodeId v) { return b.assign(VarKind::Local, s.i, v); }
+  NodeId set(int32_t i, NodeId v) { return b.assign(VarKind::Local, i, v); }
+  // A fresh cell and its first store, which is what a helper that builds a
+  // closure over its own state wants.
+  NodeId setc(int32_t i, NodeId v) {
+    return b.block({b.cell_fresh(i), b.assign(VarKind::Cell, i, v)});
+  }
+
+  // -- literals ------------------------------------------------------------
+  NodeId S(const std::string& s) { return b.str_literal(s); }
+  NodeId I(int64_t v) { return b.literal(v); }
+  NodeId D(double v) { return b.double_literal(v); }
+  NodeId Bo(bool v) { return b.bool_literal(v); }
+  NodeId Nil() { return b.nil_literal(); }
+  NodeId arr(const std::vector<NodeId>& items) { return b.array_lit(items); }
+  NodeId obj(const std::vector<std::pair<std::string, NodeId>>& kvs) {
+    std::vector<std::pair<NodeId, NodeId>> out;
+    out.reserve(kvs.size());
+    for (const auto& kv : kvs) out.emplace_back(S(kv.first), kv.second);
+    return b.object_lit(out);
+  }
+
+  // -- operators and control flow ------------------------------------------
+  NodeId in(IntrinsicId id, const std::vector<NodeId>& args) {
+    return b.intrinsic(id, args);
+  }
+  NodeId bin(BinOp op, NodeId x, NodeId y) { return b.binary(op, x, y); }
+  NodeId ret(NodeId v) { return b.make_return(v); }
+  NodeId blk(const std::vector<NodeId>& v) { return b.block(v); }
+  NodeId iff(NodeId c, NodeId t) { return b.make_if(c, t, NodeId{}); }
+  NodeId iff(NodeId c, NodeId t, NodeId e) { return b.make_if(c, t, e); }
+  NodeId wh(NodeId c, NodeId body_) { return b.make_while(c, body_); }
+  // `x && y` and `x || y`, as the If each one is. Short-circuiting, because
+  // an If does not evaluate the arm it does not take.
+  NodeId both(NodeId x, NodeId y) { return b.make_if(x, y, Bo(false)); }
+  NodeId either(NodeId x, NodeId y) { return b.make_if(x, Bo(true), y); }
+
+  // -- containers ----------------------------------------------------------
+  NodeId idx(NodeId r, NodeId k) { return b.index(r, k); }
+  NodeId idx(NodeId r, const std::string& k) { return b.index(r, S(k)); }
+  NodeId sidx(NodeId r, NodeId k, NodeId v) { return b.set_index(r, k, v); }
+  NodeId sidx(NodeId r, const std::string& k, NodeId v) {
+    return b.set_index(r, S(k), v);
+  }
+  NodeId has(NodeId r, NodeId k) { return in(IntrinsicId::ObjectHas, {r, k}); }
+  NodeId push(NodeId a, NodeId v) { return in(IntrinsicId::ArrayPush, {a, v}); }
+  NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
+  NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
+  // A value's type string compared against a name -- `typ(v)` is what these
+  // two are meant to be handed, not the value itself.
+  NodeId is(NodeId t, const std::string& s) { return bin(BinOp::Eq, t, S(s)); }
+  NodeId isnt(NodeId t, const std::string& s) {
+    return bin(BinOp::Ne, t, S(s));
+  }
+
+  // -- calls ---------------------------------------------------------------
+  // A host function, declared on the spot: the module's native table is a
+  // set, so naming one twice costs nothing.
+  NodeId nat(const std::string& name, const std::vector<NodeId>& args) {
+    return b.call_value(b.native_ref(b.declare_native(name)), args);
+  }
+  // A closure over this function's own cells. The capture map belongs to the
+  // site building it, which is here.
+  NodeId clos(int32_t func, const std::vector<int32_t>& cells) {
+    std::vector<CaptureSrc> cs;
+    cs.reserve(cells.size());
+    for (const int32_t c : cells) cs.push_back({VarKind::Cell, c});
+    const int32_t cm = static_cast<int32_t>(mod.capture_maps.size());
+    mod.capture_maps.push_back(std::move(cs));
+    return b.make_closure(func, cm);
+  }
+
+  void add(NodeId n) { body.push_back(n); }
+
+  // -- finishing -----------------------------------------------------------
+  // The two Func flags this writer decides, as defaults rather than as
+  // rules: they are what an IR-level helper library wants, which is what
+  // this class is for. `lenient_arity` because such a helper is called only
+  // from IR the same front end wrote, so its arity is that front end's
+  // business and not the executor's; `singleton` because a helper closure
+  // has no identity of its own, so every call site may share one.
+  //
+  // A front end writing a *source-visible* function with this -- a
+  // synthesized method, a lambda template, anything the program can get
+  // hold of as a value -- clears them before write(). `singleton`
+  // especially: Func::singleton says why sharing is observable, and
+  // deciding it for the caller would be the library making exactly the
+  // choice that comment reserves for the front end.
+  bool lenient_arity = true;
+  bool singleton = true;
+
+  // Writes everything added so far into `f` as its whole body, with the
+  // parameter count, slot count and name table taken from param()/local().
+  void write(Func& f, const std::string& name, int32_t ncells = 0,
+             int32_t ncaps = 0) {
+    // The writer is finished here, so the name table moves rather than
+    // being copied into write_raw's by-value parameter. The count is read
+    // into a local first: argument evaluation order is unspecified, and
+    // reading names_.size() after the move would answer zero.
+    const int32_t nlocals = static_cast<int32_t>(names_.size());
+    write_raw(f, name, nparams_, nlocals, std::move(names_), ncells, ncaps);
+  }
+
+ private:
+  // The body of write(), with the counts and names spelled out. Private: a
+  // caller that could pass its own would be back to keeping the slot
+  // numbers in one place and their names in another, which is the thing
+  // param()/local() exist to prevent. verify() requires the name table to
+  // be exactly as long as the count it describes, so the padding happens
+  // here.
+  void write_raw(Func& f, const std::string& name, int32_t nparams,
+                 int32_t nlocals, std::vector<std::string> names,
+                 int32_t ncells, int32_t ncaps) {
+    f.name = name;
+    f.num_params = nparams;
+    f.num_locals = nlocals;
+    names.resize(static_cast<size_t>(nlocals), "");
+    f.local_names = std::move(names);
+    f.num_cells = ncells;
+    f.num_captures = ncaps;
+    f.capture_names.clear();
+    for (int32_t i = 0; i < ncaps; ++i) {
+      f.capture_names.push_back("c" + std::to_string(i));
+    }
+    f.lenient_arity = lenient_arity;
+    // A func with captures cannot be a singleton whatever the writer says
+    // -- there is something per call site to forward in, which is what
+    // verify() refuses.
+    f.singleton = singleton && ncaps == 0;
+    f.body = b.scope(0, nlocals, blk(body));
+  }
+
+  std::vector<std::string> names_;
+  int32_t nparams_ = 0;
+};
 
 }  // namespace coreir
 
@@ -2727,6 +3338,7 @@ struct Chunk {
   bool is_generator = false;
   bool lenient_arity = false;
   bool tail_calls = false;
+  bool singleton = false;  // Func::singleton
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
@@ -3965,6 +4577,11 @@ inline std::optional<std::string> verify(const Module& m) {
     if (f.num_params > f.num_locals) {
       return std::string("func declares more params than locals");
     }
+    // One closure shared by every MakeClosure of this func can only be
+    // right if there is nothing per-site to forward into it.
+    if (f.singleton && f.num_captures != 0) {
+      return std::string("singleton func cannot take captures");
+    }
     if (!v.check_node(f.body, f, 0, 0)) return v.err;
   }
   if (!m.funcs[0].capture_names.empty()) {
@@ -3982,6 +4599,7 @@ inline std::string to_string(const Module& m) {
     const Func& f = m.funcs[i];
     d.out << "func #" << i << " " << f.name << "  locals=" << f.num_locals
           << " captures=" << f.num_captures;
+    if (f.singleton) d.out << " singleton";
     if (!f.capture_names.empty()) {
       d.out << " [";
       for (size_t j = 0; j < f.capture_names.size(); ++j) {
@@ -4108,7 +4726,9 @@ inline std::string to_string(const Program& p) {
   for (size_t i = 0; i < p.chunks.size(); ++i) {
     const Chunk& ch = p.chunks[i];
     out << "chunk #" << i << " " << ch.name << "  locals=" << ch.num_locals
-        << " captures=" << ch.num_captures << " regs=" << ch.num_regs << "\n";
+        << " captures=" << ch.num_captures << " regs=" << ch.num_regs;
+    if (ch.singleton) out << " singleton";
+    out << "\n";
     for (size_t j = 0; j < ch.code.size(); ++j) {
       const Insn& in = ch.code[j];
       const coreir::SrcPos sp = p.positions[ch.code_pos[j]];
@@ -4991,6 +5611,7 @@ inline Program compile(const coreir::Module& m) {
     ch.is_generator = fn.is_generator;
     ch.lenient_arity = fn.lenient_arity;
     ch.tail_calls = fn.tail_calls;
+    ch.singleton = fn.singleton;
 
     detail::FnCompiler fc{m, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
@@ -5177,6 +5798,16 @@ struct Exec {
   // to run after the entry frame, FIFO. C++-side handles, so the collector
   // sees them as roots the way it sees a frame's registers.
   std::deque<Value> jobs;
+
+  // One closure per Chunk::singleton function, built at its first
+  // MakeClosure and handed out by every later one. Parallel to
+  // Program::chunks; a nil entry is one not built yet, and a chunk that is
+  // not a singleton never has its slot touched. Held here rather than in
+  // Program because the cached value is a refcounted heap object bound to
+  // one Runtime, where a compiled Chunk is not -- the same reason
+  // Program::natives resolve into Exec::natives. Being C++-side handles,
+  // these are roots the collector sees the way it sees `jobs`.
+  std::vector<Value> singletons;
 
   // Program::natives, resolved against RunOptions::natives into NativeObj
   // values before the first instruction; Op::NativeRef reads one out.
@@ -6400,6 +7031,15 @@ struct Exec {
           f.cells[in.a] = Value::make_cell();
           break;
         case Op::MakeClosure: {
+          // A singleton's closure is the same object every time (its own
+          // capture map is empty, which verify pinned), so it is built at
+          // the first site to ask and read back at every later one.
+          if (p.chunks[static_cast<size_t>(in.b)].singleton) {
+            Value& slot = singletons[static_cast<size_t>(in.b)];
+            if (slot.is_nil()) slot = Value::make_closure(in.b, {});
+            f.regs[in.a] = slot;
+            break;
+          }
           std::vector<Value> cells;
           const auto& cmap = p.capture_maps[static_cast<size_t>(in.c)];
           cells.reserve(cmap.size());
@@ -6819,6 +7459,7 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.
+  e.singletons.resize(p.chunks.size());
   e.natives.reserve(p.natives.size());
   for (const std::string& name : p.natives) {
     const NativeDef* def = nullptr;

@@ -115,109 +115,69 @@ bool is_string_method(const std::string& n) {
          n == "len" || n == "byte";
 }
 
-struct VarInfo {
-  std::string name;
-  int32_t owner = 0;
-};
-
+// What this front end knows about a function beyond the closure conversion
+// coreir::Resolver does -- kept parallel to Resolver::fns, which owns the
+// parent link, the Module::funcs index and the capture/cell numbering.
 struct FnInfo {
-  int32_t parent = -1;
-  int32_t index = -1;
   std::string name = "?";
-  std::set<int32_t> free;
-  std::map<int32_t, int32_t> capture_index;
-  std::map<int32_t, int32_t> cell_index;
   std::vector<int32_t> params;
   const Ast* body = nullptr;
 };
 
-struct FnCtx {
+struct FnCtx : FrameLayout {
   int32_t fn = 0;
-  int32_t next_local = 0;
-  int32_t high_local = 0;
-  int32_t next_cell = 0;
-  std::vector<std::string> local_names;
-
-  int32_t alloc_local(const std::string& name) {
-    const int32_t s = next_local++;
-    if (next_local > high_local) high_local = next_local;
-    if (static_cast<size_t>(s) >= local_names.size()) {
-      local_names.resize(static_cast<size_t>(s) + 1, "");
-    }
-    local_names[static_cast<size_t>(s)] = name;
-    return s;
-  }
 };
 
 struct Binder {
   Module m;
-  std::vector<VarInfo> vars;
-  std::vector<FnInfo> fns;
+  Resolver rs;
+  std::vector<FnInfo> fns;  // parallel to rs.fns
   std::map<const Ast*, int32_t> ref_of;
   std::map<const Ast*, int32_t> decl_of;
   std::map<const Ast*, int32_t> fn_of;
   std::map<const Ast*, std::vector<int32_t>> block_decls;
-  std::vector<int32_t> slot_of;
   std::map<std::string, int32_t> rt;
   int32_t empty_cmap = -1;
-  // One closure per runtime helper, built once at file scope into an array
-  // every function captures -- see build().
-  int32_t helpers_var = -1;
   // Lua's error messages name the chunk, which is the path as it was
   // given on the command line -- so the binder has to be told it.
   std::string chunk;
 
   // ==== Pass A: scopes, declarations, captures =============================
 
-  struct ScopeA {
-    int32_t fn;
-    std::map<std::string, int32_t> names;
-    std::vector<int32_t> order;
-  };
-  std::vector<ScopeA> scopes;
+  // Parallel to Resolver::scopes: the order a block declared its bindings
+  // in, which the name map cannot answer because Lua permits shadowing
+  // within one block -- `local x` twice is two bindings, and the second
+  // hides the first from there on, so Resolver::declare's overwrite is
+  // exactly right and the *order* has to be kept beside it.
+  std::vector<std::vector<int32_t>> scope_order;
+
+  void push_scope() {
+    rs.push_scope();
+    scope_order.emplace_back();
+  }
+  void pop_scope() {
+    rs.pop_scope();
+    scope_order.pop_back();
+  }
 
   int32_t declare(const std::string& name, int32_t fn) {
-    // Lua permits shadowing, including within one block -- `local x` twice
-    // is two bindings, and the second hides the first from there on. So
-    // this overwrites the name rather than complaining, which is why the
-    // declaration *order* is kept separately from the name map.
-    const int32_t v = static_cast<int32_t>(vars.size());
-    vars.push_back({name, fn});
-    scopes.back().names[name] = v;
-    scopes.back().order.push_back(v);
+    const int32_t v = rs.declare(name, fn);
+    scope_order.back().push_back(v);
     return v;
   }
 
-  std::optional<int32_t> resolve(const std::string& name, int32_t fn) {
-    for (size_t i = scopes.size(); i-- > 0;) {
-      auto it = scopes[i].names.find(name);
-      if (it == scopes[i].names.end()) continue;
-      const int32_t v = it->second;
-      const int32_t owner = vars[static_cast<size_t>(v)].owner;
-      if (owner != fn) {
-        for (int32_t k = fn; k != owner && k >= 0;
-             k = fns[static_cast<size_t>(k)].parent) {
-          fns[static_cast<size_t>(k)].free.insert(v);
-        }
-      }
-      return v;
-    }
-    return std::nullopt;
-  }
-
   int32_t new_fn(int32_t parent, const std::string& name) {
-    const int32_t f = static_cast<int32_t>(fns.size());
+    const int32_t f = rs.new_fn(parent);
     fns.push_back({});
-    fns[static_cast<size_t>(f)].parent = parent;
     fns[static_cast<size_t>(f)].name = name;
     return f;
   }
 
   void resolve_block(const Ast& block, int32_t fn) {
-    scopes.push_back({fn, {}, {}});
+    push_scope();
     for (const auto& s : block.nodes) resolve_stmt(*s, fn);
-    block_decls[&block] = scopes.back().order;
-    scopes.pop_back();
+    block_decls[&block] = scope_order.back();
+    pop_scope();
   }
 
   // `funcbody` is params + block + the `end`. A method declared with `:`
@@ -228,7 +188,7 @@ struct Binder {
     const int32_t f = new_fn(parent, name);
     fns[static_cast<size_t>(f)].body = body.nodes[1].get();
     fn_of[&node] = f;
-    scopes.push_back({f, {}, {}});
+    push_scope();
     if (implicit_self) {
       fns[static_cast<size_t>(f)].params.push_back(declare("self", f));
     }
@@ -238,7 +198,7 @@ struct Binder {
       fns[static_cast<size_t>(f)].params.push_back(v);
     }
     resolve_block(*body.nodes[1], f);
-    scopes.pop_back();
+    pop_scope();
     return f;
   }
 
@@ -295,11 +255,11 @@ struct Binder {
         // `until`'s condition can see the block's own locals -- Lua's one
         // scope that outlives its braces, so the block and the condition
         // are resolved in the same scope rather than in two.
-        scopes.push_back({fn, {}, {}});
+        push_scope();
         for (const auto& s : a.nodes[0]->nodes) resolve_stmt(*s, fn);
         resolve_expr(*a.nodes[1], fn);
-        block_decls[a.nodes[0].get()] = scopes.back().order;
-        scopes.pop_back();
+        block_decls[a.nodes[0].get()] = scope_order.back();
+        pop_scope();
         return;
       }
       case "fornum"_: {
@@ -311,23 +271,23 @@ struct Binder {
             resolve_expr(*a.nodes[i], fn);
           }
         }
-        scopes.push_back({fn, {}, {}});
+        push_scope();
         decl_of[a.nodes[0].get()] =
             declare(std::string(a.nodes[0]->token), fn);
         resolve_block(*a.nodes.back(), fn);
-        block_decls[&a] = scopes.back().order;
-        scopes.pop_back();
+        block_decls[&a] = scope_order.back();
+        pop_scope();
         return;
       }
       case "forin"_: {
         resolve_expr(*a.nodes[1], fn);
-        scopes.push_back({fn, {}, {}});
+        push_scope();
         for (const auto& id : a.nodes[0]->nodes) {
           decl_of[id.get()] = declare(std::string(id->token), fn);
         }
         resolve_block(*a.nodes[2], fn);
-        block_decls[&a] = scopes.back().order;
-        scopes.pop_back();
+        block_decls[&a] = scope_order.back();
+        pop_scope();
         return;
       }
       case "dostat"_:
@@ -354,7 +314,7 @@ struct Binder {
         return;
       case "ident"_: {
         const std::string n(a.token);
-        if (auto v = resolve(n, fn)) {
+        if (auto v = rs.resolve(n, fn)) {
           ref_of[&a] = *v;
           return;
         }
@@ -386,36 +346,6 @@ struct Binder {
     }
   }
 
-  void number_captures() {
-    for (size_t f = 0; f < fns.size(); ++f) {
-      int32_t i = 0;
-      for (const int32_t v : fns[f].free) {
-        fns[f].capture_index[v] = i++;
-        m.funcs[static_cast<size_t>(fns[f].index)].capture_names.push_back(
-            vars[static_cast<size_t>(v)].name);
-      }
-      m.funcs[static_cast<size_t>(fns[f].index)].num_captures = i;
-    }
-    for (const auto& fi : fns) {
-      for (const int32_t v : fi.free) {
-        auto& own = fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)]
-                        .cell_index;
-        if (!own.count(v)) own[v] = static_cast<int32_t>(own.size());
-      }
-    }
-  }
-
-  std::pair<VarKind, int32_t> access(int32_t f, int32_t v) const {
-    if (vars[static_cast<size_t>(v)].owner == f) {
-      const auto& ci = fns[static_cast<size_t>(f)].cell_index;
-      const auto it = ci.find(v);
-      if (it != ci.end()) return {VarKind::Cell, it->second};
-      return {VarKind::Local, slot_of[static_cast<size_t>(v)]};
-    }
-    return {VarKind::Capture,
-            fns[static_cast<size_t>(f)].capture_index.at(v)};
-  }
-
   // ==== The runtime this front end writes in its own IR ====================
 
   static const std::vector<std::string>& rt_names() {
@@ -429,80 +359,30 @@ struct Binder {
     return names;
   }
 
-  struct RT {
+  // The front end's own additions to coreir::FuncWriter: the helpers
+  // that have to reach this binder's own tables.
+  struct RT : FuncWriter {
     Binder& bd;
-    Builder b;
-    SrcPos p{0, 0};
-    std::vector<NodeId> body;
 
-    explicit RT(Binder& bd_) : bd(bd_), b(bd_.m) {}
+    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
 
-    NodeId L(int32_t i) { return b.varref(VarKind::Local, i, p); }
-    NodeId C(int32_t i) { return b.varref(VarKind::Cell, i, p); }
-    NodeId P(int32_t i) { return b.varref(VarKind::Capture, i, p); }
-    NodeId S(const std::string& s) { return b.str_literal(s, p); }
-    NodeId D(double d) { return b.double_literal(d, p); }
-    NodeId I(int64_t v) { return b.literal(v, p); }
-    NodeId Nil() { return b.nil_literal(p); }
-    NodeId Bo(bool v) { return b.bool_literal(v, p); }
-    NodeId arr(const std::vector<NodeId>& v) { return b.array_lit(v, p); }
-    NodeId in(IntrinsicId id, const std::vector<NodeId>& a) {
-      return b.intrinsic(id, a, p);
-    }
-    NodeId bin(BinOp op, NodeId x, NodeId y) { return b.binary(op, x, y, p); }
-    NodeId set(int32_t s, NodeId v) {
-      return b.assign(VarKind::Local, s, v, p);
-    }
-    NodeId ret(NodeId v) { return b.make_return(v, p); }
-    NodeId blk(const std::vector<NodeId>& v) { return b.block(v, p); }
-    NodeId iff(NodeId c, NodeId t) { return b.make_if(c, t, NodeId{}, p); }
-    NodeId iff(NodeId c, NodeId t, NodeId e) { return b.make_if(c, t, e, p); }
-    NodeId idx(NodeId r, NodeId k) { return b.index(r, k, p); }
-    NodeId idx(NodeId r, const std::string& k) { return b.index(r, S(k), p); }
-    NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
-    NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
-    NodeId is(NodeId v, const std::string& s) { return bin(BinOp::Eq, v, S(s)); }
-    NodeId isnt(NodeId v, const std::string& s) {
-      return bin(BinOp::Ne, v, S(s));
-    }
     // `t` is a value's *type string*, from `typ(v)`: true when it names
     // one of Lua's two number types.
-    NodeId is_num(NodeId t) { return b.make_if(is(t, "int"), Bo(true), is(t, "double"), p); }
-    NodeId has(NodeId t, NodeId k) {
-      return in(IntrinsicId::ObjectHas, {t, k});
-    }
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(
-          b.make_closure(bd.rt.at(name), bd.empty_cmap, p), a, p);
-    }
-    NodeId nat(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.native_ref(b.declare_native(name), p), a, p);
-    }
-    NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
-      std::vector<CaptureSrc> cs;
-      for (const int32_t c : cells) cs.push_back({VarKind::Cell, c});
-      const int32_t cm = static_cast<int32_t>(bd.m.capture_maps.size());
-      bd.m.capture_maps.push_back(cs);
-      return b.make_closure(bd.rt.at(name), cm, p);
-    }
-    void add(NodeId n) { body.push_back(n); }
+    NodeId is_num(NodeId t) { return b.make_if(is(t, "int"), Bo(true), is(t, "double")); }
 
-    void finish(const std::string& name, int32_t nparams, int32_t nlocals,
-                std::vector<std::string> names, int32_t ncells = 0,
+    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
+      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
+    }
+
+    NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
+      return FuncWriter::clos(bd.rt.at(name), cells);
+    }
+
+    // The counts and the name table come from param()/local().
+    void finish(const std::string& name, int32_t ncells = 0,
                 int32_t ncaps = 0) {
-      Func& f = bd.m.funcs[static_cast<size_t>(bd.rt.at(name))];
-      f.name = name;
-      f.num_params = nparams;
-      f.num_locals = nlocals;
-      names.resize(static_cast<size_t>(nlocals), "");
-      f.local_names = std::move(names);
-      f.num_cells = ncells;
-      f.num_captures = ncaps;
-      for (int32_t i = 0; i < ncaps; ++i) {
-        f.capture_names.push_back("c" + std::to_string(i));
-      }
-      f.lenient_arity = true;
-      f.body = b.scope(0, nlocals, blk(body), p);
+      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
+            ncaps);
     }
   };
 
@@ -512,10 +392,11 @@ struct Binder {
   // neither."
   void rt_truthy() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.typ(r.L(0)), "bool"), r.ret(r.L(0))));
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "nil"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(r.L(v)), "bool"), r.ret(r.L(v))));
     r.add(r.ret(r.Bo(true)));
-    r.finish("$truthy", 1, 1, {"v"});
+    r.finish("$truthy");
   }
 
   // `==`: numbers compare numerically across integer and float, values of
@@ -523,34 +404,36 @@ struct Binder {
   // eval_binop stops), and everything else is identity.
   void rt_eq() {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
-    r.add(r.iff(r.is_num(r.L(2)),
-                r.iff(r.is_num(r.L(3)),
-                      r.ret(r.bin(BinOp::Eq, r.L(0), r.L(1))))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(2), r.L(3)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(2), "nil"), r.ret(r.Bo(true))));
-    r.add(r.iff(r.is(r.L(2), "bool"), r.ret(r.bin(BinOp::Eq, r.L(0), r.L(1)))));
-    r.add(r.iff(r.is(r.L(2), "string"),
-                r.ret(r.bin(BinOp::Eq, r.L(0), r.L(1)))));
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb, m] = r.locals("ta", "tb", "m");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
     r.add(r.iff(
-        r.is(r.L(2), "map"),
-        r.blk({r.set(4, r.call("$mm", {r.L(0), r.S("__eq")})),
-               r.iff(r.isnt(r.typ(r.L(4)), "nil"),
-                     r.ret(r.call("$truthy",
-                                  {r.call("$one",
-                                          {r.b.call_value(r.L(4),
-                                                          {r.L(0), r.L(1)},
-                                                          r.p)})}))),
-               r.set(4, r.call("$mm", {r.L(1), r.S("__eq")})),
-               r.iff(r.isnt(r.typ(r.L(4)), "nil"),
-                     r.ret(r.call("$truthy",
-                                  {r.call("$one",
-                                          {r.b.call_value(r.L(4),
-                                                          {r.L(0), r.L(1)},
-                                                          r.p)})})))})));
-    r.add(r.ret(r.in(IntrinsicId::Same, {r.L(0), r.L(1)})));
-    r.finish("$eq", 2, 5, {"a", "b", "ta", "tb", "m"});
+        r.is_num(r.L(ta)),
+        r.iff(r.is_num(r.L(tb)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.L(ta), "nil"), r.ret(r.Bo(true))));
+    r.add(
+        r.iff(r.is(r.L(ta), "bool"), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    r.add(r.iff(r.is(r.L(ta), "string"),
+                r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    r.add(r.iff(
+        r.is(r.L(ta), "map"),
+        r.blk(
+            {r.set(m, r.call("$mm", {r.L(a), r.S("__eq")})),
+             r.iff(r.isnt(r.typ(r.L(m)), "nil"),
+                   r.ret(r.call(
+                       "$truthy",
+                       {r.call("$one",
+                               {r.b.call_value(r.L(m), {r.L(a), r.L(b)})})}))),
+             r.set(m, r.call("$mm", {r.L(b), r.S("__eq")})),
+             r.iff(r.isnt(r.typ(r.L(m)), "nil"),
+                   r.ret(r.call(
+                       "$truthy",
+                       {r.call("$one", {r.b.call_value(
+                                           r.L(m), {r.L(a), r.L(b)})})})))})));
+    r.add(r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)})));
+    r.finish("$eq");
   }
 
   // Lua's `%` and `//` floor; C's (and BinOp::Mod's, and BinOp::Div's on
@@ -559,57 +442,61 @@ struct Binder {
   // operands' signs differ and the division was not exact.
   void rt_mod() {
     RT r(*this);
-    r.add(r.iff(r.b.make_if(r.is(r.typ(r.L(0)), "int"),
-                            r.is(r.typ(r.L(1)), "int"), r.Bo(false), r.p),
-                r.blk({r.set(2, r.bin(BinOp::Mod, r.L(0), r.L(1))),
-                       r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(2), r.I(0)),
-                                         r.bin(BinOp::Lt,
-                                               r.bin(BinOp::Mul, r.L(2),
-                                                     r.L(1)),
-                                               r.I(0)),
-                                         r.Bo(false), r.p),
-                             r.set(2, r.bin(BinOp::Add, r.L(2), r.L(1)))),
-                       r.ret(r.L(2))})));
+    const auto [a, b] = r.params("a", "b");
+    const auto [i, f] = r.locals("i", "f");
+    r.add(r.iff(
+        r.b.make_if(r.is(r.typ(r.L(a)), "int"), r.is(r.typ(r.L(b)), "int"),
+                    r.Bo(false)),
+        r.blk(
+            {r.set(i, r.bin(BinOp::Mod, r.L(a), r.L(b))),
+             r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(i), r.I(0)),
+                               r.bin(BinOp::Lt,
+                                     r.bin(BinOp::Mul, r.L(i), r.L(b)), r.I(0)),
+                               r.Bo(false)),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.L(b)))),
+             r.ret(r.L(i))})));
     // The float path: fmod, corrected the same way.
-    r.add(r.set(3, r.in(IntrinsicId::FMod, {r.L(0), r.L(1)})));
-    r.add(r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(3), r.D(0.0)),
-                            r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(3), r.L(1)),
+    r.add(r.set(f, r.in(IntrinsicId::FMod, {r.L(a), r.L(b)})));
+    r.add(r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(f), r.D(0.0)),
+                            r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(f), r.L(b)),
                                   r.D(0.0)),
-                            r.Bo(false), r.p),
-                r.set(3, r.bin(BinOp::Add, r.L(3), r.L(1)))));
-    r.add(r.ret(r.L(3)));
-    r.finish("$mod", 2, 4, {"a", "b", "i", "f"});
+                            r.Bo(false)),
+                r.set(f, r.bin(BinOp::Add, r.L(f), r.L(b)))));
+    r.add(r.ret(r.L(f)));
+    r.finish("$mod");
   }
 
   void rt_idiv() {
     RT r(*this);
-    r.add(r.iff(r.b.make_if(r.is(r.typ(r.L(0)), "int"),
-                            r.is(r.typ(r.L(1)), "int"), r.Bo(false), r.p),
-                r.blk({r.set(2, r.bin(BinOp::Div, r.L(0), r.L(1))),
-                       // Truncation and flooring differ exactly when the
-                       // signs disagree and the remainder is nonzero.
-                       r.iff(r.b.make_if(
-                                 r.bin(BinOp::Ne,
-                                       r.bin(BinOp::Mul, r.L(2), r.L(1)),
-                                       r.L(0)),
-                                 r.bin(BinOp::Lt,
-                                       r.bin(BinOp::Mul, r.L(0), r.L(1)),
-                                       r.I(0)),
-                                 r.Bo(false), r.p),
-                             r.set(2, r.bin(BinOp::Sub, r.L(2), r.I(1)))),
-                       r.ret(r.L(2))})));
-    r.add(r.ret(r.nat("floor", {r.bin(BinOp::Div,
-                                      r.in(IntrinsicId::ToDouble, {r.L(0)}),
-                                      r.in(IntrinsicId::ToDouble, {r.L(1)}))})));
-    r.finish("$idiv", 2, 3, {"a", "b", "q"});
+    const auto [a, b] = r.params("a", "b");
+    const auto [q] = r.locals("q");
+    r.add(r.iff(
+        r.b.make_if(r.is(r.typ(r.L(a)), "int"), r.is(r.typ(r.L(b)), "int"),
+                    r.Bo(false)),
+        r.blk(
+            {r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))),
+             // Truncation and flooring differ exactly when the
+             // signs disagree and the remainder is nonzero.
+             r.iff(r.b.make_if(r.bin(BinOp::Ne,
+                                     r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
+                               r.bin(BinOp::Lt,
+                                     r.bin(BinOp::Mul, r.L(a), r.L(b)), r.I(0)),
+                               r.Bo(false)),
+                   r.set(q, r.bin(BinOp::Sub, r.L(q), r.I(1)))),
+             r.ret(r.L(q))})));
+    r.add(r.ret(
+        r.nat("floor", {r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(a)}),
+                              r.in(IntrinsicId::ToDouble, {r.L(b)}))})));
+    r.finish("$idiv");
   }
 
   // `/` is always float in Lua, even on two integers.
   void rt_div() {
     RT r(*this);
-    r.add(r.ret(r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(0)}),
-                      r.in(IntrinsicId::ToDouble, {r.L(1)}))));
-    r.finish("$div", 2, 2, {"a", "b"});
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.ret(r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(a)}),
+                      r.in(IntrinsicId::ToDouble, {r.L(b)}))));
+    r.finish("$div");
   }
 
   // tostring, through the host: Lua formats a float with "%.14g" and then
@@ -617,15 +504,16 @@ struct Binder {
   // shortest round trip nor anything an IR-level helper could produce.
   void rt_str() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"), r.ret(r.L(0))));
-    r.add(r.iff(
-        r.is(r.typ(r.L(0)), "map"),
-        r.blk({r.set(1, r.call("$mm", {r.L(0), r.S("__tostring")})),
-               r.iff(r.isnt(r.typ(r.L(1)), "nil"),
-                     r.ret(r.call("$one",
-                                  {r.b.call_value(r.L(1), {r.L(0)}, r.p)})))})));
-    r.add(r.ret(r.nat("tostring", {r.L(0)})));
-    r.finish("$str", 1, 2, {"v", "m"});
+    const auto [v] = r.params("v");
+    const auto [m] = r.locals("m");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "string"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(r.L(v)), "map"),
+                r.blk({r.set(m, r.call("$mm", {r.L(v), r.S("__tostring")})),
+                       r.iff(r.isnt(r.typ(r.L(m)), "nil"),
+                             r.ret(r.call("$one", {r.b.call_value(
+                                                      r.L(m), {r.L(v)})})))})));
+    r.add(r.ret(r.nat("tostring", {r.L(v)})));
+    r.finish("$str");
   }
 
   // A table's metatable, and one metamethod off it -- the walk every
@@ -634,19 +522,22 @@ struct Binder {
   // `__tostring`/`__call`) all go through these two.
   void rt_mt() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "map"), r.ret(r.Nil())));
+    const auto [t] = r.params("t");
+    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"), r.ret(r.Nil())));
     // A missing key already reads as nil (vmlib.h's own rule for a map),
     // so no metatable is the same case as one with nothing at this key.
-    r.add(r.ret(r.idx(r.L(0), kMetaKey)));
-    r.finish("$mt", 1, 1, {"t"});
+    r.add(r.ret(r.idx(r.L(t), kMetaKey)));
+    r.finish("$mt");
   }
 
   void rt_mm() {
     RT r(*this);
-    r.add(r.set(2, r.call("$mt", {r.L(0)})));
-    r.add(r.iff(r.is(r.typ(r.L(2)), "nil"), r.ret(r.Nil())));
-    r.add(r.ret(r.idx(r.L(2), r.L(1))));
-    r.finish("$mm", 2, 3, {"v", "name", "mt"});
+    const auto [v, name] = r.params("v", "name");
+    const auto [mt] = r.locals("mt");
+    r.add(r.set(mt, r.call("$mt", {r.L(v)})));
+    r.add(r.iff(r.is(r.typ(r.L(mt)), "nil"), r.ret(r.Nil())));
+    r.add(r.ret(r.idx(r.L(mt), r.L(name))));
+    r.finish("$mm");
   }
 
   // `+`, `-`, `*` on two numbers stay `BinOp`; on anything else, the
@@ -654,52 +545,54 @@ struct Binder {
   // operand first.
   void rt_arith(const std::string& name, BinOp op, const std::string& mm) {
     RT r(*this);
-    r.add(r.set(2, r.typ(r.L(0))));
-    r.add(r.set(3, r.typ(r.L(1))));
-    r.add(r.iff(r.is_num(r.L(2)),
-                r.iff(r.is_num(r.L(3)), r.ret(r.bin(op, r.L(0), r.L(1))))));
-    r.add(r.set(4, r.call("$mm", {r.L(0), r.S(mm)})));
-    r.add(r.iff(r.isnt(r.typ(r.L(4)), "nil"),
+    const auto [a, b] = r.params("a", "b");
+    const auto [ta, tb, mv] = r.locals("ta", "tb", "m");
+    r.add(r.set(ta, r.typ(r.L(a))));
+    r.add(r.set(tb, r.typ(r.L(b))));
+    r.add(r.iff(r.is_num(r.L(ta)),
+                r.iff(r.is_num(r.L(tb)), r.ret(r.bin(op, r.L(a), r.L(b))))));
+    const auto try_mm = [&](FuncWriter::Slot recv) {
+      return std::vector<NodeId>{
+          r.set(mv, r.call("$mm", {r.L(recv), r.S(mm)})),
+          r.iff(r.isnt(r.typ(r.L(mv)), "nil"),
                 r.ret(r.call("$one",
-                             {r.b.call_value(r.L(4), {r.L(0), r.L(1)},
-                                             r.p)}))));
-    r.add(r.set(4, r.call("$mm", {r.L(1), r.S(mm)})));
-    r.add(r.iff(r.isnt(r.typ(r.L(4)), "nil"),
-                r.ret(r.call("$one",
-                             {r.b.call_value(r.L(4), {r.L(0), r.L(1)},
-                                             r.p)}))));
+                             {r.b.call_value(r.L(mv), {r.L(a), r.L(b)})})))};
+    };
+    for (const NodeId n : try_mm(a)) r.add(n);
+    for (const NodeId n : try_mm(b)) r.add(n);
     r.add(r.b.make_throw(r.S("attempt to perform arithmetic on a table "
-                             "value"),
-                         r.p));
-    r.finish(name, 2, 5, {"a", "b", "ta", "tb", "m"});
+                             "value")));
+    r.finish(name);
   }
 
   void rt_cat() {
     RT r(*this);
-    r.add(r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(0)}),
-                      r.call("$str", {r.L(1)}))));
-    r.finish("$cat", 2, 2, {"a", "b"});
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.ret(
+        r.bin(BinOp::Add, r.call("$str", {r.L(a)}), r.call("$str", {r.L(b)}))));
+    r.finish("$cat");
   }
 
   // A table key: `t[1.0]` and `t[1]` are the same slot in Lua, so an
   // integral float normalizes to the integer it equals before it is used.
   void rt_key() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "double"),
-                r.blk({r.iff(r.bin(BinOp::Ne, r.L(0), r.L(0)),
-                             r.ret(r.L(0))),
-                       r.iff(r.b.make_if(
-                                 r.bin(BinOp::Gt, r.L(0), r.D(-9.007199254740992e15)),
-                                 r.bin(BinOp::Lt, r.L(0), r.D(9.007199254740992e15)),
-                                 r.Bo(false), r.p),
-                             r.blk({r.set(1, r.in(IntrinsicId::ToInt, {r.L(0)})),
-                                    r.iff(r.bin(BinOp::Eq,
-                                                r.in(IntrinsicId::ToDouble,
-                                                     {r.L(1)}),
-                                                r.L(0)),
-                                          r.ret(r.L(1)))}))})));
-    r.add(r.ret(r.L(0)));
-    r.finish("$key", 1, 2, {"k", "i"});
+    const auto [k] = r.params("k");
+    const auto [i] = r.locals("i");
+    r.add(r.iff(
+        r.is(r.typ(r.L(k)), "double"),
+        r.blk({r.iff(r.bin(BinOp::Ne, r.L(k), r.L(k)), r.ret(r.L(k))),
+               r.iff(r.b.make_if(
+                         r.bin(BinOp::Gt, r.L(k), r.D(-9.007199254740992e15)),
+                         r.bin(BinOp::Lt, r.L(k), r.D(9.007199254740992e15)),
+                         r.Bo(false)),
+                     r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(k)})),
+                            r.iff(r.bin(BinOp::Eq,
+                                        r.in(IntrinsicId::ToDouble, {r.L(i)}),
+                                        r.L(k)),
+                                  r.ret(r.L(i)))}))})));
+    r.add(r.ret(r.L(k)));
+    r.finish("$key");
   }
 
   // Reading a table, with the one metamethod this subset has. `__index`
@@ -708,54 +601,55 @@ struct Binder {
   // not the IR's.
   void rt_get() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "map"),
-                r.b.make_throw(r.S("attempt to index a non-table value"),
-                               r.p)));
-    r.add(r.set(2, r.call("$key", {r.L(1)})));
-    r.add(r.iff(r.has(r.L(0), r.L(2)), r.ret(r.idx(r.L(0), r.L(2)))));
-    r.add(r.iff(r.has(r.L(0), r.S(kMetaKey)),
-                r.blk({r.set(3, r.idx(r.L(0), kMetaKey)),
-                       r.iff(r.has(r.L(3), r.S("__index")),
-                             r.blk({r.set(4, r.idx(r.L(3), r.S("__index"))),
-                                    r.iff(r.is(r.typ(r.L(4)), "map"),
-                                          r.ret(r.call("$get",
-                                                       {r.L(4), r.L(2)}))),
-                                    r.ret(r.call("$one",
-                                                 {r.b.call_value(
-                                                     r.L(4),
-                                                     {r.L(0), r.L(2)},
-                                                     r.p)}))}))})));
+    const auto [t, k] = r.params("t", "k");
+    const auto [key, mt, idx] = r.locals("key", "mt", "idx");
+    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"),
+                r.b.make_throw(r.S("attempt to index a non-table value"))));
+    r.add(r.set(key, r.call("$key", {r.L(k)})));
+    r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
+    r.add(r.iff(
+        r.has(r.L(t), r.S(kMetaKey)),
+        r.blk({r.set(mt, r.idx(r.L(t), kMetaKey)),
+               r.iff(r.has(r.L(mt), r.S("__index")),
+                     r.blk({r.set(idx, r.idx(r.L(mt), r.S("__index"))),
+                            r.iff(r.is(r.typ(r.L(idx)), "map"),
+                                  r.ret(r.call("$get", {r.L(idx), r.L(key)}))),
+                            r.ret(r.call(
+                                "$one",
+                                {r.b.call_value(r.L(idx),
+                                                {r.L(t), r.L(key)})}))}))})));
     r.add(r.ret(r.Nil()));
-    r.finish("$get", 2, 5, {"t", "k", "key", "mt", "idx"});
+    r.finish("$get");
   }
 
   // Writing: assigning nil removes the key, which is what makes `#t` and
   // `pairs` agree with Lua about what is in the table.
   void rt_set() {
     RT r(*this);
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "map"),
-                r.b.make_throw(r.S("attempt to index a non-table value"),
-                               r.p)));
-    r.add(r.set(3, r.call("$key", {r.L(1)})));
-    r.add(r.iff(r.is(r.typ(r.L(2)), "nil"),
-                r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(0), r.L(3)}),
-                       r.ret(r.L(2))})));
+    const auto [t, k, v] = r.params("t", "k", "v");
+    const auto [key, m] = r.locals("key", "m");
+    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"),
+                r.b.make_throw(r.S("attempt to index a non-table value"))));
+    r.add(r.set(key, r.call("$key", {r.L(k)})));
+    r.add(r.iff(r.is(r.typ(r.L(v)), "nil"),
+                r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(t), r.L(key)}),
+                       r.ret(r.L(v))})));
     // __newindex fires only for a key the raw table does not already
     // have -- Lua's own rule, so an overwrite never consults it.
     r.add(r.iff(
-        r.bin(BinOp::Eq, r.has(r.L(0), r.L(3)), r.Bo(false)),
-        r.blk({r.set(4, r.call("$mm", {r.L(0), r.S("__newindex")})),
-               r.iff(r.isnt(r.typ(r.L(4)), "nil"),
-                     r.blk({r.iff(r.is(r.typ(r.L(4)), "map"),
-                                  r.ret(r.call("$set", {r.L(4), r.L(1), r.L(2)}))),
-                            r.call("$one",
-                                   {r.b.call_value(r.L(4),
-                                                   {r.L(0), r.L(1), r.L(2)},
-                                                   r.p)}),
-                            r.ret(r.L(2))}))})));
-    r.add(r.b.set_index(r.L(0), r.L(3), r.L(2), r.p));
-    r.add(r.ret(r.L(2)));
-    r.finish("$set", 3, 5, {"t", "k", "v", "key", "m"});
+        r.bin(BinOp::Eq, r.has(r.L(t), r.L(key)), r.Bo(false)),
+        r.blk(
+            {r.set(m, r.call("$mm", {r.L(t), r.S("__newindex")})),
+             r.iff(
+                 r.isnt(r.typ(r.L(m)), "nil"),
+                 r.blk({r.iff(r.is(r.typ(r.L(m)), "map"),
+                              r.ret(r.call("$set", {r.L(m), r.L(k), r.L(v)}))),
+                        r.call("$one", {r.b.call_value(
+                                           r.L(m), {r.L(t), r.L(k), r.L(v)})}),
+                        r.ret(r.L(v))}))})));
+    r.add(r.b.set_index(r.L(t), r.L(key), r.L(v)));
+    r.add(r.ret(r.L(v)));
+    r.finish("$set");
   }
 
   // `#`: a string's byte count, or a table's border -- the largest n with
@@ -764,15 +658,16 @@ struct Binder {
   // table has a hash part.
   void rt_len() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"), r.ret(r.len(r.L(0)))));
-    r.add(r.iff(r.isnt(r.typ(r.L(0)), "map"),
-                r.b.make_throw(r.S("attempt to get length of a non-table"),
-                               r.p)));
-    r.add(r.set(1, r.I(0)));
-    r.add(r.b.make_while(r.has(r.L(0), r.bin(BinOp::Add, r.L(1), r.I(1))),
-                         r.set(1, r.bin(BinOp::Add, r.L(1), r.I(1))), r.p));
-    r.add(r.ret(r.L(1)));
-    r.finish("$len", 1, 2, {"v", "n"});
+    const auto [v] = r.params("v");
+    const auto [n] = r.locals("n");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "string"), r.ret(r.len(r.L(v)))));
+    r.add(r.iff(r.isnt(r.typ(r.L(v)), "map"),
+                r.b.make_throw(r.S("attempt to get length of a non-table"))));
+    r.add(r.set(n, r.I(0)));
+    r.add(r.b.make_while(r.has(r.L(v), r.bin(BinOp::Add, r.L(n), r.I(1))),
+                         r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1)))));
+    r.add(r.ret(r.L(n)));
+    r.finish("$len");
   }
 
   // The calling convention this front end writes over the IR's: every
@@ -780,32 +675,35 @@ struct Binder {
   // the first, or nil when there was none.
   void rt_one() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(0)), r.I(0)),
-                r.ret(r.idx(r.L(0), r.I(0)))));
+    const auto [vals] = r.params("vals");
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(vals)), r.I(0)),
+                r.ret(r.idx(r.L(vals), r.I(0)))));
     r.add(r.ret(r.Nil()));
-    r.finish("$one", 1, 1, {"vals"});
+    r.finish("$one");
   }
 
   void rt_nth() {
     RT r(*this);
-    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(0)), r.L(1)),
-                r.ret(r.idx(r.L(0), r.L(1)))));
+    const auto [vals, i] = r.params("vals", "i");
+    r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(vals)), r.L(i)),
+                r.ret(r.idx(r.L(vals), r.L(i)))));
     r.add(r.ret(r.Nil()));
-    r.finish("$nth", 2, 2, {"vals", "i"});
+    r.finish("$nth");
   }
 
   void rt_append() {
     RT r(*this);
-    r.add(r.set(2, r.in(IntrinsicId::ArraySlice,
-                        {r.L(0), r.I(0), r.len(r.L(0))})));
-    r.add(r.set(3, r.I(0)));
+    const auto [a, b] = r.params("a", "b");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(
+        out, r.in(IntrinsicId::ArraySlice, {r.L(a), r.I(0), r.len(r.L(a))})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(3), r.len(r.L(1))),
-        r.blk({r.in(IntrinsicId::ArrayPush, {r.L(2), r.idx(r.L(1), r.L(3))}),
-               r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))}),
-        r.p));
-    r.add(r.ret(r.L(2)));
-    r.finish("$append", 2, 4, {"a", "b", "out", "i"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(b))),
+        r.blk({r.in(IntrinsicId::ArrayPush, {r.L(out), r.idx(r.L(b), r.L(i))}),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$append");
   }
 
   // coroutine.resume. CoroResume answers {value, done}; Lua answers
@@ -815,55 +713,61 @@ struct Binder {
   // is already an array of results and gets appended rather than wrapped.
   void rt_resume() {
     RT r(*this);
-    r.add(r.iff(r.is(r.in(IntrinsicId::CoroStatus, {r.L(0)}), "done"),
-                r.ret(r.arr({r.Bo(false),
-                             r.S("cannot resume dead coroutine")}))));
+    const auto [co, v] = r.params("co", "v");
+    const auto [r_, exc] = r.locals("r", "exc");
+    r.add(r.iff(
+        r.is(r.in(IntrinsicId::CoroStatus, {r.L(co)}), "done"),
+        r.ret(r.arr({r.Bo(false), r.S("cannot resume dead coroutine")}))));
     // A throw the coroutine's own frames do not catch continues at the
     // CoroResume, "into the resumer's own handlers" -- so resume is where
     // Lua's rule that a failed coroutine answers `false, err` rather than
     // propagating gets written.
     r.add(r.b.make_try(
-        3, r.set(2, r.in(IntrinsicId::CoroResume, {r.L(0), r.L(1)})),
-        r.ret(r.arr({r.Bo(false), r.L(3)})), r.p));
-    r.add(r.iff(r.idx(r.L(2), "done"),
+        3, r.set(r_, r.in(IntrinsicId::CoroResume, {r.L(co), r.L(v)})),
+        r.ret(r.arr({r.Bo(false), r.L(exc)}))));
+    r.add(r.iff(r.idx(r.L(r_), "done"),
                 r.ret(r.call("$append",
-                             {r.arr({r.Bo(true)}), r.idx(r.L(2), "value")}))));
-    r.add(r.ret(r.arr({r.Bo(true), r.idx(r.L(2), "value")})));
-    r.finish("$resume", 2, 4, {"co", "v", "r", "exc"});
+                             {r.arr({r.Bo(true)}), r.idx(r.L(r_), "value")}))));
+    r.add(r.ret(r.arr({r.Bo(true), r.idx(r.L(r_), "value")})));
+    r.finish("$resume");
   }
 
   // CoroStatus's vocabulary is the IR's ("start", "done"); Lua's is
   // "suspended" and "dead". A mapping, not a mechanism.
   void rt_costatus() {
     RT r(*this);
-    r.add(r.set(1, r.in(IntrinsicId::CoroStatus, {r.L(0)})));
-    r.add(r.iff(r.is(r.L(1), "start"), r.ret(r.S("suspended"))));
-    r.add(r.iff(r.is(r.L(1), "done"), r.ret(r.S("dead"))));
-    r.add(r.ret(r.L(1)));
-    r.finish("$costatus", 1, 2, {"co", "s"});
+    const auto [co] = r.params("co");
+    const auto [s] = r.locals("s");
+    r.add(r.set(s, r.in(IntrinsicId::CoroStatus, {r.L(co)})));
+    r.add(r.iff(r.is(r.L(s), "start"), r.ret(r.S("suspended"))));
+    r.add(r.iff(r.is(r.L(s), "done"), r.ret(r.S("dead"))));
+    r.add(r.ret(r.L(s)));
+    r.finish("$costatus");
   }
 
   // coroutine.wrap: a closure over a coroutine of its own, which raises
   // instead of answering false. The cell is what the closure captures.
   void rt_wrap() {
     RT r(*this);
-    r.add(r.b.cell_fresh(0, r.p));
-    r.add(r.b.assign(VarKind::Cell, 0,
-                     r.in(IntrinsicId::CoroCreate, {r.L(0)}), r.p));
+    const auto [f] = r.params("f");
+    r.add(r.b.cell_fresh(0));
+    r.add(
+        r.b.assign(VarKind::Cell, 0, r.in(IntrinsicId::CoroCreate, {r.L(f)})));
     r.add(r.ret(r.clos("$wrapped", {0})));
-    r.finish("$wrap", 1, 1, {"f"}, 1);
+    r.finish("$wrap", 1);
   }
 
   void rt_wrapped() {
     RT r(*this);
-    r.add(r.set(1, r.call("$resume", {r.P(0), r.L(0)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(1), r.I(0)), r.Bo(false)),
-                r.b.make_throw(r.call("$one", {r.call("$append",
-                                                      {r.arr({}), r.L(1)})}),
-                               r.p)));
-    r.add(r.ret(r.in(IntrinsicId::ArraySlice,
-                     {r.L(1), r.I(1), r.len(r.L(1))})));
-    r.finish("$wrapped", 1, 2, {"v", "r"}, 0, 1);
+    const auto [v] = r.params("v");
+    const auto [r_] = r.locals("r");
+    r.add(r.set(r_, r.call("$resume", {r.P(0), r.L(v)})));
+    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(r_), r.I(0)), r.Bo(false)),
+                r.b.make_throw(r.call(
+                    "$one", {r.call("$append", {r.arr({}), r.L(r_)})}))));
+    r.add(r.ret(
+        r.in(IntrinsicId::ArraySlice, {r.L(r_), r.I(1), r.len(r.L(r_))})));
+    r.finish("$wrapped", 0, 1);
   }
 
   // table.concat and table.insert: loops over $get/$set/$len, written here
@@ -871,29 +775,31 @@ struct Binder {
   // C++ would tie this front end to MapObj's layout.
   void rt_concat() {
     RT r(*this);
-    r.add(r.set(2, r.S("")));
-    r.add(r.set(3, r.I(1)));
-    r.add(r.set(4, r.call("$len", {r.L(0)})));
+    const auto [t, sep] = r.params("t", "sep");
+    const auto [out, i, n] = r.locals("out", "i", "n");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(1)));
+    r.add(r.set(n, r.call("$len", {r.L(t)})));
     r.add(r.b.make_while(
-        r.bin(BinOp::Le, r.L(3), r.L(4)),
-        r.blk({r.iff(r.bin(BinOp::Gt, r.L(3), r.I(1)),
-                     r.set(2, r.bin(BinOp::Add, r.L(2), r.L(1)))),
-               r.set(2, r.bin(BinOp::Add, r.L(2),
-                              r.call("$str", {r.call("$get",
-                                                     {r.L(0), r.L(3)})}))),
-               r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))}),
-        r.p));
-    r.add(r.ret(r.L(2)));
-    r.finish("$concat", 2, 5, {"t", "sep", "out", "i", "n"});
+        r.bin(BinOp::Le, r.L(i), r.L(n)),
+        r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(1)),
+                     r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
+               r.set(out,
+                     r.bin(BinOp::Add, r.L(out),
+                           r.call("$str", {r.call("$get", {r.L(t), r.L(i)})}))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$concat");
   }
 
   void rt_insert() {
     RT r(*this);
-    r.add(r.call("$set", {r.L(0),
-                          r.bin(BinOp::Add, r.call("$len", {r.L(0)}), r.I(1)),
-                          r.L(1)}));
+    const auto [t, v] = r.params("t", "v");
+    r.add(r.call(
+        "$set",
+        {r.L(t), r.bin(BinOp::Add, r.call("$len", {r.L(t)}), r.I(1)), r.L(v)}));
     r.add(r.ret(r.Nil()));
-    r.finish("$insert", 2, 2, {"t", "v"});
+    r.finish("$insert");
   }
 
   // `error(msg)` prefixes a *string* message with the chunk name and the
@@ -901,24 +807,27 @@ struct Binder {
   // raised unchanged, which is what lets a table carry structured detail.
   void rt_error() {
     RT r(*this);
-    r.add(r.iff(r.is(r.typ(r.L(0)), "string"),
-                r.b.make_throw(r.bin(BinOp::Add, r.L(1), r.L(0)), r.p)));
-    r.add(r.b.make_throw(r.L(0), r.p));
-    r.finish("$error", 2, 2, {"v", "where"});
+    const auto [v, where] = r.params("v", "where");
+    r.add(r.iff(r.is(r.typ(r.L(v)), "string"),
+                r.b.make_throw(r.bin(BinOp::Add, r.L(where), r.L(v)))));
+    r.add(r.b.make_throw(r.L(v)));
+    r.finish("$error");
   }
 
   void rt_setmt() {
     RT r(*this);
-    r.add(r.b.set_index(r.L(0), r.S(kMetaKey), r.L(1), r.p));
-    r.add(r.ret(r.L(0)));
-    r.finish("$setmt", 2, 2, {"t", "mt"});
+    const auto [t, mt] = r.params("t", "mt");
+    r.add(r.b.set_index(r.L(t), r.S(kMetaKey), r.L(mt)));
+    r.add(r.ret(r.L(t)));
+    r.finish("$setmt");
   }
 
   void rt_getmt() {
     RT r(*this);
-    r.add(r.iff(r.has(r.L(0), r.S(kMetaKey)), r.ret(r.idx(r.L(0), kMetaKey))));
+    const auto [t] = r.params("t");
+    r.add(r.iff(r.has(r.L(t), r.S(kMetaKey)), r.ret(r.idx(r.L(t), kMetaKey))));
     r.add(r.ret(r.Nil()));
-    r.finish("$getmt", 1, 1, {"t"});
+    r.finish("$getmt");
   }
 
   // A trailing call inside a table constructor contributes *all* of its
@@ -926,30 +835,33 @@ struct Binder {
   // not known until it runs.
   void rt_spread() {
     RT r(*this);
-    r.add(r.set(3, r.I(0)));
+    const auto [t, start, vals] = r.params("t", "start", "vals");
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.I(0)));
     r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(3), r.len(r.L(2))),
-        r.blk({r.call("$set", {r.L(0), r.bin(BinOp::Add, r.L(1), r.L(3)),
-                               r.idx(r.L(2), r.L(3))}),
-               r.set(3, r.bin(BinOp::Add, r.L(3), r.I(1)))}),
-        r.p));
-    r.add(r.ret(r.L(0)));
-    r.finish("$spread", 3, 4, {"t", "start", "vals", "i"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(vals))),
+        r.blk({r.call("$set", {r.L(t), r.bin(BinOp::Add, r.L(start), r.L(i)),
+                               r.idx(r.L(vals), r.L(i))}),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(t)));
+    r.finish("$spread");
   }
 
   // `print` goes through `$str` per argument before the host ever sees
   // them, because the host's own formatter cannot call a Lua `__tostring`.
   void rt_strall() {
     RT r(*this);
-    r.add(r.set(1, r.arr({})));
-    r.add(r.set(2, r.I(0)));
+    const auto [vals] = r.params("vals");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
     r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(2), r.len(r.L(0))),
-        r.blk({r.in(IntrinsicId::ArrayPush, {r.L(1), r.call("$str", {r.idx(r.L(0), r.L(2))})}),
-               r.set(2, r.bin(BinOp::Add, r.L(2), r.I(1)))}),
-        r.p));
-    r.add(r.ret(r.L(1)));
-    r.finish("$strall", 1, 3, {"vals", "out", "i"});
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(vals))),
+        r.blk({r.in(IntrinsicId::ArrayPush,
+                    {r.L(out), r.call("$str", {r.idx(r.L(vals), r.L(i))})}),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$strall");
   }
 
   void emit_runtime() {
@@ -964,87 +876,52 @@ struct Binder {
     rt_strall();
   }
 
+  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
+  // sets it), so all these MakeClosures name the one closure the executor
+  // built at the first of them -- which is what the array of pre-built
+  // closures at file scope used to buy, at the cost of a synthetic variable
+  // every function had to capture. One that *does* take captures is built at
+  // the site that has them (RT::clos) and never reaches here; saying so
+  // beats the "cannot call nil" it would otherwise be at run time.
+  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
+                SrcPos p) {
+    const auto it = rt.find(name);
+    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
+    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
+      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
+    }
+    auto b = Builder(m).at(p);
+    return b.call_value(b.make_closure(it->second, empty_cmap), args);
+  }
+
   // ==== Pass B: emit ======================================================
-
-  // Where a helper sits in the array fill_helpers builds. A helper that
-  // takes captures has no closure there to fetch -- it is built at the
-  // site that has them -- so asking for one is a mistake in this binder,
-  // and saying so here beats the "cannot call nil" it would otherwise be
-  // at run time.
-  int32_t helper_slot(const std::string& name) const {
-    const auto& names = rt_names();
-    for (size_t i = 0; i < names.size(); ++i) {
-      if (names[i] != name) continue;
-      if (m.funcs[static_cast<size_t>(rt.at(name))].num_captures != 0) {
-        coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-      }
-      return static_cast<int32_t>(i);
-    }
-    coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-  }
-
-  // A helper call reads the one closure that already exists rather than
-  // building another: these capture nothing, so a per-function cell meant
-  // one allocation per helper per *call* of every function that used one.
-  NodeId helper(FnCtx& ctx, const std::string& name,
-                const std::vector<NodeId>& args, SrcPos p) {
-    Builder b(m);
-    return b.call_value(
-        b.index(read_var(helpers_var, ctx, p),
-                b.literal(helper_slot(name), p), p),
-        args, p);
-  }
-
-
-  // File scope builds every helper's closure once, into the array above.
-  void fill_helpers(std::vector<NodeId>& out, SrcPos p) {
-    Builder b(m);
-    std::vector<NodeId> vals;
-    for (const std::string& n : rt_names()) {
-      // A helper that takes captures is built at the site that has them
-      // (RT::clos), never fetched from here, so its slot stays nil.
-      const int32_t g = rt.at(n);
-      vals.push_back(m.funcs[static_cast<size_t>(g)].num_captures == 0
-                         ? b.make_closure(g, empty_cmap, p)
-                         : b.nil_literal(p));
-    }
-    const int32_t c = fns[0].cell_index.at(helpers_var);
-    out.push_back(b.cell_fresh(c, p));
-    out.push_back(b.assign(VarKind::Cell, c, b.array_lit(vals, p), p));
-  }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
-    Builder b(m);
-    return b.call_value(b.native_ref(b.declare_native(name), p), args, p);
+    auto b = Builder(m).at(p);
+    return b.call_value(b.native_ref(b.declare_native(name)), args);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    std::vector<CaptureSrc> cs;
-    for (const int32_t v : fns[static_cast<size_t>(g)].free) {
-      const auto [k, i] = access(ctx.fn, v);
-      cs.push_back({k, i});
-    }
-    const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(cs);
-    return b.make_closure(fns[static_cast<size_t>(g)].index, cm, p);
+    auto b = Builder(m).at(p);
+    return b.make_closure(rs.fns[static_cast<size_t>(g)].index,
+                          rs.capture_map(m, ctx.fn, g));
   }
 
   NodeId bind_decl(int32_t v, NodeId value, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto& ci = fns[static_cast<size_t>(ctx.fn)].cell_index;
+    auto b = Builder(m).at(p);
+    const auto& ci = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     const auto it = ci.find(v);
-    if (it != ci.end()) return b.assign(VarKind::Cell, it->second, value, p);
-    const int32_t s = ctx.alloc_local(vars[static_cast<size_t>(v)].name);
-    slot_of[static_cast<size_t>(v)] = s;
-    return b.assign(VarKind::Local, s, value, p);
+    if (it != ci.end()) return b.assign(VarKind::Cell, it->second, value);
+    const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
+    rs.vars[static_cast<size_t>(v)].slot = s;
+    return b.assign(VarKind::Local, s, value);
   }
 
   NodeId read_var(int32_t v, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const auto [k, i] = access(ctx.fn, v);
-    return b.varref(k, i, p);
+    auto b = Builder(m).at(p);
+    const auto [k, i] = rs.access(ctx.fn, v);
+    return b.varref(k, i);
   }
 
   // Cells for a block's own bindings are made on entry, not at the `local`
@@ -1053,25 +930,24 @@ struct Binder {
   // later `local` fills. See examples/mini-js/README.md for the bug.
   void fresh_cells(const std::vector<int32_t>& decls, FnCtx& ctx,
                    std::vector<NodeId>& out, SrcPos p) {
-    Builder b(m);
-    const auto& cells = fns[static_cast<size_t>(ctx.fn)].cell_index;
+    auto b = Builder(m).at(p);
+    const auto& cells = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     for (const int32_t v : decls) {
       const auto c = cells.find(v);
-      if (c != cells.end()) out.push_back(b.cell_fresh(c->second, p));
+      if (c != cells.end()) out.push_back(b.cell_fresh(c->second));
     }
   }
 
   NodeId emit_block(const Ast& block, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(block);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     std::vector<NodeId> out;
     fresh_cells(block_decls.at(&block), ctx, out, p);
     for (const auto& s : block.nodes) out.push_back(emit_stmt(*s, ctx));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    if (end > mark) return b.scope(mark, end, b.block(out, p), p);
-    return b.block(out, p);
+    const int32_t end = ctx.release(mark);
+    if (end > mark) return b.scope(mark, end, b.block(out));
+    return b.block(out);
   }
 
   // Every value this front end can produce, plus whether it is already an
@@ -1087,7 +963,7 @@ struct Binder {
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
     const Val v = emit_val(a, ctx);
     if (!v.multi) return v.n;
-    return helper(ctx, "$one", {v.n}, pos_of(a));
+    return helper("$one", {v.n}, pos_of(a));
   }
 
   bool is_call_expr(const Ast& a) {
@@ -1101,8 +977,8 @@ struct Binder {
   // An expression list as one array of values -- Lua's rule that only the
   // *last* expression expands to all of its results.
   NodeId emit_exprlist(const Ast& list, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(list);
+    auto b = Builder(m).at(p);
     std::vector<NodeId> firsts;
     for (size_t i = 0; i + 1 < list.nodes.size(); ++i) {
       firsts.push_back(emit_expr(*list.nodes[i], ctx));
@@ -1111,29 +987,29 @@ struct Binder {
     const Val lv = emit_val(last, ctx);
     if (!lv.multi) {
       firsts.push_back(lv.n);
-      return b.array_lit(firsts, p);
+      return b.array_lit(firsts);
     }
     if (firsts.empty()) return lv.n;
-    return helper(ctx, "$append", {b.array_lit(firsts, p), lv.n}, p);
+    return helper("$append", {b.array_lit(firsts), lv.n}, p);
   }
 
   Val emit_val(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
-        return {b.literal(std::strtoll(std::string(a.token).c_str(), nullptr,
-                                       10), p)};
+        return {
+            b.literal(std::strtoll(std::string(a.token).c_str(), nullptr, 10))};
       case "float"_:
         return {b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr), p)};
+            std::strtod(std::string(a.token).c_str(), nullptr))};
       case "string"_:
-        return {b.str_literal(unescape(std::string(a.token)), p)};
+        return {b.str_literal(unescape(std::string(a.token)))};
       case "literal"_: {
         const std::string t(a.token);
-        if (t == "true") return {b.bool_literal(true, p)};
-        if (t == "false") return {b.bool_literal(false, p)};
-        return {b.nil_literal(p)};
+        if (t == "true") return {b.bool_literal(true)};
+        if (t == "false") return {b.bool_literal(false)};
+        return {b.nil_literal()};
       }
       case "ident"_: {
         const auto it = ref_of.find(&a);
@@ -1158,18 +1034,17 @@ struct Binder {
         return {emit_closure(fn_of.at(&a), ctx, p)};
       case "notexp"_:
         return {b.binary(BinOp::Eq,
-                         helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)},
-                                p),
-                         b.bool_literal(false, p), p)};
+                         helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                         b.bool_literal(false))};
       case "negexp"_:
       case "negexpr"_:
-        return {b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx), p)};
+        return {b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx))};
       case "lenexp"_:
-        return {helper(ctx, "$len", {emit_expr(*a.nodes[0], ctx)}, p)};
+        return {helper("$len", {emit_expr(*a.nodes[0], ctx)}, p)};
       case "powexp"_: {
         const NodeId base = emit_expr(*a.nodes[0], ctx);
         return {b.intrinsic(IntrinsicId::Pow,
-                            {base, emit_expr(*a.nodes[1]->nodes[0], ctx)}, p)};
+                            {base, emit_expr(*a.nodes[1]->nodes[0], ctx)})};
       }
       case "orexp"_:
       case "andexp"_: {
@@ -1178,11 +1053,10 @@ struct Binder {
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t, p);
-          acc = b.block({b.assign(VarKind::Local, t, acc, p),
-                         b.make_if(helper(ctx, "$truthy", {keep}, p),
-                                   is_or ? keep : rhs, is_or ? rhs : keep, p)},
-                        p);
+          const NodeId keep = b.varref(VarKind::Local, t);
+          acc = b.block({b.assign(VarKind::Local, t, acc),
+                         b.make_if(helper("$truthy", {keep}, p),
+                                   is_or ? keep : rhs, is_or ? rhs : keep)});
         }
         return {acc};
       }
@@ -1193,17 +1067,17 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           if (t == "==") {
-            acc = helper(ctx, "$eq", {acc, rhs}, pos_of(op));
+            acc = helper("$eq", {acc, rhs}, pos_of(op));
           } else if (t == "~=") {
-            acc = b.binary(BinOp::Eq, helper(ctx, "$eq", {acc, rhs},
-                                             pos_of(op)),
-                           b.bool_literal(false, p), pos_of(op));
+            acc = b.at(pos_of(op))
+                      .binary(BinOp::Eq, helper("$eq", {acc, rhs}, pos_of(op)),
+                              b.bool_literal(false));
           } else {
             const BinOp o = t == "<"    ? BinOp::Lt
                             : t == "<=" ? BinOp::Le
                             : t == ">"  ? BinOp::Gt
                                         : BinOp::Ge;
-            acc = b.binary(o, acc, rhs, pos_of(op));
+            acc = b.at(pos_of(op)).binary(o, acc, rhs);
           }
         }
         return {acc};
@@ -1211,7 +1085,7 @@ struct Binder {
       case "concatexp"_: {
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          acc = helper(ctx, "$cat", {acc, emit_expr(*a.nodes[i], ctx)}, p);
+          acc = helper("$cat", {acc, emit_expr(*a.nodes[i], ctx)}, p);
         }
         return {acc};
       }
@@ -1223,12 +1097,12 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
-          if (t == "+") acc = helper(ctx, "$add", {acc, rhs}, op_p);
-          else if (t == "-") acc = helper(ctx, "$subm", {acc, rhs}, op_p);
-          else if (t == "*") acc = helper(ctx, "$mulm", {acc, rhs}, op_p);
-          else if (t == "/") acc = helper(ctx, "$div", {acc, rhs}, op_p);
-          else if (t == "//") acc = helper(ctx, "$idiv", {acc, rhs}, op_p);
-          else acc = helper(ctx, "$mod", {acc, rhs}, op_p);
+          if (t == "+") acc = helper("$add", {acc, rhs}, op_p);
+          else if (t == "-") acc = helper("$subm", {acc, rhs}, op_p);
+          else if (t == "*") acc = helper("$mulm", {acc, rhs}, op_p);
+          else if (t == "/") acc = helper("$div", {acc, rhs}, op_p);
+          else if (t == "//") acc = helper("$idiv", {acc, rhs}, op_p);
+          else acc = helper("$mod", {acc, rhs}, op_p);
         }
         return {acc};
       }
@@ -1244,40 +1118,38 @@ struct Binder {
   // A table constructor. The array part numbers from 1, skipping the keyed
   // and named fields -- Lua's own rule for a mixed constructor.
   NodeId emit_table(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const int32_t t = ctx.alloc_local("$tbl");
-    const NodeId T = b.varref(VarKind::Local, t, p);
+    const NodeId T = b.varref(VarKind::Local, t);
     std::vector<NodeId> out{
-        b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}, p),
-                 p)};
+        b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}))};
     int64_t next = 1;
     for (size_t i = 0; i < a.nodes.size(); ++i) {
       const Ast& f = *a.nodes[i];
       if (f.tag == "keyedfield"_) {
-        out.push_back(helper(ctx, "$set",
+        out.push_back(helper("$set",
                              {T, emit_expr(*f.nodes[0], ctx),
                               emit_expr(*f.nodes[1], ctx)},
                              p));
       } else if (f.tag == "namedfield"_) {
-        out.push_back(helper(ctx, "$set",
-                             {T, b.str_literal(std::string(f.nodes[0]->token),
-                                               p),
+        out.push_back(helper("$set",
+                             {T, b.str_literal(std::string(f.nodes[0]->token)),
                               emit_expr(*f.nodes[1], ctx)},
                              p));
       } else if (i + 1 == a.nodes.size() && is_call_expr(f)) {
         // The last positional field, when it is a call, contributes every
         // value the call returned -- Lua's rule, and the same one
         // emit_exprlist applies to an expression list.
-        out.push_back(helper(ctx, "$spread",
-                             {T, b.literal(next, p), emit_val(f, ctx).n}, p));
+        out.push_back(
+            helper("$spread", {T, b.literal(next), emit_val(f, ctx).n}, p));
       } else {
-        out.push_back(helper(ctx, "$set",
-                             {T, b.literal(next++, p), emit_expr(f, ctx)}, p));
+        out.push_back(
+            helper("$set", {T, b.literal(next++), emit_expr(f, ctx)}, p));
       }
     }
     out.push_back(T);
-    return b.block(out, p);
+    return b.block(out);
   }
 
   Val emit_suffixed(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -1294,16 +1166,16 @@ struct Binder {
       const Ast& sfx = *a.nodes[i];
       const SrcPos p = pos_of(sfx);
       const NodeId recv =
-          cur.multi ? helper(ctx, "$one", {cur.n}, p) : cur.n;
+          cur.multi ? helper("$one", {cur.n}, p) : cur.n;
       switch (sfx.tag) {
         case "dotsfx"_:
-          cur = {helper(ctx, "$get",
+          cur = {helper("$get",
                         {recv, b.str_literal(std::string(sfx.nodes[0]->token),
                                              p)},
                         p)};
           break;
         case "indexsfx"_:
-          cur = {helper(ctx, "$get",
+          cur = {helper("$get",
                         {recv, emit_expr(*sfx.nodes[0], ctx)}, p)};
           break;
         case "callsfx"_: {
@@ -1329,7 +1201,7 @@ struct Binder {
                                    b.str_literal("map", p), p),
                           b.block(
                               {b.assign(VarKind::Local, mv,
-                                       helper(ctx, "$mm",
+                                       helper("$mm",
                                               {F, b.str_literal("__call", p)},
                                               p),
                                        p),
@@ -1366,7 +1238,7 @@ struct Binder {
           call_args.insert(call_args.end(), args.begin(), args.end());
           cur = {b.block({b.assign(VarKind::Local, t, recv, p),
                           b.call_value(
-                              helper(ctx, "$get",
+                              helper("$get",
                                      {T, b.str_literal(name, p)}, p),
                               call_args, p)},
                          p),
@@ -1424,19 +1296,19 @@ struct Binder {
 
     if (mem.empty()) {
       if (g == "print") {
-        return {native("print", {helper(ctx, "$strall", {all()}, p)}, p),
+        return {native("print", {helper("$strall", {all()}, p)}, p),
                 false};
       }
       if (g == "type") return {native("type", {a0(0)}, p), false};
-      if (g == "tostring") return {helper(ctx, "$str", {a0(0)}, p), false};
+      if (g == "tostring") return {helper("$str", {a0(0)}, p), false};
       if (g == "setmetatable") {
-        return {helper(ctx, "$setmt", {a0(0), a0(1)}, p), false};
+        return {helper("$setmt", {a0(0), a0(1)}, p), false};
       }
       if (g == "getmetatable") {
-        return {helper(ctx, "$getmt", {a0(0)}, p), false};
+        return {helper("$getmt", {a0(0)}, p), false};
       }
       if (g == "error") {
-        return {helper(ctx, "$error",
+        return {helper("$error",
                        {a0(0), b.str_literal(chunk + ":" +
                                              std::to_string(p.line) + ": ",
                                              p)},
@@ -1447,14 +1319,14 @@ struct Binder {
       // rawset/rawget: `$set`/`$get` without the metamethod detour --
       // `__newindex`'s own thunk needs one, on pain of calling itself.
       if (g == "rawset") {
-        return {b.block({b.set_index(a0(0), helper(ctx, "$key", {a0(1)}, p),
+        return {b.block({b.set_index(a0(0), helper("$key", {a0(1)}, p),
                                      a0(2), p),
                          a0(0)},
                         p),
                 false};
       }
       if (g == "rawget") {
-        return {b.index(a0(0), helper(ctx, "$key", {a0(1)}, p), p), false};
+        return {b.index(a0(0), helper("$key", {a0(1)}, p), p), false};
       }
       fail(prim, "'" + g + "' is not supported here");
     }
@@ -1463,7 +1335,7 @@ struct Binder {
         return {b.intrinsic(IntrinsicId::CoroCreate, {a0(0)}, p), false};
       }
       if (mem == "resume") {
-        return {helper(ctx, "$resume", {a0(0), a0(1)}, p), true};
+        return {helper("$resume", {a0(0), a0(1)}, p), true};
       }
       if (mem == "yield") {
         return {b.array_lit(
@@ -1471,20 +1343,20 @@ struct Binder {
                 true};
       }
       if (mem == "status") {
-        return {helper(ctx, "$costatus", {a0(0)}, p), false};
+        return {helper("$costatus", {a0(0)}, p), false};
       }
-      if (mem == "wrap") return {helper(ctx, "$wrap", {a0(0)}, p), false};
+      if (mem == "wrap") return {helper("$wrap", {a0(0)}, p), false};
     }
     if (g == "table") {
       if (mem == "concat") {
-        return {helper(ctx, "$concat",
+        return {helper("$concat",
                        {a0(0), args.size() > 1 ? args[1]
                                                : b.str_literal("", p)},
                        p),
                 false};
       }
       if (mem == "insert") {
-        return {helper(ctx, "$insert", {a0(0), a0(1)}, p), false};
+        return {helper("$insert", {a0(0), a0(1)}, p), false};
       }
     }
     if (g == "string" && is_string_method(mem)) {
@@ -1503,31 +1375,30 @@ struct Binder {
   // pcall: a TryCatch, which is what it is. The value of the whole thing
   // is the arm that ran, so both arms build the array Lua answers with.
   NodeId emit_pcall(const std::vector<NodeId>& args, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     const int32_t exc = ctx.alloc_local("$exc");
     std::vector<NodeId> callargs(args.begin() + (args.empty() ? 0 : 1),
                                  args.end());
     const NodeId body = helper(
-        ctx, "$append",
-        {b.array_lit({b.bool_literal(true, p)}, p),
-         b.call_value(args.empty() ? b.nil_literal(p) : args[0], callargs, p)},
+        "$append",
+        {b.array_lit({b.bool_literal(true)}),
+         b.call_value(args.empty() ? b.nil_literal() : args[0], callargs)},
         p);
-    const NodeId handler = b.array_lit(
-        {b.bool_literal(false, p), b.varref(VarKind::Local, exc, p)}, p);
-    const NodeId out = b.make_try(exc, body, handler, p);
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, out, p);
+    const NodeId handler =
+        b.array_lit({b.bool_literal(false), b.varref(VarKind::Local, exc)});
+    const NodeId out = b.make_try(exc, body, handler);
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, out);
   }
 
   // -- Statements ---------------------------------------------------------
   NodeId emit_stmt(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     switch (a.tag) {
       case "emptystmt"_:
-        return b.block({}, p);
+        return b.block({});
       case "localfn"_:
         return bind_decl(decl_of.at(a.nodes[0].get()),
                          emit_closure(fn_of.at(&a), ctx, p), ctx, p);
@@ -1536,36 +1407,34 @@ struct Binder {
         if (a.nodes.size() == 1) {
           std::vector<NodeId> out;
           for (const auto& id : names.nodes) {
-            out.push_back(bind_decl(decl_of.at(id.get()), b.nil_literal(p),
-                                    ctx, p));
+            out.push_back(
+                bind_decl(decl_of.at(id.get()), b.nil_literal(), ctx, p));
           }
-          return b.block(out, p);
+          return b.block(out);
         }
         if (names.nodes.size() == 1) {
           return bind_decl(decl_of.at(names.nodes[0].get()),
                            emit_expr(*a.nodes[1]->nodes.back(), ctx) , ctx, p);
         }
         const int32_t t = ctx.alloc_local("$vals");
-        const NodeId T = b.varref(VarKind::Local, t, p);
-        std::vector<NodeId> out{b.assign(VarKind::Local, t,
-                                         emit_exprlist(*a.nodes[1], ctx), p)};
+        const NodeId T = b.varref(VarKind::Local, t);
+        std::vector<NodeId> out{
+            b.assign(VarKind::Local, t, emit_exprlist(*a.nodes[1], ctx))};
         for (size_t k = 0; k < names.nodes.size(); ++k) {
           out.push_back(bind_decl(
               decl_of.at(names.nodes[k].get()),
-              helper(ctx, "$nth", {T, b.literal(static_cast<int64_t>(k), p)},
-                     p),
-              ctx, p));
+              helper("$nth", {T, b.literal(static_cast<int64_t>(k))}, p), ctx,
+              p));
         }
-        return b.block(out, p);
+        return b.block(out);
       }
       case "fnstat"_:
         return emit_fnstat(a, ctx);
       case "ifstat"_:
         return emit_if(a, ctx);
       case "whilestat"_:
-        return b.make_while(
-            helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-            emit_block(*a.nodes[1], ctx), p);
+        return b.make_while(helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                            emit_block(*a.nodes[1], ctx));
       case "repeatstat"_:
         return emit_repeat(a, ctx);
       case "fornum"_:
@@ -1575,12 +1444,10 @@ struct Binder {
       case "dostat"_:
         return emit_block(*a.nodes[0], ctx);
       case "breakstat"_:
-        return b.make_break(p);
+        return b.make_break();
       case "retstat"_:
-        return b.make_return(
-            a.nodes.empty() ? b.array_lit({}, p)
-                            : emit_exprlist(*a.nodes[0], ctx),
-            p);
+        return b.make_return(a.nodes.empty() ? b.array_lit({})
+                                             : emit_exprlist(*a.nodes[0], ctx));
       case "callstmt"_:
         return emit_val(*a.nodes[0], ctx).n;
       case "assign"_:
@@ -1594,59 +1461,57 @@ struct Binder {
   // block, elseifpart*, elsepart? -- so the nested Ifs are built from the
   // end backwards rather than by recursing into the parse tree.
   NodeId emit_if(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
-        helper(ctx, "$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+        helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
         emit_block(*a.nodes[1], ctx));
     NodeId els;
     for (size_t i = 2; i < a.nodes.size(); ++i) {
       const Ast& c = *a.nodes[i];
       if (c.tag == "elseifpart"_) {
         arms.emplace_back(
-            helper(ctx, "$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+            helper("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
             emit_block(*c.nodes[1], ctx));
       } else {
         els = emit_block(*c.nodes[0], ctx);
       }
     }
     for (size_t i = arms.size(); i-- > 0;) {
-      els = b.make_if(arms[i].first, arms[i].second, els, p);
+      els = b.make_if(arms[i].first, arms[i].second, els);
     }
     return els;
   }
 
   NodeId emit_repeat(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     // `until`'s condition sees the block's locals, so the block is not
     // given a Scope of its own -- the whole loop body is one.
-    const int32_t mark = ctx.next_local;
+    const int32_t mark = ctx.mark();
     std::vector<NodeId> body;
     fresh_cells(block_decls.at(a.nodes[0].get()), ctx, body, p);
     for (const auto& s : a.nodes[0]->nodes) body.push_back(emit_stmt(*s, ctx));
-    body.push_back(b.make_if(
-        helper(ctx, "$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
-        b.make_break(p), NodeId{}, p));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    const NodeId loop =
-        b.make_while(b.bool_literal(true, p), b.block(body, p), p);
-    if (end > mark) return b.scope(mark, end, loop, p);
+    body.push_back(
+        b.make_if(helper("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
+                  b.make_break(), NodeId{}));
+    const int32_t end = ctx.release(mark);
+    const NodeId loop = b.make_while(b.bool_literal(true), b.block(body));
+    if (end > mark) return b.scope(mark, end, loop);
     return loop;
   }
 
   NodeId emit_fornum(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     const int32_t iv = ctx.alloc_local("$i");
     const int32_t lim = ctx.alloc_local("$limit");
     const int32_t stp = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, iv, p);
-    const NodeId L = b.varref(VarKind::Local, lim, p);
-    const NodeId S = b.varref(VarKind::Local, stp, p);
+    const NodeId I = b.varref(VarKind::Local, iv);
+    const NodeId L = b.varref(VarKind::Local, lim);
+    const NodeId S = b.varref(VarKind::Local, stp);
 
     const Ast* step = nullptr;
     const Ast* blk = a.nodes.back().get();
@@ -1654,44 +1519,38 @@ struct Binder {
       if (c->tag == "forstep"_) step = c->nodes[0].get();
     }
     std::vector<NodeId> out{
-        b.assign(VarKind::Local, iv, emit_expr(*a.nodes[1], ctx), p),
-        b.assign(VarKind::Local, lim, emit_expr(*a.nodes[2], ctx), p),
+        b.assign(VarKind::Local, iv, emit_expr(*a.nodes[1], ctx)),
+        b.assign(VarKind::Local, lim, emit_expr(*a.nodes[2], ctx)),
         b.assign(VarKind::Local, stp,
-                 step != nullptr ? emit_expr(*step, ctx) : b.literal(1, p), p)};
+                 step != nullptr ? emit_expr(*step, ctx) : b.literal(1))};
 
     const int32_t v = decl_of.at(a.nodes[0].get());
-    const int32_t bmark = ctx.next_local;
+    const int32_t bmark = ctx.mark();
     std::vector<NodeId> body;
     // A fresh binding per iteration, so a closure made in the body keeps
     // the number it saw -- Lua's rule, and CellFresh's whole purpose.
     fresh_cells({v}, ctx, body, p);
     body.push_back(bind_decl(v, I, ctx, p));
     body.push_back(emit_block(*blk, ctx));
-    body.push_back(b.assign(VarKind::Local, iv,
-                            b.binary(BinOp::Add, I, S, p), p));
-    const int32_t bend = ctx.next_local;
-    ctx.next_local = bmark;
+    body.push_back(b.assign(VarKind::Local, iv, b.binary(BinOp::Add, I, S)));
+    const int32_t bend = ctx.release(bmark);
 
     const NodeId cond =
-        b.make_if(b.binary(BinOp::Gt, S, b.literal(0, p), p),
-                  b.binary(BinOp::Le, I, L, p),
-                  b.binary(BinOp::Ge, I, L, p), p);
-    out.push_back(b.make_while(
-        cond,
-        bend > bmark ? b.scope(bmark, bend, b.block(body, p), p)
-                     : b.block(body, p),
-        p));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+        b.make_if(b.binary(BinOp::Gt, S, b.literal(0)),
+                  b.binary(BinOp::Le, I, L), b.binary(BinOp::Ge, I, L));
+    out.push_back(b.make_while(cond, bend > bmark
+                                         ? b.scope(bmark, bend, b.block(body))
+                                         : b.block(body)));
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   // `for k, v in ipairs(t)` and `for k, v in pairs(t)`, matched whole.
   // Lua's generic-for protocol -- an iterator function, a state and a
   // control value -- is what README.md lists as out of scope.
   NodeId emit_forin(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const Ast& list = *a.nodes[1];
     const bool is_ipairs_or_pairs =
         list.nodes.size() == 1 && is_call_expr(*list.nodes[0]) &&
@@ -1705,11 +1564,11 @@ struct Binder {
     const Ast& args = *call.nodes[1]->nodes[0];
     if (args.nodes.empty()) fail(a, "ipairs/pairs takes a table");
 
-    const int32_t mark = ctx.next_local;
+    const int32_t mark = ctx.mark();
     const int32_t tv = ctx.alloc_local("$t");
-    const NodeId T = b.varref(VarKind::Local, tv, p);
+    const NodeId T = b.varref(VarKind::Local, tv);
     std::vector<NodeId> out{
-        b.assign(VarKind::Local, tv, emit_expr(*args.nodes[0], ctx), p)};
+        b.assign(VarKind::Local, tv, emit_expr(*args.nodes[0], ctx))};
 
     const auto& names = a.nodes[0]->nodes;
     const int32_t kv = decl_of.at(names[0].get());
@@ -1719,17 +1578,16 @@ struct Binder {
     std::vector<NodeId> body;
     if (which == "ipairs") {
       const int32_t iv = ctx.alloc_local("$i");
-      const NodeId I = b.varref(VarKind::Local, iv, p);
-      out.push_back(b.assign(VarKind::Local, iv, b.literal(1, p), p));
+      const NodeId I = b.varref(VarKind::Local, iv);
+      out.push_back(b.assign(VarKind::Local, iv, b.literal(1)));
       const int32_t ev = ctx.alloc_local("$e");
-      const NodeId E = b.varref(VarKind::Local, ev, p);
-      body.push_back(b.assign(VarKind::Local, ev,
-                              helper(ctx, "$get", {T, I}, p), p));
-      body.push_back(b.make_if(
-          b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}, p),
-                   b.str_literal("nil", p), p),
-          b.make_break(p), NodeId{}, p));
-      const int32_t bmark = ctx.next_local;
+      const NodeId E = b.varref(VarKind::Local, ev);
+      body.push_back(b.assign(VarKind::Local, ev, helper("$get", {T, I}, p)));
+      body.push_back(
+          b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}),
+                             b.str_literal("nil")),
+                    b.make_break(), NodeId{}));
+      const int32_t bmark = ctx.mark();
       std::vector<NodeId> inner;
       fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}
                           : std::vector<int32_t>{kv},
@@ -1737,55 +1595,48 @@ struct Binder {
       inner.push_back(bind_decl(kv, I, ctx, p));
       if (vv >= 0) inner.push_back(bind_decl(vv, E, ctx, p));
       inner.push_back(emit_block(*a.nodes[2], ctx));
-      const int32_t bend = ctx.next_local;
-      ctx.next_local = bmark;
-      body.push_back(bend > bmark
-                         ? b.scope(bmark, bend, b.block(inner, p), p)
-                         : b.block(inner, p));
-      body.push_back(b.assign(VarKind::Local, iv,
-                              b.binary(BinOp::Add, I, b.literal(1, p), p), p));
+      const int32_t bend = ctx.release(bmark);
+      body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
+                                  : b.block(inner));
+      body.push_back(
+          b.assign(VarKind::Local, iv, b.binary(BinOp::Add, I, b.literal(1))));
     } else {
       const int32_t ks = ctx.alloc_local("$keys");
       const int32_t ix = ctx.alloc_local("$ki");
-      const NodeId K = b.varref(VarKind::Local, ks, p);
-      const NodeId X = b.varref(VarKind::Local, ix, p);
+      const NodeId K = b.varref(VarKind::Local, ks);
+      const NodeId X = b.varref(VarKind::Local, ix);
       out.push_back(b.assign(VarKind::Local, ks,
-                             b.intrinsic(IntrinsicId::ObjectKeys, {T}, p), p));
-      out.push_back(b.assign(VarKind::Local, ix, b.literal(0, p), p));
+                             b.intrinsic(IntrinsicId::ObjectKeys, {T})));
+      out.push_back(b.assign(VarKind::Local, ix, b.literal(0)));
       const int32_t cur = ctx.alloc_local("$k");
-      const NodeId C = b.varref(VarKind::Local, cur, p);
-      body.push_back(b.make_if(
-          b.binary(BinOp::Ge, X, b.intrinsic(IntrinsicId::Len, {K}, p), p),
-          b.make_break(p), NodeId{}, p));
-      body.push_back(b.assign(VarKind::Local, cur, b.index(K, X, p), p));
-      body.push_back(b.assign(VarKind::Local, ix,
-                              b.binary(BinOp::Add, X, b.literal(1, p), p), p));
+      const NodeId C = b.varref(VarKind::Local, cur);
+      body.push_back(
+          b.make_if(b.binary(BinOp::Ge, X, b.intrinsic(IntrinsicId::Len, {K})),
+                    b.make_break(), NodeId{}));
+      body.push_back(b.assign(VarKind::Local, cur, b.index(K, X)));
+      body.push_back(
+          b.assign(VarKind::Local, ix, b.binary(BinOp::Add, X, b.literal(1))));
       // The metatable hangs on the same map, under a key no program can
       // spell -- so `pairs` has to step over it.
-      body.push_back(b.make_if(
-          helper(ctx, "$eq", {C, b.str_literal(kMetaKey, p)}, p),
-          b.make_continue(p), NodeId{}, p));
-      const int32_t bmark = ctx.next_local;
+      body.push_back(b.make_if(helper("$eq", {C, b.str_literal(kMetaKey)}, p),
+                               b.make_continue(), NodeId{}));
+      const int32_t bmark = ctx.mark();
       std::vector<NodeId> inner;
       fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}
                           : std::vector<int32_t>{kv},
                   ctx, inner, p);
       inner.push_back(bind_decl(kv, C, ctx, p));
       if (vv >= 0) {
-        inner.push_back(bind_decl(vv, helper(ctx, "$get", {T, C}, p), ctx, p));
+        inner.push_back(bind_decl(vv, helper("$get", {T, C}, p), ctx, p));
       }
       inner.push_back(emit_block(*a.nodes[2], ctx));
-      const int32_t bend = ctx.next_local;
-      ctx.next_local = bmark;
-      body.push_back(bend > bmark
-                         ? b.scope(bmark, bend, b.block(inner, p), p)
-                         : b.block(inner, p));
+      const int32_t bend = ctx.release(bmark);
+      body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
+                                  : b.block(inner));
     }
-    out.push_back(
-        b.make_while(b.bool_literal(true, p), b.block(body, p), p));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+    out.push_back(b.make_while(b.bool_literal(true), b.block(body)));
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   // The real generic-`for` protocol: `exprlist` is (iterator function,
@@ -1794,90 +1645,83 @@ struct Binder {
   // above are simply the two library functions this front end special-
   // cases for speed rather than compiling through this path too.
   NodeId emit_forin_generic(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
-    const int32_t mark = ctx.next_local;
+    auto b = Builder(m).at(p);
+    const int32_t mark = ctx.mark();
     const int32_t triple = ctx.alloc_local("$triple");
-    const NodeId TR = b.varref(VarKind::Local, triple, p);
+    const NodeId TR = b.varref(VarKind::Local, triple);
     const int32_t fv = ctx.alloc_local("$iterf");
-    const NodeId F = b.varref(VarKind::Local, fv, p);
+    const NodeId F = b.varref(VarKind::Local, fv);
     const int32_t sv = ctx.alloc_local("$state");
-    const NodeId S = b.varref(VarKind::Local, sv, p);
+    const NodeId S = b.varref(VarKind::Local, sv);
     const int32_t cv = ctx.alloc_local("$control");
-    const NodeId C = b.varref(VarKind::Local, cv, p);
+    const NodeId C = b.varref(VarKind::Local, cv);
     std::vector<NodeId> out{
-        b.assign(VarKind::Local, triple, emit_exprlist(*a.nodes[1], ctx), p),
-        b.assign(VarKind::Local, fv, helper(ctx, "$nth", {TR, b.literal(0, p)}, p),
-                 p),
-        b.assign(VarKind::Local, sv, helper(ctx, "$nth", {TR, b.literal(1, p)}, p),
-                 p),
-        b.assign(VarKind::Local, cv, helper(ctx, "$nth", {TR, b.literal(2, p)}, p),
-                 p)};
+        b.assign(VarKind::Local, triple, emit_exprlist(*a.nodes[1], ctx)),
+        b.assign(VarKind::Local, fv, helper("$nth", {TR, b.literal(0)}, p)),
+        b.assign(VarKind::Local, sv, helper("$nth", {TR, b.literal(1)}, p)),
+        b.assign(VarKind::Local, cv, helper("$nth", {TR, b.literal(2)}, p))};
 
     const int32_t rv = ctx.alloc_local("$results");
-    const NodeId R = b.varref(VarKind::Local, rv, p);
+    const NodeId R = b.varref(VarKind::Local, rv);
     const int32_t first = ctx.alloc_local("$first");
-    const NodeId FI = b.varref(VarKind::Local, first, p);
+    const NodeId FI = b.varref(VarKind::Local, first);
     std::vector<NodeId> body{
-        b.assign(VarKind::Local, rv, b.call_value(F, {S, C}, p), p),
-        b.assign(VarKind::Local, first, helper(ctx, "$one", {R}, p), p),
-        b.make_if(b.binary(BinOp::Eq,
-                           b.intrinsic(IntrinsicId::TypeOf, {FI}, p),
-                           b.str_literal("nil", p), p),
-                  b.make_break(p), NodeId{}, p),
-        b.assign(VarKind::Local, cv, FI, p)};
+        b.assign(VarKind::Local, rv, b.call_value(F, {S, C})),
+        b.assign(VarKind::Local, first, helper("$one", {R}, p)),
+        b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {FI}),
+                           b.str_literal("nil")),
+                  b.make_break(), NodeId{}),
+        b.assign(VarKind::Local, cv, FI)};
 
     const auto& names = a.nodes[0]->nodes;
     std::vector<int32_t> decls;
     for (const auto& n : names) decls.push_back(decl_of.at(n.get()));
-    const int32_t bmark = ctx.next_local;
+    const int32_t bmark = ctx.mark();
     std::vector<NodeId> inner;
     fresh_cells(decls, ctx, inner, p);
     for (size_t k = 0; k < decls.size(); ++k) {
       inner.push_back(bind_decl(
-          decls[k], helper(ctx, "$nth", {R, b.literal(static_cast<int64_t>(k), p)}, p),
+          decls[k], helper("$nth", {R, b.literal(static_cast<int64_t>(k))}, p),
           ctx, p));
     }
     inner.push_back(emit_block(*a.nodes[2], ctx));
-    const int32_t bend = ctx.next_local;
-    ctx.next_local = bmark;
-    body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner, p), p)
-                                : b.block(inner, p));
+    const int32_t bend = ctx.release(bmark);
+    body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
+                                : b.block(inner));
 
-    out.push_back(b.make_while(b.bool_literal(true, p), b.block(body, p), p));
-    const int32_t end = ctx.next_local;
-    ctx.next_local = mark;
-    return b.scope(mark, end, b.block(out, p), p);
+    out.push_back(b.make_while(b.bool_literal(true), b.block(body)));
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(out));
   }
 
   NodeId emit_fnstat(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const Ast& nm = *a.nodes[0];
     const NodeId fn = emit_closure(fn_of.at(&a), ctx, p);
     if (nm.nodes.size() == 1) {
       const auto it = ref_of.find(nm.nodes[0].get());
       if (it == ref_of.end()) fail(nm, "cannot assign to this name");
-      const auto [k, i] = access(ctx.fn, it->second);
-      return b.assign(k, i, fn, p);
+      const auto [k, i] = rs.access(ctx.fn, it->second);
+      return b.assign(k, i, fn);
     }
     NodeId recv = emit_expr(*nm.nodes[0], ctx);
     for (size_t i = 1; i + 1 < nm.nodes.size(); ++i) {
-      recv = helper(ctx, "$get",
-                    {recv, b.str_literal(
-                               std::string(nm.nodes[i]->nodes[0]->token), p)},
-                    p);
+      recv = helper(
+          "$get",
+          {recv, b.str_literal(std::string(nm.nodes[i]->nodes[0]->token))}, p);
     }
     return helper(
-        ctx, "$set",
-        {recv,
-         b.str_literal(std::string(nm.nodes.back()->nodes[0]->token), p), fn},
+        "$set",
+        {recv, b.str_literal(std::string(nm.nodes.back()->nodes[0]->token)),
+         fn},
         p);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx) {
-    Builder b(m);
     const SrcPos p = pos_of(a);
+    auto b = Builder(m).at(p);
     const Ast& targets = *a.nodes[0];
     const Ast& values = *a.nodes[1];
     if (targets.nodes.size() == 1) {
@@ -1885,27 +1729,26 @@ struct Binder {
                         emit_expr(*values.nodes.back(), ctx), ctx, p);
     }
     const int32_t t = ctx.alloc_local("$vals");
-    const NodeId T = b.varref(VarKind::Local, t, p);
+    const NodeId T = b.varref(VarKind::Local, t);
     std::vector<NodeId> out{
-        b.assign(VarKind::Local, t, emit_exprlist(values, ctx), p)};
+        b.assign(VarKind::Local, t, emit_exprlist(values, ctx))};
     for (size_t k = 0; k < targets.nodes.size(); ++k) {
       out.push_back(emit_store(
           *targets.nodes[k],
-          helper(ctx, "$nth", {T, b.literal(static_cast<int64_t>(k), p)}, p),
-          ctx, p));
+          helper("$nth", {T, b.literal(static_cast<int64_t>(k))}, p), ctx, p));
     }
-    return b.block(out, p);
+    return b.block(out);
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
+    auto b = Builder(m).at(p);
     if (target.tag == "ident"_) {
       const auto it = ref_of.find(&target);
       if (it == ref_of.end()) {
         fail(target, "'" + std::string(target.token) + "' is not a variable");
       }
-      const auto [k, i] = access(ctx.fn, it->second);
-      return b.assign(k, i, value, p);
+      const auto [k, i] = rs.access(ctx.fn, it->second);
+      return b.assign(k, i, value);
     }
     if (target.tag != "suffixedexp"_ || target.nodes.size() < 2) {
       fail(target, "cannot assign to this expression");
@@ -1913,7 +1756,7 @@ struct Binder {
     const Ast& last = *target.nodes.back();
     NodeId key;
     if (last.tag == "dotsfx"_) {
-      key = b.str_literal(std::string(last.nodes[0]->token), p);
+      key = b.str_literal(std::string(last.nodes[0]->token));
     } else if (last.tag == "indexsfx"_) {
       key = emit_expr(*last.nodes[0], ctx);
     } else {
@@ -1921,97 +1764,82 @@ struct Binder {
     }
     const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
     const NodeId R =
-        recv.multi ? helper(ctx, "$one", {recv.n}, p) : recv.n;
-    return helper(ctx, "$set", {R, key, value}, p);
+        recv.multi ? helper("$one", {recv.n}, p) : recv.n;
+    return helper("$set", {R, key, value}, p);
   }
 
   // -- One function's body -------------------------------------------------
   void emit_fn(int32_t f) {
     const FnInfo& fi = fns[static_cast<size_t>(f)];
+    const Resolver::Fn& rf = rs.fns[static_cast<size_t>(f)];
     FnCtx ctx;
     ctx.fn = f;
-    ctx.next_cell = static_cast<int32_t>(fi.cell_index.size());
-    Builder b(m);
     const SrcPos p = fi.body != nullptr ? pos_of(*fi.body) : SrcPos{0, 0};
+    auto b = Builder(m).at(p);
 
     std::vector<NodeId> pre;
     for (const int32_t v : fi.params) {
-      const int32_t s = ctx.alloc_local(vars[static_cast<size_t>(v)].name);
-      slot_of[static_cast<size_t>(v)] = s;
-      const auto it = fi.cell_index.find(v);
-      if (it != fi.cell_index.end()) {
-        pre.push_back(b.cell_fresh(it->second, p));
-        pre.push_back(b.assign(VarKind::Cell, it->second,
-                               b.varref(VarKind::Local, s, p), p));
+      const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
+      rs.vars[static_cast<size_t>(v)].slot = s;
+      const auto it = rf.cell_index.find(v);
+      if (it != rf.cell_index.end()) {
+        pre.push_back(b.cell_fresh(it->second));
+        pre.push_back(
+            b.assign(VarKind::Cell, it->second, b.varref(VarKind::Local, s)));
       }
     }
-    const int32_t nparams = ctx.next_local;
+    const int32_t nparams = ctx.mark();
     const NodeId body = emit_block(*fi.body, ctx);
 
     std::vector<NodeId> stmts;
-    if (f == 0) fill_helpers(stmts, p);
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
     // Falling off the end returns no values, which under this front end's
     // convention is the empty array rather than nil.
-    stmts.push_back(b.make_return(b.array_lit({}, p), p));
+    stmts.push_back(b.make_return(b.array_lit({})));
 
     Func fn;
     fn.name = fi.name;
     fn.num_params = nparams;
     fn.num_locals = ctx.high_local;
-    ctx.local_names.resize(static_cast<size_t>(ctx.high_local), "");
-    fn.local_names = ctx.local_names;
-    fn.num_cells = ctx.next_cell;
+    fn.local_names = ctx.names();
+    fn.num_cells = rs.num_cells(f);
     fn.lenient_arity = true;  // Lua's own arity rule: missing args are nil
     // The headline. Lua guarantees that `return f(...)` reuses the frame,
     // so samples/tailcalls.lua recurses far past max_call_depth and has to
     // still work.
     fn.tail_calls = true;
-    fn.num_captures = m.funcs[static_cast<size_t>(fi.index)].num_captures;
-    fn.capture_names = m.funcs[static_cast<size_t>(fi.index)].capture_names;
-    fn.body = b.scope(0, nparams, b.block(stmts, p), p);
-    m.funcs[static_cast<size_t>(fi.index)] = std::move(fn);
+    fn.num_captures = m.funcs[static_cast<size_t>(rf.index)].num_captures;
+    fn.capture_names = m.funcs[static_cast<size_t>(rf.index)].capture_names;
+    fn.body = b.scope(0, nparams, b.block(stmts));
+    m.funcs[static_cast<size_t>(rf.index)] = std::move(fn);
   }
 
   Module build(const Ast& program) {
     const int32_t top = new_fn(-1, "main");
     fns[static_cast<size_t>(top)].body = program.nodes[0].get();
 
-    scopes.push_back({top, {}, {}});
+    push_scope();
     resolve_block(*program.nodes[0], top);
-    scopes.pop_back();
+    pop_scope();
 
     m.funcs.push_back({});
-    fns[static_cast<size_t>(top)].index = 0;
+    rs.fns[static_cast<size_t>(top)].index = 0;
     for (const std::string& n : rt_names()) {
       rt[n] = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
     for (size_t f = 1; f < fns.size(); ++f) {
-      fns[f].index = static_cast<int32_t>(m.funcs.size());
+      rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
     }
 
-    // One binding, owned by file scope and captured by every function: the
-    // array of runtime-helper closures. Declared after resolution so no
-    // source name can collide with it, and before number_captures so the
-    // ordinary capture machinery threads it like any other free variable.
-    helpers_var = static_cast<int32_t>(vars.size());
-    vars.push_back({"$helpers", top});
-    for (size_t f = 1; f < fns.size(); ++f) fns[f].free.insert(helpers_var);
-    // A cell whether or not anything captured it: file scope reads it
-    // itself, and a program with no nested function has no free set to put
-    // it in. number_captures below finds it already there.
-    fns[0].cell_index[helpers_var] =
-        static_cast<int32_t>(fns[0].cell_index.size());
 
-    number_captures();
+    rs.number_captures(m);
     empty_cmap = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back({});
     emit_runtime();
 
-    slot_of.assign(vars.size(), -1);
     for (size_t f = 0; f < fns.size(); ++f) {
       emit_fn(static_cast<int32_t>(f));
     }

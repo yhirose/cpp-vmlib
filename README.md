@@ -127,6 +127,69 @@ A few things worth knowing before you write a binder:
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
 
+## Writing a binder
+
+`Builder` and `verify()` are all a binder strictly needs; `examples/pl0/`
+uses nothing else. Three optional utilities sit beside them, in the
+`coreir/resolve.h` section of `vmlib.h`. Nothing in `coreir` or `vm` reads
+them, and each is there because every front end in `examples/` that got as
+far as closures had written the same thing.
+
+**`Builder::at(p)`** binds a source position once instead of at every node:
+
+```cpp
+Builder bld(m);
+auto b = bld.at(pos_of(node));
+b.binary(BinOp::Add, b.varref(VarKind::Local, 0), b.literal(1))
+```
+
+**`Resolver`** is closure conversion, for a front end whose functions nest
+lexically. `push_scope`/`declare`/`resolve` as you walk the source;
+`number_captures(m)` once afterwards; then `access(fn, var)` answers the
+`(VarKind, index)` pair each `VarRef` and `Assign` needs -- a local slot, a
+cell of this function's own, or a capture -- and `capture_map(m, here,
+target)` writes the forwarding table a `MakeClosure` for `target` needs,
+expressed in `here`'s frame. What it gets right, and a
+per-function capture list would not, is the propagation: a name read two
+levels in is recorded as free in *every* function between the reader and
+the owner, because a closure's capture map is written in the frame that
+builds it and the frame two levels down cannot name a cell it does not own.
+It knows nothing about any parse tree -- names and integers go in, and the
+front end keeps its own per-function record beside it. `FrameLayout` is the
+slot bookkeeping that goes with it: `alloc_local` for the names, `mark`/
+`release` so sibling blocks reuse slots and a frame's width is the deepest
+nesting rather than the total number of declarations.
+
+**`FuncWriter`** writes a whole function directly in IR -- the shape a front
+end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
+dynamically typed language needs and the IR has no opinion about. The
+position is bound (it is a `Builder::At` underneath) and the locals have
+names:
+
+```cpp
+FuncWriter w(m);
+const auto [x, y] = w.params("x", "y");
+const auto [out, i] = w.locals("out", "i");
+w.add(w.set(out, w.arr({})));
+...
+w.write(m.funcs[idx], "$umul");     // counts and name table derived
+```
+
+Its `lenient_arity` and `singleton` fields default to what a helper library
+wants and are the caller's to clear -- a function the *program* can get hold
+of as a value wants neither, and `singleton` especially is a decision
+[Static calls](#static-calls) reserves for the front end.
+
+Written with bare slot numbers instead, a helper's body has its indices in
+one place and their names in another, and inserting a temporary in the
+middle renumbers everything after it -- which `verify()` catches only if the
+*count* changed too.
+
+`examples/pl0/` deliberately uses none of the three: its captures travel
+through calls rather than through nesting, so it needs a fixpoint `Resolver`
+does not do, and it is short enough that the rest is clearer spelled out.
+The other eight front ends use all three.
+
 ## Fixed-width integers
 
 `Value` only ever holds an `int64` or a `double` -- there is no `int32`, no
@@ -213,21 +276,34 @@ call site reached once; a call inside a loop, or any method called from more
 than one place, should not pay `MakeClosure`'s allocation on every visit for
 a target that never changes between them.
 
-The recipe costs nothing in the library: build the closure once, at module
-initialization, into a `Cell` the binder reserves for it -- the same kind of
-`Cell` a captured local would use, just never reassigned after its one
-store -- and lower every call site to `VarRef(Cell)` followed by
-`CallValue`, instead of a fresh `MakeClosure` at each one. The difference
-from PL/0's shape is exactly that one hoist; nothing about `CallValue`
-itself changes.
+Set `Func::singleton` on the target. Every `MakeClosure` naming that
+function then yields the *same* closure object -- built at the first one to
+run, cached by the executor for the rest of the run -- so a call site stays
+the plain `MakeClosure` + `CallValue` PL/0 writes, and the allocation
+happens once rather than once per visit. The cache lives in `Exec` rather
+than in `Program`, since the cached value is a refcounted heap object bound
+to one `Runtime` and so cannot be precomputed and reused across runs the way
+a compiled `Chunk` can be. No new opcode, and nothing about `CallValue`
+changes.
 
-If that recipe is not enough once profiled, the next step lives entirely in
-the executor and needs no new IR: cache the `ClosureObj` a capture-map-empty
-`MakeClosure` builds, keyed by func index, in a table `Exec` owns for the
-run -- not `Program`, since the cached value is a refcounted heap object
-bound to one `Runtime` and so cannot be precomputed once and reused across
-runs the way a compiled `Chunk` can be. `Op::MakeClosure` checks the table
-before allocating a new closure; no new opcode.
+It is opt-in rather than an automatic optimization for every capture-empty
+`MakeClosure`, because the sharing is observable: `Same` compares closures
+by heap identity, so two evaluations of the same source-level `function
+() {}` would go from distinct to identical. A front end turns it on for a
+function whose closure has no identity of its own -- a top-level `func`, a
+static method, an IR-level helper it wrote itself -- and leaves it off for
+a lambda the source can capture and compare. `verify()` refuses the one
+combination that cannot mean anything, a singleton with captures to
+forward.
+
+Every front end in `examples/` that writes an IR-level helper library uses
+this: [mini-go](examples/mini-go/) for its top-level funcs and channel
+runtime, and the seven dynamic ones for the dozens of `$truthy`/`$str`-shaped
+helpers each writes. Before the flag existed, each of them hand-built the
+hoist above -- a synthetic `$helpers` variable owned by file scope, threaded
+into every function's captures, holding an array of pre-built closures
+indexed per helper. That is about forty lines per front end the flag
+deleted.
 
 ## Struct fields
 
@@ -363,8 +439,8 @@ have, and ends the run). `NativeCall::call` runs a closure -- or another
 native -- to completion from inside a native, and a throw the callee lets
 out travels through the native to the caller's handler; a native that calls
 back therefore keeps what it owns in RAII handles. A front end that calls
-one host function from many sites hoists the `NativeRef` into a `Cell`
-exactly as [Static calls](#static-calls) hoists a `MakeClosure`.
+one host function from many sites hoists the `NativeRef` into a `Cell`,
+the same saving [Static calls](#static-calls) gets from `Func::singleton`.
 
 ## Tail calls
 
@@ -712,3 +788,12 @@ Each front end owns its own verification, but the shape is the same
 everywhere: run every sample and check the output against an oracle this
 repository does not contain. Passing your own test suite is not the same as
 matching the language -- see a front end's own README for what its oracle is.
+
+`test/` holds what the samples cannot reach: one executable per property,
+each building its Core-IR by hand and supplying its own `coreir_rt` host.
+`test_singleton.cc` pins `Func::singleton` (identity, the allocation it
+saves, a generator's per-call activation, and the one combination `verify()`
+refuses); `test_binding.cc` pins the two optional binder utilities --
+`Resolver`'s propagation and cell/local decision, `FrameLayout`'s slot
+reuse, and `FuncWriter`'s name table. `just test` runs everything;
+`just sanitizers` runs it again under ASan/UBSan/LSan.
