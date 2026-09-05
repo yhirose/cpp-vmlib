@@ -13,7 +13,7 @@
 namespace {
 
 void usage() {
-  std::cerr << "usage: go_mini [--dump-ir] [--dump-bc] PROGRAM.go\n";
+  std::cerr << "usage: mini-go [--dump-ir] [--dump-bc] PROGRAM.go\n";
 }
 
 }  // namespace
@@ -42,14 +42,14 @@ int main(int argc, char** argv) {
 
   std::ifstream in(path);
   if (!in) {
-    std::cerr << "go_mini: cannot open " << path << "\n";
+    std::cerr << "mini-go: cannot open " << path << "\n";
     return 2;
   }
   std::ostringstream ss;
   ss << in.rdbuf();
 
   coreir_rt_default::set_path(path);
-  const coreir::Module m = go_mini::bind_source(ss.str());
+  const coreir::Module m = mini_go::bind_source(ss.str());
 
   if (dump_ir) {
     std::cout << coreir::to_string(m);

@@ -934,7 +934,7 @@ enum class Tag : uint8_t {
   // Frame -- a borrowed slot pointer and an owned cell -- with the meaning of
   // VarKind::Capture depending on which kind of call got you there. A front
   // end that wants the old shape builds a closure and calls it immediately;
-  // example/pl0 does exactly that.
+  // examples/pl0 does exactly that.
   MakeClosure,  // a = func index, b = capture map index
   CallValue,    // children: callee, args...
   // Containers. Index and SetIndex dispatch on what the receiver turns out

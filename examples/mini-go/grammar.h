@@ -21,7 +21,7 @@
 //
 // Every rule that can end up with exactly one child needs `no_ast_opt`,
 // or optimize_ast folds it away and its identity (or its list shape) is
-// lost -- see example/pl0/grammar.h's own comment for the canonical case
+// lost -- see examples/pl0/grammar.h's own comment for the canonical case
 // this bites (`CALL x` folding to a bare `x`). The rules here that have
 // that shape, beyond the ones slice 1 already needed:
 //   * `defaultcase` has exactly one child (its `stmts`), so without
@@ -54,7 +54,7 @@
 
 #pragma once
 
-namespace go_mini {
+namespace mini_go {
 
 inline constexpr const char* kGrammar = R"(
   program    <- _ 'package' __ 'main' _ 'import' __ '"fmt"' _ topdecl* _   { no_ast_opt }
@@ -138,4 +138,4 @@ inline constexpr const char* kGrammar = R"(
 // peglib's own grammar DSL comments with `#`, not `//` -- `//` here would
 // parse as grammar text, not a comment, and fail to load.)
 
-}  // namespace go_mini
+}  // namespace mini_go

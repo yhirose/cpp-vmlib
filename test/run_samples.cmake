@@ -6,7 +6,7 @@
 
 set(SAMPLES square gcd fib nested unary odd read)
 
-set(dir ${SRC}/example/pl0/samples)
+set(dir ${SRC}/examples/pl0/samples)
 set(failed 0)
 
 foreach(s ${SAMPLES})

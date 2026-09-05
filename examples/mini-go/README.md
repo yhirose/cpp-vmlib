@@ -1,4 +1,4 @@
-# go_mini
+# mini-go
 
 The second front end for cpp-vmlib's Core-IR, and a narrower one than
 PL/0 on purpose: it exists to prove five of `vmlib.h`'s own recipes work
@@ -30,7 +30,7 @@ caller's?) that are orthogonal to what Struct fields is here to prove.
 ## Running
 
 ```
-build/example/go_mini/go_mini [--dump-ir] [--dump-bc] PROGRAM.go
+build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] PROGRAM.go
 ```
 
 ## A worked example: one closure, two calls
@@ -158,7 +158,7 @@ happen to hold exactly one item -- both shapes fold away under peglib's
 `return` becomes indistinguishable from evaluating its expression as a
 statement) or the list's shape (a single-argument call's `args` node
 disappears, taking that argument's position with it) with it. See
-`grammar.h`'s own header comment and example/pl0/grammar.h's `var` note for
+`grammar.h`'s own header comment and examples/pl0/grammar.h's `var` note for
 the canonical case this bites.
 
 **`__` after `ident`.** The word-boundary check `__` only does anything
@@ -169,7 +169,7 @@ time anything after one of them runs, the separator is already consumed and
 always fails. `param <- ident type` and `vardecl <- 'var' __ ident type ...`
 want nothing there at all, not `__` -- `ident`'s own trailing `_` is
 already the separator -- and this front end's grammar had exactly this bug
-on its first pass, caught by `go_mini square.go` failing to parse its own
+on its first pass, caught by `mini-go square.go` failing to parse its own
 parameter list. `structdecl` had the same *kind* of bug on slice 2's first
 pass (`'type' __ ident __ 'struct' ...`), but there a plain `_` really was
 the fix: `'struct'` is a keyword literal, not another `ident`, so it has no
@@ -178,7 +178,7 @@ failing on its own `type ... struct` line.
 
 ## Testing
 
-`ctest -R go_mini_samples` runs
+`ctest -R mini-go-samples` runs
 `samples/{ints,floats,structs,switch,goroutines}/*.go`
 and requires the output to match a golden file (`samples/golden/`)
 captured from `go run` -- see PL/0's own README for why an external,

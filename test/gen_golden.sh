@@ -11,7 +11,7 @@ set -euo pipefail
 CULEBRA=${1:?usage: gen_golden.sh CULEBRA PL0_CUL}
 PL0_CUL=${2:?usage: gen_golden.sh CULEBRA PL0_CUL}
 
-cd "$(dirname "$0")/../example/pl0/samples"
+cd "$(dirname "$0")/../examples/pl0/samples"
 mkdir -p golden
 
 for f in *.pas; do

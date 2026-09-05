@@ -65,7 +65,7 @@ using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
 
-namespace go_mini {
+namespace mini_go {
 namespace {
 
 // Struct and Chan are deliberately last and outside type_from_name's
@@ -1304,4 +1304,4 @@ Module bind_source(const std::string& source) {
   return m;
 }
 
-}  // namespace go_mini
+}  // namespace mini_go

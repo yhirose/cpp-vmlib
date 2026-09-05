@@ -17,13 +17,13 @@ stdio host the header carries.
 ## Running
 
 ```
-build/example/pl0/pl0 [--dump-ir] [--dump-bc] PROGRAM.pas
+build/examples/pl0/pl0 [--dump-ir] [--dump-bc] PROGRAM.pas
 ```
 
 ## A worked example: captures across a call
 
 A PL/0 procedure call is a closure built over the caller's cells and called
-immediately. `--dump-ir example/pl0/samples/fib.pas` shows the same function
+immediately. `--dump-ir examples/pl0/samples/fib.pas` shows the same function
 built from two places, resolving its captures differently each time:
 
 ```

@@ -16,7 +16,7 @@ set(dir ${SRC}/samples)
 set(failed 0)
 
 foreach(s ${SAMPLES})
-  execute_process(COMMAND ${GO_MINI} ${s}.go
+  execute_process(COMMAND ${MINI_GO} ${s}.go
                   WORKING_DIRECTORY ${dir}/${s}
                   OUTPUT_VARIABLE out ERROR_VARIABLE err
                   RESULT_VARIABLE rc)
@@ -43,6 +43,6 @@ foreach(s ${SAMPLES})
 endforeach()
 
 if(failed)
-  message(FATAL_ERROR "go_mini sample output does not match go run")
+  message(FATAL_ERROR "mini-go sample output does not match go run")
 endif()
-message(STATUS "go_mini samples OK (matches go run)")
+message(STATUS "mini-go samples OK (matches go run)")
