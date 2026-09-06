@@ -2225,15 +2225,10 @@ struct Resolver {
   // the diagnostic name table into each function's Func. Call once, after
   // the walk: a resolve() afterwards would add to a `free` set already
   // numbered.
-  void number_captures(Module& m) {
+  void number_captures() {
     for (Fn& f : fns) {
       int32_t i = 0;
-      Func& mf = m.funcs[static_cast<size_t>(f.index)];
-      for (const int32_t v : f.free) {
-        f.capture_index[v] = i++;
-        mf.capture_names.push_back(vars[static_cast<size_t>(v)].name);
-      }
-      mf.num_captures = i;
+      for (const int32_t v : f.free) f.capture_index[v] = i++;
     }
     // A binding anyone captures cannot stay a slot in its owner's frame:
     // the closure may outlive that frame. Walking every function's free set
@@ -2243,6 +2238,32 @@ struct Resolver {
       for (const int32_t v : f.free) claim_cell(v);
     }
     for (const int32_t v : forced_cells) claim_cell(v);
+  }
+
+  // The same, plus the counts and names written into Module::funcs. Every
+  // function's `index` has to name a Func that already exists -- a binder
+  // sizes the table (funcs.resize) before the bind pass, and a caller that
+  // fills it in afterwards wants the argument-less overload and
+  // capture_name() instead.
+  void number_captures(Module& m) {
+    number_captures();
+    for (Fn& f : fns) {
+      Func& mf = m.funcs[static_cast<size_t>(f.index)];
+      for (const int32_t v : f.free) {
+        mf.capture_names.push_back(vars[static_cast<size_t>(v)].name);
+      }
+      mf.num_captures = static_cast<int32_t>(f.free.size());
+    }
+  }
+
+  // The name at capture index `i` of `fn` -- what the Module overload would
+  // have pushed into Func::capture_names, for a caller building its funcs
+  // after the numbering rather than before.
+  const std::string& capture_name(int32_t fn, int32_t i) const {
+    const std::set<int32_t>& free = fns[static_cast<size_t>(fn)].free;
+    auto it = free.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(i));
+    return vars[static_cast<size_t>(*it)].name;
   }
 
   // The capture map a closure over `target` needs, expressed in `builder`'s
