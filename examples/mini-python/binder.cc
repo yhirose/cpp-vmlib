@@ -348,7 +348,7 @@ struct Binder {
     for (const std::string& g : fi.globals) {
       // Scope 0 is the module's, and funcs[0] is the function that owns
       // it -- build() pushes the two together.
-      if (!rs.scopes[0].count(g)) rs.declare_in(0, g, 0);
+      if (!rs.declared_at(0, g)) rs.declare_in(0, g, 0);
     }
     std::vector<const Ast*> names;
     for (const auto& s : body.nodes) collect_bindings(*s, names);

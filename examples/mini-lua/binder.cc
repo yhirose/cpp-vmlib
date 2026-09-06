@@ -144,26 +144,12 @@ struct Binder {
 
   // ==== Pass A: scopes, declarations, captures =============================
 
-  // Parallel to Resolver::scopes: the order a block declared its bindings
-  // in, which the name map cannot answer because Lua permits shadowing
-  // within one block -- `local x` twice is two bindings, and the second
-  // hides the first from there on, so Resolver::declare's overwrite is
-  // exactly right and the *order* has to be kept beside it.
-  std::vector<std::vector<int32_t>> scope_order;
-
-  void push_scope() {
-    rs.push_scope();
-    scope_order.emplace_back();
-  }
-  void pop_scope() {
-    rs.pop_scope();
-    scope_order.pop_back();
-  }
-
-  int32_t declare(const std::string& name, int32_t fn) {
-    const int32_t v = rs.declare(name, fn);
-    scope_order.back().push_back(v);
-    return v;
+  // The order a block declared its bindings in is Resolver's -- Lua permits
+  // shadowing within one block (`local x` twice is two bindings, and the
+  // second hides the first from there on), so the name map holds one of
+  // them and declared_order holds both.
+  const std::vector<int32_t>& scope_order() const {
+    return rs.declared_order(rs.depth() - 1);
   }
 
   int32_t new_fn(int32_t parent, const std::string& name) {
@@ -174,10 +160,10 @@ struct Binder {
   }
 
   void resolve_block(const Ast& block, int32_t fn) {
-    push_scope();
+    rs.push_scope();
     for (const auto& s : block.nodes) resolve_stmt(*s, fn);
-    block_decls[&block] = scope_order.back();
-    pop_scope();
+    block_decls[&block] = scope_order();
+    rs.pop_scope();
   }
 
   // `funcbody` is params + block + the `end`. A method declared with `:`
@@ -188,17 +174,17 @@ struct Binder {
     const int32_t f = new_fn(parent, name);
     fns[static_cast<size_t>(f)].body = body.nodes[1].get();
     fn_of[&node] = f;
-    push_scope();
+    rs.push_scope();
     if (implicit_self) {
-      fns[static_cast<size_t>(f)].params.push_back(declare("self", f));
+      fns[static_cast<size_t>(f)].params.push_back(rs.declare("self", f));
     }
     for (const auto& p : body.nodes[0]->nodes) {
-      const int32_t v = declare(std::string(p->token), f);
+      const int32_t v = rs.declare(std::string(p->token), f);
       decl_of[p.get()] = v;
       fns[static_cast<size_t>(f)].params.push_back(v);
     }
     resolve_block(*body.nodes[1], f);
-    pop_scope();
+    rs.pop_scope();
     return f;
   }
 
@@ -211,14 +197,14 @@ struct Binder {
         // The name is visible inside the body, so it is declared first --
         // which is what makes `local function f() return f() end` recurse.
         const Ast& id = *a.nodes[0];
-        decl_of[&id] = declare(std::string(id.token), fn);
+        decl_of[&id] = rs.declare(std::string(id.token), fn);
         resolve_fn(a, *a.nodes[1], fn, std::string(id.token), false);
         return;
       }
       case "localdecl"_: {
         if (a.nodes.size() > 1) resolve_expr(*a.nodes[1], fn);
         for (const auto& id : a.nodes[0]->nodes) {
-          decl_of[id.get()] = declare(std::string(id->token), fn);
+          decl_of[id.get()] = rs.declare(std::string(id->token), fn);
         }
         return;
       }
@@ -255,11 +241,11 @@ struct Binder {
         // `until`'s condition can see the block's own locals -- Lua's one
         // scope that outlives its braces, so the block and the condition
         // are resolved in the same scope rather than in two.
-        push_scope();
+        rs.push_scope();
         for (const auto& s : a.nodes[0]->nodes) resolve_stmt(*s, fn);
         resolve_expr(*a.nodes[1], fn);
-        block_decls[a.nodes[0].get()] = scope_order.back();
-        pop_scope();
+        block_decls[a.nodes[0].get()] = scope_order();
+        rs.pop_scope();
         return;
       }
       case "fornum"_: {
@@ -271,23 +257,23 @@ struct Binder {
             resolve_expr(*a.nodes[i], fn);
           }
         }
-        push_scope();
+        rs.push_scope();
         decl_of[a.nodes[0].get()] =
-            declare(std::string(a.nodes[0]->token), fn);
+            rs.declare(std::string(a.nodes[0]->token), fn);
         resolve_block(*a.nodes.back(), fn);
-        block_decls[&a] = scope_order.back();
-        pop_scope();
+        block_decls[&a] = scope_order();
+        rs.pop_scope();
         return;
       }
       case "forin"_: {
         resolve_expr(*a.nodes[1], fn);
-        push_scope();
+        rs.push_scope();
         for (const auto& id : a.nodes[0]->nodes) {
-          decl_of[id.get()] = declare(std::string(id->token), fn);
+          decl_of[id.get()] = rs.declare(std::string(id->token), fn);
         }
         resolve_block(*a.nodes[2], fn);
-        block_decls[&a] = scope_order.back();
-        pop_scope();
+        block_decls[&a] = scope_order();
+        rs.pop_scope();
         return;
       }
       case "dostat"_:
@@ -1819,9 +1805,9 @@ struct Binder {
     const int32_t top = new_fn(-1, "main");
     fns[static_cast<size_t>(top)].body = program.nodes[0].get();
 
-    push_scope();
+    rs.push_scope();
     resolve_block(*program.nodes[0], top);
-    pop_scope();
+    rs.pop_scope();
 
     m.funcs.push_back({});
     rs.fns[static_cast<size_t>(top)].index = 0;

@@ -345,6 +345,87 @@ int main() {
     }
   }
 
+  // --- 6. A closure built where its captures cannot be reached is refused.
+  // The rule the propagation rests on: resolve() records a free name in
+  // every function between the reader and the owner, so the frame a
+  // function is *written* in can always name what that function captures.
+  // A frame elsewhere -- a sibling, a wrapper the walk never nested the
+  // function inside -- generally cannot, and the capture map it would get
+  // is silently wrong. capture_map says so instead.
+  //
+  //   let x = 1;
+  //   function owner() { function reader() { return x; } }  // reader: free x
+  //   function other() { /* builds reader's closure -- with what? */ }
+  {
+    Resolver rs;
+    Module m;
+    m.funcs.resize(4);
+    const int32_t main_fn = rs.new_fn(-1);
+    rs.fns[static_cast<size_t>(main_fn)].index = 0;
+    rs.push_scope();
+    const int32_t x = rs.declare("x", main_fn);
+    rs.vars[static_cast<size_t>(x)].slot = 0;
+
+    const int32_t owner = rs.new_fn(main_fn);
+    rs.fns[static_cast<size_t>(owner)].index = 1;
+    const int32_t reader = rs.new_fn(owner);
+    rs.fns[static_cast<size_t>(reader)].index = 2;
+    rs.resolve("x", reader);
+    const int32_t other = rs.new_fn(main_fn);
+    rs.fns[static_cast<size_t>(other)].index = 3;
+    rs.number_captures(m);
+
+    // owner is where reader is written: it carries x, so this is fine.
+    rs.capture_map(m, owner, reader);
+
+    // other is not, and never asked for x.
+    bool refused = false;
+    try {
+      rs.capture_map(m, other, reader);
+    } catch (const Failure& e) {
+      refused = std::string(e.what()).find("cannot supply 'x'") !=
+                std::string::npos;
+    }
+    if (!refused) {
+      std::fprintf(stderr,
+                   "FAIL: a closure built out of reach was not refused\n");
+      ++g_failures;
+    }
+  }
+
+  // --- 7. The declaration order a block keeps beside its name map.
+  // A name declared twice in one block is two bindings wherever the
+  // language allows it (Lua's `local x` twice), so the map holds the
+  // second and the order holds both -- which is what a front end releasing
+  // a block's slots, or refreshing them per loop iteration, has to walk.
+  // An alias is not a declaration and does not appear.
+  {
+    Resolver rs;
+    const int32_t fn = rs.new_fn(-1);
+    rs.push_scope();
+    const int32_t x1 = rs.declare("x", fn);
+    const int32_t y = rs.declare("y", fn);
+    const int32_t x2 = rs.declare("x", fn);
+    rs.alias("z", y);
+
+    const std::vector<int32_t> want{x1, y, x2};
+    if (rs.declared_order(rs.depth() - 1) != want) {
+      std::fprintf(stderr, "FAIL: declaration order lost a shadowed binding\n");
+      ++g_failures;
+    }
+    if (rs.declared_here("x") != x2 || rs.declared_here("z") != y) {
+      std::fprintf(stderr, "FAIL: the name map answered the wrong binding\n");
+      ++g_failures;
+    }
+    // A block that closes takes its order with it.
+    rs.pop_scope();
+    rs.push_scope();
+    if (!rs.declared_order(rs.depth() - 1).empty()) {
+      std::fprintf(stderr, "FAIL: a new scope inherited an order table\n");
+      ++g_failures;
+    }
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

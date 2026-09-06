@@ -428,7 +428,7 @@ struct Binder {
     rs.push_scope();
     for (size_t i = 0; i < fns[static_cast<size_t>(f)].params.size(); ++i) {
       const int32_t v = fns[static_cast<size_t>(f)].params[i];
-      rs.scopes.back()[rs.vars[static_cast<size_t>(v)].name] = v;
+      rs.alias(rs.vars[static_cast<size_t>(v)].name, v);
     }
     // The base class's table is read by `: base(...)`, so naming it in a
     // base initializer is a reference like any other -- without this the

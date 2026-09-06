@@ -2103,10 +2103,18 @@ struct Resolver {
 
   std::vector<Var> vars;
   std::vector<Fn> fns;
-  // The open scopes, innermost last. Public because a front end with its own
-  // per-scope bookkeeping (a declaration order, a set of names a block has
-  // hoisted) keeps a parallel stack and needs to see this one's depth.
-  std::vector<std::map<std::string, int32_t>> scopes;
+  // One open block: what each name in it means, and the order the
+  // declarations arrived in.
+  //
+  // The order cannot be read back out of the map, and a front end needs it
+  // for two things: the slots a block owns (to release them at its end, or
+  // to hand a loop body a fresh set per iteration), and shadowing within
+  // one block -- `local x` twice in Lua is two bindings, the second hiding
+  // the first, so the map holds one of them and the order holds both.
+  struct Scope {
+    std::map<std::string, int32_t> map;
+    std::vector<int32_t> order;
+  };
   // Bindings that must be cells whether or not the walk above found anyone
   // capturing them -- a table some closure built by hand reaches, say.
   // Applied after the walk, so they take the cell indices left over.
@@ -2118,24 +2126,51 @@ struct Resolver {
     return static_cast<int32_t>(fns.size() - 1);
   }
 
-  void push_scope() { scopes.emplace_back(); }
-  void pop_scope() { scopes.pop_back(); }
+  void push_scope() { scopes_.emplace_back(); }
+  void pop_scope() { scopes_.pop_back(); }
+
+  // How many blocks are open. What a front end keeping its own parallel
+  // per-scope table indexes it by.
+  size_t depth() const { return scopes_.size(); }
+
+  // What the block at `scope` binds `name` to, or nothing. The building
+  // block for a lookup rule this one does not have -- Ruby's block scopes,
+  // which leak an assignment outward but stop at the enclosing method.
+  std::optional<int32_t> declared_at(size_t scope,
+                                     const std::string& name) const {
+    const auto& mp = scopes_[scope].map;
+    const auto it = mp.find(name);
+    if (it == mp.end()) return std::nullopt;
+    return it->second;
+  }
+
+  // Everything the block at `scope` declared, in order, one entry per
+  // declare() -- including a name declared twice.
+  const std::vector<int32_t>& declared_order(size_t scope) const {
+    return scopes_[scope].order;
+  }
+
+  // A second name for a binding that already exists, in the innermost
+  // scope. Not a declaration: Ruby's `&blk` and C#'s constructor
+  // re-entering its own parameters are both naming something already
+  // declared, so neither belongs in the order table.
+  void alias(const std::string& name, int32_t v) {
+    scopes_.back().map[name] = v;
+  }
 
   // Whether the innermost scope already binds this name. The front end's,
   // not this one's, because languages disagree about what a second `let x`
   // in one block means: an error (JavaScript), a fresh binding that hides
   // the first (Lua), or the same binding again (Python's assignment).
   std::optional<int32_t> declared_here(const std::string& name) const {
-    const auto it = scopes.back().find(name);
-    if (it == scopes.back().end()) return std::nullopt;
-    return it->second;
+    return declared_at(scopes_.size() - 1, name);
   }
 
   // A new binding in the innermost scope, owned by `owner`. Overwrites a
   // name the scope already had, so a language that shadows within a block
   // gets that by default and one that refuses it checks declared_here first.
   int32_t declare(const std::string& name, int32_t owner) {
-    return declare_in(scopes.size() - 1, name, owner);
+    return declare_in(scopes_.size() - 1, name, owner);
   }
 
   // The same, into a scope that is not the innermost -- what Python's
@@ -2144,7 +2179,8 @@ struct Resolver {
   int32_t declare_in(size_t scope, const std::string& name, int32_t owner) {
     const int32_t v = static_cast<int32_t>(vars.size());
     vars.push_back({name, owner, -1});
-    scopes[scope][name] = v;
+    scopes_[scope].map[name] = v;
+    scopes_[scope].order.push_back(v);
     return v;
   }
 
@@ -2154,13 +2190,13 @@ struct Resolver {
   std::optional<int32_t> lookup(const std::string& name,
                                 size_t from_scope) const {
     for (size_t i = from_scope + 1; i-- > 0;) {
-      const auto it = scopes[i].find(name);
-      if (it != scopes[i].end()) return it->second;
+      const std::optional<int32_t> v = declared_at(i, name);
+      if (v) return v;
     }
     return std::nullopt;
   }
   std::optional<int32_t> lookup(const std::string& name) const {
-    return scopes.empty() ? std::nullopt : lookup(name, scopes.size() - 1);
+    return scopes_.empty() ? std::nullopt : lookup(name, scopes_.size() - 1);
   }
 
   // Reading `v` from `fn`: if the binding belongs to an enclosing function
@@ -2223,11 +2259,35 @@ struct Resolver {
     const std::set<int32_t>& free = fns[static_cast<size_t>(target)].free;
     cs.reserve(free.size());
     for (const int32_t v : free) {
+      if (!reaches(builder, v)) {
+        coreir_rt::fail(
+            "capture_map: function " + std::to_string(builder) +
+                " cannot supply '" + vars[static_cast<size_t>(v)].name +
+                "', which function " + std::to_string(target) +
+                " reads from outside itself -- build a closure in the frame "
+                "its function is written in, or capture the name there first",
+            0, 0);
+      }
       const auto [k, i] = access(builder, v);
       cs.push_back({k, i});
     }
     m.capture_maps.push_back(std::move(cs));
     return static_cast<int32_t>(m.capture_maps.size() - 1);
+  }
+
+  // Whether `fn` can name binding `v` at all -- it owns it, or its own
+  // capture list holds it.
+  //
+  // Building a closure in the frame the function is *written* in makes this
+  // true by construction, because resolve() records a free name in every
+  // function between the reader and the owner. A front end that builds one
+  // somewhere else (at a call site, say) has to have arranged the captures
+  // itself; this is the question capture_map asks before it trusts that,
+  // and the alternative is a std::out_of_range from access() naming
+  // nothing.
+  bool reaches(int32_t fn, int32_t v) const {
+    if (vars[static_cast<size_t>(v)].owner == fn) return true;
+    return fns[static_cast<size_t>(fn)].capture_index.count(v) != 0;
   }
 
   // How `fn` reaches `v`: its own cell, its own local slot, or a capture.
@@ -2256,6 +2316,11 @@ struct Resolver {
   }
 
  private:
+  // The open blocks, innermost last. Private: every question a front end
+  // asked of it directly turned out to be one of the four above, and two
+  // binders had reimplemented lookup() to ask them.
+  std::vector<Scope> scopes_;
+
   void claim_cell(int32_t v) {
     auto& own =
         fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)].cell_index;

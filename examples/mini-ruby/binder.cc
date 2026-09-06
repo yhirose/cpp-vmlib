@@ -173,9 +173,9 @@ struct Binder {
     // A block's assignment lands outside if the name is already bound
     // there -- Ruby's rule, and the reason a counter incremented inside
     // `each` is visible after it.
-    for (size_t i = rs.scopes.size(); i-- > 0;) {
-      const auto it = rs.scopes[i].find(name);
-      if (it != rs.scopes[i].end()) return it->second;
+    for (size_t i = rs.depth(); i-- > 0;) {
+      const std::optional<int32_t> v = rs.declared_at(i, name);
+      if (v) return *v;
       if (!porous[i]) break;
     }
     return rs.declare(name, fn);
@@ -256,7 +256,7 @@ struct Binder {
       if (p->tag == "blockparam"_) {
         // `&blk` names the block this method was passed, which is already
         // parameter 0 -- so it is an alias, not a new parameter.
-        rs.scopes.back()[std::string(p->nodes[0]->token)] = blk;
+        rs.alias(std::string(p->nodes[0]->token), blk);
         decl_of[p->nodes[0].get()] = blk;
         continue;
       }
