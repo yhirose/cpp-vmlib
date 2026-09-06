@@ -2136,6 +2136,12 @@ struct Resolver {
   // capture propagation goes even though the syntax nested neither.
   void set_parent(int32_t fn, int32_t parent) {
     fns[static_cast<size_t>(fn)].parent = parent;
+    // What `fn` already reads from outside itself was propagated against the
+    // parent it had a moment ago, and the new one is the frame that will
+    // build its closure -- so it owes them. Doing this here rather than
+    // leaving it to the caller is the difference between an order the API
+    // enforces and one a comment asks for.
+    for (const int32_t v : fns[static_cast<size_t>(fn)].free) use(v, parent);
   }
 
   void push_scope() { scopes_.emplace_back(); }
