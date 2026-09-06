@@ -2230,12 +2230,63 @@ struct Resolver {
 
   void force_cell(int32_t v) { forced_cells.push_back(v); }
 
+  // Everything this resolver holds, as of now. What a front end that binds
+  // a runtime once and then compiles program after program against it takes
+  // before the first program, to give back everything the last one added.
+  struct Mark {
+    size_t vars = 0;
+    size_t fns = 0;
+    size_t scopes = 0;
+    size_t forced = 0;
+  };
+  Mark mark() const {
+    return {vars.size(), fns.size(), scopes_.size(), forced_cells.size()};
+  }
+
+  // Back to `m`. The functions and variables declared since are gone; what
+  // the ones before them captured stays, so a prelude keeps its analysis
+  // and only the program on top of it is redone.
+  //
+  // A kept function that referred to a dropped variable would be left
+  // naming nothing, so the free sets are pruned rather than trusted -- the
+  // entry function is the one this happens to, and reset_fn is how a front
+  // end says so explicitly.
+  void rollback(const Mark& m) {
+    vars.resize(m.vars);
+    fns.resize(m.fns);
+    scopes_.resize(m.scopes);
+    forced_cells.resize(m.forced);
+    for (Fn& f : fns) {
+      for (auto it = f.free.begin(); it != f.free.end();) {
+        it = static_cast<size_t>(*it) >= m.vars ? f.free.erase(it)
+                                                : std::next(it);
+      }
+      f.capture_index.clear();
+      f.cell_index.clear();
+    }
+  }
+
+  // Start one kept function over: it is about to be rebuilt from a new
+  // program's syntax, so what the last one made it capture is not its own.
+  void reset_fn(int32_t f, int32_t parent) {
+    Fn& fn = fns[static_cast<size_t>(f)];
+    fn.parent = parent;
+    fn.free.clear();
+    fn.capture_index.clear();
+    fn.cell_index.clear();
+  }
+
   // Numbers every capture and every cell, and writes the capture count and
   // the diagnostic name table into each function's Func. Call once, after
   // the walk: a resolve() afterwards would add to a `free` set already
   // numbered.
   void number_captures() {
     for (Fn& f : fns) {
+      // Cleared rather than overwritten: after a rollback the kept
+      // functions still carry the numbering from the last program, and an
+      // entry for a variable that no longer exists would outlive it.
+      f.capture_index.clear();
+      f.cell_index.clear();
       int32_t i = 0;
       for (const int32_t v : f.free) f.capture_index[v] = i++;
     }

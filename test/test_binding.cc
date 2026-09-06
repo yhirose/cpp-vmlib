@@ -426,6 +426,51 @@ int main() {
     }
   }
 
+  // --- 7. mark/rollback: a prelude bound once, programs compiled on top.
+  // The prelude's own analysis survives; everything the program added is
+  // gone, including a free-set entry naming a variable that no longer is.
+  {
+    Resolver rs;
+    const int32_t main_fn = rs.new_fn(-1);
+    rs.fns[static_cast<size_t>(main_fn)].index = 0;
+    rs.push_scope();
+    const int32_t g = rs.declare("$global", main_fn);
+    const int32_t helper = rs.new_fn(main_fn);
+    rs.fns[static_cast<size_t>(helper)].index = 1;
+    rs.resolve("$global", helper);
+    const Resolver::Mark after_prelude = rs.mark();
+
+    // a program: one more function, one more variable, and it reading both
+    const int32_t prog_fn = rs.new_fn(main_fn);
+    rs.fns[static_cast<size_t>(prog_fn)].index = 2;
+    rs.declare("x", main_fn);
+    rs.resolve("x", prog_fn);
+    rs.number_captures();
+    if (rs.fns[static_cast<size_t>(main_fn)].cell_index.size() != 2) {
+      std::fprintf(stderr, "FAIL: the program's own cell was not counted\n");
+      ++g_failures;
+    }
+
+    rs.rollback(after_prelude);
+    if (rs.fns.size() != 2 || rs.vars.size() != 1) {
+      std::fprintf(stderr, "FAIL: rollback kept the program's fns or vars\n");
+      ++g_failures;
+    }
+    if (rs.fns[static_cast<size_t>(helper)].free.count(g) != 1) {
+      std::fprintf(stderr, "FAIL: rollback dropped the prelude's own free\n");
+      ++g_failures;
+    }
+    // the entry function is rebuilt per program, so it starts over
+    rs.reset_fn(main_fn, -1);
+    rs.number_captures();
+    const auto& cells = rs.fns[static_cast<size_t>(main_fn)].cell_index;
+    if (cells.size() != 1 || cells.count(g) != 1) {
+      std::fprintf(stderr,
+                   "FAIL: renumbering after rollback kept a stale cell\n");
+      ++g_failures;
+    }
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;
