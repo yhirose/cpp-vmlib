@@ -898,8 +898,7 @@ struct Binder {
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
-    return b.make_closure(rs.fns[static_cast<size_t>(g)].index,
-                          rs.capture_map(m, ctx.fn, g));
+    return rs.closure(m, ctx.fn, g, p);
   }
 
   NodeId read_var(int32_t v, FnCtx& ctx, SrcPos p) {

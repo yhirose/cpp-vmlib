@@ -2445,6 +2445,16 @@ struct Resolver {
     return fns[static_cast<size_t>(fn)].capture_index.count(v) != 0;
   }
 
+  // A closure of `target` built in `builder`'s frame: the function index and
+  // the forwarding table, as the one node they are always used to make.
+  // Five binders here spell this pair out identically, and so did every
+  // front end in the sibling repo.
+  NodeId closure(Module& m, int32_t builder, int32_t target, SrcPos p) {
+    const int32_t cmap = capture_map(m, builder, target);
+    return Builder(m).at(p).make_closure(
+        fns[static_cast<size_t>(target)].index, cmap);
+  }
+
   // Reading `v` from `fn`, and writing it: `access` turned into the VarRef
   // or Assign it is for. Every binder here wrote these two itself, to the
   // character -- seven identical `read_var`, five identical `write_var` --
@@ -2472,8 +2482,19 @@ struct Resolver {
       if (it != ci.end()) return {VarKind::Cell, it->second};
       return {VarKind::Local, vars[static_cast<size_t>(v)].slot};
     }
-    return {VarKind::Capture,
-            fns[static_cast<size_t>(fn)].capture_index.at(v)};
+    const auto& idx = fns[static_cast<size_t>(fn)].capture_index;
+    const auto it = idx.find(v);
+    // Says which function and which name, rather than the std::out_of_range
+    // a bare .at() would raise from inside a map. Reaching this means the
+    // read was never recorded against `fn` -- number_captures gave it no
+    // index because resolve() never walked through it.
+    if (it == idx.end()) {
+      coreir_rt::fail("func " + std::to_string(fn) + " cannot name '" +
+               vars[static_cast<size_t>(v)].name +
+               "' -- it neither owns it nor captures it",
+           0, 0);
+    }
+    return {VarKind::Capture, it->second};
   }
 
   // The cell index `fn` gave `v`, or -1 if `v` is not one of its cells --
