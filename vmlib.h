@@ -2129,6 +2129,15 @@ struct Resolver {
     return static_cast<int32_t>(fns.size() - 1);
   }
 
+  // Which frame builds `fn`'s closure, decided after the fact. A front end
+  // that lowers one source function into two -- a generator's raw body and
+  // the wrapper that hands out its activations -- learns which is which
+  // only once both exist, and the body is nested in the wrapper as far as
+  // capture propagation goes even though the syntax nested neither.
+  void set_parent(int32_t fn, int32_t parent) {
+    fns[static_cast<size_t>(fn)].parent = parent;
+  }
+
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() { scopes_.pop_back(); }
 
