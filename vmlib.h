@@ -2166,6 +2166,16 @@ struct Resolver {
     return declared_at(scopes_.size() - 1, name);
   }
 
+  // A binding that no scope names: a front end resolving names its own way
+  // -- PL/0, whose (block, slot) pairs come out of its own block table --
+  // still wants the id space and the capture analysis over it, and has no
+  // use for the scope stack. `declare` is this plus an entry in the
+  // innermost scope.
+  int32_t declare_var(const std::string& name, int32_t owner) {
+    vars.push_back({name, owner, -1});
+    return static_cast<int32_t>(vars.size() - 1);
+  }
+
   // A new binding in the innermost scope, owned by `owner`. Overwrites a
   // name the scope already had, so a language that shadows within a block
   // gets that by default and one that refuses it checks declared_here first.
@@ -2177,8 +2187,7 @@ struct Resolver {
   // `global x` inside a function needs: the binding it creates belongs to
   // the module, not to the function the statement stands in.
   int32_t declare_in(size_t scope, const std::string& name, int32_t owner) {
-    const int32_t v = static_cast<int32_t>(vars.size());
-    vars.push_back({name, owner, -1});
+    const int32_t v = declare_var(name, owner);
     scopes_[scope].map[name] = v;
     scopes_[scope].order.push_back(v);
     return v;
