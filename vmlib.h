@@ -2266,12 +2266,29 @@ struct Resolver {
     while (changed) {
       changed = false;
       for (const auto& [f, g] : calls) {
-        for (const int32_t v : fns[static_cast<size_t>(g)].free) {
-          if (vars[static_cast<size_t>(v)].owner == f) continue;
-          if (fns[static_cast<size_t>(f)].free.insert(v).second) changed = true;
-        }
+        changed |= lift(f, g);
+      }
+      // A capture that arrived through a call edge has to keep going the way
+      // one recorded by `use` already did: the frame that builds *this*
+      // function's closure must supply it too. Without this the propagation
+      // stops at the caller, and a closure built one level out is refused
+      // for a variable it was never told about.
+      for (size_t i = 0; i < fns.size(); i++) {
+        const int32_t p = fns[i].parent;
+        if (p >= 0) changed |= lift(p, static_cast<int32_t>(i));
       }
     }
+  }
+
+  // Everything `src` needs from outside itself, `dst` must supply too --
+  // except what dst owns. Answers whether that added anything.
+  bool lift(int32_t dst, int32_t src) {
+    bool added = false;
+    for (const int32_t v : fns[static_cast<size_t>(src)].free) {
+      if (vars[static_cast<size_t>(v)].owner == dst) continue;
+      if (fns[static_cast<size_t>(dst)].free.insert(v).second) added = true;
+    }
+    return added;
   }
 
   // Everything this resolver holds, as of now. What a front end that binds
