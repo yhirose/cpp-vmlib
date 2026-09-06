@@ -2972,15 +2972,11 @@ struct Binder {
   }
 
   NodeId read_var(int32_t v, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
-    const auto [k, i] = rs.access(ctx.fn, v);
-    return b.varref(k, i);
+    return rs.read(m, ctx.fn, v, p);
   }
 
   NodeId write_var(int32_t v, NodeId value, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
-    const auto [k, i] = rs.access(ctx.fn, v);
-    return b.assign(k, i, value);
+    return rs.write(m, ctx.fn, v, value, p);
   }
 
   // A Python binding is function-scoped, not block-scoped, so a block is a

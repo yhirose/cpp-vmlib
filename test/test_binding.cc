@@ -471,6 +471,43 @@ int main() {
     }
   }
 
+  // --- 8. close_over_calls: a language whose closures are built at every
+  // reference to a function, not where it is written. PL/0's shape:
+  //
+  //   VAR x;
+  //   PROCEDURE outer;  PROCEDURE inner; BEGIN x := 1 END; BEGIN CALL inner END;
+  //
+  // `outer` never touches x, but it builds inner's closure at its CALL, so
+  // it has to carry what inner captures. And a self-recursive call is the
+  // case one pass misses, which is why this iterates.
+  {
+    Resolver rs;
+    const int32_t main_fn = rs.new_fn(-1);
+    rs.push_scope();
+    const int32_t x = rs.declare("x", main_fn);
+    // no parent: a PL/0 closure exists only at its call site
+    const int32_t outer = rs.new_fn(-1);
+    const int32_t inner = rs.new_fn(-1);
+    rs.use(x, inner);
+    rs.note_call(outer, inner);
+    rs.note_call(main_fn, outer);
+    rs.note_call(inner, inner);  // self-recursion
+
+    if (rs.fns[static_cast<size_t>(outer)].free.count(x) != 0) {
+      std::fprintf(stderr, "FAIL: a call edge lifted before it was asked\n");
+      ++g_failures;
+    }
+    rs.close_over_calls();
+    if (rs.fns[static_cast<size_t>(outer)].free.count(x) != 1) {
+      std::fprintf(stderr, "FAIL: the caller did not take the callee's free\n");
+      ++g_failures;
+    }
+    if (rs.fns[static_cast<size_t>(main_fn)].free.count(x) != 0) {
+      std::fprintf(stderr, "FAIL: the owner captured its own variable\n");
+      ++g_failures;
+    }
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

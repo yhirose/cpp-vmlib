@@ -2119,6 +2119,9 @@ struct Resolver {
   // capturing them -- a table some closure built by hand reaches, say.
   // Applied after the walk, so they take the cell indices left over.
   std::vector<int32_t> forced_cells;
+  // (caller, callee) for close_over_calls. Empty for every front end whose
+  // closures are built where their functions are written.
+  std::vector<std::pair<int32_t, int32_t>> calls;
 
   int32_t new_fn(int32_t parent) {
     fns.push_back({});
@@ -2230,6 +2233,38 @@ struct Resolver {
 
   void force_cell(int32_t v) { forced_cells.push_back(v); }
 
+  // `f` names `g`, and builds g's closure to do it.
+  //
+  // Only a language where a function is a static entity rather than a value
+  // has these: a procedure named at three call sites has its closure built
+  // three times, in three different frames, so each of them must carry what
+  // it captures. `use` alone closes the free sets for everything else,
+  // because a closure built where its function is written rides the nesting
+  // the walk already follows.
+  void note_call(int32_t f, int32_t g) { calls.push_back({f, g}); }
+
+  // Everything a callee needs from outside itself, its callers must supply.
+  // Iterated because a call graph has cycles -- self-recursion is the case
+  // one pass misses -- and called explicitly, after the reads are in and
+  // before number_captures, because a front end that does not declare call
+  // edges must not pay for the concept.
+  //
+  // The price is real where it applies: every frame between a caller and an
+  // owner carries a capture it has no use of its own for. That is why this
+  // is a method a front end asks for rather than part of `use`.
+  void close_over_calls() {
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const auto& [f, g] : calls) {
+        for (const int32_t v : fns[static_cast<size_t>(g)].free) {
+          if (vars[static_cast<size_t>(v)].owner == f) continue;
+          if (fns[static_cast<size_t>(f)].free.insert(v).second) changed = true;
+        }
+      }
+    }
+  }
+
   // Everything this resolver holds, as of now. What a front end that binds
   // a runtime once and then compiles program after program against it takes
   // before the first program, to give back everything the last one added.
@@ -2254,6 +2289,13 @@ struct Resolver {
   void rollback(const Mark& m) {
     vars.resize(m.vars);
     fns.resize(m.fns);
+    calls.erase(std::remove_if(calls.begin(), calls.end(),
+                               [&](const std::pair<int32_t, int32_t>& e) {
+                                 return static_cast<size_t>(e.first) >=
+                                            m.fns ||
+                                        static_cast<size_t>(e.second) >= m.fns;
+                               }),
+                calls.end());
     scopes_.resize(m.scopes);
     forced_cells.resize(m.forced);
     for (Fn& f : fns) {
@@ -2369,6 +2411,25 @@ struct Resolver {
   bool reaches(int32_t fn, int32_t v) const {
     if (vars[static_cast<size_t>(v)].owner == fn) return true;
     return fns[static_cast<size_t>(fn)].capture_index.count(v) != 0;
+  }
+
+  // Reading `v` from `fn`, and writing it: `access` turned into the VarRef
+  // or Assign it is for. Every binder here wrote these two itself, to the
+  // character -- seven identical `read_var`, five identical `write_var` --
+  // which is the same reason `access` is here rather than in each of them.
+  //
+  // On Resolver rather than Builder because this is the direction the
+  // dependency already runs: capture_map takes a Module too, and a front
+  // end using the builder without the analysis should not have to know
+  // this exists.
+  NodeId read(Module& m, int32_t fn, int32_t v, SrcPos p) const {
+    const auto [k, i] = access(fn, v);
+    return Builder(m).at(p).varref(k, i);
+  }
+  NodeId write(Module& m, int32_t fn, int32_t v, NodeId value,
+               SrcPos p) const {
+    const auto [k, i] = access(fn, v);
+    return Builder(m).at(p).assign(k, i, value);
   }
 
   // How `fn` reaches `v`: its own cell, its own local slot, or a capture.
