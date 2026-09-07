@@ -552,6 +552,186 @@ int main() {
              "byte range: message");
   }
 
+  // ArrayConcat joins one array onto another, in place: what a front end
+  // writes as a loop over ArrayPush when it has to build an argument list
+  // or a return list out of two.
+  {
+    Module m;
+    Builder b(m);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.block(
+             {b.assign(VarKind::Local, 0,
+                       b.array_lit({b.literal(1, p), b.literal(2, p)}, p), p),
+              b.intrinsic(IntrinsicId::ArrayConcat,
+                          {xs, b.array_lit({b.literal(3, p), b.literal(4, p)},
+                                           p)},
+                          p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::Len, {xs}, p)}, p),
+              b.intrinsic(IntrinsicId::Print, {b.index(xs, b.literal(3, p), p)},
+                          p)},
+             p),
+         {"xs"},
+         {}});
+    run_module(m, "concat");
+    check_eq(joined(), "4|4|", "concat output");
+  }
+  // Onto itself: the source is read by index because appending reallocates.
+  {
+    Module m;
+    Builder b(m);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.block(
+             {b.assign(VarKind::Local, 0,
+                       b.array_lit({b.literal(1, p), b.literal(2, p)}, p), p),
+              b.intrinsic(IntrinsicId::ArrayConcat, {xs, xs}, p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::Len, {xs}, p)}, p),
+              b.intrinsic(IntrinsicId::Print, {b.index(xs, b.literal(2, p), p)},
+                          p)},
+             p),
+         {"xs"},
+         {}});
+    run_module(m, "concat self");
+    check_eq(joined(), "4|1|", "concat self output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::ArrayConcat,
+                     {b.array_lit({}, p), b.literal(1, p)}, p),
+         {}, {}});
+    check_eq(run_module(m, "concat type"), "cannot join int onto array",
+             "concat type: message");
+  }
+
+  // ArrayFill starts an array at a length, which `new T[n]` needs and a
+  // loop over ArrayPush is the long way round.
+  {
+    Module m;
+    Builder b(m);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.block(
+             {b.assign(VarKind::Local, 0,
+                       b.intrinsic(IntrinsicId::ArrayFill,
+                                   {b.literal(3, p), b.literal(7, p)}, p),
+                       p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::Len, {xs}, p)}, p),
+              b.intrinsic(IntrinsicId::Print, {b.index(xs, b.literal(2, p), p)},
+                          p)},
+             p),
+         {"xs"},
+         {}});
+    run_module(m, "fill");
+    check_eq(joined(), "3|7|", "fill output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::ArrayFill,
+                                  {b.literal(-1, p), b.nil_literal(p)}, p)},
+                     p),
+         {}, {}});
+    check_eq(run_module(m, "fill negative"),
+             "cannot make an array of fewer than 0", "fill negative: message");
+  }
+
+  // Len answers a map's live entry count, tombstones skipped -- the same
+  // question it answers for a string and an array, which is why there is no
+  // second intrinsic for it.
+  {
+    Module m;
+    Builder b(m);
+    const NodeId o = b.varref(VarKind::Local, 0, p);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.block(
+             {b.assign(VarKind::Local, 0, b.intrinsic(IntrinsicId::MapNew, {},
+                                                      p),
+                       p),
+              b.set_index(o, b.str_literal("a", p), b.literal(1, p), p),
+              b.set_index(o, b.literal(2, p), b.literal(2, p), p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::Len, {o}, p)}, p),
+              b.intrinsic(IntrinsicId::ObjectRemove, {o, b.literal(2, p)}, p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::Len, {o}, p)}, p)},
+             p),
+         {"xs"},
+         {}});
+    run_module(m, "map len");
+    check_eq(joined(), "2|1|", "map len output");
+  }
+
+  // ASCII case, byte by byte: a multi-byte character passes through whole
+  // because none of its bytes is in A-Z or a-z.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.block(
+             {b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::StrUpper,
+                                       {b.str_literal("aB c1\xC3\xA9", p)},
+                                       p)},
+                          p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.intrinsic(IntrinsicId::StrLower,
+                                       {b.str_literal("Ab C1", p)}, p)},
+                          p)},
+             p),
+         {}, {}});
+    run_module(m, "case");
+    check_eq(joined(), "AB C1\xC3\xA9|ab c1|", "case output");
+  }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.intrinsic(IntrinsicId::StrUpper, {b.literal(1, p)}, p)},
+                     p),
+         {}, {}});
+    check_eq(run_module(m, "case type"), "cannot change the case of int",
+             "case type: message");
+  }
+
+  // Not is the inverse of the truthiness JumpIfFalse tests, which is why it
+  // answers for every value rather than only for a Bool.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.block(
+             {b.intrinsic(IntrinsicId::Print,
+                          {b.unary(UnOp::Not, b.bool_literal(true, p), p)}, p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.unary(UnOp::Not, b.nil_literal(p), p)}, p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.unary(UnOp::Not, b.literal(0, p), p)}, p),
+              b.intrinsic(IntrinsicId::Print,
+                          {b.unary(UnOp::Not, b.str_literal("", p), p)}, p)},
+             p),
+         {}, {}});
+    run_module(m, "not");
+    check_eq(joined(), "false|true|true|false|", "not output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;

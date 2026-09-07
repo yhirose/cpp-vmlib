@@ -1055,6 +1055,10 @@ inline constexpr Tag kLastTag = Tag::NativeRef;
 // int64's own ordering.
 enum class UnOp : uint8_t {
   Neg, BitNot,
+  // Logical negation, over the same truthiness JumpIfFalse tests: a
+  // condition and its inverse are one rule stated once. Every front end
+  // here with a boolean `!` was writing `If(x, false, true)` by hand.
+  Not,
   WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,
 };
 
@@ -1109,6 +1113,10 @@ enum class IntrinsicId : uint8_t {
   // loop a front end writes in its own language.
   ArrayPush,    // (array, value) -> nil, appends
   ArrayPop,     // (array) -> last value, removed; an empty array fails
+  // The two shapes a front end otherwise writes as a loop over ArrayPush:
+  // joining one list onto another, and starting one at a given length.
+  ArrayConcat,  // (array, array) -> nil, appends every element of the second
+  ArrayFill,    // (int, value) -> a new array of that many of that value
   ObjectHas,    // (object, key) -> bool (Index reads a missing key as nil,
                 //  which cannot tell absent from nil-valued)
   ObjectKeys,   // (object) -> array of keys, insertion order
@@ -1210,6 +1218,12 @@ enum class IntrinsicId : uint8_t {
   ArraySlice,   // (array, i, j) -> array
   StrByte,      // (str, i) -> int, 0..255; out of range traps like Index
   StrFromByte,  // (int 0..255) -> str of one byte; anything else traps
+  // ASCII case only: A-Z and a-z, every other byte unchanged. What a
+  // language means by case above ASCII is its own decision (and its own
+  // table), but the ASCII half is the same everywhere and was being written
+  // as a byte loop in every front end that needed it.
+  StrUpper,     // (str) -> str
+  StrLower,     // (str) -> str
   // A fresh, empty Map (value.h's MapObj). Filled through SetIndex, read
   // through Index, and asked about through ObjectHas / ObjectKeys /
   // ObjectRemove, each of which accepts a map receiver as well as an
@@ -1507,6 +1521,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::PrintRaw: return 1;
     case IntrinsicId::ArrayPush: return 2;
     case IntrinsicId::ArrayPop: return 1;
+    case IntrinsicId::ArrayConcat: return 2;
+    case IntrinsicId::ArrayFill: return 2;
     case IntrinsicId::ObjectHas: return 2;
     case IntrinsicId::ObjectKeys: return 1;
     case IntrinsicId::ObjectRemove: return 2;
@@ -1524,6 +1540,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::ArraySlice: return 3;
     case IntrinsicId::StrByte: return 2;
     case IntrinsicId::StrFromByte: return 1;
+    case IntrinsicId::StrUpper: return 1;
+    case IntrinsicId::StrLower: return 1;
     case IntrinsicId::MapNew: return 0;
     case IntrinsicId::CoroCreate: return 1;
     case IntrinsicId::CoroResume: return 2;
@@ -2420,7 +2438,10 @@ struct Resolver {
                 " cannot supply '" + vars[static_cast<size_t>(v)].name +
                 "', which function " + std::to_string(target) +
                 " reads from outside itself -- build a closure in the frame "
-                "its function is written in, or capture the name there first",
+                "its function is written in, or capture the name there "
+                "first. A language whose functions are static entities, "
+                "built afresh at every reference, says so with note_call "
+                "and then close_over_calls before number_captures",
             0, 0);
       }
       const auto [k, i] = access(builder, v);
@@ -2485,10 +2506,21 @@ struct Resolver {
     const auto& idx = fns[static_cast<size_t>(fn)].capture_index;
     const auto it = idx.find(v);
     // Says which function and which name, rather than the std::out_of_range
-    // a bare .at() would raise from inside a map. Reaching this means the
-    // read was never recorded against `fn` -- number_captures gave it no
-    // index because resolve() never walked through it.
+    // a bare .at() would raise from inside a map. There are two ways to
+    // get here and they have different fixes, so the message picks: either
+    // the read was never recorded against `fn`, or it was and the indices
+    // have not been assigned yet.
     if (it == idx.end()) {
+      const std::set<int32_t>& free = fns[static_cast<size_t>(fn)].free;
+      if (free.find(v) != free.end()) {
+        coreir_rt::fail(
+            "func " + std::to_string(fn) + " reads '" +
+                vars[static_cast<size_t>(v)].name +
+                "' from outside itself, but the captures are not numbered "
+                "yet -- call number_captures() once every read is recorded, "
+                "and build the bodies after it",
+            0, 0);
+      }
       coreir_rt::fail("func " + std::to_string(fn) + " cannot name '" +
                vars[static_cast<size_t>(v)].name +
                "' -- it neither owns it nor captures it",
@@ -3069,6 +3101,7 @@ inline Value apply_unop(UnOp op, const Value& v) {
     case UnOp::WrapU8:  return wrap_to<uint8_t>(v.as_int());
     case UnOp::WrapU16: return wrap_to<uint16_t>(v.as_int());
     case UnOp::WrapU32: return wrap_to<uint32_t>(v.as_int());
+    case UnOp::Not:     return Value::make_bool(!v.truthy());
     case UnOp::Neg:     break;
   }
   return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
@@ -3240,6 +3273,7 @@ enum class Op : uint8_t {
   LoadConst,    // a = dst, b = const index
   Neg,          // a = dst, b = src
   BitNot,       // a = dst, b = src
+  Not,          // a = dst, b = src   (Bool(!truthy), never fails)
   // coreir::UnOp's WrapI8..WrapU32, at a fixed offset from Neg/BitNot the
   // same way Add..Ge sits at one from coreir::BinOp's -- see kUnOpOffset.
   WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,  // a = dst, b = src
@@ -3324,6 +3358,8 @@ enum class Op : uint8_t {
   ToStr,        // a = dst, b = src   (to_display's formatting)
   ArrayPush,    // a = array reg, b = value reg
   ArrayPop,     // a = dst, b = array reg
+  ArrayConcat,  // a = array reg, b = source reg
+  ArrayFill,    // a = dst, b = count reg, c = value reg
   ObjectHas,    // a = dst, b = object reg, c = key reg
   ObjectKeys,   // a = dst, b = object reg
   ObjectRemove, // a = object reg, b = key reg
@@ -3356,6 +3392,8 @@ enum class Op : uint8_t {
   ArraySlice,   // a = dst, b = array reg, c = from reg, d = to reg
   StrByte,      // a = dst, b = str reg, c = index reg
   StrFromByte,  // a = dst, b = src
+  StrUpper,     // a = dst, b = src
+  StrLower,     // a = dst, b = src
   NewMap,       // a = dst   (empty; SetIndex fills it)
   NativeRef,    // a = dst, b = index into Program::natives
   // Coroutines (ir.h's intrinsics of the same names). CoroYield parks
@@ -3402,6 +3440,7 @@ inline constexpr coreir::UnOp unop_of(Op op) {
 }
 static_assert(op_of(coreir::UnOp::Neg) == Op::Neg);
 static_assert(op_of(coreir::UnOp::BitNot) == Op::BitNot);
+static_assert(op_of(coreir::UnOp::Not) == Op::Not);
 static_assert(op_of(coreir::UnOp::WrapU32) == Op::WrapU32);
 
 // A variable's storage class, as the opcode that reads it and the one that
@@ -3449,6 +3488,8 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::Pow:          return Op::Pow;
     case I::ArrayPush:    return Op::ArrayPush;
     case I::ArrayPop:     return Op::ArrayPop;
+    case I::ArrayConcat:  return Op::ArrayConcat;
+    case I::ArrayFill:    return Op::ArrayFill;
     case I::ObjectHas:    return Op::ObjectHas;
     case I::ObjectKeys:   return Op::ObjectKeys;
     case I::ObjectRemove: return Op::ObjectRemove;
@@ -3466,6 +3507,8 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::ArraySlice:   return Op::ArraySlice;
     case I::StrByte:      return Op::StrByte;
     case I::StrFromByte:  return Op::StrFromByte;
+    case I::StrUpper:     return Op::StrUpper;
+    case I::StrLower:     return Op::StrLower;
     case I::MapNew:       return Op::NewMap;
     case I::CoroCreate:   return Op::CoroCreate;
     case I::CoroResume:   return Op::CoroResume;
@@ -3486,6 +3529,7 @@ inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
     case I::Print:
     case I::PrintRaw:
     case I::ArrayPush:
+    case I::ArrayConcat:
     case I::ObjectRemove:
     case I::Enqueue:
     case I::CoroClose:
@@ -4259,6 +4303,7 @@ inline const char* name_of(UnOp op) {
   switch (op) {
     case UnOp::Neg:    return "neg";
     case UnOp::BitNot: return "bitnot";
+    case UnOp::Not:    return "not";
     case UnOp::WrapI8:  return "wrapi8";
     case UnOp::WrapI16: return "wrapi16";
     case UnOp::WrapI32: return "wrapi32";
@@ -4329,6 +4374,8 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::PrintRaw: return "printraw";
     case IntrinsicId::ArrayPush: return "arraypush";
     case IntrinsicId::ArrayPop: return "arraypop";
+    case IntrinsicId::ArrayConcat: return "arrayconcat";
+    case IntrinsicId::ArrayFill: return "arrayfill";
     case IntrinsicId::ObjectHas: return "objecthas";
     case IntrinsicId::ObjectKeys: return "objectkeys";
     case IntrinsicId::ObjectRemove: return "objectremove";
@@ -4346,6 +4393,8 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::ArraySlice: return "arrayslice";
     case IntrinsicId::StrByte: return "strbyte";
     case IntrinsicId::StrFromByte: return "strfrombyte";
+    case IntrinsicId::StrUpper: return "strupper";
+    case IntrinsicId::StrLower: return "strlower";
     case IntrinsicId::MapNew: return "mapnew";
     case IntrinsicId::CoroCreate: return "corocreate";
     case IntrinsicId::CoroResume: return "cororesume";
@@ -4894,6 +4943,7 @@ inline const char* name_of(Op op) {
     case Op::BitNot:      return "bitnot";
     // Shares coreir's name table via unop_of rather than re-typing the
     // Wrap* names.
+    case Op::Not:
     case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
     case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
       return coreir::name_of(unop_of(op));
@@ -4943,6 +4993,8 @@ inline const char* name_of(Op op) {
     case Op::ToStr:       return "tostr";
     case Op::ArrayPush:   return "arraypush";
     case Op::ArrayPop:    return "arraypop";
+    case Op::ArrayConcat: return "arrayconcat";
+    case Op::ArrayFill:   return "arrayfill";
     case Op::ObjectHas:   return "objecthas";
     case Op::ObjectKeys:  return "objectkeys";
     case Op::ObjectRemove: return "objectremove";
@@ -4967,6 +5019,8 @@ inline const char* name_of(Op op) {
     case Op::ArraySlice:  return "arrayslice";
     case Op::StrByte:     return "strbyte";
     case Op::StrFromByte: return "strfrombyte";
+    case Op::StrUpper:    return "strupper";
+    case Op::StrLower:    return "strlower";
     case Op::NewMap:      return "newmap";
     case Op::NativeRef:   return "nativeref";
     case Op::CoroCreate:  return "corocreate";
@@ -4998,6 +5052,7 @@ inline std::string to_string(const Program& p) {
           out << " r" << in.a << ", " << p.consts[in.b].bits;
           break;
         case Op::Neg:
+        case Op::Not:
           out << " r" << in.a << ", r" << in.b;
           break;
         // The opcode's own name says which storage class this is, so the
@@ -6799,6 +6854,7 @@ struct Exec {
           break;
         case Op::Neg:
         case Op::BitNot:
+        case Op::Not:
         case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32: {
           const UnOp uop = unop_of(in.op);
@@ -7085,6 +7141,35 @@ struct Exec {
           f.regs[in.a] = std::move(out);
           break;
         }
+        case Op::ArrayConcat: {
+          const Value& a = f.regs[in.a];
+          const Value& b = f.regs[in.b];
+          if (!a.is_array() || !b.is_array()) {
+            fail(f, std::string("cannot join ") + type_name(b.tag()) +
+                        " onto " + type_name(a.tag()));
+          }
+          auto& dst = a.as_array()->items;
+          // The source read by index rather than by iterator: appending to
+          // an array onto itself reallocates, and `x + x` is a thing a
+          // front end will write.
+          const std::vector<Value>& src = b.as_array()->items;
+          const size_t n = src.size();
+          dst.reserve(dst.size() + n);
+          for (size_t k = 0; k < n; ++k) dst.push_back(src[k]);
+          break;
+        }
+        case Op::ArrayFill: {
+          const Value& n = f.regs[in.b];
+          if (!n.is_int()) {
+            fail(f, std::string("cannot make an array of ") +
+                        type_name(n.tag()) + " elements");
+          }
+          if (n.as_int() < 0) fail(f, "cannot make an array of fewer than 0");
+          f.regs[in.a] = Value::make_array(
+              std::vector<Value>(static_cast<size_t>(n.as_int()),
+                                 f.regs[in.c]));
+          break;
+        }
         case Op::ObjectHas: {
           const Value& o = f.regs[in.b];
           const Value& k = f.regs[in.c];
@@ -7192,6 +7277,25 @@ struct Exec {
           }
           f.regs[in.a] = Value::make_str(
               std::string(1, static_cast<char>(v.as_int())));
+          break;
+        }
+        case Op::StrUpper:
+        case Op::StrLower: {
+          const Value& v = f.regs[in.b];
+          if (!v.is_str()) {
+            fail(f, std::string("cannot change the case of ") +
+                        type_name(v.tag()));
+          }
+          // ASCII only, and byte by byte: a UTF-8 continuation byte is
+          // outside A-Z and a-z, so a multi-byte character passes through
+          // whole rather than being half-mapped.
+          const bool up = in.op == Op::StrUpper;
+          std::string out = v.as_str();
+          for (char& c : out) {
+            if (up && c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+            if (!up && c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+          }
+          f.regs[in.a] = Value::make_str(std::move(out));
           break;
         }
         case Op::ToInt: {
