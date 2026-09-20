@@ -622,6 +622,68 @@ int main() {
     check_eq(joined(), "1|D|x|true|6|5|true|", "throw-out output");
   }
 
+  // --- 11. Closing runs every pending mark, not just up to the first throw.
+  // gen() { scope { defer print "outer"
+  //                 scope { defer throw "boom"; yield 1 } } }
+  // resume, then close: the inner mark's defer throws, the outer mark still
+  // runs, and the throw leaves at the close -- defers' rule within a mark
+  // (test_defers.cc case 8), across the marks a suspended frame still holds.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"deferOuter", 0, 0,
+                       b.intrinsic(IntrinsicId::Print,
+                                   {b.str_literal("outer", p)}, p),
+                       {},
+                       {}});
+    m.funcs.push_back({"deferBoom", 0, 0,
+                       b.make_throw(b.str_literal("boom", p), p), {}, {}});
+    m.funcs.push_back(
+        {"gen", 0, 0,
+         b.scope(0, 0,
+                 b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                          b.scope(0, 0,
+                                  b.block({b.make_defer(
+                                               b.make_closure(2, 0, p), p),
+                                           b.make_yield(b.literal(1, p), p)},
+                                          p),
+                                  p)},
+                         p),
+                 p),
+         {},
+         {}});
+    m.funcs.back().is_generator = true;
+    m.funcs[0] = {
+        "main", 3, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.call_value(b.make_closure(3, 0, p), {}, p), p),
+                 b.assign(VarKind::Local, 1,
+                          b.intrinsic(IntrinsicId::GenResume,
+                                      {b.varref(VarKind::Local, 0, p),
+                                       b.nil_literal(p)},
+                                      p),
+                          p),
+                 print_field(b, 1, "value"),
+                 b.make_try(2,
+                            b.assign(VarKind::Local, 1,
+                                     b.intrinsic(IntrinsicId::GenReturn,
+                                                 {b.varref(VarKind::Local, 0,
+                                                           p),
+                                                  b.literal(0, p)},
+                                                 p),
+                                     p),
+                            b.intrinsic(IntrinsicId::Print,
+                                        {b.varref(VarKind::Local, 2, p)}, p),
+                            p)},
+                p),
+        {"g", "r", "e"},
+        {}};
+    check_eq(run_module(m, "close-marks"), "", "close-marks: failure");
+    check_eq(joined(), "1|outer|boom|", "close-marks output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

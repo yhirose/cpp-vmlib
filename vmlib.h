@@ -6624,14 +6624,21 @@ struct Exec {
   // Every defer mark a frame still holds, innermost first -- what closing a
   // suspended activation owes before its frame goes, as opposed to
   // returning from one, where each scope's own exit already ran its share.
-  // A defer that throws propagates to the caller; the marks already run
-  // stay run.
+  // A throw from one mark is held while the marks outside it run, and the
+  // last to throw is what leaves: the rule run_defers_now holds within a
+  // mark, which a frame's own scopes cannot be an exception to.
   void run_pending_defers(Frame& f, SrcPos pos) {
+    std::optional<Raise> thrown;
     while (!f.defer_marks.empty()) {
       const size_t mark = f.defer_marks.back().first;
       f.defer_marks.pop_back();
-      run_defers_now(f, mark, pos);
+      try {
+        run_defers_now(f, mark, pos);
+      } catch (Raise& r) {
+        thrown = std::move(r);
+      }
     }
+    if (thrown) throw std::move(*thrown);
   }
 
   // A scope's release, the two forms: its local range last-slot-first, or
