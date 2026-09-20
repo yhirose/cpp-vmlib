@@ -6601,12 +6601,12 @@ struct Exec {
   // per call -- calls inside the defer stay flat), so only pathological
   // defers-spawning-defers chains deepen it.
   //
-  // A defer whose own throw is not handled within its frames aborts the
-  // run: the remaining defers of the same mark are dropped unrun (their
-  // values released), and the throw replaces whatever was unwinding --
-  // culebra's rule, minus its quirk of skipping the aborting frame's own
-  // remaining handlers.
+  // A defer always runs, whatever the ones registered after it did: a throw
+  // one does not handle within its frames is held while the remaining defers
+  // of the same mark run, and the last of them to throw is what leaves --
+  // replacing whatever was unwinding. culebra's rule, and Go's.
   void run_defers_now(Frame& f, size_t mark, SrcPos pos) {
+    std::optional<Raise> thrown;
     while (f.defers.size() > mark) {
       Value d = std::move(f.defers.back());
       f.defers.pop_back();
@@ -6614,11 +6614,11 @@ struct Exec {
       try {
         push_closure(d, nullptr, 0, -1, pos);
         run_nested(floor);
-      } catch (Raise&) {
-        while (f.defers.size() > mark) f.defers.pop_back();
-        throw;
+      } catch (Raise& r) {
+        thrown = std::move(r);
       }
     }
+    if (thrown) throw std::move(*thrown);
   }
 
   // Every defer mark a frame still holds, innermost first -- what closing a

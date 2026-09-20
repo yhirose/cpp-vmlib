@@ -315,23 +315,28 @@ int main() {
   }
 
   // --- 8. A defer throwing during unwind replaces the in-flight value.
-  //        The remaining defers of the same scope are dropped unrun, and --
-  //        deliberately unlike culebra, whose cost ruling keeps its JIT
-  //        skipping them -- the same frame's outer handlers stay eligible. -
+  //        The remaining defers of the same scope still run, in order -- the
+  //        last of them to throw is what propagates -- and the same frame's
+  //        outer handlers stay eligible. -----------------------------------
   {
     Module m;
     Builder b(m);
     m.capture_maps.push_back({});
     m.funcs.push_back({"main", 1, 0, NodeId{}, {}, {}});
-    const NodeId skipped = print_closure(b, m, "skipped", p);
+    const NodeId pending = print_closure(b, m, "still runs", p);
     m.funcs.push_back(
         {"defer_throw", 0, 0,
          b.make_throw(b.str_literal("replacement", p), p), {}, {}});
     const int32_t thrower = static_cast<int32_t>(m.funcs.size() - 1);
+    m.funcs.push_back(
+        {"defer_throw_first", 0, 0,
+         b.make_throw(b.str_literal("replaced in turn", p), p), {}, {}});
+    const int32_t first_thrower = static_cast<int32_t>(m.funcs.size() - 1);
     const NodeId body = b.scope(
         0, 0,
-        b.block({b.make_defer(skipped, p),
+        b.block({b.make_defer(pending, p),
                  b.make_defer(b.make_closure(thrower, 0, p), p),
+                 b.make_defer(b.make_closure(first_thrower, 0, p), p),
                  b.make_throw(b.str_literal("original", p), p)},
                 p),
         p);
@@ -341,7 +346,7 @@ int main() {
                     p);
     m.funcs[0].local_names = {"e"};
     check_eq(run_module(m, "defer replaces"), "", "defer replaces: failure");
-    check_eq(joined(), "replacement|", "defer replaces output");
+    check_eq(joined(), "still runs|replacement|", "defer replaces output");
   }
 
   // --- 9. What verify() refuses. ------------------------------------------
