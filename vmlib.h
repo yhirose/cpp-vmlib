@@ -338,7 +338,7 @@ class Value {
   }
 
   // The bit pattern, as culebra's JitValue stores a Float: a payload word is
-  // a payload word, and bit_cast keeps it from being a strict-aliasing
+  // a payload word, and memcpy keeps it from being a strict-aliasing
   // question.
   static Value make_double(double v) {
     Value r;
@@ -891,10 +891,10 @@ namespace coreir_rt {
 
 // coreir -- a closed intermediate representation.
 //
-// A front end lowers its own grammar into these fifteen node shapes; nothing in
-// this header, or in any backend that consumes it, knows what parser produced
-// them. That is the whole point: the tag set is closed, so a backend written
-// once serves every front end that can reach it.
+// A front end lowers its own grammar into these node shapes (Tag, below);
+// nothing in this header, or in any backend that consumes it, knows what
+// parser produced them. That is the whole point: the tag set is closed, so a
+// backend written once serves every front end that can reach it.
 //
 // Node is a fixed-size POD with no virtual functions, no RTTI, no
 // std::function and no static initializer. Those are what survive
@@ -1424,6 +1424,12 @@ struct Module {
   std::unordered_map<uint64_t, uint32_t> pos_index;
   std::vector<Const> consts;
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
+  // Builder::intern_scalar / intern_str's indexes into `consts`, caches the
+  // same way pos_index is. An entry is checked against the pool before it is
+  // trusted, so a pool a front end has edited or cut back by hand costs a
+  // duplicate constant at worst, never a wrong one.
+  std::map<std::pair<ConstKind, int64_t>, int32_t> scalar_index;
+  std::unordered_map<std::string, int32_t> str_index;
   std::vector<Func> funcs;                      // funcs[0] is the entry point
   std::vector<std::vector<CaptureSrc>> capture_maps;
   // The host functions this module calls, by name; Tag::NativeRef indexes
@@ -1741,29 +1747,29 @@ public:
 
   // Same interning shape as intern_int, over the string pool.
   int32_t intern_str(const std::string& s) {
-    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
-      if (m_.consts[i].kind == ConstKind::Str &&
-          m_.str_consts[static_cast<size_t>(m_.consts[i].bits)] == s) {
-        return static_cast<int32_t>(i);
-      }
-    }
+    const auto it = m_.str_index.find(s);
+    if (it != m_.str_index.end() && holds_str(it->second, s)) return it->second;
     m_.str_consts.push_back(s);
     m_.consts.push_back(
         {ConstKind::Str, static_cast<int64_t>(m_.str_consts.size() - 1)});
-    return static_cast<int32_t>(m_.consts.size() - 1);
+    const int32_t i = static_cast<int32_t>(m_.consts.size() - 1);
+    m_.str_index.insert_or_assign(s, i);
+    return i;
   }
 
   // Interning by (kind, bits) rather than a per-kind scan: Bool and Double
   // want the same dedup Int gets, and one comparison covers all three because
   // a Double is stored as its bit pattern.
   int32_t intern_scalar(ConstKind kind, int64_t bits) {
-    for (uint32_t i = 0; i < m_.consts.size(); ++i) {
-      if (m_.consts[i].kind == kind && m_.consts[i].bits == bits) {
-        return static_cast<int32_t>(i);
-      }
+    const auto key = std::make_pair(kind, bits);
+    const auto it = m_.scalar_index.find(key);
+    if (it != m_.scalar_index.end() && holds_scalar(it->second, kind, bits)) {
+      return it->second;
     }
     m_.consts.push_back({kind, bits});
-    return static_cast<int32_t>(m_.consts.size() - 1);
+    const int32_t i = static_cast<int32_t>(m_.consts.size() - 1);
+    m_.scalar_index.insert_or_assign(key, i);
+    return i;
   }
 
   NodeId literal(int64_t v, SrcPos p) {
@@ -1908,9 +1914,6 @@ public:
   NodeId native_ref(int32_t index, SrcPos p) {
     return emit(Tag::NativeRef, 0, p, index, 0, {});
   }
-  // Declares a host function by name (or finds the declaration already
-  // made) and answers its Module::natives index -- what native_ref takes.
-
   // The same builder with a source position already bound: every emit call
   // above ends in the same `p`, and a binder threading it by hand writes it
   // once per node -- about one line in thirteen across the front ends in
@@ -2020,6 +2023,8 @@ public:
 
   At at(SrcPos p) { return At(m_, p); }
 
+  // Declares a host function by name (or finds the declaration already
+  // made) and answers its Module::natives index -- what native_ref takes.
   int32_t declare_native(const std::string& name) {
     for (size_t i = 0; i < m_.natives.size(); ++i) {
       if (m_.natives[i] == name) return static_cast<int32_t>(i);
@@ -2029,6 +2034,20 @@ public:
   }
 
 private:
+  // Whether consts[i] is still the constant an index entry says it is.
+  bool holds_scalar(int32_t i, ConstKind kind, int64_t bits) const {
+    return static_cast<size_t>(i) < m_.consts.size() &&
+           m_.consts[static_cast<size_t>(i)].kind == kind &&
+           m_.consts[static_cast<size_t>(i)].bits == bits;
+  }
+  bool holds_str(int32_t i, const std::string& s) const {
+    if (static_cast<size_t>(i) >= m_.consts.size()) return false;
+    const Const& c = m_.consts[static_cast<size_t>(i)];
+    return c.kind == ConstKind::Str && c.bits >= 0 &&
+           static_cast<size_t>(c.bits) < m_.str_consts.size() &&
+           m_.str_consts[static_cast<size_t>(c.bits)] == s;
+  }
+
   NodeId emit(Tag tag, uint8_t op, SrcPos p, int32_t a, int32_t b,
               const std::vector<NodeId>& children) {
     Node n;
@@ -2057,7 +2076,7 @@ std::optional<std::string> verify(const Module& m);
 std::string to_string(const Module& m);
 
 // Public so vm's own instruction-name table can share it instead of
-// restating the same eleven strings, and so a front end resolving its own
+// restating the same strings, and so a front end resolving its own
 // vocabulary (codegen.h's builders, for one) has one table to call rather
 // than a copy of these strings of its own.
 const char* name_of(Tag t);

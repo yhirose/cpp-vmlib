@@ -500,6 +500,40 @@ int main() {
     check_eq(joined(), "false|true|true|false|true|", "same output");
   }
 
+  // --- The Builder's constant pool: one entry per distinct constant, found
+  // through an index that is a cache, not the truth -- a pool cut back or
+  // edited by hand costs a duplicate at worst, never a wrong constant. ----
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    const int32_t a = m.nodes[b.literal(7, p).v].a;
+    check_eq(std::to_string(m.nodes[b.literal(7, p).v].a), std::to_string(a),
+             "int constants share an entry");
+    const int32_t s1 = m.nodes[b.str_literal("hi", p).v].a;
+    check_eq(std::to_string(m.nodes[b.str_literal("hi", p).v].a),
+             std::to_string(s1), "string constants share an entry");
+    check_eq(std::to_string(m.consts.size()), "2", "two distinct constants");
+    check_eq(std::to_string(m.nodes[b.bool_literal(true, p).v].a == a), "0",
+             "a bool is not the int 1");
+
+    // Cut the pool back to nothing: the stale index entries name entries
+    // that are gone, and must be rebuilt rather than trusted.
+    m.consts.clear();
+    m.str_consts.clear();
+    const NodeId again = b.str_literal("hi", p);
+    const NodeId num = b.literal(7, p);
+    check_eq(m.str_const(again), "hi", "a string after the pool was cleared");
+    check_eq(std::to_string(m.int_const(num)), "7",
+             "an int after the pool was cleared");
+
+    // Overwrite an entry in place: the index still says "hi" lives there.
+    m.str_consts[static_cast<size_t>(m.consts[static_cast<size_t>(
+        m.nodes[again.v].a)].bits)] = "other";
+    check_eq(m.str_const(b.str_literal("hi", p)), "hi",
+             "a string after its entry was overwritten");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;
