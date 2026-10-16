@@ -536,6 +536,10 @@ struct ObjectObj : HeapObj {
   void remove(const std::string& k) {
     for (auto it = props.begin(); it != props.end(); ++it) {
       if (it->first == k) {
+        // The value dies after the erase, not during it: its release can
+        // run a drop hook that writes back into this object, and props must
+        // not reallocate under the erase's own element shifting.
+        const Value dead = std::move(it->second);
         props.erase(it);
         if (owner && k == kDropKey) owner->owned_unregister(this);
         return;
@@ -5390,6 +5394,11 @@ struct FnCompiler {
     const Node& sn = m.at(id);
     const ScopeView sv = view_scope(m, id);
     const bool defers = declares_defers(sv.body);
+    // The result register is taken before the body, as TryCatch's dst is:
+    // the value has to land where the scope was entered, since a caller
+    // laying out consecutive operands (CallValue's arguments, ArrayLit's
+    // items) reads the next one from the register after it.
+    const int32_t dst = want_value && defers ? alloc() : -1;
     const int32_t regs_base = top;
     // Every Scope takes an owned-stack mark on entry; its exit resolves
     // the drop-bearing cycles bound under it. The mark's pc is the
@@ -5417,9 +5426,9 @@ struct FnCompiler {
       // DeferRunTo's own pc sits outside a fused try's (below). A
       // statement body ends in its own ClearRegs, which does the same.
       if (want_value) {
-        const int32_t held = alloc();
-        emit(Op::Move, held, r, 0, sn.pos);
-        r = held;
+        emit(Op::Move, dst, r, 0, sn.pos);
+        r = dst;
+        top = dst + 1;
       }
       defer_run_pc = here();
       emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
@@ -6311,6 +6320,9 @@ struct Exec {
       gf.gen_self = std::move(fr.gen_self);
       co->frames.push_back(std::move(gf));
     }
+    // The one reference the parked frames still hold, released only once
+    // they are out of `frames` (discard_top has the reason).
+    const Value self = std::move(frames[bottom]->coro_self);
     frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(bottom),
                  frames.end());
     co->state = CoroObj::State::Suspended;
@@ -6713,7 +6725,7 @@ struct Exec {
       const std::string what =
           r.fatal_msg.empty() ? to_display(r.value) : r.fatal_msg;
       std::fprintf(stderr, "drop: %s\n", what.c_str());
-      while (self->frames.size() > floor) self->frames.pop_back();
+      while (self->frames.size() > floor) self->discard_top();
     }
   }
 
@@ -6790,8 +6802,20 @@ struct Exec {
     const bool bare = f.entry && !entry_frame_drops;
     if (bare) rt.set_drop_fn(nullptr, nullptr);
     release_range(f, 0, static_cast<int32_t>(f.locals.size()));
-    frames.pop_back();
+    discard_top();
     if (bare) rt.set_drop_fn(this, &Exec::drop_hook);
+  }
+
+  // Drops the top frame without pop_frame's ordered release. Out of the
+  // vector first, destroyed after: FrameDeleter releases what the frame
+  // still holds, a release can run a drop hook, and the hook pushes frames
+  // onto this same vector -- which a bare pop_back would still be in the
+  // middle of, destroying an element in the slot (or the buffer) the hook
+  // is writing to. Every frame that leaves `frames` one at a time goes
+  // through here.
+  void discard_top() {
+    FramePtr dead = std::move(frames.back());
+    frames.pop_back();
   }
 
   // Hands a popped frame's result to whoever asked for it. Ret and Yield
@@ -6849,7 +6873,7 @@ struct Exec {
       // Every chunk the compiler emits ends in Ret; running off the end is
       // the same belt and braces the old loop condition was.
       if (f.pc >= ch.code.size()) {
-        frames.pop_back();
+        discard_top();
         if (frames.size() <= floor) return;
         continue;
       }
@@ -7450,6 +7474,10 @@ struct Exec {
           }
           const ClosureObj* c = callee.as_closure();
           const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
+          // Checked while this is still the caller's frame: a wrong count
+          // traps at the call, as push_closure's would, rather than from a
+          // half-replaced frame whose pc already names the callee's code.
+          const int32_t taken = check_arity(nch, in.d, pos);
           // This frame's exit, in full, before the callee starts: every
           // temporary except the argument window, the locals
           // last-slot-first, then each open scope's owned resolution
@@ -7478,7 +7506,6 @@ struct Exec {
           f.chunk = &nch;
           f.pc = 0;
           f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-          const int32_t taken = check_arity(nch, in.d, pos);
           for (int32_t i = 0; i < taken; ++i) {
             f.locals[static_cast<size_t>(i)] =
                 std::move(f.regs[static_cast<size_t>(in.c + i)]);
@@ -7514,7 +7541,7 @@ struct Exec {
           park_frame(go->frame, f);
           go->state = GeneratorObj::State::Suspended;
           const int32_t ret_reg = f.ret_reg;
-          frames.pop_back();
+          discard_top();
           deliver(ret_reg, gen_result(std::move(out), false));
           if (frames.size() <= floor) return;
           continue;
@@ -7560,11 +7587,11 @@ struct Exec {
               run_pending_defers(gf, pos);
             } catch (Raise&) {
               go->state = St::Done;
-              frames.pop_back();
+              discard_top();
               throw;
             }
             go->state = St::Done;
-            frames.pop_back();
+            discard_top();
           } else {
             // Start never ran (nothing registered, nothing to run); Done
             // holds nothing either. Both just settle the state and drop
@@ -7768,7 +7795,7 @@ struct Exec {
             }
           } catch (Raise&) {
             finish_coro(co);
-            while (frames.size() > base) frames.pop_back();
+            while (frames.size() > base) discard_top();
             throw;
           }
           finish_coro(co);

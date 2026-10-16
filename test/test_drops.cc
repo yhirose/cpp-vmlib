@@ -709,6 +709,165 @@ int main() {
     check_eq(joined(), "a|after|", "temps: self-cycle output");
   }
 
+  // A destructor run by a frame on its way off the stack: the frame's
+  // last references go as it is discarded, and the destructor they start
+  // calls two thousand deep, so the frame stack it pushes onto has to
+  // grow -- under a frame that must already be out of it. Three ways off
+  // the stack: a Ret whose frame holds the object only in a cell, a throw
+  // unwinding a frame whose argument register holds it, and GenReturn
+  // closing a generator whose local holds it.
+  {
+    const auto build = [](Prog& g) {
+      using namespace coreir;
+      const SrcPos& p = g.p;
+      Builder& b = g.b;
+      // funcs[1], the destructor: print(self.name); rec(rec, 2000)
+      g.m.funcs[1].body = b.block(
+          {g.print(b.index(g.local(0), g.str("name"), p)),
+           b.call_value(b.make_closure(2, 0, p),
+                        {b.make_closure(2, 0, p), b.literal(2000, p)}, p)},
+          p);
+      // funcs[2]: rec(r, n) = if n == 0 { 0 } else { r(r, n - 1) }
+      Func rec{"rec", 2, 0,
+               b.make_return(
+                   b.make_if(b.binary(BinOp::Eq, g.local(1), b.literal(0, p), p),
+                             b.literal(0, p),
+                             b.call_value(g.local(0),
+                                          {g.local(0),
+                                           b.binary(BinOp::Sub, g.local(1),
+                                                    b.literal(1, p), p)},
+                                          p),
+                             p),
+                   p),
+               {"r", "n"}, {}};
+      rec.num_params = 2;
+      g.m.funcs.push_back(rec);
+    };
+    const auto obj = [](Prog& g, const char* name) {
+      return g.b.object_lit({{g.str("name"), g.str(name)},
+                             {g.str("\x01" "drop"),
+                              g.b.make_closure(1, 0, g.p)}},
+                            g.p);
+    };
+    {
+      // c() { cell0 = obj("c"); print("body") }; c(); print("after")
+      Prog g;
+      build(g);
+      Func c{"c", 0, 0,
+             g.b.block({g.b.assign(coreir::VarKind::Cell, 0, obj(g, "c"), g.p),
+                        g.print_str("body")},
+                       g.p),
+             {}, {}};
+      c.num_cells = 1;
+      g.m.funcs.push_back(c);  // funcs[3]
+      g.main(g.b.block({g.b.call_value(g.b.make_closure(3, 0, g.p), {}, g.p),
+                        g.print_str("after")},
+                       g.p),
+             {});
+      expect_clean(run_module(g.m, "frame exit: ret"), "frame exit: ret");
+      check_eq(joined(), "body|c|after|", "frame exit: ret output");
+    }
+    {
+      // two(x, y) = 0; boom() { throw "boom" }
+      // try { two(obj("h"), boom()) } catch { print("caught") }
+      Prog g;
+      build(g);
+      Func two{"two", 2, 0, g.b.literal(0, g.p), {"x", "y"}, {}};
+      two.num_params = 2;
+      g.m.funcs.push_back(two);  // funcs[3]
+      g.m.funcs.push_back({"boom", 0, 0, g.b.make_throw(g.str("boom"), g.p),
+                           {}, {}});  // funcs[4]
+      Func h{"h", 0, 0,
+             g.b.call_value(g.b.make_closure(3, 0, g.p),
+                            {obj(g, "h"),
+                             g.b.call_value(g.b.make_closure(4, 0, g.p), {},
+                                            g.p)},
+                            g.p),
+             {}, {}};
+      g.m.funcs.push_back(h);  // funcs[5]
+      g.main(g.b.block({g.b.make_try(
+                            1, g.b.call_value(g.b.make_closure(5, 0, g.p), {},
+                                              g.p),
+                            g.print_str("caught"), g.p),
+                        g.print_str("after")},
+                       g.p),
+             {"e"});
+      expect_clean(run_module(g.m, "frame exit: throw"), "frame exit: throw");
+      check_eq(joined(), "h|caught|after|", "frame exit: throw output");
+    }
+    {
+      // gen() { o = obj("gen"); yield 1 }
+      // x = gen(); resume(x); return(x); print("after")
+      Prog g;
+      build(g);
+      Func gen{"gen", 1, 0,
+               g.b.block({g.b.assign(coreir::VarKind::Local, 0, obj(g, "gen"),
+                                     g.p),
+                          g.b.make_yield(g.b.literal(1, g.p), g.p)},
+                         g.p),
+               {"o"}, {}};
+      gen.is_generator = true;
+      g.m.funcs.push_back(gen);  // funcs[3]
+      g.main(g.b.block(
+                 {g.b.assign(coreir::VarKind::Local, 1,
+                             g.b.call_value(g.b.make_closure(3, 0, g.p), {},
+                                            g.p),
+                             g.p),
+                  g.b.intrinsic(coreir::IntrinsicId::GenResume,
+                                {g.local(1), g.b.nil_literal(g.p)}, g.p),
+                  g.b.intrinsic(coreir::IntrinsicId::GenReturn,
+                                {g.local(1), g.b.nil_literal(g.p)}, g.p),
+                  g.print_str("after")},
+                 g.p),
+             {"x"});
+      expect_clean(run_module(g.m, "frame exit: close"), "frame exit: close");
+      check_eq(joined(), "gen|after|", "frame exit: close output");
+    }
+  }
+
+  // ObjectRemove releasing a value whose destructor writes back into the
+  // object it was removed from -- enough keys to make the object's
+  // storage grow, which it must not do under the remove itself.
+  //   drop2(self) { self.back.x0 = 0; ... self.back.x15 = 15 }
+  //   o = {}; o.a = {back: o, drop: drop2}; o.b0 = 0; o.b1 = 1; o.b2 = 2
+  //   ObjectRemove(o, "a"); print(len(ObjectKeys(o)))
+  {
+    Prog g;
+    std::vector<coreir::NodeId> writes;
+    for (int i = 0; i < 16; ++i) {
+      const std::string k = "x" + std::to_string(i);
+      writes.push_back(g.b.set_index(g.b.index(g.local(0), g.str("back"), g.p),
+                                     g.b.str_literal(k, g.p),
+                                     g.b.literal(i, g.p), g.p));
+    }
+    coreir::Func d2{"drop2", 1, 0, g.b.block(writes, g.p), {"self"}, {}};
+    d2.num_params = 1;
+    g.m.funcs.push_back(d2);  // funcs[2]
+    g.main(g.b.block(
+               {g.b.assign(coreir::VarKind::Local, 1, g.b.object_lit({}, g.p),
+                           g.p),
+                g.set(1, "a",
+                      g.b.object_lit({{g.str("back"), g.local(1)},
+                                      {g.str("\x01" "drop"),
+                                       g.b.make_closure(2, 0, g.p)}},
+                                     g.p)),
+                g.set(1, "b0", g.b.literal(0, g.p)),
+                g.set(1, "b1", g.b.literal(1, g.p)),
+                g.set(1, "b2", g.b.literal(2, g.p)),
+                g.b.intrinsic(coreir::IntrinsicId::ObjectRemove,
+                              {g.local(1), g.str("a")}, g.p),
+                g.print(g.b.intrinsic(
+                    coreir::IntrinsicId::Len,
+                    {g.b.intrinsic(coreir::IntrinsicId::ObjectKeys,
+                                   {g.local(1)}, g.p)},
+                    g.p))},
+               g.p),
+           {"o"});
+    expect_clean(run_module(g.m, "remove: drop writes back"),
+                 "remove: drop writes back");
+    check_eq(joined(), "19|", "remove: drop writes back output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "drops: %d failure(s)\n", g_failures);
     return 1;

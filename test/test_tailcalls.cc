@@ -493,6 +493,32 @@ int main() {
              "arity: failure");
   }
 
+  // --- 10. ...and checked before the caller's frame becomes the callee's:
+  // a try at the top of the callee's body must not catch the arity error of
+  // its own call. -------------------------------------------------------------
+  // one(a) { try { print(a) } catch e { print("caught") } }; caller() = one()
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"one", 2, 0,
+                       b.make_try(1, pr(b, loc(b, 0)),
+                                  pr(b, b.str_literal("caught", p)), p),
+                       {"a", "e"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.push_back({"caller", 0, 0,
+                       b.make_return(b.call_value(b.make_closure(1, 0, p), {}, p),
+                                     p),
+                       {}, {}});
+    m.funcs.back().tail_calls = true;
+    m.funcs[0] = {"main", 0, 0, b.call_value(b.make_closure(2, 0, p), {}, p),
+                  {}, {}};
+    check_eq(run_module(m, "arity, callee try"),
+             "one takes 1 argument(s), given 0", "arity, callee try: failure");
+    check_eq(joined(), "", "arity, callee try: output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

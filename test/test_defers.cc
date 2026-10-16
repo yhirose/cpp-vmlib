@@ -363,6 +363,46 @@ int main() {
              "defer outside scope: verify message");
   }
 
+  // --- 10. A defer-declaring scope in value position, as one of several
+  // operands laid out in consecutive registers: its value lands where the
+  // scope was entered, not one register up. -------------------------------
+  // sub(a, b) = a - b
+  // print(sub(scope { defer D; 10 }, 20)); print([scope { defer D; 10 }, 20][1])
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    Func sub{"sub", 2, 0,
+             b.binary(BinOp::Sub, b.varref(VarKind::Local, 0, p),
+                      b.varref(VarKind::Local, 1, p), p),
+             {"a", "b"}, {}};
+    sub.num_params = 2;
+    m.funcs.push_back(sub);  // funcs[1]
+    print_closure(b, m, "D", p);  // funcs[2]
+    const auto ten = [&] {
+      return b.scope(0, 0,
+                     b.block({b.make_defer(b.make_closure(2, 0, p), p),
+                              b.literal(10, p)},
+                             p),
+                     p);
+    };
+    m.funcs[0] = {
+        "main", 0, 0,
+        b.block({b.intrinsic(IntrinsicId::Print,
+                             {b.call_value(b.make_closure(1, 0, p),
+                                           {ten(), b.literal(20, p)}, p)},
+                             p),
+                 b.intrinsic(IntrinsicId::Print,
+                             {b.index(b.array_lit({ten(), b.literal(20, p)}, p),
+                                      b.literal(1, p), p)},
+                             p)},
+                p),
+        {}, {}};
+    check_eq(run_module(m, "scope operand"), "", "scope operand: failure");
+    check_eq(joined(), "D|-10|D|20|", "scope operand output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "defers: %d failure(s)\n", g_failures);
     return 1;
