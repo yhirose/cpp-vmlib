@@ -2177,7 +2177,10 @@ struct Resolver {
   }
 
   void push_scope() { scopes_.emplace_back(); }
-  void pop_scope() { scopes_.pop_back(); }
+  void pop_scope() {
+    scope_at(scopes_.size() - 1);  // fails clearly when none is open
+    scopes_.pop_back();
+  }
 
   // How many blocks are open. What a front end keeping its own parallel
   // per-scope table indexes it by.
@@ -2188,7 +2191,7 @@ struct Resolver {
   // which leak an assignment outward but stop at the enclosing method.
   std::optional<int32_t> declared_at(size_t scope,
                                      const std::string& name) const {
-    const auto& mp = scopes_[scope].map;
+    const auto& mp = scope_at(scope).map;
     const auto it = mp.find(name);
     if (it == mp.end()) return std::nullopt;
     return it->second;
@@ -2197,7 +2200,7 @@ struct Resolver {
   // Everything the block at `scope` declared, in order, one entry per
   // declare() -- including a name declared twice.
   const std::vector<int32_t>& declared_order(size_t scope) const {
-    return scopes_[scope].order;
+    return scope_at(scope).order;
   }
 
   // A second name for a binding that already exists, in the innermost
@@ -2205,7 +2208,7 @@ struct Resolver {
   // re-entering its own parameters are both naming something already
   // declared, so neither belongs in the order table.
   void alias(const std::string& name, int32_t v) {
-    scopes_.back().map[name] = v;
+    scope_at(scopes_.size() - 1).map[name] = v;
   }
 
   // Whether the innermost scope already binds this name. The front end's,
@@ -2237,9 +2240,10 @@ struct Resolver {
   // `global x` inside a function needs: the binding it creates belongs to
   // the module, not to the function the statement stands in.
   int32_t declare_in(size_t scope, const std::string& name, int32_t owner) {
+    Scope& sc = scope_at(scope);
     const int32_t v = declare_var(name, owner);
-    scopes_[scope].map[name] = v;
-    scopes_[scope].order.push_back(v);
+    sc.map[name] = v;
+    sc.order.push_back(v);
     return v;
   }
 
@@ -2421,7 +2425,15 @@ struct Resolver {
   // capture_name() instead.
   void number_captures(Module& m) {
     number_captures();
-    for (Fn& f : fns) {
+    for (size_t k = 0; k < fns.size(); ++k) {
+      const Fn& f = fns[k];
+      if (f.index < 0 || static_cast<size_t>(f.index) >= m.funcs.size()) {
+        coreir_rt::fail("Resolver: function " + std::to_string(k) +
+                            " has no Module::funcs entry (index " +
+                            std::to_string(f.index) +
+                            "); set Fn::index and size m.funcs first",
+                        0, 0);
+      }
       Func& mf = m.funcs[static_cast<size_t>(f.index)];
       // Cleared first: after a rollback a kept function is numbered again.
       mf.capture_names.clear();
@@ -2437,6 +2449,12 @@ struct Resolver {
   // after the numbering rather than before.
   const std::string& capture_name(int32_t fn, int32_t i) const {
     const std::set<int32_t>& free = fns[static_cast<size_t>(fn)].free;
+    if (i < 0 || static_cast<size_t>(i) >= free.size()) {
+      coreir_rt::fail("Resolver: function " + std::to_string(fn) +
+                          " has no capture " + std::to_string(i) + " (it has " +
+                          std::to_string(free.size()) + ")",
+                      0, 0);
+    }
     auto it = free.begin();
     std::advance(it, static_cast<std::ptrdiff_t>(i));
     return vars[static_cast<size_t>(*it)].name;
@@ -2572,6 +2590,25 @@ struct Resolver {
   // binders had reimplemented lookup() to ask them.
   std::vector<Scope> scopes_;
 
+  // The block at `scope`. Every name operation is relative to an open
+  // block, so asking past the stack is a front end's ordering bug, reported
+  // as one rather than read out of bounds.
+  const Scope& scope_at(size_t scope) const {
+    if (scope >= scopes_.size()) {
+      coreir_rt::fail(scopes_.empty()
+                          ? std::string("Resolver: no scope is open; "
+                                        "push_scope first")
+                          : "Resolver: scope " + std::to_string(scope) +
+                                " is not open (" +
+                                std::to_string(scopes_.size()) + " are)",
+                      0, 0);
+    }
+    return scopes_[scope];
+  }
+  Scope& scope_at(size_t scope) {
+    return const_cast<Scope&>(std::as_const(*this).scope_at(scope));
+  }
+
   void claim_cell(int32_t v) {
     auto& own =
         fns[static_cast<size_t>(vars[static_cast<size_t>(v)].owner)].cell_index;
@@ -2667,6 +2704,12 @@ class FuncWriter {
   // num_params locals are the parameters, so param() must be called before
   // any local().
   Slot param(std::string name) {
+    if (static_cast<size_t>(nparams_) != names_.size()) {
+      coreir_rt::fail("FuncWriter: param '" + name +
+                          "' after a local; the parameters are the first "
+                          "locals, so declare them first",
+                      0, 0);
+    }
     ++nparams_;
     return local(std::move(name));
   }
