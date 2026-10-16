@@ -529,6 +529,72 @@ int main() {
              "coroutine needs a function, not int", "not callable: failure");
   }
 
+  // --- 11. CoroClose whose defer throws: the generator activation lower in
+  // the slice is finished with the rest of it, as on the normal path --
+  // resuming it answers done, not "already running". ----------------------
+  // k() { scope { defer d; CoroYield(1) } }   d() { throw "from defer" }
+  // gen G() { k(); yield 2 }                  cf(x) { GenResume(x, nil) }
+  // g = G(); co = CoroCreate(cf); CoroResume(co, g)
+  // try { CoroClose(co) } catch e { print "close threw" }
+  // print(CoroStatus(co)); print(GenResume(g, nil).done)
+  {
+    const SrcPos p{1, 1};
+    Module m;
+    Builder b(m);
+    using I = IntrinsicId;
+    auto loc = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    auto str = [&](const char* t) { return b.str_literal(t, p); };
+    auto pr = [&](NodeId v) { return b.intrinsic(I::Print, {v}, p); };
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back(
+        {"d", 0, 0, b.make_throw(str("from defer"), p), {}, {}});  // 1
+    m.funcs.push_back(
+        {"k", 0, 0,
+         b.scope(0, 0,
+                 b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                          b.intrinsic(I::CoroYield, {b.literal(1, p)}, p)},
+                         p),
+                 p),
+         {}, {}});  // 2
+    {
+      Func g{"G", 0, 0,
+             b.block({b.call_value(b.make_closure(2, 0, p), {}, p),
+                      b.make_yield(b.literal(2, p), p)},
+                     p),
+             {}, {}};
+      g.is_generator = true;
+      m.funcs.push_back(g);  // 3
+    }
+    {
+      Func cf{"cf", 1, 0,
+              b.intrinsic(I::GenResume, {loc(0), b.nil_literal(p)}, p),
+              {"x"}, {}};
+      cf.num_params = 1;
+      m.funcs.push_back(cf);  // 4
+    }
+    m.funcs[0] = {
+        "main", 3, 0,
+        b.block(
+            {b.assign(VarKind::Local, 0,
+                      b.call_value(b.make_closure(3, 0, p), {}, p), p),
+             b.assign(VarKind::Local, 1,
+                      b.intrinsic(I::CoroCreate, {b.make_closure(4, 0, p)}, p),
+                      p),
+             b.intrinsic(I::CoroResume, {loc(1), loc(0)}, p),
+             b.make_try(2, b.intrinsic(I::CoroClose, {loc(1)}, p),
+                        pr(str("close threw")), p),
+             pr(b.intrinsic(I::CoroStatus, {loc(1)}, p)),
+             pr(b.index(b.intrinsic(I::GenResume, {loc(0), b.nil_literal(p)}, p),
+                        str("done"), p))},
+            p),
+        {"g", "co", "e"}, {}};
+    check_eq(run_module(m, "close, throwing defer"), "",
+             "close, throwing defer: failure");
+    check_eq(joined(), "close threw|done|true|",
+             "close, throwing defer output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

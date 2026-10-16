@@ -19,9 +19,11 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -6284,6 +6286,14 @@ struct Exec {
     if (co->scheduled) scheduled.erase(co);
   }
 
+  // A generator activation that leaves the stack by any way but its own
+  // return is finished for good: every later resume answers done.
+  static void finish_gen(Frame& f) {
+    if (f.gen_self.is_generator()) {
+      f.gen_self.as_generator()->state = GeneratorObj::State::Done;
+    }
+  }
+
   // A blank frame: the pool's, if it has one -- clear_frame blanked it on
   // the way in, and its vectors' capacity is still there for a caller's
   // resize to land in -- and a fresh one otherwise. The only place a Frame
@@ -6900,9 +6910,7 @@ struct Exec {
       // A coroutine's bottom frame, the same: the frame below it is the
       // resumer's, at its CoroResume, whose own handlers get the throw
       // next.
-      if (f.gen_self.is_generator()) {
-        f.gen_self.as_generator()->state = GeneratorObj::State::Done;
-      }
+      finish_gen(f);
       if (f.coro_self.is_coroutine()) finish_coro(f.coro_self.as_coroutine());
       pop_frame();
     }
@@ -7315,9 +7323,17 @@ struct Exec {
                         type_name(n.tag()) + " elements");
           }
           if (n.as_int() < 0) fail(f, "cannot make an array of fewer than 0");
-          f.regs[in.a] = Value::make_array(
-              std::vector<Value>(static_cast<size_t>(n.as_int()),
-                                 f.regs[in.c]));
+          // A length the allocator refuses is a trap like any other, not a
+          // C++ exception out of vm::run past every handler in the program.
+          std::vector<Value> items;
+          try {
+            items.assign(static_cast<size_t>(n.as_int()), f.regs[in.c]);
+          } catch (const std::length_error&) {
+            fail(f, "array too large");
+          } catch (const std::bad_alloc&) {
+            fail(f, "array too large");
+          }
+          f.regs[in.a] = Value::make_array(std::move(items));
           break;
         }
         case Op::ObjectHas: {
@@ -7907,14 +7923,18 @@ struct Exec {
             while (frames.size() > base) {
               Frame& t = *frames.back();
               run_pending_defers(t, pos);
-              if (t.gen_self.is_generator()) {
-                t.gen_self.as_generator()->state = GeneratorObj::State::Done;
-              }
+              finish_gen(t);
               pop_frame();
             }
           } catch (Raise&) {
+            // The rest of the slice goes the way the normal path sends it,
+            // its generators finished with it -- including the frame whose
+            // defer threw.
             finish_coro(co);
-            discard_to(base);
+            while (frames.size() > base) {
+              finish_gen(*frames.back());
+              pop_frame();
+            }
             throw;
           }
           finish_coro(co);
@@ -8058,7 +8078,8 @@ void coreir_rt_out_raw(const char* bytes, int64_t len) {
 }
 
 void coreir_rt_out_str(const char* bytes, int64_t len) {
-  std::printf("%.*s\n", static_cast<int>(len), bytes);
+  std::fwrite(bytes, 1, static_cast<size_t>(len), stdout);
+  std::fputc('\n', stdout);
 }
 
 int64_t coreir_rt_in(int64_t line, int64_t col) {

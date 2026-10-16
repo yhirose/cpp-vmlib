@@ -647,6 +647,29 @@ int main() {
     check_eq(run_module(m, "fill negative"),
              "cannot make an array of fewer than 0", "fill negative: message");
   }
+  {
+    // A length no allocator will give is a trap a program can catch, not a
+    // C++ exception out of vm::run.
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.make_try(0,
+                    b.intrinsic(IntrinsicId::Print,
+                                {b.intrinsic(IntrinsicId::ArrayFill,
+                                             {b.literal(int64_t{1} << 62, p),
+                                              b.nil_literal(p)},
+                                             p)},
+                                p),
+                    b.intrinsic(IntrinsicId::Print,
+                                {b.index(b.varref(VarKind::Local, 0, p),
+                                         b.str_literal("message", p), p)},
+                                p),
+                    p),
+         {"e"}, {}});
+    check_eq(run_module(m, "fill too large"), "", "fill too large: failure");
+    check_eq(joined(), "array too large|", "fill too large: caught");
+  }
 
   // Len answers a map's live entry count, tombstones skipped -- the same
   // question it answers for a string and an array, which is why there is no
