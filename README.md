@@ -393,6 +393,29 @@ different), stated once as `MapKeyRef` in `vmlib.h`. Lookup is a hash;
 iteration is insertion order, like an object's, so a printed map is
 reproducible.
 
+The rule is strict on purpose, so the same question has different answers
+for a key and for a comparison:
+
+| | `Eq` | as map keys |
+|---|---|---|
+| `1` and `1.0` | equal (compared as the numbers they are) | two keys |
+| `0.0` and `-0.0` | equal | two keys |
+| `NaN` and `NaN` | not equal | one key (every NaN bit pattern is the same key) |
+| `1` and `"1"` | refused (a language's question) | two keys |
+
+Which keys a language wants to be the same is that language's rule, and
+the languages disagree, so none of them is the VM's. A binder that needs
+one writes it once, as a small function in the program it emits, and runs
+every key through it before `Index`, `SetIndex`, `ObjectHas` or
+`ObjectRemove`:
+
+| language | wants | normalize first |
+|---|---|---|
+| Lua | `t[1.0]` and `t[1]` are one slot | a double that equals an int becomes that int (mini-lua's `$key`) |
+| JavaScript `Map`/`Set` | SameValueZero: `+0` and `-0` are one key, `NaN` is one key | `-0.0` becomes `0.0`; `NaN` needs nothing |
+| Python `dict` | `1`, `1.0` and `True` are one key | a bool or an integral double becomes the int (mini-python leaves `True` and `1` apart, and says so) |
+| Ruby, Go, C# | keys of different types are different keys | nothing: the rule above is already theirs |
+
 ## Strings and slices
 
 `Index` on a string yields one byte, as a string. That is enough to express

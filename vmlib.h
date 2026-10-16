@@ -660,7 +660,21 @@ struct NativeObj : HeapObj {
 struct MapKeyRef {
   ValueTag tag;
   int64_t bits;
-  static MapKeyRef of(const Value& v) { return {v.tag(), v.raw_data()}; }
+  // Every NaN is one key whatever its sign and payload bits: 0.0/0.0 is a
+  // negative NaN on x86 and a NaN literal is a positive one, and two keys
+  // for "the same" NaN is a hole nothing could fill from the language side.
+  static MapKeyRef of(const Value& v) {
+    int64_t bits = v.raw_data();
+    if (v.is_double()) {
+      double d;
+      std::memcpy(&d, &bits, sizeof d);
+      if (std::isnan(d)) {
+        d = std::numeric_limits<double>::quiet_NaN();
+        std::memcpy(&bits, &d, sizeof bits);
+      }
+    }
+    return {v.tag(), bits};
+  }
   const std::string& str() const {
     return reinterpret_cast<const StrObj*>(bits)->s;
   }

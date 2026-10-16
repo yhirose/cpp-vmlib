@@ -534,6 +534,46 @@ int main() {
              "a string after its entry was overwritten");
   }
 
+  // --- Map keys are strict (README, "Maps"): 1 and 1.0 are two keys, 0.0
+  // and -0.0 are two keys, and every NaN is one key whatever its bits --
+  // 0.0/0.0 is a negative NaN on x86 and a NaN literal is a positive one. -
+  {
+    using coreir::Value;
+    coreir::Runtime rt;
+    coreir::Runtime::Scope scope(rt);
+    Value mv = Value::make_map();
+    coreir::MapObj* map = mv.as_map();
+    volatile double zero = 0.0;
+    const double neg_nan = zero / zero;
+    const double pos_nan = std::nan("");
+    map->set(Value::make_double(neg_nan), Value::make_int(1));
+    map->set(Value::make_double(pos_nan), Value::make_int(2));
+    check(map->live == 1, "every NaN is one key");
+    check(map->find(Value::make_double(neg_nan)) != nullptr &&
+              map->find(Value::make_double(pos_nan)) != nullptr &&
+              map->find(Value::make_double(pos_nan))->as_int() == 2,
+          "either NaN finds the entry (the last write won)");
+
+    map->set(Value::make_int(1), Value::make_int(10));
+    map->set(Value::make_double(1.0), Value::make_int(11));
+    map->set(Value::make_double(0.0), Value::make_int(12));
+    map->set(Value::make_double(-0.0), Value::make_int(13));
+    check(map->live == 5, "1, 1.0, 0.0, -0.0 and NaN are five keys");
+    check(map->find(Value::make_int(1))->as_int() == 10 &&
+              map->find(Value::make_double(1.0))->as_int() == 11,
+          "1 and 1.0 do not meet");
+
+    // The index is rebuilt when the entries are compacted; NaN must still
+    // be found through the canonical key afterwards.
+    for (int64_t i = 100; i < 120; ++i) {
+      map->set(Value::make_int(i), Value::make_int(i));
+    }
+    for (int64_t i = 100; i < 120; ++i) map->remove(Value::make_int(i));
+    check(map->find(Value::make_double(neg_nan)) != nullptr,
+          "NaN survives compaction");
+    mv = Value();
+  }
+
   // --- The IR and bytecode dumps print a constant by value: a string, a
   // double, a bool and nil used to print as their pool index or bit pattern.
   {
