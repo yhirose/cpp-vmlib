@@ -642,8 +642,9 @@ struct NativeObj : HeapObj {
 // every lookup actually goes through. Two values are the same key when
 // they have the same tag and, for a string, the same bytes -- or, for
 // everything else, the same payload word: an int by value, a double by
-// bit pattern (so -0.0 and 0.0 are two keys and NaN is one; a language
-// with SameValueZero normalizes before the value gets here), a heap
+// bit pattern, except that every NaN is one key (so -0.0 and 0.0 are two
+// keys; a language with SameValueZero normalizes before the value gets
+// here), a heap
 // object by identity. This is a third rule beside Eq (which refuses to
 // compare across types at all, and refuses objects) and Same (which
 // compares a string by pointer, so two equal strings from two allocations
@@ -660,20 +661,13 @@ struct NativeObj : HeapObj {
 struct MapKeyRef {
   ValueTag tag;
   int64_t bits;
-  // Every NaN is one key whatever its sign and payload bits: 0.0/0.0 is a
-  // negative NaN on x86 and a NaN literal is a positive one, and two keys
-  // for "the same" NaN is a hole nothing could fill from the language side.
+  // Every NaN is one key, whatever its sign and payload bits.
   static MapKeyRef of(const Value& v) {
-    int64_t bits = v.raw_data();
-    if (v.is_double()) {
-      double d;
-      std::memcpy(&d, &bits, sizeof d);
-      if (std::isnan(d)) {
-        d = std::numeric_limits<double>::quiet_NaN();
-        std::memcpy(&bits, &d, sizeof bits);
-      }
+    if (v.is_double() && std::isnan(v.as_double())) {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      return {v.tag(), Value::make_double(nan).raw_data()};
     }
-    return {v.tag(), bits};
+    return {v.tag(), v.raw_data()};
   }
   const std::string& str() const {
     return reinterpret_cast<const StrObj*>(bits)->s;

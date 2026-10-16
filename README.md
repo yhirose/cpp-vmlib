@@ -385,9 +385,8 @@ and `ObjectRemove`, each of which accepts a map receiver too. Nothing about
 
 Two values are the same key when they have the same tag and -- for a string
 -- the same bytes, or -- for everything else -- the same payload: an int by
-value, a double by bit pattern (so `-0.0` and `0.0` are two keys and `NaN` is
-one; a language with SameValueZero normalizes first), a heap object by
-identity. That is a third rule beside `Eq` (which refuses to compare across
+value, a double by bit pattern except that every `NaN` is one key, a heap
+object by identity. That is a third rule beside `Eq` (which refuses to compare across
 types) and `Same` (which compares two equal strings from two allocations as
 different), stated once as `MapKeyRef` in `vmlib.h`. Lookup is a hash;
 iteration is insertion order, like an object's, so a printed map is
@@ -400,21 +399,21 @@ for a key and for a comparison:
 |---|---|---|
 | `1` and `1.0` | equal (compared as the numbers they are) | two keys |
 | `0.0` and `-0.0` | equal | two keys |
-| `NaN` and `NaN` | not equal | one key (every NaN bit pattern is the same key) |
+| `NaN` and `NaN` | not equal | one key, whatever the NaN's bits (`Same` compares raw bits, so it can tell them apart) |
 | `1` and `"1"` | refused (a language's question) | two keys |
 
 Which keys a language wants to be the same is that language's rule, and
-the languages disagree, so none of them is the VM's. A binder that needs
-one writes it once, as a small function in the program it emits, and runs
-every key through it before `Index`, `SetIndex`, `ObjectHas` or
+the languages disagree, so none of them is the VM's. A language whose keys
+are already typed (Go, C#, Ruby's `eql?`) needs nothing. A binder that
+needs one writes it once, as a small function in the program it emits, and
+runs every key through it before `Index`, `SetIndex`, `ObjectHas` or
 `ObjectRemove`:
 
 | language | wants | normalize first |
 |---|---|---|
 | Lua | `t[1.0]` and `t[1]` are one slot | a double that equals an int becomes that int (mini-lua's `$key`) |
-| JavaScript `Map`/`Set` | SameValueZero: `+0` and `-0` are one key, `NaN` is one key | `-0.0` becomes `0.0`; `NaN` needs nothing |
+| JavaScript `Map`/`Set` | SameValueZero: `+0` and `-0` are one key | `-0.0` becomes `0.0` |
 | Python `dict` | `1`, `1.0` and `True` are one key | a bool or an integral double becomes the int (mini-python leaves `True` and `1` apart, and says so) |
-| Ruby, Go, C# | keys of different types are different keys | nothing: the rule above is already theirs |
 
 ## Strings and slices
 
