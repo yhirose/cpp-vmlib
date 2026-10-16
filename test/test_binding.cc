@@ -471,6 +471,81 @@ int main() {
     }
   }
 
+  // --- 7b. rollback gives back the scopes' names and the call edges, not
+  // only the depth: a program that re-declares a prelude name, or declares
+  // a new one, into the prelude's own scope leaves neither behind; a call
+  // edge between two kept functions goes; a kept function a program
+  // re-parented under one of its own is back where it was.
+  {
+    Resolver rs;
+    const int32_t main_fn = rs.new_fn(-1);
+    rs.push_scope();
+    const int32_t g = rs.declare("g", main_fn);
+    const int32_t pre = rs.new_fn(main_fn);
+    const Resolver::Mark after_prelude = rs.mark();
+
+    // the program: shadows g, adds x, aliases y, calls pre, adopts pre
+    const int32_t prog_fn = rs.new_fn(main_fn);
+    const int32_t g2 = rs.declare("g", main_fn);
+    const int32_t x = rs.declare("x", main_fn);
+    rs.alias("y", x);
+    rs.note_call(main_fn, pre);
+    rs.set_parent(pre, prog_fn);
+
+    rs.rollback(after_prelude);
+    if (rs.lookup("g") != std::optional<int32_t>(g)) {
+      std::fprintf(stderr, "FAIL: rollback left the prelude's name shadowed\n");
+      ++g_failures;
+    }
+    if (rs.lookup("x") || rs.lookup("y")) {
+      std::fprintf(stderr, "FAIL: rollback kept names the program declared\n");
+      ++g_failures;
+    }
+    if (rs.declared_order(0).size() != 1) {
+      std::fprintf(stderr, "FAIL: rollback kept the program's declarations\n");
+      ++g_failures;
+    }
+    if (!rs.calls.empty()) {
+      std::fprintf(stderr, "FAIL: rollback kept a call edge\n");
+      ++g_failures;
+    }
+    if (rs.fns[static_cast<size_t>(pre)].parent != main_fn) {
+      std::fprintf(stderr, "FAIL: rollback left a fn under a dropped one\n");
+      ++g_failures;
+    }
+    // and the next program starts from the prelude's names alone
+    const int32_t next = rs.declare("z", main_fn);
+    if (rs.lookup("z") != std::optional<int32_t>(next) || next != g2) {
+      std::fprintf(stderr, "FAIL: a reused id answers the old name\n");
+      ++g_failures;
+    }
+    if (rs.lookup("x")) {
+      std::fprintf(stderr, "FAIL: a stale name followed its id\n");
+      ++g_failures;
+    }
+  }
+
+  // --- 7c. number_captures(Module&) names each capture once, however many
+  // times a rolled-back function is numbered again.
+  {
+    Resolver rs;
+    const int32_t main_fn = rs.new_fn(-1);
+    rs.fns[static_cast<size_t>(main_fn)].index = 0;
+    rs.push_scope();
+    const int32_t v = rs.declare("v", main_fn);
+    const int32_t inner = rs.new_fn(main_fn);
+    rs.fns[static_cast<size_t>(inner)].index = 1;
+    rs.use(v, inner);
+    Module m;
+    m.funcs.resize(2);
+    rs.number_captures(m);
+    rs.number_captures(m);
+    if (m.funcs[1].num_captures != 1 || m.funcs[1].capture_names.size() != 1) {
+      std::fprintf(stderr, "FAIL: capture names doubled on renumbering\n");
+      ++g_failures;
+    }
+  }
+
   // --- 8. close_over_calls: a language whose closures are built at every
   // reference to a function, not where it is written. PL/0's shape:
   //

@@ -2327,19 +2327,31 @@ struct Resolver {
   // Everything this resolver holds, as of now. What a front end that binds
   // a runtime once and then compiles program after program against it takes
   // before the first program, to give back everything the last one added.
+  //
+  // The scopes are kept whole, not by count: a program declares into the
+  // scopes that were already open (the prelude's global one), and giving
+  // those back is a matter of names as much as of depth.
   struct Mark {
     size_t vars = 0;
     size_t fns = 0;
-    size_t scopes = 0;
     size_t forced = 0;
+    size_t calls = 0;
+    std::vector<int32_t> parents;  // of the fns that exist now
+    std::vector<Scope> scopes;
   };
   Mark mark() const {
-    return {vars.size(), fns.size(), scopes_.size(), forced_cells.size()};
+    Mark m{vars.size(), fns.size(), forced_cells.size(), calls.size(), {},
+           scopes_};
+    m.parents.reserve(fns.size());
+    for (const Fn& f : fns) m.parents.push_back(f.parent);
+    return m;
   }
 
-  // Back to `m`. The functions and variables declared since are gone; what
-  // the ones before them captured stays, so a prelude keeps its analysis
-  // and only the program on top of it is redone.
+  // Back to `m`. The functions, variables, call edges and names declared
+  // since are gone, and a kept function nested under a dropped one is
+  // back under what it had; what the kept ones captured stays, so a
+  // prelude keeps its analysis and only the program on top of it is
+  // redone.
   //
   // A kept function that referred to a dropped variable would be left
   // naming nothing, so the free sets are pruned rather than trusted -- the
@@ -2348,16 +2360,12 @@ struct Resolver {
   void rollback(const Mark& m) {
     vars.resize(m.vars);
     fns.resize(m.fns);
-    calls.erase(std::remove_if(calls.begin(), calls.end(),
-                               [&](const std::pair<int32_t, int32_t>& e) {
-                                 return static_cast<size_t>(e.first) >=
-                                            m.fns ||
-                                        static_cast<size_t>(e.second) >= m.fns;
-                               }),
-                calls.end());
-    scopes_.resize(m.scopes);
+    calls.resize(m.calls);
+    scopes_ = m.scopes;
     forced_cells.resize(m.forced);
-    for (Fn& f : fns) {
+    for (size_t i = 0; i < fns.size(); ++i) {
+      Fn& f = fns[i];
+      f.parent = m.parents[i];
       for (auto it = f.free.begin(); it != f.free.end();) {
         it = static_cast<size_t>(*it) >= m.vars ? f.free.erase(it)
                                                 : std::next(it);
@@ -2410,6 +2418,8 @@ struct Resolver {
     number_captures();
     for (Fn& f : fns) {
       Func& mf = m.funcs[static_cast<size_t>(f.index)];
+      // Cleared first: after a rollback a kept function is numbered again.
+      mf.capture_names.clear();
       for (const int32_t v : f.free) {
         mf.capture_names.push_back(vars[static_cast<size_t>(v)].name);
       }
