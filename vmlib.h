@@ -701,8 +701,12 @@ struct MapObj : HeapObj {
     if (it == index.end()) return;
     auto& e = entries[it->second];
     index.erase(it);  // before the key it refers through is released
+    // Both die at the return, once the map is consistent again: either
+    // release can run a drop hook that writes into this map, and `e` would
+    // not survive the reallocation (ObjectObj::remove, the same).
+    const Value dead_key = std::move(e.first);
+    const Value dead_value = std::move(e.second);
     e.first = Value::uninit();
-    e.second = Value();
     --live;
     if (entries.size() > 8 && live * 2 < entries.size()) compact();
   }
@@ -720,7 +724,9 @@ struct MapObj : HeapObj {
   }
   void clear() {
     index.clear();  // first: it refers through keys the entries own
-    entries.clear();
+    // Released from a vector this map no longer owns, for the same reason.
+    const auto dead = std::move(entries);
+    entries.clear();  // a moved-from vector is valid but unspecified
     live = 0;
   }
 };

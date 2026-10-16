@@ -197,6 +197,42 @@ int main() {
     keeper = nullptr;
   }
 
+  // --- 6b. A Map's remove and clear release what they drop only once the
+  //         map is consistent: the hook below grows the very map whose
+  //         entry is going, past its storage's capacity. remove() is given
+  //         the entry's own key, so the map holds the only reference. ----
+  for (const bool clear : {false, true}) {
+    Runtime rt;
+    Runtime::Scope scope(rt);
+    static MapObj* map = nullptr;
+    Value mv = Value::make_map();
+    map = mv.as_map();
+    rt.set_drop_fn(nullptr, [](void*, HeapObj*) {
+      for (int64_t i = 100; i < 164; ++i) {
+        map->set(Value::make_int(i), Value::make_int(i));
+      }
+    });
+    {
+      Value k = Value::make_object();
+      k.as_object()->set(kDropKey, Value::make_int(0));
+      map->set(k, Value::make_int(1));
+    }
+    for (int64_t i = 2; i < 10; ++i) {
+      map->set(Value::make_int(i), Value::make_int(i));
+    }
+    if (clear) {
+      map->clear();
+      check(map->live == 64, "map clear: the hook's entries survive it");
+    } else {
+      map->remove(map->entries[0].first);
+      check(map->live == 72, "map remove: the hook's entries survive it");
+    }
+    rt.set_drop_fn(nullptr, nullptr);
+    mv = Value();
+    map = nullptr;
+    check(rt.live_objects() == 0, "map remove/clear: nothing left");
+  }
+
   // --- 7. Collect and HeapStats from a program: a dropped cycle is what
   //        collect() frees, and what is gone after. No allocation sits
   //        between the drop and the collect: under COREIR_GC_STRESS one
