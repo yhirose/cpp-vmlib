@@ -349,9 +349,7 @@ class Value {
 
   // Takes ownership of the +1 a fresh StrObj is born with.
   static Value make_str(std::string s) {
-    Value r = adopt(new StrObj(std::move(s)));
-    gc_safepoint();
-    return r;
+    return fresh(new StrObj(std::move(s)));
   }
 
   // The allocators' collection point. The fresh object is complete and held
@@ -482,6 +480,13 @@ class Value {
     Value r;
     r.tag_ = h->kind;
     r.data_ = reinterpret_cast<int64_t>(h);
+    return r;
+  }
+  // A freshly allocated object, as a Value: counted once, and a point where
+  // the collector may run (the object is already held, so it survives it).
+  static Value fresh(HeapObj* h) {
+    Value r = adopt(h);
+    gc_safepoint();
     return r;
   }
 
@@ -736,28 +741,14 @@ struct MapObj : HeapObj {
 inline Value Value::make_array(std::vector<Value> items) {
   auto* a = new ArrayObj();
   a->items = std::move(items);
-  Value r = adopt(a);
-  gc_safepoint();
-  return r;
+  return fresh(a);
 }
 
-inline Value Value::make_object() {
-  Value r = adopt(new ObjectObj());
-  gc_safepoint();
-  return r;
-}
-
-inline Value Value::make_map() {
-  Value r = adopt(new MapObj());
-  gc_safepoint();
-  return r;
-}
-
-inline Value Value::make_coroutine() {
-  Value r = adopt(new CoroObj());
-  gc_safepoint();
-  return r;
-}
+inline Value Value::make_object() { return fresh(new ObjectObj()); }
+inline Value Value::make_map() { return fresh(new MapObj()); }
+inline Value Value::make_coroutine() { return fresh(new CoroObj()); }
+inline Value Value::make_cell() { return fresh(new CellObj()); }
+inline Value Value::make_generator() { return fresh(new GeneratorObj()); }
 
 inline Value Value::make_native(std::string name, int32_t arity, void* ctx,
                                 NativeFn fn) {
@@ -766,30 +757,14 @@ inline Value Value::make_native(std::string name, int32_t arity, void* ctx,
   n->arity = arity;
   n->ctx = ctx;
   n->fn = fn;
-  Value r = adopt(n);
-  gc_safepoint();
-  return r;
-}
-
-inline Value Value::make_cell() {
-  Value r = adopt(new CellObj());
-  gc_safepoint();
-  return r;
-}
-
-inline Value Value::make_generator() {
-  Value r = adopt(new GeneratorObj());
-  gc_safepoint();
-  return r;
+  return fresh(n);
 }
 
 inline Value Value::make_closure(int32_t func, std::vector<Value> cells) {
   auto* c = new ClosureObj();
   c->func = func;
   c->cells = std::move(cells);
-  Value r = adopt(c);
-  gc_safepoint();
-  return r;
+  return fresh(c);
 }
 
 // Reference counting alone cannot free a cycle, and closures make cycles
@@ -4475,58 +4450,41 @@ inline const char* name_of(ConstKind k) {
 // value differently by construction. Each enum's values are contiguous from
 // 0 (a plain enum class with no explicit initializers), so the scan's upper
 // bound is just its last enumerator.
+namespace detail {
+// The scan every from_name specialization is: name_of over [0, last].
+template <class E>
+std::optional<E> scan_names(std::string_view s, E last) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(last); ++i) {
+    const auto e = static_cast<E>(i);
+    if (name_of(e) == s) return e;
+  }
+  return std::nullopt;
+}
+}  // namespace detail
+
 template <>
 inline std::optional<Tag> from_name<Tag>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastTag); ++i) {
-    const auto t = static_cast<Tag>(i);
-    if (name_of(t) == s) return t;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, kLastTag);
 }
-
 template <>
 inline std::optional<UnOp> from_name<UnOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastUnOp); ++i) {
-    const auto op = static_cast<UnOp>(i);
-    if (name_of(op) == s) return op;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, kLastUnOp);
 }
-
 template <>
 inline std::optional<BinOp> from_name<BinOp>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastBinOp); ++i) {
-    const auto op = static_cast<BinOp>(i);
-    if (name_of(op) == s) return op;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, kLastBinOp);
 }
-
 template <>
 inline std::optional<VarKind> from_name<VarKind>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(VarKind::Cell); ++i) {
-    const auto k = static_cast<VarKind>(i);
-    if (name_of(k) == s) return k;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, VarKind::Cell);
 }
-
 template <>
 inline std::optional<IntrinsicId> from_name<IntrinsicId>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastIntrinsic); ++i) {
-    const auto id = static_cast<IntrinsicId>(i);
-    if (name_of(id) == s) return id;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, kLastIntrinsic);
 }
-
 template <>
 inline std::optional<ConstKind> from_name<ConstKind>(std::string_view s) {
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(ConstKind::Str); ++i) {
-    const auto k = static_cast<ConstKind>(i);
-    if (name_of(k) == s) return k;
-  }
-  return std::nullopt;
+  return detail::scan_names(s, ConstKind::Str);
 }
 
 namespace detail {
@@ -4553,6 +4511,99 @@ struct Verifier {
     const Const& c = m.consts[static_cast<size_t>(i)];
     return c.kind != ConstKind::Str ||
            (c.bits >= 0 && static_cast<size_t>(c.bits) < m.str_consts.size());
+  }
+
+  // The subject aside, children come in (key, body) pairs plus an
+  // optional trailing default -- an even total means the last one is
+  // that default, the same parity test ObjectLit would use if it had
+  // an odd-shaped variant. Each key must be a Literal (verify() cannot
+  // evaluate an arbitrary expression at compile time), all of one
+  // ConstKind, and pairwise distinct -- ambiguity FnCompiler's table
+  // build has no way to resolve.
+  bool check_switch(NodeId id, const Node& n) {
+    if (n.num_children < 1) return fail("Switch needs a subject");
+    const auto sw = view_switch(m, id);
+    std::optional<ConstKind> kind;
+    std::vector<int64_t> seen_int;
+    std::vector<std::string> seen_str;
+    // Linear, like intern_pos: a switch has a handful of arms, and a
+    // set would cost more to build than the scan it saves. Written once
+    // over whichever pool the key's kind picked, so the two kinds
+    // cannot drift apart on what counts as a duplicate.
+    auto first_time = [](auto& seen, const auto& v) {
+      if (std::find(seen.begin(), seen.end(), v) != seen.end()) {
+        return false;
+      }
+      seen.push_back(v);
+      return true;
+    };
+    for (uint32_t i = 0; i < sw.arm_count; ++i) {
+      const NodeId key = switch_key(m, id, i);
+      if (!key.valid() || key.v >= m.nodes.size() ||
+          m.at(key).tag != Tag::Literal) {
+        return fail("switch key must be a literal");
+      }
+      if (!const_ok(m.at(key).a)) {
+        return fail("literal const index out of range");
+      }
+      const ConstKind k = m.const_kind(key);
+      if (k != ConstKind::Int && k != ConstKind::Str) {
+        return fail("switch key must be an int or a string");
+      }
+      if (!kind.has_value()) {
+        kind = k;
+      } else if (*kind != k) {
+        return fail("switch keys must share one const kind");
+      }
+      const bool fresh = k == ConstKind::Int
+                             ? first_time(seen_int, m.int_const(key))
+                             : first_time(seen_str, m.str_const(key));
+      if (!fresh) return fail("duplicate switch key");
+    }
+    return true;
+  }
+
+  // A Scope's local range, and its optional release list: a Block of
+  // VarRefs naming each slot it releases, once, in release order.
+  bool check_scope(NodeId id, const Node& n, const Func& f) {
+    if (n.a < 0 || n.a > n.b || n.b > f.num_locals) {
+      return fail("scope local range out of range");
+    }
+    if (n.num_children != 1 && n.num_children != 2) {
+      return fail("Scope takes a body and an optional release list");
+    }
+    if (n.num_children == 2) {
+      const NodeId list = m.child(id, 1);
+      if (!list.valid() || list.v >= m.nodes.size() ||
+          m.at(list).tag != Tag::Block) {
+        return fail("scope release list must be a Block of VarRef");
+      }
+      std::vector<std::pair<VarKind, int32_t>> seen;
+      for (uint32_t i = 0; i < m.num_children(list); ++i) {
+        const NodeId e = m.child(list, i);
+        if (!e.valid() || e.v >= m.nodes.size() ||
+            m.at(e).tag != Tag::VarRef) {
+          return fail("scope release list must be a Block of VarRef");
+        }
+        const auto v = view_varref(m, e);
+        if (v.kind == VarKind::Capture) {
+          return fail("scope release list cannot name a capture");
+        }
+        if (v.index < 0 || v.index >= slot_limit(f, v.kind)) {
+          return fail("scope release list entry out of range");
+        }
+        if (v.kind == VarKind::Local && (v.index < n.a || v.index >= n.b)) {
+          return fail("scope release list names a local outside its range");
+        }
+        for (const auto& s : seen) {
+          if (s.first == v.kind && s.second == v.index) {
+            return fail("scope release list repeats an entry");
+          }
+        }
+        seen.emplace_back(v.kind, v.index);
+      }
+    }
+    return true;
   }
 
   bool check_node(NodeId id, const Func& f, int loop_depth, int scope_depth) {
@@ -4600,55 +4651,9 @@ struct Verifier {
           return fail("If takes 2 or 3 children");
         }
         break;
-      // The subject aside, children come in (key, body) pairs plus an
-      // optional trailing default -- an even total means the last one is
-      // that default, the same parity test ObjectLit would use if it had
-      // an odd-shaped variant. Each key must be a Literal (verify() cannot
-      // evaluate an arbitrary expression at compile time), all of one
-      // ConstKind, and pairwise distinct -- ambiguity FnCompiler's table
-      // build has no way to resolve.
-      case Tag::Switch: {
-        if (n.num_children < 1) return fail("Switch needs a subject");
-        const auto sw = view_switch(m, id);
-        std::optional<ConstKind> kind;
-        std::vector<int64_t> seen_int;
-        std::vector<std::string> seen_str;
-        // Linear, like intern_pos: a switch has a handful of arms, and a
-        // set would cost more to build than the scan it saves. Written once
-        // over whichever pool the key's kind picked, so the two kinds
-        // cannot drift apart on what counts as a duplicate.
-        auto first_time = [](auto& seen, const auto& v) {
-          if (std::find(seen.begin(), seen.end(), v) != seen.end()) {
-            return false;
-          }
-          seen.push_back(v);
-          return true;
-        };
-        for (uint32_t i = 0; i < sw.arm_count; ++i) {
-          const NodeId key = switch_key(m, id, i);
-          if (!key.valid() || key.v >= m.nodes.size() ||
-              m.at(key).tag != Tag::Literal) {
-            return fail("switch key must be a literal");
-          }
-          if (!const_ok(m.at(key).a)) {
-            return fail("literal const index out of range");
-          }
-          const ConstKind k = m.const_kind(key);
-          if (k != ConstKind::Int && k != ConstKind::Str) {
-            return fail("switch key must be an int or a string");
-          }
-          if (!kind.has_value()) {
-            kind = k;
-          } else if (*kind != k) {
-            return fail("switch keys must share one const kind");
-          }
-          const bool fresh = k == ConstKind::Int
-                                 ? first_time(seen_int, m.int_const(key))
-                                 : first_time(seen_str, m.str_const(key));
-          if (!fresh) return fail("duplicate switch key");
-        }
+      case Tag::Switch:
+        if (!check_switch(id, n)) return false;
         break;
-      }
       // A closure's captures are cells, which outlive the frame that
       // built it. A plain Local cannot be one -- it dies with the frame -- so
       // naming one here is the mistake this rejects, and the front end's cue
@@ -4677,46 +4682,9 @@ struct Verifier {
       case Tag::CallValue:
         if (n.num_children < 1) return fail("CallValue needs a callee");
         break;
-      case Tag::Scope: {
-        if (n.a < 0 || n.a > n.b || n.b > f.num_locals) {
-          return fail("scope local range out of range");
-        }
-        if (n.num_children != 1 && n.num_children != 2) {
-          return fail("Scope takes a body and an optional release list");
-        }
-        if (n.num_children == 2) {
-          const NodeId list = m.child(id, 1);
-          if (!list.valid() || list.v >= m.nodes.size() ||
-              m.at(list).tag != Tag::Block) {
-            return fail("scope release list must be a Block of VarRef");
-          }
-          std::vector<std::pair<VarKind, int32_t>> seen;
-          for (uint32_t i = 0; i < m.num_children(list); ++i) {
-            const NodeId e = m.child(list, i);
-            if (!e.valid() || e.v >= m.nodes.size() ||
-                m.at(e).tag != Tag::VarRef) {
-              return fail("scope release list must be a Block of VarRef");
-            }
-            const auto v = view_varref(m, e);
-            if (v.kind == VarKind::Capture) {
-              return fail("scope release list cannot name a capture");
-            }
-            if (v.index < 0 || v.index >= slot_limit(f, v.kind)) {
-              return fail("scope release list entry out of range");
-            }
-            if (v.kind == VarKind::Local && (v.index < n.a || v.index >= n.b)) {
-              return fail("scope release list names a local outside its range");
-            }
-            for (const auto& s : seen) {
-              if (s.first == v.kind && s.second == v.index) {
-                return fail("scope release list repeats an entry");
-              }
-            }
-            seen.emplace_back(v.kind, v.index);
-          }
-        }
+      case Tag::Scope:
+        if (!check_scope(id, n, f)) return false;
         break;
-      }
       case Tag::Return:
         if (n.num_children > 1) return fail("Return takes 0 or 1 children");
         break;
@@ -4857,6 +4825,31 @@ struct Verifier {
   }
 };
 
+// A constant as the dumps print it: an integer as itself (what the dumps
+// always printed, and what a transcript may pin), and the other kinds by
+// value rather than as the pool index or bit pattern they are stored as.
+inline std::string const_text(const Const& c,
+                              const std::vector<std::string>& strs) {
+  switch (c.kind) {
+    case ConstKind::Nil:  return "nil";
+    case ConstKind::Int:  return std::to_string(c.bits);
+    case ConstKind::Bool: return c.bits ? "true" : "false";
+    case ConstKind::Double: {
+      double d;
+      std::memcpy(&d, &c.bits, sizeof d);
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.17g", d);
+      return buf;
+    }
+    case ConstKind::Str:
+      if (c.bits >= 0 && static_cast<size_t>(c.bits) < strs.size()) {
+        return "\"" + strs[static_cast<size_t>(c.bits)] + "\"";
+      }
+      return "\"?\"";
+  }
+  return "?";
+}
+
 struct Dumper {
   const Module& m;
   std::ostringstream out;
@@ -4869,7 +4862,8 @@ struct Dumper {
     indent(d);
     switch (n.tag) {
       case Tag::Literal:
-        out << "literal " << m.int_const(id);
+        out << "literal "
+            << const_text(m.consts[static_cast<size_t>(n.a)], m.str_consts);
         break;
       case Tag::VarRef: {
         auto v = view_varref(m, id);
@@ -5137,7 +5131,9 @@ inline std::string to_string(const Program& p) {
       out << "  " << j << "\t" << detail::name_of(in.op);
       switch (in.op) {
         case Op::LoadConst:
-          out << " r" << in.a << ", " << p.consts[in.b].bits;
+          out << " r" << in.a << ", "
+              << coreir::detail::const_text(
+                     p.consts[static_cast<size_t>(in.b)], p.str_consts);
           break;
         case Op::Neg:
         case Op::Not:

@@ -534,6 +534,39 @@ int main() {
              "a string after its entry was overwritten");
   }
 
+  // --- The IR and bytecode dumps print a constant by value: a string, a
+  // double, a bool and nil used to print as their pool index or bit pattern.
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.block({b.intrinsic(IntrinsicId::Print, {b.literal(7, p)}, p),
+                  b.intrinsic(IntrinsicId::Print, {b.str_literal("hi", p)}, p),
+                  b.intrinsic(IntrinsicId::Print,
+                              {b.double_literal(1.5, p)}, p),
+                  b.intrinsic(IntrinsicId::Print,
+                              {b.bool_literal(true, p)}, p),
+                  b.intrinsic(IntrinsicId::Print, {b.nil_literal(p)}, p)},
+                 p),
+         {}, {}});
+    const std::string ir = to_string(m);
+    for (const char* want :
+         {"literal 7 ", "literal \"hi\" ", "literal 1.5 ", "literal true ",
+          "literal nil "}) {
+      check(ir.find(want) != std::string::npos,
+            std::string("IR dump lacks '") + want + "'");
+    }
+    const std::string bc = vm::to_string(vm::compile(m));
+    for (const char* want :
+         {"r0, 7\t", "r0, \"hi\"\t", "r0, 1.5\t", "r0, true\t"}) {
+      check(bc.find(want) != std::string::npos,
+            std::string("bytecode dump lacks '") + want + "'");
+    }
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;
