@@ -17,7 +17,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -2931,38 +2930,22 @@ inline Value compare(BinOp op, const T& a, const T& b) {
   }
 }
 
-// An int against a double, exactly: widening the int to double first rounds
-// anything past 2^53, which made 2^53 and 2^53+1 both equal to 2^53.0 and
-// not to each other. NaN is unordered against everything.
-enum class Order { Less, Equal, Greater, Unordered };
+// 2^63: the first magnitude no int64 reaches, and so the range bound for
+// every int64 <-> double question (this comparison, ToInt).
+inline constexpr double kTwo63 = 9223372036854775808.0;
 
-inline Order compare_int_double(int64_t i, double d) {
-  if (std::isnan(d)) return Order::Unordered;
-  if (d >= 9223372036854775808.0) return Order::Less;     // 2^63 > any int64
-  if (d < -9223372036854775808.0) return Order::Greater;  // below -2^63
-  // Inside [-2^63, 2^63), the truncation fits an int64 and the fraction
-  // d - trunc(d) is exact.
-  const double whole = std::trunc(d);
-  const int64_t w = static_cast<int64_t>(whole);
-  if (i != w) return i < w ? Order::Less : Order::Greater;
-  const double frac = d - whole;
-  if (frac > 0) return Order::Less;
-  if (frac < 0) return Order::Greater;
-  return Order::Equal;
-}
-
-// The answer a comparison operator gives for an ordering.
-inline Value compare_order(BinOp op, Order o) {
-  switch (op) {
-    case BinOp::Eq: return Value::make_bool(o == Order::Equal);
-    case BinOp::Ne: return Value::make_bool(o != Order::Equal);
-    case BinOp::Lt: return Value::make_bool(o == Order::Less);
-    case BinOp::Le: return Value::make_bool(o == Order::Less || o == Order::Equal);
-    case BinOp::Gt: return Value::make_bool(o == Order::Greater);
-    case BinOp::Ge:
-      return Value::make_bool(o == Order::Greater || o == Order::Equal);
-    default: return Value();
-  }
+// An int against a non-NaN double, exactly, as -1, 0 or 1: widening the int
+// to double first rounds anything past 2^53, which made 2^53 and 2^53+1
+// both equal to 2^53.0 and not to each other.
+inline int compare_int_double(int64_t i, double d) {
+  if (d >= kTwo63) return -1;
+  if (d < -kTwo63) return 1;
+  // Inside [-2^63, 2^63) the truncation fits an int64, and the fraction
+  // d - w is exact.
+  const int64_t w = static_cast<int64_t>(d);
+  if (i != w) return i < w ? -1 : 1;
+  const double frac = d - static_cast<double>(w);
+  return frac > 0 ? -1 : frac < 0 ? 1 : 0;
 }
 
 // The check and the arithmetic in one walk of the operand ladder: on
@@ -3050,20 +3033,20 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
     }
   }
   // A comparison of an int with a double is made on the numbers, not on the
-  // int rounded to a double (arithmetic still widens, below).
-  if (is_comparison(op) && l.is_number() && r.is_number()) {
-    if (l.is_int() && r.is_double()) {
-      out = compare_order(op, compare_int_double(l.as_int(), r.as_double()));
-      return {};
+  // int rounded to a double (arithmetic still widens, below). NaN is
+  // unordered: false for everything but Ne.
+  if (l.is_int() != r.is_int() && l.is_number() && r.is_number() &&
+      is_comparison(op)) {
+    const double d = l.is_double() ? l.as_double() : r.as_double();
+    if (std::isnan(d)) {
+      out = Value::make_bool(op == BinOp::Ne);
+    } else if (l.is_int()) {
+      out = compare(op, compare_int_double(l.as_int(), d), 0);
+    } else {
+      // The double is on the left: ask the other way round and negate.
+      out = compare(op, -compare_int_double(r.as_int(), d), 0);
     }
-    if (l.is_double() && r.is_int()) {
-      // Asked the other way round, so the answer flips.
-      Order o = compare_int_double(r.as_int(), l.as_double());
-      if (o == Order::Less) o = Order::Greater;
-      else if (o == Order::Greater) o = Order::Less;
-      out = compare_order(op, o);
-      return {};
-    }
+    return {};
   }
   if (l.is_number() && r.is_number() && !is_int_only(op)) {
     if (op == BinOp::Mod) return "cannot mod double";
@@ -3156,29 +3139,23 @@ inline Value wrap_to(int64_t x) {
   return Value::make_int(static_cast<int64_t>(static_cast<T>(x)));
 }
 
-// Round-trip through float and back: the one thing a front end
-// for a language with both float and double cannot write itself,
-// the same way ToStr's digits are the one thing it cannot derive
-// from a number in-language. A magnitude beyond float's range is
-// undefined behavior for a bare static_cast<float> ([conv.double]
-// defines the cast only up to the destination type's range), so
-// that range is handled by hand rather than left to the cast --
-// Java and C# both round such a value to +-infinity, not a trap,
-// and NaN survives the round trip as NaN either way. The boundary
-// for that is not float's own max: round-to-nearest sends
-// everything below the midpoint between kFloatMax and 2^128 back
-// down to kFloatMax, the same as an in-range value would round,
-// and only that midpoint (kFloatOverflow) and beyond actually
-// overflows to infinity.
+// Round-trip through float and back: the one thing a front end for a
+// language with both float and double cannot write itself. A bare
+// static_cast<float> is undefined past float's range, so that range is
+// handled by hand: Java and C# round such a value to +-infinity, not a trap,
+// and NaN survives. The overflow threshold is not float's max but the
+// midpoint between it and 2^128 (kFloatOverflow): round-to-nearest sends
+// everything below that back down to the max.
 inline double to_float32(double d) {
   constexpr double kFloatMax =
       static_cast<double>(std::numeric_limits<float>::max());
   constexpr double kFloatOverflow = 0x1.ffffffp127;  // (2-2^-24)*2^127
   if (std::isnan(d)) return d;
-  if (d >= kFloatOverflow) return std::numeric_limits<double>::infinity();
-  if (d > kFloatMax) return kFloatMax;
-  if (d <= -kFloatOverflow) return -std::numeric_limits<double>::infinity();
-  if (d < -kFloatMax) return -kFloatMax;
+  const double mag = std::fabs(d);
+  if (mag >= kFloatOverflow) {
+    return std::copysign(std::numeric_limits<double>::infinity(), d);
+  }
+  if (mag > kFloatMax) return std::copysign(kFloatMax, d);
   return static_cast<double>(static_cast<float>(d));
 }
 
@@ -5644,18 +5621,16 @@ struct FnCompiler {
     top = base;
   }
 
-  // The shape most expressions share: compile the (one or two) operands,
-  // free their registers, and emit `op result, operand registers...` into a
+  // The shape most expressions share: compile the operand (or two), free
+  // their registers, and emit `op result, operand registers...` into a
   // fresh result register.
-  int32_t compile_op(Op op, uint32_t pos,
-                     std::initializer_list<NodeId> operands) {
+  int32_t compile_op(Op op, uint32_t pos, NodeId a, NodeId b = NodeId{}) {
     const int32_t base = top;
-    int32_t regs[2] = {0, 0};
-    size_t k = 0;
-    for (const NodeId o : operands) regs[k++] = compile_expr(o);
+    const int32_t ra = compile_expr(a);
+    const int32_t rb = b.valid() ? compile_expr(b) : 0;
     top = base;
     const int32_t r = alloc();
-    emit(op, r, regs[0], regs[1], pos);
+    emit(op, r, ra, rb, pos);
     return r;
   }
 
@@ -5675,7 +5650,8 @@ struct FnCompiler {
     }
   }
 
-  int32_t compile_try(NodeId id, const Node& n) {
+  int32_t compile_try(NodeId id) {
+    const Node& n = m.at(id);
     // dst sits below regs_base on purpose: the unwinder drops the
     // region's temps, and the result register must not be one of them.
     auto v = view_try(m, id);
@@ -5721,7 +5697,8 @@ struct FnCompiler {
     return dst;
   }
 
-  int32_t compile_intrinsic(NodeId id, const Node& n) {
+  int32_t compile_intrinsic(NodeId id) {
+    const Node& n = m.at(id);
     // Every intrinsic lowers the same way, because the three facts that
     // distinguish them are all stated elsewhere exactly once: how many
     // operands (coreir::intrinsic_arity), which opcode (op_of), and
@@ -5757,10 +5734,6 @@ struct FnCompiler {
       return r;
     }
     // Statement-shaped: the operands are a and b, and the value is nil.
-    // Print used to emit LoadConst 0 here, which read the first entry of
-    // a const pool that a program need not have -- latent until Block
-    // became a value-producing tag and put Print in value position for
-    // the first time.
     emit(op_of(v.id), a[0], a[1], 0, n.pos);
     const int32_t r = alloc();
     emit(Op::LoadNil, r, 0, 0, n.pos);
@@ -5773,7 +5746,8 @@ struct FnCompiler {
   // been emitted, so it is finished (finish_switch_table) after the
   // loop below rather than built up front the way compile_release_list
   // builds a Scope's.
-  int32_t compile_switch_expr(NodeId id, const Node& n, bool tail) {
+  int32_t compile_switch(NodeId id, bool tail) {
+    const Node& n = m.at(id);
     const auto sw = view_switch(m, id);
     const int32_t base = top;
     const int32_t s = compile_expr(sw.subject);
@@ -5824,12 +5798,12 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         auto v = view_unary(m, id);
-        return compile_op(op_of(v.op), n.pos, {v.operand});
+        return compile_op(op_of(v.op), n.pos, v.operand);
       }
       case Tag::Scope:
         return compile_scope(id, true, tail);
       case Tag::TryCatch:
-        return compile_try(id, n);
+        return compile_try(id);
       case Tag::Binary: {
         auto v = view_binary(m, id);
         // A failing division reports at its right operand, so that is the
@@ -5837,10 +5811,10 @@ struct FnCompiler {
         const uint32_t pos = (v.op == BinOp::Div || v.op == BinOp::Mod)
                                  ? m.at(v.rhs).pos
                                  : n.pos;
-        return compile_op(op_of(v.op), pos, {v.lhs, v.rhs});
+        return compile_op(op_of(v.op), pos, v.lhs, v.rhs);
       }
       case Tag::Intrinsic:
-        return compile_intrinsic(id, n);
+        return compile_intrinsic(id);
       // A block's value is its last child's; every child before it is a
       // statement. An empty block is nil.
       case Tag::Block: {
@@ -5878,7 +5852,7 @@ struct FnCompiler {
       }
 
       case Tag::Switch:
-        return compile_switch_expr(id, n, tail);
+        return compile_switch(id, tail);
 
       case Tag::MakeClosure: {
         auto v = view_make_closure(m, id);
@@ -5892,7 +5866,7 @@ struct FnCompiler {
         return r;
       }
       case Tag::Yield:
-        return compile_op(Op::Yield, n.pos, {m.child(id, 0)});
+        return compile_op(Op::Yield, n.pos, m.child(id, 0));
       case Tag::ArrayLit: {
         // Items go in one contiguous run, the same arrangement CallValue's
         // arguments use, so the instruction needs only a start and a count.
@@ -5923,7 +5897,7 @@ struct FnCompiler {
         return r;
       }
       case Tag::Index:
-        return compile_op(Op::Index, n.pos, {m.child(id, 0), m.child(id, 1)});
+        return compile_op(Op::Index, n.pos, m.child(id, 0), m.child(id, 1));
       case Tag::FieldGet: {
         auto v = view_field_get(m, id);
         const int32_t base = top;
@@ -7091,9 +7065,15 @@ struct Exec {
     deliver(ret_reg, std::move(call.result));
   }
 
+  // The long Op cases, as methods. Each leaves f.pc where the next
+  // instruction to run needs it (stepped, or left to the frames it pushed),
+  // so dispatch carries straight on after the call. Switch and ArraySlice
+  // are the long cases still inline.
+  //
   // A TailCall: the callee replaces this frame when it can, and is an
   // ordinary call when it cannot.
-  void tail_call(Frame& f, const Insn& in, SrcPos pos) {
+  void tail_call(Frame& f, const Insn& in) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value callee = f.regs[in.b];
     // The replacement needs a callee whose activation is a plain frame
     // (a native runs on the spot, a generator call builds an object),
@@ -7160,7 +7140,8 @@ struct Exec {
   }
 
   // GenReturn: close a generator, running the defers it had pending.
-  void gen_return(Frame& f, const Insn& in, SrcPos pos) {
+  void gen_return(Frame& f, const Insn& in) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value gv = f.regs[in.b];
     GeneratorObj* go = gen_operand(f, gv, "close");
     using St = GeneratorObj::State;
@@ -7191,10 +7172,12 @@ struct Exec {
       go->frame = GenFrame{};
     }
     f.regs[in.a] = gen_result(std::move(out), true);
+    ++f.pc;
   }
 
   // GenThrow: throw into a generator, at its yield when it is suspended.
-  void gen_throw(Frame& f, const Insn& in, SrcPos pos) {
+  [[noreturn]] void gen_throw(Frame& f, const Insn& in) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value gv = f.regs[in.b];
     GeneratorObj* go = gen_operand(f, gv, "throw into");
     using St = GeneratorObj::State;
@@ -7221,16 +7204,17 @@ struct Exec {
     throw Raise{std::move(v), yp, {}};
   }
 
-  // CoroResume. True when the instruction is finished and the pc should step;
-  // false when frames moved and dispatch carries on from the top frame.
-  bool coro_resume(Frame& f, const Insn& in, SrcPos pos) {
+  // CoroResume.
+  void coro_resume(Frame& f, const Insn& in) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value cv = f.regs[in.b];
     CoroObj* co = coro_operand(f, cv, "resume");
     using St = CoroObj::State;
     if (co->state == St::Running) fail(f, "coroutine already running");
     if (co->state == St::Done) {
       f.regs[in.a] = gen_result(Value(), true);
-      return true;
+      ++f.pc;
+      return;
     }
     if (co->state == St::Start) {
       // The first resume is the call (start_coro), and a trap at it
@@ -7242,7 +7226,7 @@ struct Exec {
       if (!start_coro(cv, sent, in.a, pos)) {
         f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
       }
-      return false;
+      return;
     }
     // Suspended: the parked frames come back, all of them at once,
     // so the depth bound is checked against the whole slice.
@@ -7252,22 +7236,26 @@ struct Exec {
     coreir_rt_poll();
     ++f.pc;
     unpark_coro(cv, in.a, &f.regs[in.c]);
-    return false;
   }
 
-  // CoroClose, with coro_resume's return convention.
-  bool coro_close(Frame& f, const Insn& in, SrcPos pos) {
+  // CoroClose.
+  void coro_close(Frame& f, const Insn& in) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value cv = f.regs[in.a];
     CoroObj* co = coro_operand(f, cv, "close");
     using St = CoroObj::State;
     if (co->state == St::Running) {
       fail(f, "cannot close a running coroutine");
     }
-    if (co->state == St::Done) return true;
+    if (co->state == St::Done) {
+      ++f.pc;
+      return;
+    }
     if (co->state == St::Start) {
       co->fn = Value();
       finish_coro(co);
-      return true;
+      ++f.pc;
+      return;
     }
     // Restore the slice and unwind it by hand, top frame first: each
     // frame's pending defers innermost mark first, then the frame
@@ -7300,7 +7288,6 @@ struct Exec {
       throw;
     }
     finish_coro(co);
-    return false;
   }
 
   void dispatch(size_t floor) {
@@ -7788,8 +7775,7 @@ struct Exec {
           const double d = v.as_double();
           // The comparison is in double, where int64's max rounds up to
           // 2^63 -- so >= on the top edge, > on the bottom.
-          if (std::isnan(d) || d >= 9223372036854775808.0 ||
-              d < -9223372036854775808.0) {
+          if (std::isnan(d) || d >= kTwo63 || d < -kTwo63) {
             fail(f, "double value out of int range");
           }
           f.regs[in.a] = Value::make_int(static_cast<int64_t>(d));
@@ -7870,7 +7856,7 @@ struct Exec {
           continue;
         }
         case Op::TailCall: {
-          tail_call(f, in, pos_at(ch, f.pc));
+          tail_call(f, in);
           continue;
         }
         case Op::Throw: {
@@ -7920,12 +7906,11 @@ struct Exec {
           continue;
         }
         case Op::GenReturn: {
-          gen_return(f, in, pos_at(ch, f.pc));
-          break;
+          gen_return(f, in);
+          continue;
         }
         case Op::GenThrow: {
-          gen_throw(f, in, pos_at(ch, f.pc));
-          break;
+          gen_throw(f, in);
         }
         case Op::Enqueue: {
           const Value& v = f.regs[in.a];
@@ -8000,7 +7985,7 @@ struct Exec {
           break;
         }
         case Op::CoroResume: {
-          if (coro_resume(f, in, pos_at(ch, f.pc))) break;
+          coro_resume(f, in);
           continue;
         }
         case Op::CoroYield: {
@@ -8029,7 +8014,7 @@ struct Exec {
           continue;
         }
         case Op::CoroClose: {
-          if (coro_close(f, in, pos_at(ch, f.pc))) break;
+          coro_close(f, in);
           continue;
         }
         case Op::CoroStatus: {

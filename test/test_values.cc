@@ -569,54 +569,62 @@ int main() {
 
   // --- An int against a double compares the numbers, not the int rounded to
   // a double: past 2^53 the two disagree, and Eq stopped being transitive
-  // (2^53 and 2^53+1 were both equal to 2^53.0, and not to each other). ---
+  // (2^53 and 2^53+1 were both equal to 2^53.0, and not to each other).
+  // Every row is checked in both operand orders. ----------------------------
   {
     using coreir::BinOp;
     using coreir::Value;
-    const auto holds = [&](BinOp op, Value l, Value r, bool want,
-                           const char* what) {
-      const Value got = coreir::apply_binop(op, l, r);
-      check(got.is_bool() && got.as_bool() == want, std::string(what));
+    const auto mirror = [](BinOp op) {
+      switch (op) {
+        case BinOp::Lt: return BinOp::Gt;
+        case BinOp::Le: return BinOp::Ge;
+        case BinOp::Gt: return BinOp::Lt;
+        case BinOp::Ge: return BinOp::Le;
+        default: return op;  // Eq, Ne
+      }
     };
-    const auto I = [](int64_t v) { return Value::make_int(v); };
-    const auto D = [](double v) { return Value::make_double(v); };
+    const auto holds = [&](BinOp op, int64_t i, double d, bool want,
+                           const char* what) {
+      const Value vi = Value::make_int(i);
+      const Value vd = Value::make_double(d);
+      const Value a = coreir::apply_binop(op, vi, vd);
+      const Value b = coreir::apply_binop(mirror(op), vd, vi);
+      check(a.is_bool() && a.as_bool() == want, std::string(what));
+      check(b.is_bool() && b.as_bool() == want,
+            std::string(what) + " (operands swapped)");
+    };
     const int64_t p53 = int64_t{1} << 53;
-    const double kTwo63 = 9223372036854775808.0;  // 2^63, not an int64
+    const double d53 = static_cast<double>(p53);
 
-    holds(BinOp::Eq, I(p53), D(9007199254740992.0), true, "2^53 == 2^53.0");
-    holds(BinOp::Eq, I(p53 + 1), D(9007199254740992.0), false,
-          "2^53+1 != 2^53.0");
-    holds(BinOp::Gt, I(p53 + 1), D(9007199254740992.0), true,
-          "2^53+1 > 2^53.0");
-    holds(BinOp::Lt, D(9007199254740992.0), I(p53 + 1), true,
-          "2^53.0 < 2^53+1 (flipped)");
-    holds(BinOp::Eq, I(p53), I(p53 + 1), false, "2^53 != 2^53+1");
+    holds(BinOp::Eq, p53, d53, true, "2^53 == 2^53.0");
+    holds(BinOp::Eq, p53 + 1, d53, false, "2^53+1 != 2^53.0");
+    holds(BinOp::Gt, p53 + 1, d53, true, "2^53+1 > 2^53.0");
+    check(!coreir::apply_binop(BinOp::Eq, Value::make_int(p53),
+                               Value::make_int(p53 + 1)).as_bool(),
+          "2^53 != 2^53+1");
 
-    holds(BinOp::Lt, I(INT64_MAX), D(kTwo63), true, "INT64_MAX < 2^63.0");
-    holds(BinOp::Eq, I(INT64_MAX), D(kTwo63), false, "INT64_MAX != 2^63.0");
-    holds(BinOp::Eq, I(INT64_MIN), D(-kTwo63), true, "INT64_MIN == -2^63.0");
-    holds(BinOp::Gt, I(INT64_MIN), D(-kTwo63 - 2048.0), true,
+    holds(BinOp::Lt, INT64_MAX, coreir::kTwo63, true, "INT64_MAX < 2^63.0");
+    holds(BinOp::Eq, INT64_MAX, coreir::kTwo63, false, "INT64_MAX != 2^63.0");
+    holds(BinOp::Eq, INT64_MIN, -coreir::kTwo63, true, "INT64_MIN == -2^63.0");
+    holds(BinOp::Gt, INT64_MIN, -coreir::kTwo63 - 2048.0, true,
           "INT64_MIN > the double below -2^63");
-    holds(BinOp::Lt, I(INT64_MAX), D(INFINITY), true, "INT64_MAX < inf");
-    holds(BinOp::Gt, I(INT64_MIN), D(-INFINITY), true, "INT64_MIN > -inf");
+    holds(BinOp::Lt, INT64_MAX, INFINITY, true, "INT64_MAX < inf");
+    holds(BinOp::Gt, INT64_MIN, -INFINITY, true, "INT64_MIN > -inf");
 
-    holds(BinOp::Lt, I(1), D(1.5), true, "1 < 1.5");
-    holds(BinOp::Gt, I(2), D(1.5), true, "2 > 1.5");
-    holds(BinOp::Gt, I(-1), D(-1.5), true, "-1 > -1.5");
-    holds(BinOp::Lt, I(-2), D(-1.5), true, "-2 < -1.5");
-    holds(BinOp::Eq, I(1), D(1.0), true, "1 == 1.0");
-    holds(BinOp::Eq, I(0), D(-0.0), true, "0 == -0.0");
-    holds(BinOp::Ge, D(1.5), I(1), true, "1.5 >= 1 (flipped)");
-    holds(BinOp::Le, D(1.0), I(1), true, "1.0 <= 1 (flipped)");
+    holds(BinOp::Lt, 1, 1.5, true, "1 < 1.5");
+    holds(BinOp::Gt, 2, 1.5, true, "2 > 1.5");
+    holds(BinOp::Gt, -1, -1.5, true, "-1 > -1.5");
+    holds(BinOp::Lt, -2, -1.5, true, "-2 < -1.5");
+    holds(BinOp::Eq, 1, 1.0, true, "1 == 1.0");
+    holds(BinOp::Eq, 0, -0.0, true, "0 == -0.0");
+    holds(BinOp::Le, 1, 1.0, true, "1 <= 1.0");
 
-    // NaN is unordered: false for everything but Ne, either way round.
+    // NaN is unordered: false for everything but Ne.
     for (const BinOp op : {BinOp::Eq, BinOp::Lt, BinOp::Le, BinOp::Gt,
                            BinOp::Ge}) {
-      holds(op, I(1), D(NAN), false, "int vs NaN");
-      holds(op, D(NAN), I(1), false, "NaN vs int");
+      holds(op, 1, NAN, false, "int vs NaN");
     }
-    holds(BinOp::Ne, I(1), D(NAN), true, "int != NaN");
-    holds(BinOp::Ne, D(NAN), I(1), true, "NaN != int");
+    holds(BinOp::Ne, 1, NAN, true, "int != NaN");
   }
 
   if (g_failures != 0) {
