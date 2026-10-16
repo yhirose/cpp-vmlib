@@ -5336,13 +5336,13 @@ struct FnCompiler {
     size_t scope_depth;              // open_scopes.size() at loop entry
     std::vector<size_t> break_jumps; // patched to the loop's exit
   };
-  std::vector<OpenLoop> open_loops;
+  std::vector<OpenLoop> open_loops{};
   struct OpenScope {
     int32_t first_local, end_local;
     bool has_defers;
     int32_t release_list;  // -1: release the range
   };
-  std::vector<OpenScope> open_scopes;
+  std::vector<OpenScope> open_scopes{};
   // Where the most recently closed Scope's exit-time DeferRunTo sits, so a
   // TryCatch whose body is that scope can end its guarded region before it
   // (a defer throwing at the body's fall-through exit escapes its own catch,
@@ -5362,7 +5362,7 @@ struct FnCompiler {
     size_t scope_depth;
     std::vector<std::pair<int32_t, int32_t>> holes;
   };
-  std::vector<OpenTry> open_tries;
+  std::vector<OpenTry> open_tries{};
 
   // Whether a CallValue here may be emitted as a TailCall: the function
   // asked for them (Func::tail_calls), no try body is open, and no open
@@ -6334,12 +6334,12 @@ struct Exec {
   // aimed at them, and a deque owns its elements outright, which leaves no
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
-  FrameStack frames;
+  FrameStack frames{};
 
   // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
   // to run after the entry frame, FIFO. C++-side handles, so the collector
   // sees them as roots the way it sees a frame's registers.
-  std::deque<Value> jobs;
+  std::deque<Value> jobs{};
 
   // One closure per Chunk::singleton function, built at its first
   // MakeClosure and handed out by every later one. Parallel to
@@ -6349,18 +6349,18 @@ struct Exec {
   // one Runtime, where a compiled Chunk is not -- the same reason
   // Program::natives resolve into Exec::natives. Being C++-side handles,
   // these are roots the collector sees the way it sees `jobs`.
-  std::vector<Value> singletons;
+  std::vector<Value> singletons{};
 
   // Program::natives, resolved against RunOptions::natives into NativeObj
   // values before the first instruction; Op::NativeRef reads one out.
-  std::vector<Value> natives;
+  std::vector<Value> natives{};
 
   // Where a call made from C++ (NativeCall::call) gets its result: a
   // ret_reg of kSyncRet names this slot instead of a register in the frame
   // below. One slot suffices because such calls nest as a stack -- an
   // inner one has been consumed before the outer one delivers.
   static constexpr int32_t kSyncRet = -2;
-  Value sync_result;
+  Value sync_result{};
 
   // Every coroutine ever handed to Enqueue, held until it finishes: the
   // scheduler's own reference, so a coroutine that parks and is then
@@ -6368,7 +6368,7 @@ struct Exec {
   // count rather than quietly freed -- Go's rule, that a goroutine is the
   // runtime's until it returns. Keyed by object for the O(1) erase at
   // finish_coro.
-  std::unordered_map<const CoroObj*, Value> scheduled;
+  std::unordered_map<const CoroObj*, Value> scheduled{};
 
   // The one place a coroutine becomes Done: from its bottom frame's Ret or
   // an unwind past it, from CoroClose, or from a first resume whose

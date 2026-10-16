@@ -31,6 +31,13 @@ foreach(t throw_safety deep_calls values closures lifetimes containers
   add_test(NAME ${t} COMMAND test_${t})
 endforeach()
 
+# The header stays clean under -Wall -Wextra: a host that builds with
+# -Werror includes it, so a warning here is that host's broken build.
+# verify's own code is warning-free, so anything this reports is vmlib.h's.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_verify PRIVATE -Wall -Wextra -Werror)
+endif()
+
 # two_tus: vmlib.h included from two translation units linked into one
 # binary, so a definition that is not inline shows up as a link error here
 # rather than in a host's build.
