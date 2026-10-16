@@ -379,10 +379,11 @@ int main() {
              {"a", "b"}, {}};
     sub.num_params = 2;
     m.funcs.push_back(sub);  // funcs[1]
-    print_closure(b, m, "D", p);  // funcs[2]
+    print_closure(b, m, "D", p);
+    const auto d = static_cast<int32_t>(m.funcs.size() - 1);
     const auto ten = [&] {
       return b.scope(0, 0,
-                     b.block({b.make_defer(b.make_closure(2, 0, p), p),
+                     b.block({b.make_defer(b.make_closure(d, 0, p), p),
                               b.literal(10, p)},
                              p),
                      p);

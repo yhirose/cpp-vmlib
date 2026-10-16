@@ -6320,11 +6320,7 @@ struct Exec {
       gf.gen_self = std::move(fr.gen_self);
       co->frames.push_back(std::move(gf));
     }
-    // The one reference the parked frames still hold, released only once
-    // they are out of `frames` (discard_top has the reason).
-    const Value self = std::move(frames[bottom]->coro_self);
-    frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(bottom),
-                 frames.end());
+    discard_to(bottom);
     co->state = CoroObj::State::Suspended;
   }
 
@@ -6725,7 +6721,7 @@ struct Exec {
       const std::string what =
           r.fatal_msg.empty() ? to_display(r.value) : r.fatal_msg;
       std::fprintf(stderr, "drop: %s\n", what.c_str());
-      while (self->frames.size() > floor) self->discard_top();
+      self->discard_to(floor);
     }
   }
 
@@ -6806,16 +6802,17 @@ struct Exec {
     if (bare) rt.set_drop_fn(this, &Exec::drop_hook);
   }
 
-  // Drops the top frame without pop_frame's ordered release. Out of the
-  // vector first, destroyed after: FrameDeleter releases what the frame
-  // still holds, a release can run a drop hook, and the hook pushes frames
-  // onto this same vector -- which a bare pop_back would still be in the
-  // middle of, destroying an element in the slot (or the buffer) the hook
-  // is writing to. Every frame that leaves `frames` one at a time goes
-  // through here.
+  // Drops the top frame without pop_frame's ordered release. Every frame
+  // leaves `frames` through here, never a bare pop_back or erase: the
+  // frame's releases can run a drop hook that pushes onto `frames`, so it
+  // is moved out first and destroyed once the vector is done with it.
   void discard_top() {
     FramePtr dead = std::move(frames.back());
     frames.pop_back();
+  }
+
+  void discard_to(size_t n) {
+    while (frames.size() > n) discard_top();
   }
 
   // Hands a popped frame's result to whoever asked for it. Ret and Yield
@@ -7795,7 +7792,7 @@ struct Exec {
             }
           } catch (Raise&) {
             finish_coro(co);
-            while (frames.size() > base) discard_top();
+            discard_to(base);
             throw;
           }
           finish_coro(co);

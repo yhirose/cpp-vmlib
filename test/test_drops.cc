@@ -723,7 +723,7 @@ int main() {
       Builder& b = g.b;
       // funcs[1], the destructor: print(self.name); rec(rec, 2000)
       g.m.funcs[1].body = b.block(
-          {g.print(b.index(g.local(0), g.str("name"), p)),
+          {g.m.funcs[1].body,
            b.call_value(b.make_closure(2, 0, p),
                         {b.make_closure(2, 0, p), b.literal(2000, p)}, p)},
           p);
