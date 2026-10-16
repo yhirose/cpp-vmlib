@@ -27,7 +27,6 @@
 
 #include <cstdio>
 #include <stdexcept>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -585,11 +584,11 @@ int main() {
   }
 
   // --- Misuse is reported, not read out of bounds: a name operation with no
-  // scope open, a capture number the function does not have, a function
-  // number_captures(m) has no Module::funcs entry for, and a FuncWriter
-  // parameter declared after a local. --------------------------------------
+  // scope open, an id for a function or variable that does not exist, a
+  // capture number the function does not have, a function with no
+  // Module::funcs entry, and a FuncWriter parameter declared after a local.
   {
-    const auto failure = [](const std::function<void()>& f) {
+    const auto failure = [](const auto& f) {
       try {
         f();
       } catch (const Failure& e) {
@@ -597,47 +596,36 @@ int main() {
       }
       return std::string();
     };
-    const auto starts = [](const std::string& s, const char* prefix) {
-      return s.rfind(prefix, 0) == 0;
-    };
-    {
-      Resolver rs;
-      const int32_t fn = rs.new_fn(-1);
-      check_eq(failure([&] { rs.declare("x", fn); }),
-               "Resolver: no scope is open; push_scope first",
-               "declare with no scope open");
-      check_eq(failure([&] { rs.alias("x", 0); }),
-               "Resolver: no scope is open; push_scope first",
-               "alias with no scope open");
-      check_eq(failure([&] { rs.declared_here("x"); }),
-               "Resolver: no scope is open; push_scope first",
-               "declared_here with no scope open");
-      check_eq(failure([&] { rs.pop_scope(); }),
-               "Resolver: no scope is open; push_scope first",
-               "pop_scope with no scope open");
-      rs.push_scope();
-      check_eq(failure([&] { rs.declared_order(3); }),
-               "Resolver: scope 3 is not open (1 are)",
-               "declared_order past the stack");
-      check_eq(failure([&] { rs.capture_name(fn, 0); }),
-               "Resolver: function 0 has no capture 0 (it has 0)",
-               "capture_name past the free set");
-      Module m;
-      const std::string got = failure([&] { rs.number_captures(m); });
-      if (!starts(got, "Resolver: function 0 has no Module::funcs entry")) {
-        check_eq(got, "Resolver: function 0 has no Module::funcs entry ...",
-                 "number_captures(m) with no funcs entry");
-      }
-    }
-    {
-      Module m;
-      FuncWriter w(m);
-      w.local("t");
-      check_eq(failure([&] { w.param("a"); }),
-               "FuncWriter: param 'a' after a local; the parameters are the "
-               "first locals, so declare them first",
-               "param after local");
-    }
+    const std::string no_scope = "Resolver: no scope is open; push_scope first";
+    Resolver rs;
+    const int32_t fn = rs.new_fn(-1);
+    check_eq(failure([&] { rs.declare("x", fn); }), no_scope, "declare");
+    check_eq(failure([&] { rs.declared_here("x"); }), no_scope, "declared_here");
+    check_eq(failure([&] { rs.pop_scope(); }), no_scope, "pop_scope");
+    rs.push_scope();
+    const int32_t x = rs.declare("x", fn);
+    check_eq(failure([&] { rs.declared_order(3); }),
+             "Resolver: scope 3 is not open (1 are)", "declared_order");
+    check_eq(failure([&] { rs.new_fn(7); }), "Resolver: no function 7",
+             "new_fn with a parent that does not exist");
+    check_eq(failure([&] { rs.declare("y", 7); }), "Resolver: no function 7",
+             "declare with an owner that does not exist");
+    check_eq(failure([&] { rs.use(9, fn); }), "Resolver: no variable 9",
+             "use of a variable that does not exist");
+    check_eq(failure([&] { rs.access(-1, x); }), "Resolver: no function -1",
+             "access from the 'no parent' id");
+    check_eq(failure([&] { rs.capture_name(fn, 0); }),
+             "Resolver: function 0 has no capture 0", "capture_name");
+    Module m;
+    check_eq(failure([&] { rs.number_captures(m); }),
+             "Resolver: function 0 has no Module::funcs entry",
+             "number_captures(m)");
+
+    FuncWriter w(m);
+    w.local("t");
+    check_eq(failure([&] { w.param("a"); }),
+             "FuncWriter: param 'a' after a local; parameters come first",
+             "param after local");
   }
 
   if (g_failures != 0) {

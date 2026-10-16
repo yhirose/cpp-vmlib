@@ -2156,6 +2156,7 @@ struct Resolver {
   std::vector<std::pair<int32_t, int32_t>> calls;
 
   int32_t new_fn(int32_t parent) {
+    check_parent(parent);
     fns.push_back({});
     fns.back().parent = parent;
     return static_cast<int32_t>(fns.size() - 1);
@@ -2167,6 +2168,8 @@ struct Resolver {
   // only once both exist, and the body is nested in the wrapper as far as
   // capture propagation goes even though the syntax nested neither.
   void set_parent(int32_t fn, int32_t parent) {
+    check_fn(fn);
+    check_parent(parent);
     fns[static_cast<size_t>(fn)].parent = parent;
     // What `fn` already reads from outside itself was propagated against the
     // parent it had a moment ago, and the new one is the frame that will
@@ -2178,7 +2181,7 @@ struct Resolver {
 
   void push_scope() { scopes_.emplace_back(); }
   void pop_scope() {
-    scope_at(scopes_.size() - 1);  // fails clearly when none is open
+    check_scope(scopes_.size() - 1);
     scopes_.pop_back();
   }
 
@@ -2191,7 +2194,8 @@ struct Resolver {
   // which leak an assignment outward but stop at the enclosing method.
   std::optional<int32_t> declared_at(size_t scope,
                                      const std::string& name) const {
-    const auto& mp = scope_at(scope).map;
+    check_scope(scope);
+    const auto& mp = scopes_[scope].map;
     const auto it = mp.find(name);
     if (it == mp.end()) return std::nullopt;
     return it->second;
@@ -2200,7 +2204,8 @@ struct Resolver {
   // Everything the block at `scope` declared, in order, one entry per
   // declare() -- including a name declared twice.
   const std::vector<int32_t>& declared_order(size_t scope) const {
-    return scope_at(scope).order;
+    check_scope(scope);
+    return scopes_[scope].order;
   }
 
   // A second name for a binding that already exists, in the innermost
@@ -2208,7 +2213,9 @@ struct Resolver {
   // re-entering its own parameters are both naming something already
   // declared, so neither belongs in the order table.
   void alias(const std::string& name, int32_t v) {
-    scope_at(scopes_.size() - 1).map[name] = v;
+    check_scope(scopes_.size() - 1);
+    check_var(v);
+    scopes_.back().map[name] = v;
   }
 
   // Whether the innermost scope already binds this name. The front end's,
@@ -2225,6 +2232,7 @@ struct Resolver {
   // use for the scope stack. `declare` is this plus an entry in the
   // innermost scope.
   int32_t declare_var(const std::string& name, int32_t owner) {
+    check_fn(owner);
     vars.push_back({name, owner, -1});
     return static_cast<int32_t>(vars.size() - 1);
   }
@@ -2240,10 +2248,10 @@ struct Resolver {
   // `global x` inside a function needs: the binding it creates belongs to
   // the module, not to the function the statement stands in.
   int32_t declare_in(size_t scope, const std::string& name, int32_t owner) {
-    Scope& sc = scope_at(scope);
+    check_scope(scope);
     const int32_t v = declare_var(name, owner);
-    sc.map[name] = v;
-    sc.order.push_back(v);
+    scopes_[scope].map[name] = v;
+    scopes_[scope].order.push_back(v);
     return v;
   }
 
@@ -2267,6 +2275,8 @@ struct Resolver {
   // function on the way down, each of which has to *carry* it -- see the
   // note on propagation above.
   void use(int32_t v, int32_t fn) {
+    check_var(v);
+    check_fn(fn);
     const int32_t owner = vars[static_cast<size_t>(v)].owner;
     if (owner == fn) return;
     for (int32_t k = fn; k != owner && k >= 0;
@@ -2282,7 +2292,10 @@ struct Resolver {
     return v;
   }
 
-  void force_cell(int32_t v) { forced_cells.push_back(v); }
+  void force_cell(int32_t v) {
+    check_var(v);
+    forced_cells.push_back(v);
+  }
 
   // `f` names `g`, and builds g's closure to do it.
   //
@@ -2292,7 +2305,11 @@ struct Resolver {
   // it captures. `use` alone closes the free sets for everything else,
   // because a closure built where its function is written rides the nesting
   // the walk already follows.
-  void note_call(int32_t f, int32_t g) { calls.push_back({f, g}); }
+  void note_call(int32_t f, int32_t g) {
+    check_fn(f);
+    check_fn(g);
+    calls.push_back({f, g});
+  }
 
   // Everything a callee needs from outside itself, its callers must supply.
   // Iterated because a call graph has cycles -- self-recursion is the case
@@ -2387,6 +2404,8 @@ struct Resolver {
   // Start one kept function over: it is about to be rebuilt from a new
   // program's syntax, so what the last one made it capture is not its own.
   void reset_fn(int32_t f, int32_t parent) {
+    check_fn(f);
+    check_parent(parent);
     Fn& fn = fns[static_cast<size_t>(f)];
     fn.parent = parent;
     fn.free.clear();
@@ -2429,9 +2448,7 @@ struct Resolver {
       const Fn& f = fns[k];
       if (f.index < 0 || static_cast<size_t>(f.index) >= m.funcs.size()) {
         coreir_rt::fail("Resolver: function " + std::to_string(k) +
-                            " has no Module::funcs entry (index " +
-                            std::to_string(f.index) +
-                            "); set Fn::index and size m.funcs first",
+                            " has no Module::funcs entry",
                         0, 0);
       }
       Func& mf = m.funcs[static_cast<size_t>(f.index)];
@@ -2448,11 +2465,11 @@ struct Resolver {
   // have pushed into Func::capture_names, for a caller building its funcs
   // after the numbering rather than before.
   const std::string& capture_name(int32_t fn, int32_t i) const {
+    check_fn(fn);
     const std::set<int32_t>& free = fns[static_cast<size_t>(fn)].free;
     if (i < 0 || static_cast<size_t>(i) >= free.size()) {
       coreir_rt::fail("Resolver: function " + std::to_string(fn) +
-                          " has no capture " + std::to_string(i) + " (it has " +
-                          std::to_string(free.size()) + ")",
+                          " has no capture " + std::to_string(i),
                       0, 0);
     }
     auto it = free.begin();
@@ -2470,6 +2487,8 @@ struct Resolver {
   // function (see the README's design note on why), so it can only be
   // written here, once both are known.
   int32_t capture_map(Module& m, int32_t builder, int32_t target) const {
+    check_fn(builder);
+    check_fn(target);
     std::vector<CaptureSrc> cs;
     const std::set<int32_t>& free = fns[static_cast<size_t>(target)].free;
     cs.reserve(free.size());
@@ -2504,6 +2523,8 @@ struct Resolver {
   // and the alternative is a std::out_of_range from access() naming
   // nothing.
   bool reaches(int32_t fn, int32_t v) const {
+    check_fn(fn);
+    check_var(v);
     if (vars[static_cast<size_t>(v)].owner == fn) return true;
     return fns[static_cast<size_t>(fn)].capture_index.count(v) != 0;
   }
@@ -2539,6 +2560,8 @@ struct Resolver {
 
   // How `fn` reaches `v`: its own cell, its own local slot, or a capture.
   std::pair<VarKind, int32_t> access(int32_t fn, int32_t v) const {
+    check_fn(fn);
+    check_var(v);
     if (vars[static_cast<size_t>(v)].owner == fn) {
       const auto& ci = fns[static_cast<size_t>(fn)].cell_index;
       const auto it = ci.find(v);
@@ -2575,12 +2598,15 @@ struct Resolver {
   // what a front end asks when it has to emit a CellFresh for a binding it
   // is about to initialize.
   int32_t cell_of(int32_t fn, int32_t v) const {
+    check_fn(fn);
+    check_var(v);
     const auto& ci = fns[static_cast<size_t>(fn)].cell_index;
     const auto it = ci.find(v);
     return it == ci.end() ? -1 : it->second;
   }
 
   int32_t num_cells(int32_t fn) const {
+    check_fn(fn);
     return static_cast<int32_t>(fns[static_cast<size_t>(fn)].cell_index.size());
   }
 
@@ -2590,23 +2616,35 @@ struct Resolver {
   // binders had reimplemented lookup() to ask them.
   std::vector<Scope> scopes_;
 
-  // The block at `scope`. Every name operation is relative to an open
-  // block, so asking past the stack is a front end's ordering bug, reported
-  // as one rather than read out of bounds.
-  const Scope& scope_at(size_t scope) const {
+  // The ids a front end hands in, checked where they arrive: a scope past
+  // the stack, a function or variable id that does not exist (a stale one
+  // after rollback, say) is that front end's ordering bug, reported as one
+  // rather than read out of bounds -- and, for an id stored for later (a
+  // parent, an owner, a call edge), reported where it was given rather
+  // than where it is first used. A parent may be -1, "none".
+  void check_scope(size_t scope) const {
+    if (scopes_.empty()) {
+      coreir_rt::fail("Resolver: no scope is open; push_scope first", 0, 0);
+    }
     if (scope >= scopes_.size()) {
-      coreir_rt::fail(scopes_.empty()
-                          ? std::string("Resolver: no scope is open; "
-                                        "push_scope first")
-                          : "Resolver: scope " + std::to_string(scope) +
-                                " is not open (" +
-                                std::to_string(scopes_.size()) + " are)",
+      coreir_rt::fail("Resolver: scope " + std::to_string(scope) +
+                          " is not open (" + std::to_string(scopes_.size()) +
+                          " are)",
                       0, 0);
     }
-    return scopes_[scope];
   }
-  Scope& scope_at(size_t scope) {
-    return const_cast<Scope&>(std::as_const(*this).scope_at(scope));
+  void check_fn(int32_t f) const {
+    if (f < 0 || static_cast<size_t>(f) >= fns.size()) {
+      coreir_rt::fail("Resolver: no function " + std::to_string(f), 0, 0);
+    }
+  }
+  void check_parent(int32_t f) const {
+    if (f != -1) check_fn(f);
+  }
+  void check_var(int32_t v) const {
+    if (v < 0 || static_cast<size_t>(v) >= vars.size()) {
+      coreir_rt::fail("Resolver: no variable " + std::to_string(v), 0, 0);
+    }
   }
 
   void claim_cell(int32_t v) {
@@ -2706,8 +2744,7 @@ class FuncWriter {
   Slot param(std::string name) {
     if (static_cast<size_t>(nparams_) != names_.size()) {
       coreir_rt::fail("FuncWriter: param '" + name +
-                          "' after a local; the parameters are the first "
-                          "locals, so declare them first",
+                          "' after a local; parameters come first",
                       0, 0);
     }
     ++nparams_;
@@ -5245,20 +5282,34 @@ inline std::string to_string(const Program& p) {
       const Insn& in = ch.code[j];
       const coreir::SrcPos sp = p.positions[ch.code_pos[j]];
       out << "  " << j << "\t" << detail::name_of(in.op);
+      // Every opcode listed, no default: an opcode added without a format
+      // here is a -Wswitch warning (an error in test_verify's build), not
+      // three registers printed whatever it reads.
       switch (in.op) {
         case Op::LoadConst:
           out << " r" << in.a << ", "
               << coreir::detail::const_text(
                      p.consts[static_cast<size_t>(in.b)], p.str_consts);
           break;
+        // a = dst
+        case Op::LoadNil: case Op::NewObject:
+          out << " r" << in.a;
+          break;
+        // a = dst, b = src
         case Op::Neg: case Op::BitNot: case Op::Not:
         case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
-        case Op::Move:
+        case Op::Move: case Op::Yield:
           out << " r" << in.a << ", r" << in.b;
           break;
-        case Op::LoadNil:
-          out << " r" << in.a;
+        // a = dst, b and c = operands
+        case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
+        case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt:
+        case Op::Ge: case Op::BitAnd: case Op::BitOr: case Op::BitXor:
+        case Op::Shl: case Op::Shr: case Op::UDiv: case Op::UMod:
+        case Op::UShr: case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
+        case Op::Index: case Op::SetIndex:
+          out << " r" << in.a << ", r" << in.b << ", r" << in.c;
           break;
         // The opcode's own name says which storage class this is, so the
         // operand is just the index into it.
@@ -5305,9 +5356,6 @@ inline std::string to_string(const Program& p) {
         case Op::Switch:
           out << " r" << in.a << ", table#" << in.b;
           break;
-        case Op::Out:
-        case Op::OutRaw:
-        case Op::In:
         case Op::Throw:
         case Op::DeferPush:
           out << " r" << in.a;
@@ -5325,26 +5373,29 @@ inline std::string to_string(const Program& p) {
         case Op::FieldSet:
           out << " r" << in.a << ", field[" << in.b << "], r" << in.c;
           break;
-        case Op::StrSlice:
-        case Op::ArraySlice:
-          out << " r" << in.a << ", r" << in.b << ", r" << in.c << ", r"
-              << in.d;
-          break;
-        default:
-          // An intrinsic's operands are as many as its arity, after the
-          // destination when it writes one (compile_intrinsic's layout);
-          // everything else left here is a three-register instruction.
-          if (const auto id = intrinsic_of(in.op)) {
-            const int32_t regs[] = {in.a, in.b, in.c, in.d};
-            const uint32_t n = coreir::intrinsic_arity(*id) +
-                               (intrinsic_has_dst(*id) ? 1 : 0);
-            for (uint32_t k = 0; k < n && k < 4; ++k) {
-              out << (k ? ", r" : " r") << regs[k];
-            }
-          } else {
-            out << " r" << in.a << ", r" << in.b << ", r" << in.c;
+        // An intrinsic's operands are its arity's worth, after the
+        // destination when it writes one -- compile_intrinsic's layout.
+        case Op::Out: case Op::OutRaw: case Op::In: case Op::Len:
+        case Op::ToStr: case Op::TypeOf: case Op::ToInt: case Op::ToDouble:
+        case Op::FMod: case Op::Pow: case Op::ArrayPush: case Op::ArrayPop:
+        case Op::ArrayConcat: case Op::ArrayFill: case Op::ObjectHas:
+        case Op::ObjectKeys: case Op::ObjectRemove: case Op::ArgCount:
+        case Op::Same: case Op::FnArity: case Op::Collect: case Op::HeapStats:
+        case Op::GenResume: case Op::GenReturn: case Op::GenThrow:
+        case Op::Enqueue: case Op::ToFloat32: case Op::StrSlice:
+        case Op::ArraySlice: case Op::StrByte: case Op::StrFromByte:
+        case Op::StrUpper: case Op::StrLower: case Op::NewMap:
+        case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
+        case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent: {
+          const coreir::IntrinsicId id = *intrinsic_of(in.op);
+          const int32_t regs[] = {in.a, in.b, in.c, in.d};
+          const uint32_t n =
+              coreir::intrinsic_arity(id) + (intrinsic_has_dst(id) ? 1 : 0);
+          for (uint32_t k = 0; k < n; ++k) {
+            out << (k ? ", r" : " r") << regs[k];
           }
           break;
+        }
       }
       out << "\t; " << sp.line << ":" << sp.col << "\n";
     }
@@ -5398,6 +5449,8 @@ namespace detail {
 // translation unit that reopens the namespace.
 using namespace coreir;
 
+// Built from its first two members (vm::compile); every later one has an
+// initializer, which -Wextra checks and test_verify's -Werror enforces.
 struct FnCompiler {
   const Module& m;
   Chunk& ch;
@@ -6394,6 +6447,8 @@ class FrameStack {
   std::vector<FramePtr> v_;
 };
 
+// Built from its first four members (vm::run); every later one has an
+// initializer, which -Wextra checks and test_verify's -Werror enforces.
 struct Exec {
   const Program& p;
   size_t max_frames;
@@ -6402,7 +6457,7 @@ struct Exec {
 
   // Declared before `frames`, so it outlives them: a frame returning to the
   // pool during teardown must find the pool still there.
-  FramePool pool;
+  FramePool pool{};
 
   // unique_ptr rather than a vector<Frame> or a deque<Frame>: a vector moves
   // its elements as it grows, which would invalidate every `captures` pointer
@@ -8152,7 +8207,7 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   coreir::Runtime::Scope scope(rt);
   const int depth = opts.max_call_depth;
   detail::Exec e{p, depth < 0 ? 0 : static_cast<size_t>(depth), rt,
-         opts.entry_frame_drops, {}};
+                 opts.entry_frame_drops};
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.
