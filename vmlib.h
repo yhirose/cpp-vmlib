@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -3787,10 +3788,20 @@ struct RunOptions {
 // leak.
 void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts);
 
-// The same with default options but for the depth bound, and on a heap of
-// the run's own.
-void run(const Program& p, coreir::Runtime& rt, int max_call_depth = 10000);
-void run(const Program& p, int max_call_depth = 10000);
+// The same with default options, and with default options but for the depth
+// bound; the last two on a heap of the run's own.
+//
+// The depth bound is a template over any integer type rather than an `int`
+// parameter: a braced `{}` converts to an int as readily as to a
+// RunOptions, so `run(p, rt, {})` -- "default options" -- used to mean a
+// depth of 0, and every call in the program trapped. A braced list cannot
+// deduce a template argument, so it can only reach RunOptions.
+void run(const Program& p, coreir::Runtime& rt);
+template <class Depth, class = std::enable_if_t<std::is_integral_v<Depth>>>
+void run(const Program& p, coreir::Runtime& rt, Depth max_call_depth);
+void run(const Program& p);
+template <class Depth, class = std::enable_if_t<std::is_integral_v<Depth>>>
+void run(const Program& p, Depth max_call_depth);
 
 }  // namespace vm
 
@@ -8021,13 +8032,24 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   rt.set_drop_fn(nullptr, nullptr);
 }
 
-inline void run(const Program& p, coreir::Runtime& rt, int max_call_depth) {
+inline void run(const Program& p, coreir::Runtime& rt) {
+  run(p, rt, RunOptions{});
+}
+
+template <class Depth, class>
+void run(const Program& p, coreir::Runtime& rt, Depth max_call_depth) {
   RunOptions opts;
-  opts.max_call_depth = max_call_depth;
+  opts.max_call_depth = static_cast<int>(max_call_depth);
   run(p, rt, opts);
 }
 
-inline void run(const Program& p, int max_call_depth) {
+inline void run(const Program& p) {
+  coreir::Runtime rt;
+  run(p, rt);
+}
+
+template <class Depth, class>
+void run(const Program& p, Depth max_call_depth) {
   coreir::Runtime rt;
   run(p, rt, max_call_depth);
 }

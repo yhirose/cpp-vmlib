@@ -354,6 +354,52 @@ int main() {
     check_eq(joined(), "0|1|", "cellfresh output");
   }
 
+  // --- run(p, rt, {}) is the default options, not a depth of 0: a braced
+  // list converts to an int as readily as to RunOptions, which used to make
+  // every call in the program trap. An explicit depth still bounds it. ----
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back({"one", 0, 0, b.literal(1, p), {}, {}});
+    m.funcs[0] = {"main", 0, 0,
+                  b.intrinsic(IntrinsicId::Print,
+                              {b.call_value(b.make_closure(1, 0, p), {}, p)},
+                              p),
+                  {}, {}};
+    const vm::Program prog = vm::compile(m);
+    const auto outcome = [&](auto&&... extra) {
+      g_out.clear();
+      Runtime rt;
+      try {
+        vm::run(prog, rt, extra...);
+      } catch (const Failure& e) {
+        return std::string(e.what());
+      }
+      return std::string();
+    };
+    check_eq(outcome(), "", "run(p, rt): failure");
+    check_eq(outcome(vm::RunOptions{}), "", "run(p, rt, RunOptions): failure");
+    check_eq(joined(), "1|", "run(p, rt, RunOptions): output");
+    g_out.clear();
+    {
+      Runtime rt;
+      std::string failure;
+      try {
+        vm::run(prog, rt, {});
+      } catch (const Failure& e) {
+        failure = e.what();
+      }
+      check_eq(failure, "", "run(p, rt, {}): failure");
+      check_eq(joined(), "1|", "run(p, rt, {}): output");
+    }
+    check_eq(outcome(0), "recursion limit exceeded",
+             "run(p, rt, 0): the bound still applies");
+    check_eq(outcome(10), "", "run(p, rt, 10): failure");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "closures: %d failure(s)\n", g_failures);
     return 1;
