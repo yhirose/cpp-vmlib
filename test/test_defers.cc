@@ -404,6 +404,89 @@ int main() {
     check_eq(joined(), "D|-10|D|20|", "scope operand output");
   }
 
+  // --- 11. A Break, Continue or Return inside a try leaves the scopes
+  // around it, and a defer of a scope *outside* the try that throws there
+  // belongs to whatever encloses that scope, not to this try; one of a
+  // scope *inside* the try is the try's. Ending the guarded region only at
+  // the body's fall-through exit (case 6) was not enough: the exit run of a
+  // jump is in the middle of the body.
+  {
+    enum class Exit { Break, Continue, Return };
+    // scope { defer D; try { <exit> } catch e { print "inner" }; print "after" }
+    // inside <host>, all under try { ... } catch e { print "outer" }; print "end"
+    const auto outer_defer = [&p](Exit exit) {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      auto pr = [&](const char* t) {
+        return b.intrinsic(IntrinsicId::Print, {b.str_literal(t, p)}, p);
+      };
+      m.funcs.push_back({});
+      m.funcs.push_back({"d", 0, 0, b.make_throw(b.str_literal("boom", p), p),
+                         {}, {}});  // funcs[1]
+      const NodeId leave = exit == Exit::Break      ? b.make_break(p)
+                           : exit == Exit::Continue ? b.make_continue(p)
+                                                    : b.make_return(b.literal(7, p), p);
+      const NodeId sc = b.scope(
+          0, 0,
+          b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                   b.make_try(0, leave, pr("inner"), p), pr("after")},
+                  p),
+          p);
+      m.funcs.push_back({"g", 1, 0,
+                         exit == Exit::Return ? sc : b.nil_literal(p),
+                         {"e"}, {}});  // funcs[2]
+      const NodeId host =
+          exit == Exit::Return
+              ? b.call_value(b.make_closure(2, 0, p), {}, p)
+              : b.block({b.make_while(b.bool_literal(true, p), sc, p),
+                         pr("after-loop")},
+                        p);
+      m.funcs[0] = {"main", 1, 0,
+                    b.block({b.make_try(0, host, pr("outer"), p), pr("end")},
+                            p),
+                    {"e"}, {}};
+      return m;
+    };
+    check_eq(run_module(outer_defer(Exit::Break), "outer defer, break"), "",
+             "outer defer, break: failure");
+    check_eq(joined(), "outer|end|", "outer defer, break output");
+    check_eq(run_module(outer_defer(Exit::Continue), "outer defer, continue"),
+             "", "outer defer, continue: failure");
+    check_eq(joined(), "outer|end|", "outer defer, continue output");
+    check_eq(run_module(outer_defer(Exit::Return), "outer defer, return"), "",
+             "outer defer, return: failure");
+    check_eq(joined(), "outer|end|", "outer defer, return output");
+  }
+  {
+    // while true { try { scope { defer D; break } } catch e { print "inner"; break } }
+    // The scope is inside the try, so its defer's throw is the try's.
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    auto pr = [&](const char* t) {
+      return b.intrinsic(IntrinsicId::Print, {b.str_literal(t, p)}, p);
+    };
+    m.funcs.push_back({});
+    m.funcs.push_back({"d", 0, 0, b.make_throw(b.str_literal("boom", p), p),
+                       {}, {}});
+    const NodeId inner_scope =
+        b.scope(0, 0,
+                b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                         b.make_break(p)},
+                        p),
+                p);
+    const NodeId loop = b.make_while(
+        b.bool_literal(true, p),
+        b.make_try(0, inner_scope, b.block({pr("inner"), b.make_break(p)}, p),
+                   p),
+        p);
+    m.funcs[0] = {"main", 1, 0, b.block({loop, pr("end")}, p), {"e"}, {}};
+    check_eq(run_module(m, "inner defer, break"), "",
+             "inner defer, break: failure");
+    check_eq(joined(), "inner|end|", "inner defer, break output");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "defers: %d failure(s)\n", g_failures);
     return 1;

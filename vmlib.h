@@ -5296,10 +5296,21 @@ struct FnCompiler {
   // (a defer throwing at the body's fall-through exit escapes its own catch,
   // the way culebra's does). -1 when the last scope had no defers.
   int32_t last_scope_defer_run_pc = -1;
-  // How many TryCatch bodies enclose the point being compiled. A tail call
+  // The TryCatch bodies enclosing the point being compiled. A tail call
   // inside one would drop the handler with the frame (Cleanup regions are
   // pc ranges of this chunk), so none is emitted there.
-  int try_depth = 0;
+  //
+  // `scope_depth` is open_scopes.size() at the try's entry: the scopes from
+  // there up are inside the try, the ones below it are not. A Break,
+  // Continue or Return inside the body leaves scopes of both kinds in one
+  // run of code, and what a defer of an outer scope throws there is not the
+  // try's to catch, so the run's outer part is recorded in `holes` -- pc
+  // ranges the try's guarded region skips.
+  struct OpenTry {
+    size_t scope_depth;
+    std::vector<std::pair<int32_t, int32_t>> holes;
+  };
+  std::vector<OpenTry> open_tries;
 
   // Whether a CallValue here may be emitted as a TailCall: the function
   // asked for them (Func::tail_calls), no try body is open, and no open
@@ -5309,7 +5320,7 @@ struct FnCompiler {
   // neither the declared order nor a cell refresh, so a scope that named one
   // keeps the ordinary call rather than silently getting the default order.
   bool tail_call_ok() const {
-    if (!ch.tail_calls || try_depth > 0) return false;
+    if (!ch.tail_calls || !open_tries.empty()) return false;
     for (const OpenScope& sc : open_scopes) {
       if (sc.has_defers || sc.release_list >= 0) return false;
     }
@@ -5372,10 +5383,20 @@ struct FnCompiler {
     if (ch.num_regs > regs_floor) {
       emit(Op::ClearRegs, regs_floor, ch.num_regs, 0, pos);
     }
+    // Where, for each open try, the scopes outside it begin in this run.
+    std::vector<int32_t> hole_start(open_tries.size(), -1);
     for (size_t i = open_scopes.size(); i > scope_depth; --i) {
+      for (size_t k = 0; k < open_tries.size(); ++k) {
+        if (open_tries[k].scope_depth == i) hole_start[k] = here();
+      }
       const OpenScope& sc = open_scopes[i - 1];
       if (sc.has_defers) emit(Op::DeferRunTo, 0, 0, 0, pos);
       emit_scope_release(sc, pos);
+    }
+    for (size_t k = 0; k < open_tries.size(); ++k) {
+      if (hole_start[k] >= 0) {
+        open_tries[k].holes.emplace_back(hole_start[k], here());
+      }
     }
   }
 
@@ -5592,9 +5613,10 @@ struct FnCompiler {
         const int32_t regs_base = top;
         const int32_t start = here();
         last_scope_defer_run_pc = -1;
-        ++try_depth;
+        open_tries.push_back({open_scopes.size(), {}});
         branch_into(dst, v.body, n.pos);
-        --try_depth;
+        const auto holes = std::move(open_tries.back().holes);
+        open_tries.pop_back();
         // A body that is a defer-declaring Scope runs those defers at its
         // fall-through exit; the guarded region ends before that run, so a
         // defer throwing there escapes its own catch (culebra's rule: a try
@@ -5608,8 +5630,21 @@ struct FnCompiler {
         // Otherwise the region ends where the handler starts: the jump over
         // it still belongs to the guarded range (a callee's resume pc can
         // point at it), while the handler must not be guarded by its own try.
-        ch.cleanups.push_back({start, body_end >= 0 ? body_end : handler_pc,
-                               0, 0, regs_base, handler_pc, v.caught_local});
+        // The guarded region is [start, end) less the holes a non-local
+        // exit left in it: one record per piece, all with this handler.
+        const int32_t end = body_end >= 0 ? body_end : handler_pc;
+        int32_t from = start;
+        const auto guard = [&](int32_t to) {
+          if (to > from) {
+            ch.cleanups.push_back({from, to, 0, 0, regs_base, handler_pc,
+                                   v.caught_local});
+          }
+        };
+        for (const auto& [hole_start, hole_end] : holes) {
+          guard(std::min(hole_start, end));
+          from = std::max(from, hole_end);
+        }
+        guard(end);
         branch_into(dst, v.handler, n.pos);
         patch(jend, here());
         return dst;
