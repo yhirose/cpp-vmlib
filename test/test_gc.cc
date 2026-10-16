@@ -204,12 +204,11 @@ int main() {
   for (const bool clear : {false, true}) {
     Runtime rt;
     Runtime::Scope scope(rt);
-    static MapObj* map = nullptr;
     Value mv = Value::make_map();
-    map = mv.as_map();
-    rt.set_drop_fn(nullptr, [](void*, HeapObj*) {
+    MapObj* map = mv.as_map();
+    rt.set_drop_fn(map, [](void* ctx, HeapObj*) {
       for (int64_t i = 100; i < 164; ++i) {
-        map->set(Value::make_int(i), Value::make_int(i));
+        static_cast<MapObj*>(ctx)->set(Value::make_int(i), Value::make_int(i));
       }
     });
     {
@@ -229,7 +228,6 @@ int main() {
     }
     rt.set_drop_fn(nullptr, nullptr);
     mv = Value();
-    map = nullptr;
     check(rt.live_objects() == 0, "map remove/clear: nothing left");
   }
 
