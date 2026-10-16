@@ -3663,6 +3663,17 @@ inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
   }
 }
 
+// The inverse of op_of(IntrinsicId), for a reader of bytecode (the dump)
+// that has the opcode and wants the intrinsic's shape back. A scan, since
+// only diagnostics ask.
+inline std::optional<coreir::IntrinsicId> intrinsic_of(Op op) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
+    const auto id = static_cast<coreir::IntrinsicId>(i);
+    if (op_of(id) == op) return id;
+  }
+  return std::nullopt;
+}
+
 struct Insn {
   Op op;
   int32_t a = 0;
@@ -5240,9 +5251,14 @@ inline std::string to_string(const Program& p) {
               << coreir::detail::const_text(
                      p.consts[static_cast<size_t>(in.b)], p.str_consts);
           break;
-        case Op::Neg:
-        case Op::Not:
+        case Op::Neg: case Op::BitNot: case Op::Not:
+        case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
+        case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
+        case Op::Move:
           out << " r" << in.a << ", r" << in.b;
+          break;
+        case Op::LoadNil:
+          out << " r" << in.a;
           break;
         // The opcode's own name says which storage class this is, so the
         // operand is just the index into it.
@@ -5301,6 +5317,7 @@ inline std::string to_string(const Program& p) {
         case Op::OwnedMark:
           break;
         case Op::Ret:
+          if (in.b != 0) out << " r" << in.a;  // b == 0: returns nil
           break;
         case Op::FieldGet:
           out << " r" << in.a << ", r" << in.b << ", field[" << in.c << "]";
@@ -5314,7 +5331,19 @@ inline std::string to_string(const Program& p) {
               << in.d;
           break;
         default:
-          out << " r" << in.a << ", r" << in.b << ", r" << in.c;
+          // An intrinsic's operands are as many as its arity, after the
+          // destination when it writes one (compile_intrinsic's layout);
+          // everything else left here is a three-register instruction.
+          if (const auto id = intrinsic_of(in.op)) {
+            const int32_t regs[] = {in.a, in.b, in.c, in.d};
+            const uint32_t n = coreir::intrinsic_arity(*id) +
+                               (intrinsic_has_dst(*id) ? 1 : 0);
+            for (uint32_t k = 0; k < n && k < 4; ++k) {
+              out << (k ? ", r" : " r") << regs[k];
+            }
+          } else {
+            out << " r" << in.a << ", r" << in.b << ", r" << in.c;
+          }
           break;
       }
       out << "\t; " << sp.line << ":" << sp.col << "\n";

@@ -12,6 +12,7 @@
 // Every case asserts the live heap-object count is zero afterward, so a
 // missing release fails the test rather than waiting for a leak checker.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -532,6 +533,48 @@ int main() {
         m.nodes[again.v].a)].bits)] = "other";
     check_eq(m.str_const(b.str_literal("hi", p)), "hi",
              "a string after its entry was overwritten");
+  }
+
+  // --- The bytecode dump shows each instruction's own operands: a unary op,
+  // Move and LoadNil used to print three registers whatever they read, Ret
+  // none, and an intrinsic as many as an Insn has rather than its arity. --
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    m.capture_maps.push_back({});
+    const auto x = [&] { return b.varref(VarKind::Local, 0, p); };
+    const auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    m.funcs.push_back(
+        {"main", 2, 0,
+         b.block({b.assign(VarKind::Local, 0, b.literal(5, p), p),
+                  print(b.unary(UnOp::BitNot, x(), p)),
+                  print(b.unary(UnOp::WrapI8, x(), p)),
+                  b.assign(VarKind::Local, 1, b.array_lit({}, p), p),
+                  b.intrinsic(IntrinsicId::ArrayPush,
+                              {b.varref(VarKind::Local, 1, p), x()}, p),
+                  print(b.intrinsic(IntrinsicId::Len,
+                                    {b.varref(VarKind::Local, 1, p)}, p))},
+                 p),
+         {"x", "a"}, {}});
+    const std::string dump = vm::to_string(vm::compile(m));
+    // How many operands the first instruction named `op` prints, or -1.
+    const auto operands = [&](const std::string& op) {
+      const size_t at = dump.find("\t" + op);
+      if (at == std::string::npos) return -1;
+      const size_t start = at + 1 + op.size();
+      const std::string ops = dump.substr(start, dump.find('\t', start) - start);
+      if (ops.empty()) return 0;
+      return static_cast<int>(std::count(ops.begin(), ops.end(), ',')) + 1;
+    };
+    check(operands("bitnot") == 2, "bitnot shows dst and src");
+    check(operands("wrapi8") == 2, "wrapi8 shows dst and src");
+    check(operands("loadnil") == 1, "loadnil shows its dst");
+    check(operands("ret") == 1, "ret shows the register it returns");
+    check(operands("len") == 2, "len (an intrinsic with a dst) shows dst and arg");
+    check(operands("arraypush") == 2, "arraypush (no dst) shows its two args");
   }
 
   // --- A NaN prints as "nan" whatever its sign bit: 0.0/0.0 sets it on x86
