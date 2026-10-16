@@ -3308,13 +3308,16 @@ inline std::string slice_error(const Value& recv, const Value& i,
 // itself. Shortest round-trip for a double, so 3.5 is "3.5" and not
 // "3.500000", and 4.0 is "4" -- whether a whole double should show a decimal
 // point is a language's decision, and a front end that cares builds the
-// string rather than asking this to grow a mode.
+// string rather than asking this to grow a mode. A NaN is "nan" whatever its
+// sign bit, which is not part of its value and not the same across machines
+// (0.0/0.0 sets it on x86, not on ARM).
 inline std::string to_display(const Value& v) {
   switch (v.tag()) {
     case ValueTag::Nil:  return "nil";
     case ValueTag::Bool: return v.as_bool() ? "true" : "false";
     case ValueTag::Int:  return std::to_string(v.as_int());
     case ValueTag::Double: {
+      if (std::isnan(v.as_double())) return "nan";
       char buf[32];
       auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v.as_double());
       return ec == std::errc() ? std::string(buf, end) : std::string("?");

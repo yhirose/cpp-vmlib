@@ -534,6 +534,18 @@ int main() {
              "a string after its entry was overwritten");
   }
 
+  // --- A NaN prints as "nan" whatever its sign bit: 0.0/0.0 sets it on x86
+  // and not on ARM, so "-nan" made the same program print differently. --
+  {
+    const double pos_nan = std::nan("");
+    check_eq(coreir::to_display(coreir::Value::make_double(pos_nan)), "nan",
+             "positive NaN displays as nan");
+    check_eq(coreir::to_display(coreir::Value::make_double(-pos_nan)), "nan",
+             "negative NaN displays as nan");
+    check_eq(coreir::to_display(coreir::Value::make_double(-INFINITY)), "-inf",
+             "the sign of an infinity stays");
+  }
+
   // --- Map keys are strict (README, "Maps"): 1 and 1.0 differ, 0.0 and -0.0
   // differ, and every NaN is one key whatever its sign bit. ----------------
   {
