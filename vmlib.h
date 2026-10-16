@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -3155,6 +3156,32 @@ inline Value wrap_to(int64_t x) {
   return Value::make_int(static_cast<int64_t>(static_cast<T>(x)));
 }
 
+// Round-trip through float and back: the one thing a front end
+// for a language with both float and double cannot write itself,
+// the same way ToStr's digits are the one thing it cannot derive
+// from a number in-language. A magnitude beyond float's range is
+// undefined behavior for a bare static_cast<float> ([conv.double]
+// defines the cast only up to the destination type's range), so
+// that range is handled by hand rather than left to the cast --
+// Java and C# both round such a value to +-infinity, not a trap,
+// and NaN survives the round trip as NaN either way. The boundary
+// for that is not float's own max: round-to-nearest sends
+// everything below the midpoint between kFloatMax and 2^128 back
+// down to kFloatMax, the same as an in-range value would round,
+// and only that midpoint (kFloatOverflow) and beyond actually
+// overflows to infinity.
+inline double to_float32(double d) {
+  constexpr double kFloatMax =
+      static_cast<double>(std::numeric_limits<float>::max());
+  constexpr double kFloatOverflow = 0x1.ffffffp127;  // (2-2^-24)*2^127
+  if (std::isnan(d)) return d;
+  if (d >= kFloatOverflow) return std::numeric_limits<double>::infinity();
+  if (d > kFloatMax) return kFloatMax;
+  if (d <= -kFloatOverflow) return -std::numeric_limits<double>::infinity();
+  if (d < -kFloatMax) return -kFloatMax;
+  return static_cast<double>(static_cast<float>(d));
+}
+
 inline Value apply_unop(UnOp op, const Value& v) {
   // One exhaustive switch rather than an is_wrap guard around a second one:
   // a width added to UnOp without a case here fails the build (-Wswitch),
@@ -5617,6 +5644,21 @@ struct FnCompiler {
     top = base;
   }
 
+  // The shape most expressions share: compile the (one or two) operands,
+  // free their registers, and emit `op result, operand registers...` into a
+  // fresh result register.
+  int32_t compile_op(Op op, uint32_t pos,
+                     std::initializer_list<NodeId> operands) {
+    const int32_t base = top;
+    int32_t regs[2] = {0, 0};
+    size_t k = 0;
+    for (const NodeId o : operands) regs[k++] = compile_expr(o);
+    top = base;
+    const int32_t r = alloc();
+    emit(op, r, regs[0], regs[1], pos);
+    return r;
+  }
+
   // Compiles `id` so its value is in the register `top` pointed at on entry,
   // and leaves `top` just past it. An operand run that an instruction reads
   // as `start + i` (CallValue's arguments, ArrayLit's items) is built from
@@ -5632,6 +5674,137 @@ struct FnCompiler {
       emit(Op::Move, slot, r, 0, m.at(id).pos);
     }
   }
+
+  int32_t compile_try(NodeId id, const Node& n) {
+    // dst sits below regs_base on purpose: the unwinder drops the
+    // region's temps, and the result register must not be one of them.
+    auto v = view_try(m, id);
+    const int32_t dst = alloc();
+    const int32_t regs_base = top;
+    const int32_t start = here();
+    last_scope_defer_run_pc = -1;
+    open_tries.push_back({open_scopes.size(), {}});
+    branch_into(dst, v.body, n.pos);
+    const auto holes = std::move(open_tries.back().holes);
+    open_tries.pop_back();
+    // A body that is a defer-declaring Scope runs those defers at its
+    // fall-through exit; the guarded region ends before that run, so a
+    // defer throwing there escapes its own catch (culebra's rule: a try
+    // ends its region before the body's fall-through defer run).
+    const int32_t body_end =
+        (m.at(v.body).tag == Tag::Scope && last_scope_defer_run_pc >= 0)
+            ? last_scope_defer_run_pc
+            : -1;
+    const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
+    const int32_t handler_pc = here();
+    // The guarded region is [start, end), less the holes a non-local exit
+    // left in it, one record per piece and all with this handler. It ends
+    // at the body's defer run when there is one; otherwise where the
+    // handler starts -- the jump over it still belongs to the range (a
+    // callee's resume pc can point at it), but the handler must not be
+    // guarded by its own try.
+    const int32_t end = body_end >= 0 ? body_end : handler_pc;
+    int32_t from = start;
+    const auto guard = [&](int32_t to) {
+      if (to > from) {
+        ch.cleanups.push_back({from, to, 0, 0, regs_base, handler_pc,
+                               v.caught_local});
+      }
+    };
+    for (const auto& [hole_start, hole_end] : holes) {
+      guard(std::min(hole_start, end));
+      from = std::max(from, hole_end);
+    }
+    guard(end);
+    branch_into(dst, v.handler, n.pos);
+    patch(jend, here());
+    return dst;
+  }
+
+  int32_t compile_intrinsic(NodeId id, const Node& n) {
+    // Every intrinsic lowers the same way, because the three facts that
+    // distinguish them are all stated elsewhere exactly once: how many
+    // operands (coreir::intrinsic_arity), which opcode (op_of), and
+    // whether it writes a result (intrinsic_has_dst). A new intrinsic
+    // needs no case here.
+    auto v = view_intrinsic(m, id);
+    // Print and PrintRaw are the two intrinsics that also have a
+    // statement lowering, and it does more than emit the opcode: the
+    // statement path ends by clearing the registers the operand used,
+    // so what was printed is not held live by a stale register. Going
+    // through it keeps that; the value position then yields nil.
+    if (v.id == IntrinsicId::Print || v.id == IntrinsicId::PrintRaw) {
+      compile_stmt(id);
+      const int32_t r = alloc();
+      emit(Op::LoadNil, r, 0, 0, n.pos);
+      return r;
+    }
+    // Three, because an Insn has four operand fields and the widest
+    // intrinsic spends one of them on its destination (a slice: the
+    // receiver and two bounds). An intrinsic wanting more would need a
+    // different instruction shape, not a bigger array here.
+    constexpr uint32_t kMaxArgs = 3;
+    const uint32_t argc = std::min(intrinsic_arity(v.id), kMaxArgs);
+    const int32_t base = top;
+    int32_t a[kMaxArgs] = {0, 0, 0};
+    for (uint32_t i = 0; i < argc; ++i) {
+      a[i] = compile_expr(m.child(id, i));
+    }
+    top = base;
+    if (intrinsic_has_dst(v.id)) {
+      const int32_t r = alloc();
+      emit(op_of(v.id), r, a[0], a[1], n.pos, a[2]);
+      return r;
+    }
+    // Statement-shaped: the operands are a and b, and the value is nil.
+    // Print used to emit LoadConst 0 here, which read the first entry of
+    // a const pool that a program need not have -- latent until Block
+    // became a value-producing tag and put Print in value position for
+    // the first time.
+    emit(op_of(v.id), a[0], a[1], 0, n.pos);
+    const int32_t r = alloc();
+    emit(Op::LoadNil, r, 0, 0, n.pos);
+    return r;
+  }
+
+  // Same shape as If -- every arm lands its value in one register --
+  // fanned out over a Chunk::switch_tables entry instead of a single
+  // JumpIfFalse. The table's arm pcs are only known once each arm has
+  // been emitted, so it is finished (finish_switch_table) after the
+  // loop below rather than built up front the way compile_release_list
+  // builds a Scope's.
+  int32_t compile_switch_expr(NodeId id, const Node& n, bool tail) {
+    const auto sw = view_switch(m, id);
+    const int32_t base = top;
+    const int32_t s = compile_expr(sw.subject);
+    top = base;
+    const int32_t r = alloc();
+    const int32_t table_idx = static_cast<int32_t>(ch.switch_tables.size());
+    ch.switch_tables.emplace_back();
+    emit(Op::Switch, s, table_idx, 0, n.pos);
+    std::vector<size_t> end_jumps;
+    if (!sw.default_body.valid()) {
+      emit(Op::LoadNil, r, 0, 0, n.pos);
+      end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+    }
+    std::vector<std::pair<NodeId, int32_t>> arm_keys;
+    arm_keys.reserve(sw.arm_count);
+    for (uint32_t i = 0; i < sw.arm_count; ++i) {
+      arm_keys.emplace_back(switch_key(m, id, i), here());
+      branch_into(r, switch_body(m, id, i), n.pos, tail);
+      end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+    }
+    int32_t default_pc = -1;
+    if (sw.default_body.valid()) {
+      default_pc = here();
+      branch_into(r, sw.default_body, n.pos, tail);
+      end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+    }
+    for (size_t j : end_jumps) patch(j, here());
+    finish_switch_table(table_idx, arm_keys, default_pc);
+    return r;
+  }
+
 
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
@@ -5651,119 +5824,23 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         auto v = view_unary(m, id);
-        const int32_t base = top;
-        const int32_t s = compile_expr(v.operand);
-        top = base;
-        const int32_t r = alloc();
-        emit(op_of(v.op), r, s, 0, n.pos);
-        return r;
+        return compile_op(op_of(v.op), n.pos, {v.operand});
       }
       case Tag::Scope:
         return compile_scope(id, true, tail);
-      case Tag::TryCatch: {
-        // dst sits below regs_base on purpose: the unwinder drops the
-        // region's temps, and the result register must not be one of them.
-        auto v = view_try(m, id);
-        const int32_t dst = alloc();
-        const int32_t regs_base = top;
-        const int32_t start = here();
-        last_scope_defer_run_pc = -1;
-        open_tries.push_back({open_scopes.size(), {}});
-        branch_into(dst, v.body, n.pos);
-        const auto holes = std::move(open_tries.back().holes);
-        open_tries.pop_back();
-        // A body that is a defer-declaring Scope runs those defers at its
-        // fall-through exit; the guarded region ends before that run, so a
-        // defer throwing there escapes its own catch (culebra's rule: a try
-        // ends its region before the body's fall-through defer run).
-        const int32_t body_end =
-            (m.at(v.body).tag == Tag::Scope && last_scope_defer_run_pc >= 0)
-                ? last_scope_defer_run_pc
-                : -1;
-        const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
-        const int32_t handler_pc = here();
-        // Otherwise the region ends where the handler starts: the jump over
-        // it still belongs to the guarded range (a callee's resume pc can
-        // point at it), while the handler must not be guarded by its own try.
-        // The guarded region is [start, end) less the holes a non-local
-        // exit left in it: one record per piece, all with this handler.
-        const int32_t end = body_end >= 0 ? body_end : handler_pc;
-        int32_t from = start;
-        const auto guard = [&](int32_t to) {
-          if (to > from) {
-            ch.cleanups.push_back({from, to, 0, 0, regs_base, handler_pc,
-                                   v.caught_local});
-          }
-        };
-        for (const auto& [hole_start, hole_end] : holes) {
-          guard(std::min(hole_start, end));
-          from = std::max(from, hole_end);
-        }
-        guard(end);
-        branch_into(dst, v.handler, n.pos);
-        patch(jend, here());
-        return dst;
-      }
+      case Tag::TryCatch:
+        return compile_try(id, n);
       case Tag::Binary: {
         auto v = view_binary(m, id);
-        const int32_t base = top;
-        const int32_t l = compile_expr(v.lhs);
-        const int32_t rr = compile_expr(v.rhs);
-        top = base;
-        const int32_t r = alloc();
         // A failing division reports at its right operand, so that is the
         // position stamped on the instruction that can trap.
         const uint32_t pos = (v.op == BinOp::Div || v.op == BinOp::Mod)
                                  ? m.at(v.rhs).pos
                                  : n.pos;
-        emit(op_of(v.op), r, l, rr, pos);
-        return r;
+        return compile_op(op_of(v.op), pos, {v.lhs, v.rhs});
       }
-      case Tag::Intrinsic: {
-        // Every intrinsic lowers the same way, because the three facts that
-        // distinguish them are all stated elsewhere exactly once: how many
-        // operands (coreir::intrinsic_arity), which opcode (op_of), and
-        // whether it writes a result (intrinsic_has_dst). A new intrinsic
-        // needs no case here.
-        auto v = view_intrinsic(m, id);
-        // Print and PrintRaw are the two intrinsics that also have a
-        // statement lowering, and it does more than emit the opcode: the
-        // statement path ends by clearing the registers the operand used,
-        // so what was printed is not held live by a stale register. Going
-        // through it keeps that; the value position then yields nil.
-        if (v.id == IntrinsicId::Print || v.id == IntrinsicId::PrintRaw) {
-          compile_stmt(id);
-          const int32_t r = alloc();
-          emit(Op::LoadNil, r, 0, 0, n.pos);
-          return r;
-        }
-        // Three, because an Insn has four operand fields and the widest
-        // intrinsic spends one of them on its destination (a slice: the
-        // receiver and two bounds). An intrinsic wanting more would need a
-        // different instruction shape, not a bigger array here.
-        constexpr uint32_t kMaxArgs = 3;
-        const uint32_t argc = std::min(intrinsic_arity(v.id), kMaxArgs);
-        const int32_t base = top;
-        int32_t a[kMaxArgs] = {0, 0, 0};
-        for (uint32_t i = 0; i < argc; ++i) {
-          a[i] = compile_expr(m.child(id, i));
-        }
-        top = base;
-        if (intrinsic_has_dst(v.id)) {
-          const int32_t r = alloc();
-          emit(op_of(v.id), r, a[0], a[1], n.pos, a[2]);
-          return r;
-        }
-        // Statement-shaped: the operands are a and b, and the value is nil.
-        // Print used to emit LoadConst 0 here, which read the first entry of
-        // a const pool that a program need not have -- latent until Block
-        // became a value-producing tag and put Print in value position for
-        // the first time.
-        emit(op_of(v.id), a[0], a[1], 0, n.pos);
-        const int32_t r = alloc();
-        emit(Op::LoadNil, r, 0, 0, n.pos);
-        return r;
-      }
+      case Tag::Intrinsic:
+        return compile_intrinsic(id, n);
       // A block's value is its last child's; every child before it is a
       // statement. An empty block is nil.
       case Tag::Block: {
@@ -5800,43 +5877,8 @@ struct FnCompiler {
         return r;
       }
 
-      // Same shape as If -- every arm lands its value in one register --
-      // fanned out over a Chunk::switch_tables entry instead of a single
-      // JumpIfFalse. The table's arm pcs are only known once each arm has
-      // been emitted, so it is finished (finish_switch_table) after the
-      // loop below rather than built up front the way compile_release_list
-      // builds a Scope's.
-      case Tag::Switch: {
-        const auto sw = view_switch(m, id);
-        const int32_t base = top;
-        const int32_t s = compile_expr(sw.subject);
-        top = base;
-        const int32_t r = alloc();
-        const int32_t table_idx = static_cast<int32_t>(ch.switch_tables.size());
-        ch.switch_tables.emplace_back();
-        emit(Op::Switch, s, table_idx, 0, n.pos);
-        std::vector<size_t> end_jumps;
-        if (!sw.default_body.valid()) {
-          emit(Op::LoadNil, r, 0, 0, n.pos);
-          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
-        }
-        std::vector<std::pair<NodeId, int32_t>> arm_keys;
-        arm_keys.reserve(sw.arm_count);
-        for (uint32_t i = 0; i < sw.arm_count; ++i) {
-          arm_keys.emplace_back(switch_key(m, id, i), here());
-          branch_into(r, switch_body(m, id, i), n.pos, tail);
-          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
-        }
-        int32_t default_pc = -1;
-        if (sw.default_body.valid()) {
-          default_pc = here();
-          branch_into(r, sw.default_body, n.pos, tail);
-          end_jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
-        }
-        for (size_t j : end_jumps) patch(j, here());
-        finish_switch_table(table_idx, arm_keys, default_pc);
-        return r;
-      }
+      case Tag::Switch:
+        return compile_switch_expr(id, n, tail);
 
       case Tag::MakeClosure: {
         auto v = view_make_closure(m, id);
@@ -5849,14 +5891,8 @@ struct FnCompiler {
         emit(Op::NativeRef, r, view_native_ref(m, id).index, 0, n.pos);
         return r;
       }
-      case Tag::Yield: {
-        const int32_t base = top;
-        const int32_t s = compile_expr(m.child(id, 0));
-        top = base;
-        const int32_t r = alloc();
-        emit(Op::Yield, r, s, 0, n.pos);
-        return r;
-      }
+      case Tag::Yield:
+        return compile_op(Op::Yield, n.pos, {m.child(id, 0)});
       case Tag::ArrayLit: {
         // Items go in one contiguous run, the same arrangement CallValue's
         // arguments use, so the instruction needs only a start and a count.
@@ -5886,15 +5922,8 @@ struct FnCompiler {
         }
         return r;
       }
-      case Tag::Index: {
-        const int32_t base = top;
-        const int32_t recv = compile_expr(m.child(id, 0));
-        const int32_t key = compile_expr(m.child(id, 1));
-        top = base;
-        const int32_t r = alloc();
-        emit(Op::Index, r, recv, key, n.pos);
-        return r;
-      }
+      case Tag::Index:
+        return compile_op(Op::Index, n.pos, {m.child(id, 0), m.child(id, 1)});
       case Tag::FieldGet: {
         auto v = view_field_get(m, id);
         const int32_t base = top;
@@ -7062,6 +7091,218 @@ struct Exec {
     deliver(ret_reg, std::move(call.result));
   }
 
+  // A TailCall: the callee replaces this frame when it can, and is an
+  // ordinary call when it cannot.
+  void tail_call(Frame& f, const Insn& in, SrcPos pos) {
+    const Value callee = f.regs[in.b];
+    // The replacement needs a callee whose activation is a plain frame
+    // (a native runs on the spot, a generator call builds an object),
+    // and a frame that is not the program's own (the entry frame's
+    // end is the program's end, with entry_frame_drops' rules). Any
+    // other shape is the call it would otherwise have been.
+    const bool replace =
+        callee.is_func() && !f.entry &&
+        !p.chunks[static_cast<size_t>(callee.as_closure()->func)]
+             .is_generator;
+    if (!replace) {
+      ++f.pc;
+      push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+      return;
+    }
+    const ClosureObj* c = callee.as_closure();
+    const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
+    // Checked while this is still the caller's frame: a wrong count
+    // traps at the call, as push_closure's would, rather than from a
+    // half-replaced frame whose pc already names the callee's code.
+    const int32_t taken = check_arity(nch, in.d, pos);
+    // This frame's exit, in full, before the callee starts: every
+    // temporary except the argument window, the locals
+    // last-slot-first, then each open scope's owned resolution
+    // innermost-first -- what falling off the end would do, minus
+    // per-scope interleaving, since the frame is going as a whole.
+    // The compiler has kept defers out of here (tail_call_ok), so
+    // there are none to run: neither f.defers nor f.defer_marks can
+    // be non-empty at a TailCall.
+    //
+    // The argument window stays: those registers hold the arguments'
+    // one counted reference across the exit, and the callee's locals
+    // move out of them below. They cannot be stashed anywhere else
+    // -- a release here can run a drop hook, which re-enters dispatch
+    // and may tail-call again, so a buffer Exec owned would be
+    // clobbered under them -- and copying them out would be an
+    // allocation per call, on the one path that exists to make a call
+    // loop cheap.
+    clear_refs(f, 0, static_cast<size_t>(in.c));
+    clear_refs(f, static_cast<size_t>(in.c + in.d), f.regs.size());
+    release_range(f, 0, static_cast<int32_t>(f.locals.size()));
+    while (!f.owned_marks.empty()) leave_scope_owned(f);
+    // The new activation, in place: ret_reg, gen_self, coro_self and
+    // the frame's position in the stack are the caller's and stay --
+    // a tail call from a coroutine's bottom frame is still that
+    // coroutine's bottom frame.
+    f.chunk = &nch;
+    f.pc = 0;
+    f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
+    for (int32_t i = 0; i < taken; ++i) {
+      f.locals[static_cast<size_t>(i)] =
+          std::move(f.regs[static_cast<size_t>(in.c + i)]);
+    }
+    for (int32_t i = taken; i < nch.num_params; ++i) {
+      f.locals[static_cast<size_t>(i)] = Value();
+    }
+    f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
+    f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
+    f.captures = c->cells;
+    f.argc = in.d;
+    // A tail call is the loop back-edge of a program written as calls:
+    // the same interrupt point Jump gives a While.
+    coreir_rt_poll();
+  }
+
+  // GenReturn: close a generator, running the defers it had pending.
+  void gen_return(Frame& f, const Insn& in, SrcPos pos) {
+    const Value gv = f.regs[in.b];
+    GeneratorObj* go = gen_operand(f, gv, "close");
+    using St = GeneratorObj::State;
+    Value out = f.regs[in.c];
+    if (go->state == St::Suspended) {
+      // Close: restore the activation, run its pending defers --
+      // innermost first, as the yield point's own Return would --
+      // then discard the frame without executing any more of it. A
+      // defer that throws propagates to this call; the generator is
+      // done either way (the popped frame releases what it held).
+      check_can_push(pos);
+      frames.push_back(unpark_frame(gv, -1));
+      Frame& gf = *frames.back();
+      try {
+        run_pending_defers(gf, pos);
+      } catch (Raise&) {
+        go->state = St::Done;
+        frames.pop();
+        throw;
+      }
+      go->state = St::Done;
+      frames.pop();
+    } else {
+      // Start never ran (nothing registered, nothing to run); Done
+      // holds nothing either. Both just settle the state and drop
+      // whatever arguments a Start-state activation still packaged.
+      go->state = St::Done;
+      go->frame = GenFrame{};
+    }
+    f.regs[in.a] = gen_result(std::move(out), true);
+  }
+
+  // GenThrow: throw into a generator, at its yield when it is suspended.
+  void gen_throw(Frame& f, const Insn& in, SrcPos pos) {
+    const Value gv = f.regs[in.b];
+    GeneratorObj* go = gen_operand(f, gv, "throw into");
+    using St = GeneratorObj::State;
+    Value v = f.regs[in.c];
+    if (go->state != St::Suspended) {
+      // No frame for it to land in: the generator is done (a Start
+      // activation drops what it packaged) and the throw is this
+      // instruction's own, at its own pc like a Throw.
+      go->state = St::Done;
+      go->frame = GenFrame{};
+      throw Raise{std::move(v), pos, {}};
+    }
+    // Re-enter at the Yield itself rather than after it, so the
+    // regions enclosing the yield -- its handlers, its defers -- are
+    // the ones the throw crosses; the resumer's pc advances as for a
+    // call, which is where the throw lands if the body lets it out.
+    check_can_push(pos);
+    const size_t at = static_cast<size_t>(go->frame.pc) - 1;
+    auto nf = unpark_frame(gv, in.a);
+    nf->pc = at;
+    const SrcPos yp = pos_at(*nf->chunk, at);
+    ++f.pc;
+    frames.push_back(std::move(nf));
+    throw Raise{std::move(v), yp, {}};
+  }
+
+  // CoroResume. True when the instruction is finished and the pc should step;
+  // false when frames moved and dispatch carries on from the top frame.
+  bool coro_resume(Frame& f, const Insn& in, SrcPos pos) {
+    const Value cv = f.regs[in.b];
+    CoroObj* co = coro_operand(f, cv, "resume");
+    using St = CoroObj::State;
+    if (co->state == St::Running) fail(f, "coroutine already running");
+    if (co->state == St::Done) {
+      f.regs[in.a] = gen_result(Value(), true);
+      return true;
+    }
+    if (co->state == St::Start) {
+      // The first resume is the call (start_coro), and a trap at it
+      // is this instruction's own. A callee that completed on the
+      // spot left no frame to suspend, so the coroutine is done at
+      // once, with the answer that call delivered into in.a.
+      const Value sent = f.regs[in.c];
+      ++f.pc;
+      if (!start_coro(cv, sent, in.a, pos)) {
+        f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
+      }
+      return false;
+    }
+    // Suspended: the parked frames come back, all of them at once,
+    // so the depth bound is checked against the whole slice.
+    if (frames.size() + co->frames.size() > max_frames) {
+      raise_trap("recursion limit exceeded", pos);
+    }
+    coreir_rt_poll();
+    ++f.pc;
+    unpark_coro(cv, in.a, &f.regs[in.c]);
+    return false;
+  }
+
+  // CoroClose, with coro_resume's return convention.
+  bool coro_close(Frame& f, const Insn& in, SrcPos pos) {
+    const Value cv = f.regs[in.a];
+    CoroObj* co = coro_operand(f, cv, "close");
+    using St = CoroObj::State;
+    if (co->state == St::Running) {
+      fail(f, "cannot close a running coroutine");
+    }
+    if (co->state == St::Done) return true;
+    if (co->state == St::Start) {
+      co->fn = Value();
+      finish_coro(co);
+      return true;
+    }
+    // Restore the slice and unwind it by hand, top frame first: each
+    // frame's pending defers innermost mark first, then the frame
+    // itself (its locals last-slot-first, as any return would). A
+    // generator activation caught in the slice is finished with it.
+    // A defer that throws propagates to this call; the coroutine is
+    // done either way.
+    if (frames.size() + co->frames.size() > max_frames) {
+      raise_trap("recursion limit exceeded", pos);
+    }
+    const size_t base = frames.size();
+    ++f.pc;
+    unpark_coro(cv, -1, nullptr);
+    try {
+      while (frames.size() > base) {
+        Frame& t = *frames.back();
+        run_pending_defers(t, pos);
+        finish_gen(t);
+        pop_frame();
+      }
+    } catch (Raise&) {
+      // The rest of the slice goes the way the normal path sends it,
+      // its generators finished with it -- including the frame whose
+      // defer threw.
+      finish_coro(co);
+      while (frames.size() > base) {
+        finish_gen(*frames.back());
+        pop_frame();
+      }
+      throw;
+    }
+    finish_coro(co);
+    return false;
+  }
+
   void dispatch(size_t floor) {
     while (true) {
       Frame& f = *frames.back();
@@ -7569,39 +7810,7 @@ struct Exec {
             fail(f, std::string("cannot convert ") + type_name(v.tag()) +
                         " to float");
           }
-          // Round-trip through float and back: the one thing a front end
-          // for a language with both float and double cannot write itself,
-          // the same way ToStr's digits are the one thing it cannot derive
-          // from a number in-language. A magnitude beyond float's range is
-          // undefined behavior for a bare static_cast<float> ([conv.double]
-          // defines the cast only up to the destination type's range), so
-          // that range is handled by hand rather than left to the cast --
-          // Java and C# both round such a value to +-infinity, not a trap,
-          // and NaN survives the round trip as NaN either way. The boundary
-          // for that is not float's own max: round-to-nearest sends
-          // everything below the midpoint between kFloatMax and 2^128 back
-          // down to kFloatMax, the same as an in-range value would round,
-          // and only that midpoint (kFloatOverflow) and beyond actually
-          // overflows to infinity.
-          const double d = v.as_number();
-          constexpr double kFloatMax =
-              static_cast<double>(std::numeric_limits<float>::max());
-          constexpr double kFloatOverflow = 0x1.ffffffp127;  // (2-2^-24)*2^127
-          double result;
-          if (std::isnan(d)) {
-            result = d;
-          } else if (d >= kFloatOverflow) {
-            result = std::numeric_limits<double>::infinity();
-          } else if (d > kFloatMax) {
-            result = kFloatMax;
-          } else if (d <= -kFloatOverflow) {
-            result = -std::numeric_limits<double>::infinity();
-          } else if (d < -kFloatMax) {
-            result = -kFloatMax;
-          } else {
-            result = static_cast<double>(static_cast<float>(d));
-          }
-          f.regs[in.a] = Value::make_double(result);
+          f.regs[in.a] = Value::make_double(to_float32(v.as_number()));
           break;
         }
         case Op::FMod: {
@@ -7661,70 +7870,7 @@ struct Exec {
           continue;
         }
         case Op::TailCall: {
-          const SrcPos pos = pos_at(ch, f.pc);
-          const Value callee = f.regs[in.b];
-          // The replacement needs a callee whose activation is a plain frame
-          // (a native runs on the spot, a generator call builds an object),
-          // and a frame that is not the program's own (the entry frame's
-          // end is the program's end, with entry_frame_drops' rules). Any
-          // other shape is the call it would otherwise have been.
-          const bool replace =
-              callee.is_func() && !f.entry &&
-              !p.chunks[static_cast<size_t>(callee.as_closure()->func)]
-                   .is_generator;
-          if (!replace) {
-            ++f.pc;
-            push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
-            continue;
-          }
-          const ClosureObj* c = callee.as_closure();
-          const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
-          // Checked while this is still the caller's frame: a wrong count
-          // traps at the call, as push_closure's would, rather than from a
-          // half-replaced frame whose pc already names the callee's code.
-          const int32_t taken = check_arity(nch, in.d, pos);
-          // This frame's exit, in full, before the callee starts: every
-          // temporary except the argument window, the locals
-          // last-slot-first, then each open scope's owned resolution
-          // innermost-first -- what falling off the end would do, minus
-          // per-scope interleaving, since the frame is going as a whole.
-          // The compiler has kept defers out of here (tail_call_ok), so
-          // there are none to run: neither f.defers nor f.defer_marks can
-          // be non-empty at a TailCall.
-          //
-          // The argument window stays: those registers hold the arguments'
-          // one counted reference across the exit, and the callee's locals
-          // move out of them below. They cannot be stashed anywhere else
-          // -- a release here can run a drop hook, which re-enters dispatch
-          // and may tail-call again, so a buffer Exec owned would be
-          // clobbered under them -- and copying them out would be an
-          // allocation per call, on the one path that exists to make a call
-          // loop cheap.
-          clear_refs(f, 0, static_cast<size_t>(in.c));
-          clear_refs(f, static_cast<size_t>(in.c + in.d), f.regs.size());
-          release_range(f, 0, static_cast<int32_t>(f.locals.size()));
-          while (!f.owned_marks.empty()) leave_scope_owned(f);
-          // The new activation, in place: ret_reg, gen_self, coro_self and
-          // the frame's position in the stack are the caller's and stay --
-          // a tail call from a coroutine's bottom frame is still that
-          // coroutine's bottom frame.
-          f.chunk = &nch;
-          f.pc = 0;
-          f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-          for (int32_t i = 0; i < taken; ++i) {
-            f.locals[static_cast<size_t>(i)] =
-                std::move(f.regs[static_cast<size_t>(in.c + i)]);
-          }
-          for (int32_t i = taken; i < nch.num_params; ++i) {
-            f.locals[static_cast<size_t>(i)] = Value();
-          }
-          f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
-          f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
-          f.captures = c->cells;
-          f.argc = in.d;
-          // A tail call is the loop back-edge of a program written as calls:
-          // the same interrupt point Jump gives a While.
-          coreir_rt_poll();
+          tail_call(f, in, pos_at(ch, f.pc));
           continue;
         }
         case Op::Throw: {
@@ -7774,65 +7920,12 @@ struct Exec {
           continue;
         }
         case Op::GenReturn: {
-          const SrcPos pos = pos_at(ch, f.pc);
-          const Value gv = f.regs[in.b];
-          GeneratorObj* go = gen_operand(f, gv, "close");
-          using St = GeneratorObj::State;
-          Value out = f.regs[in.c];
-          if (go->state == St::Suspended) {
-            // Close: restore the activation, run its pending defers --
-            // innermost first, as the yield point's own Return would --
-            // then discard the frame without executing any more of it. A
-            // defer that throws propagates to this call; the generator is
-            // done either way (the popped frame releases what it held).
-            check_can_push(pos);
-            frames.push_back(unpark_frame(gv, -1));
-            Frame& gf = *frames.back();
-            try {
-              run_pending_defers(gf, pos);
-            } catch (Raise&) {
-              go->state = St::Done;
-              frames.pop();
-              throw;
-            }
-            go->state = St::Done;
-            frames.pop();
-          } else {
-            // Start never ran (nothing registered, nothing to run); Done
-            // holds nothing either. Both just settle the state and drop
-            // whatever arguments a Start-state activation still packaged.
-            go->state = St::Done;
-            go->frame = GenFrame{};
-          }
-          f.regs[in.a] = gen_result(std::move(out), true);
+          gen_return(f, in, pos_at(ch, f.pc));
           break;
         }
         case Op::GenThrow: {
-          const SrcPos pos = pos_at(ch, f.pc);
-          const Value gv = f.regs[in.b];
-          GeneratorObj* go = gen_operand(f, gv, "throw into");
-          using St = GeneratorObj::State;
-          Value v = f.regs[in.c];
-          if (go->state != St::Suspended) {
-            // No frame for it to land in: the generator is done (a Start
-            // activation drops what it packaged) and the throw is this
-            // instruction's own, at its own pc like a Throw.
-            go->state = St::Done;
-            go->frame = GenFrame{};
-            throw Raise{std::move(v), pos, {}};
-          }
-          // Re-enter at the Yield itself rather than after it, so the
-          // regions enclosing the yield -- its handlers, its defers -- are
-          // the ones the throw crosses; the resumer's pc advances as for a
-          // call, which is where the throw lands if the body lets it out.
-          check_can_push(pos);
-          const size_t at = static_cast<size_t>(go->frame.pc) - 1;
-          auto nf = unpark_frame(gv, in.a);
-          nf->pc = at;
-          const SrcPos yp = pos_at(*nf->chunk, at);
-          ++f.pc;
-          frames.push_back(std::move(nf));
-          throw Raise{std::move(v), yp, {}};
+          gen_throw(f, in, pos_at(ch, f.pc));
+          break;
         }
         case Op::Enqueue: {
           const Value& v = f.regs[in.a];
@@ -7907,35 +8000,7 @@ struct Exec {
           break;
         }
         case Op::CoroResume: {
-          const SrcPos pos = pos_at(ch, f.pc);
-          const Value cv = f.regs[in.b];
-          CoroObj* co = coro_operand(f, cv, "resume");
-          using St = CoroObj::State;
-          if (co->state == St::Running) fail(f, "coroutine already running");
-          if (co->state == St::Done) {
-            f.regs[in.a] = gen_result(Value(), true);
-            break;
-          }
-          if (co->state == St::Start) {
-            // The first resume is the call (start_coro), and a trap at it
-            // is this instruction's own. A callee that completed on the
-            // spot left no frame to suspend, so the coroutine is done at
-            // once, with the answer that call delivered into in.a.
-            const Value sent = f.regs[in.c];
-            ++f.pc;
-            if (!start_coro(cv, sent, in.a, pos)) {
-              f.regs[in.a] = gen_result(std::move(f.regs[in.a]), true);
-            }
-            continue;
-          }
-          // Suspended: the parked frames come back, all of them at once,
-          // so the depth bound is checked against the whole slice.
-          if (frames.size() + co->frames.size() > max_frames) {
-            raise_trap("recursion limit exceeded", pos);
-          }
-          coreir_rt_poll();
-          ++f.pc;
-          unpark_coro(cv, in.a, &f.regs[in.c]);
+          if (coro_resume(f, in, pos_at(ch, f.pc))) break;
           continue;
         }
         case Op::CoroYield: {
@@ -7964,50 +8029,7 @@ struct Exec {
           continue;
         }
         case Op::CoroClose: {
-          const SrcPos pos = pos_at(ch, f.pc);
-          const Value cv = f.regs[in.a];
-          CoroObj* co = coro_operand(f, cv, "close");
-          using St = CoroObj::State;
-          if (co->state == St::Running) {
-            fail(f, "cannot close a running coroutine");
-          }
-          if (co->state == St::Done) break;
-          if (co->state == St::Start) {
-            co->fn = Value();
-            finish_coro(co);
-            break;
-          }
-          // Restore the slice and unwind it by hand, top frame first: each
-          // frame's pending defers innermost mark first, then the frame
-          // itself (its locals last-slot-first, as any return would). A
-          // generator activation caught in the slice is finished with it.
-          // A defer that throws propagates to this call; the coroutine is
-          // done either way.
-          if (frames.size() + co->frames.size() > max_frames) {
-            raise_trap("recursion limit exceeded", pos);
-          }
-          const size_t base = frames.size();
-          ++f.pc;
-          unpark_coro(cv, -1, nullptr);
-          try {
-            while (frames.size() > base) {
-              Frame& t = *frames.back();
-              run_pending_defers(t, pos);
-              finish_gen(t);
-              pop_frame();
-            }
-          } catch (Raise&) {
-            // The rest of the slice goes the way the normal path sends it,
-            // its generators finished with it -- including the frame whose
-            // defer threw.
-            finish_coro(co);
-            while (frames.size() > base) {
-              finish_gen(*frames.back());
-              pop_frame();
-            }
-            throw;
-          }
-          finish_coro(co);
+          if (coro_close(f, in, pos_at(ch, f.pc))) break;
           continue;
         }
         case Op::CoroStatus: {
