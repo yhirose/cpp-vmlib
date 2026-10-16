@@ -398,6 +398,8 @@ int main() {
     check_eq(outcome(0), "recursion limit exceeded",
              "run(p, rt, 0): the bound still applies");
     check_eq(outcome(10), "", "run(p, rt, 10): failure");
+    check_eq(outcome(int64_t{1} << 40), "",
+             "run(p, rt, 2^40): a wide depth saturates, it does not wrap");
   }
 
   if (g_failures != 0) {

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1399,10 +1400,9 @@ struct Module {
   std::unordered_map<uint64_t, uint32_t> pos_index;
   std::vector<Const> consts;
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
-  // Builder::intern_scalar / intern_str's indexes into `consts`, caches the
-  // same way pos_index is. An entry is checked against the pool before it is
-  // trusted, so a pool a front end has edited or cut back by hand costs a
-  // duplicate constant at worst, never a wrong one.
+  // Builder::intern_scalar / intern_str's indexes into `consts`: caches, like
+  // pos_index, checked against the pool before they are trusted. They live
+  // here because a binder constructs a fresh Builder per node.
   std::map<std::pair<ConstKind, int64_t>, int32_t> scalar_index;
   std::unordered_map<std::string, int32_t> str_index;
   std::vector<Func> funcs;                      // funcs[0] is the entry point
@@ -3785,11 +3785,9 @@ void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts);
 // The same with default options, and with default options but for the depth
 // bound; the last two on a heap of the run's own.
 //
-// The depth bound is a template over any integer type rather than an `int`
-// parameter: a braced `{}` converts to an int as readily as to a
-// RunOptions, so `run(p, rt, {})` -- "default options" -- used to mean a
-// depth of 0, and every call in the program trapped. A braced list cannot
-// deduce a template argument, so it can only reach RunOptions.
+// The depth is a template, not an `int`: `{}` converts to an int as readily
+// as to a RunOptions, so `run(p, rt, {})` once meant a depth of 0. A braced
+// list cannot deduce a template argument, so it reaches RunOptions.
 void run(const Program& p, coreir::Runtime& rt);
 template <class Depth, class = std::enable_if_t<std::is_integral_v<Depth>>>
 void run(const Program& p, coreir::Runtime& rt, Depth max_call_depth);
@@ -3874,7 +3872,10 @@ void on_heap_kind(HeapObj* o, F&& f) {
     case ValueTag::Map:       f(*static_cast<MapObj*>(o)); break;
     case ValueTag::Coroutine: f(*static_cast<CoroObj*>(o)); break;
     case ValueTag::Native:    f(*static_cast<NativeObj*>(o)); break;
-    default: break;  // no other tag names a heap object
+    // Not heap objects; listed so that a new tag is a -Wswitch warning here.
+    case ValueTag::Uninit: case ValueTag::Nil: case ValueTag::Bool:
+    case ValueTag::Int: case ValueTag::Double:
+      break;
   }
 }
 
@@ -4513,13 +4514,11 @@ struct Verifier {
            (c.bits >= 0 && static_cast<size_t>(c.bits) < m.str_consts.size());
   }
 
-  // The subject aside, children come in (key, body) pairs plus an
-  // optional trailing default -- an even total means the last one is
-  // that default, the same parity test ObjectLit would use if it had
-  // an odd-shaped variant. Each key must be a Literal (verify() cannot
-  // evaluate an arbitrary expression at compile time), all of one
-  // ConstKind, and pairwise distinct -- ambiguity FnCompiler's table
-  // build has no way to resolve.
+  // The subject aside, children come in (key, body) pairs plus an optional
+  // trailing default -- an even total means the last one is that default.
+  // Each key must be a Literal (verify() cannot evaluate an arbitrary
+  // expression at compile time), all of one ConstKind, and pairwise
+  // distinct -- ambiguity FnCompiler's table build has no way to resolve.
   bool check_switch(NodeId id, const Node& n) {
     if (n.num_children < 1) return fail("Switch needs a subject");
     const auto sw = view_switch(m, id);
@@ -4825,21 +4824,19 @@ struct Verifier {
   }
 };
 
-// A constant as the dumps print it: an integer as itself (what the dumps
-// always printed, and what a transcript may pin), and the other kinds by
-// value rather than as the pool index or bit pattern they are stored as.
+// A constant as the dumps print it: a scalar the way the program would
+// print it (to_display), a string quoted. Not as the pool index or bit
+// pattern it is stored as.
 inline std::string const_text(const Const& c,
                               const std::vector<std::string>& strs) {
   switch (c.kind) {
-    case ConstKind::Nil:  return "nil";
-    case ConstKind::Int:  return std::to_string(c.bits);
-    case ConstKind::Bool: return c.bits ? "true" : "false";
+    case ConstKind::Nil:  return to_display(Value());
+    case ConstKind::Int:  return to_display(Value::make_int(c.bits));
+    case ConstKind::Bool: return to_display(Value::make_bool(c.bits != 0));
     case ConstKind::Double: {
       double d;
       std::memcpy(&d, &c.bits, sizeof d);
-      char buf[32];
-      std::snprintf(buf, sizeof buf, "%.17g", d);
-      return buf;
+      return to_display(Value::make_double(d));
     }
     case ConstKind::Str:
       if (c.bits >= 0 && static_cast<size_t>(c.bits) < strs.size()) {
@@ -4951,7 +4948,7 @@ struct Dumper {
 
 inline std::optional<std::string> verify(const Module& m) {
   if (m.funcs.empty()) return std::string("module has no entry function");
-  detail::Verifier v{m, {}};
+  detail::Verifier v{m, {}, {}};
   for (const Func& f : m.funcs) {
     if (static_cast<size_t>(f.num_locals) != f.local_names.size() ||
         static_cast<size_t>(f.num_captures) != f.capture_names.size()) {
@@ -5495,10 +5492,9 @@ struct FnCompiler {
     const Node& sn = m.at(id);
     const ScopeView sv = view_scope(m, id);
     const bool defers = declares_defers(sv.body);
-    // The result register is taken before the body, as TryCatch's dst is:
-    // the value has to land where the scope was entered, since a caller
-    // laying out consecutive operands (CallValue's arguments, ArrayLit's
-    // items) reads the next one from the register after it.
+    // The result register is taken before the body, as TryCatch's dst is, so
+    // the value lands where the scope was entered. compile_operand would
+    // fix a misplaced one with a Move; this saves that Move.
     const int32_t dst = want_value && defers ? alloc() : -1;
     const int32_t regs_base = top;
     // Every Scope takes an owned-stack mark on entry; its exit resolves
@@ -8052,7 +8048,9 @@ inline void run(const Program& p, coreir::Runtime& rt) {
 template <class Depth, class>
 void run(const Program& p, coreir::Runtime& rt, Depth max_call_depth) {
   RunOptions opts;
-  opts.max_call_depth = static_cast<int>(max_call_depth);
+  opts.max_call_depth = std::cmp_greater(max_call_depth, INT_MAX)
+                            ? INT_MAX
+                            : static_cast<int>(max_call_depth);
   run(p, rt, opts);
 }
 

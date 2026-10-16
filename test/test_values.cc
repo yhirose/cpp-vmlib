@@ -508,14 +508,12 @@ int main() {
     Builder b(m);
     const SrcPos p{1, 1};
     const int32_t a = m.nodes[b.literal(7, p).v].a;
-    check_eq(std::to_string(m.nodes[b.literal(7, p).v].a), std::to_string(a),
-             "int constants share an entry");
+    check(m.nodes[b.literal(7, p).v].a == a, "int constants share an entry");
     const int32_t s1 = m.nodes[b.str_literal("hi", p).v].a;
-    check_eq(std::to_string(m.nodes[b.str_literal("hi", p).v].a),
-             std::to_string(s1), "string constants share an entry");
-    check_eq(std::to_string(m.consts.size()), "2", "two distinct constants");
-    check_eq(std::to_string(m.nodes[b.bool_literal(true, p).v].a == a), "0",
-             "a bool is not the int 1");
+    check(m.nodes[b.str_literal("hi", p).v].a == s1,
+          "string constants share an entry");
+    check(m.consts.size() == 2, "two distinct constants");
+    check(m.nodes[b.bool_literal(true, p).v].a != a, "a bool is not the int 1");
 
     // Cut the pool back to nothing: the stale index entries name entries
     // that are gone, and must be rebuilt rather than trusted.
