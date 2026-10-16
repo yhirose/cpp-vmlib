@@ -4527,10 +4527,25 @@ namespace detail {
 struct Verifier {
   const Module& m;
   std::string err;
+  // The nodes whose children are being checked right now: a node reached
+  // again while it is in here is its own ancestor. Sharing a node between
+  // two parents is fine and stays fine; only a cycle is refused.
+  std::vector<char> open;
 
   bool fail(const std::string& msg) {
     if (err.empty()) err = msg;
     return false;
+  }
+
+  // A const-pool index that names an entry, and -- for a string -- a string
+  // that exists. Everything that reads `consts[i]` or `str_consts[bits]`
+  // later (the compiler, the dumper, the switch-key scan below) relies on
+  // exactly this.
+  bool const_ok(int64_t i) const {
+    if (i < 0 || static_cast<size_t>(i) >= m.consts.size()) return false;
+    const Const& c = m.consts[static_cast<size_t>(i)];
+    return c.kind != ConstKind::Str ||
+           (c.bits >= 0 && static_cast<size_t>(c.bits) < m.str_consts.size());
   }
 
   bool check_node(NodeId id, const Func& f, int loop_depth, int scope_depth) {
@@ -4538,9 +4553,14 @@ struct Verifier {
     const Node& n = m.at(id);
 
     if (n.pos >= m.positions.size()) return fail("node pos out of range");
-    if (n.first_child + n.num_children > m.child_ids.size()) {
+    // 64-bit: first_child + num_children can wrap in 32.
+    if (static_cast<uint64_t>(n.first_child) + n.num_children >
+        m.child_ids.size()) {
       return fail("node children out of range");
     }
+    if (n.tag > kLastTag) return fail("unknown node tag");
+    if (open.size() < m.nodes.size()) open.resize(m.nodes.size(), 0);
+    if (open[id.v]) return fail("node is its own ancestor");
 
     const int want = arity_of(n.tag);
     if (want >= 0 && n.num_children != static_cast<uint32_t>(want)) {
@@ -4549,8 +4569,16 @@ struct Verifier {
 
     switch (n.tag) {
       case Tag::Literal:
-        if (n.a < 0 || static_cast<size_t>(n.a) >= m.consts.size()) {
-          return fail("literal const index out of range");
+        if (!const_ok(n.a)) return fail("literal const index out of range");
+        break;
+      case Tag::Unary:
+        if (n.op > static_cast<uint8_t>(kLastUnOp)) {
+          return fail("unknown unary operator");
+        }
+        break;
+      case Tag::Binary:
+        if (n.op > static_cast<uint8_t>(kLastBinOp)) {
+          return fail("unknown binary operator");
         }
         break;
       case Tag::VarRef:
@@ -4594,6 +4622,9 @@ struct Verifier {
           if (!key.valid() || key.v >= m.nodes.size() ||
               m.at(key).tag != Tag::Literal) {
             return fail("switch key must be a literal");
+          }
+          if (!const_ok(m.at(key).a)) {
+            return fail("literal const index out of range");
           }
           const ConstKind k = m.const_kind(key);
           if (k != ConstKind::Int && k != ConstKind::Str) {
@@ -4737,12 +4768,15 @@ struct Verifier {
       case Tag::FieldGet:
       case Tag::FieldSet:
         if (n.a < 0) return fail("field slot must be non-negative");
-        if (n.b < 0 || static_cast<size_t>(n.b) >= m.consts.size() ||
+        if (!const_ok(n.b) ||
             m.consts[static_cast<size_t>(n.b)].kind != ConstKind::Str) {
           return fail("field name must be a string const");
         }
         break;
       case Tag::Intrinsic: {
+        if (n.op > static_cast<uint8_t>(kLastIntrinsic)) {
+          return fail("unknown intrinsic");
+        }
         const auto id = static_cast<IntrinsicId>(n.op);
         if (n.num_children != intrinsic_arity(id)) {
           return fail("wrong arity for intrinsic");
@@ -4800,18 +4834,19 @@ struct Verifier {
         break;
     }
 
-    for (uint32_t i = 0; i < n.num_children; ++i) {
+    open[id.v] = 1;
+    bool ok = true;
+    for (uint32_t i = 0; i < n.num_children && ok; ++i) {
       // A While's body is the one edge that opens a loop; its condition is
       // not part of the body, so a Break there names the loop outside it.
       const int child_depth =
           (n.tag == Tag::While && i == 1) ? loop_depth + 1 : loop_depth;
       const int child_scope =
           n.tag == Tag::Scope ? scope_depth + 1 : scope_depth;
-      if (!check_node(m.child(id, i), f, child_depth, child_scope)) {
-        return false;
-      }
+      ok = check_node(m.child(id, i), f, child_depth, child_scope);
     }
-    return true;
+    open[id.v] = 0;
+    return ok;
   }
 };
 

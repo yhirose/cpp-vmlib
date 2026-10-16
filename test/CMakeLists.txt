@@ -25,7 +25,7 @@ add_test(NAME errors
 foreach(t throw_safety deep_calls values closures lifetimes containers
         control_flow exceptions defers gc generators arity drops jobs names
         ints fields switch natives tailcalls coroutines bigint_recipe
-        singleton binding)
+        singleton binding verify)
   add_executable(test_${t} test_${t}.cc)
   target_link_libraries(test_${t} PRIVATE vmlib)
   add_test(NAME ${t} COMMAND test_${t})
