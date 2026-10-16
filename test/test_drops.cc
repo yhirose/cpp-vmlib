@@ -825,6 +825,52 @@ int main() {
     }
   }
 
+  // A scope exit that strips a dropped cycle (owned_scope_exit) releases the
+  // cycle's members while the stripped object is being emptied; a member
+  // bound outside the scope has its own destructor, which reads back into
+  // the stripped object. The object must already be empty then, not
+  // half-way through destroying its own properties.
+  //   x = {K: "x", drop: dx}; { c = {K: "c", drop: d}; c.o = x; x.o = c; x = nil }
+  //   dx(self) { print(self.o[K]) }  -- d prints self[K]
+  // K is long enough to live on the heap, so a read of a destroyed key is
+  // visible to a sanitizer rather than reading stale inline bytes.
+  {
+    const char* K = "a_rather_long_property_key_name";
+    Prog g;
+    g.m.funcs[1].body = g.print(g.b.index(g.local(0), g.str(K), g.p));
+    coreir::Func dx{"dropx", 1, 0,
+                    g.print(g.b.index(g.b.index(g.local(0), g.str("o"), g.p),
+                                      g.str(K), g.p)),
+                    {"self"}, {}};
+    dx.num_params = 1;
+    g.m.funcs.push_back(dx);  // funcs[2]
+    const auto obj = [&](const char* name, int32_t drop_slot) {
+      return g.b.object_lit({{g.str(K), g.str(name)},
+                             {g.str("\x01" "drop"), g.local(drop_slot)}},
+                            g.p);
+    };
+    g.main(g.b.block(
+               {g.bind_drop(),
+                g.b.assign(coreir::VarKind::Local, 1,
+                           g.b.make_closure(2, 0, g.p), g.p),
+                g.b.assign(coreir::VarKind::Local, 2, obj("x-name", 1), g.p),
+                g.b.scope(3, 4,
+                          g.b.block({g.b.assign(coreir::VarKind::Local, 3,
+                                                obj("c-name", 0), g.p),
+                                     g.set(3, "o", g.local(2)),
+                                     g.set(2, "o", g.local(3)),
+                                     g.b.assign(coreir::VarKind::Local, 2,
+                                                g.b.nil_literal(g.p), g.p)},
+                                    g.p),
+                          g.p),
+                g.print_str("after")},
+               g.p),
+           {"dx", "x", "c"});
+    expect_clean(run_module(g.m, "strip: member destructor"),
+                 "strip: member destructor");
+    check_eq(joined(), "c-name|nil|after|", "strip: member destructor output");
+  }
+
   // ObjectRemove releasing a value whose destructor writes back into the
   // object it was removed from -- enough keys to make the object's
   // storage grow, which it must not do under the remove itself.

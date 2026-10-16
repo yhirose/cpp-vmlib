@@ -4225,29 +4225,38 @@ inline HeapObj::~HeapObj() {
 }
 
 inline void clear_heap_object_refs(HeapObj* o) {
+  // Each container is detached into `dead` and released after the object is
+  // already empty. Releasing a child can run its drop hook (owned_scope_exit
+  // strips with sweeping_ off), and a hook may read or write this object --
+  // which must not be half-way through destroying its own elements.
   switch (o->kind) {
-    case ValueTag::Array:
-      static_cast<ArrayObj*>(o)->items.clear();
+    case ValueTag::Array: {
+      const auto dead = std::exchange(static_cast<ArrayObj*>(o)->items, {});
       break;
-    case ValueTag::Object:
-      static_cast<ObjectObj*>(o)->props.clear();
+    }
+    case ValueTag::Object: {
+      const auto dead = std::exchange(static_cast<ObjectObj*>(o)->props, {});
       break;
+    }
     case ValueTag::Cell:
       static_cast<CellObj*>(o)->v = Value();
       break;
-    case ValueTag::Func:
-      static_cast<ClosureObj*>(o)->cells.clear();
+    case ValueTag::Func: {
+      const auto dead = std::exchange(static_cast<ClosureObj*>(o)->cells, {});
       break;
-    case ValueTag::Generator:
-      static_cast<GeneratorObj*>(o)->frame = GenFrame{};
+    }
+    case ValueTag::Generator: {
+      const GenFrame dead =
+          std::exchange(static_cast<GeneratorObj*>(o)->frame, GenFrame{});
       break;
+    }
     case ValueTag::Map:
       static_cast<MapObj*>(o)->clear();
       break;
     case ValueTag::Coroutine: {
       auto* co = static_cast<CoroObj*>(o);
       co->fn = Value();
-      co->frames.clear();
+      const auto dead = std::exchange(co->frames, {});
       break;
     }
     default:
