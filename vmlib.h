@@ -5556,6 +5556,22 @@ struct FnCompiler {
     top = base;
   }
 
+  // Compiles `id` so its value is in the register `top` pointed at on entry,
+  // and leaves `top` just past it. An operand run that an instruction reads
+  // as `start + i` (CallValue's arguments, ArrayLit's items) is built from
+  // these, so its layout is guaranteed here once instead of being a property
+  // every expression kind has to have: one that puts its result elsewhere --
+  // a Scope with defers once did -- costs a Move, not a shifted argument.
+  void compile_operand(NodeId id) {
+    const int32_t slot = top;
+    const int32_t r = compile_expr(id);
+    if (r != slot) {
+      top = slot;
+      alloc();
+      emit(Op::Move, slot, r, 0, m.at(id).pos);
+    }
+  }
+
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
   int32_t compile_expr(NodeId id, bool tail = false) {
@@ -5786,7 +5802,7 @@ struct FnCompiler {
         const int32_t base = top;
         const int32_t items_at = top;
         for (uint32_t i = 0; i < n.num_children; ++i) {
-          compile_expr(m.child(id, i));
+          compile_operand(m.child(id, i));
         }
         top = base;
         const int32_t r = alloc();
@@ -5837,7 +5853,7 @@ struct FnCompiler {
         const int32_t argc = static_cast<int32_t>(n.num_children) - 1;
         const int32_t args_at = top;
         for (int32_t i = 0; i < argc; ++i) {
-          compile_expr(m.child(id, static_cast<uint32_t>(i + 1)));
+          compile_operand(m.child(id, static_cast<uint32_t>(i + 1)));
         }
         top = base;
         const int32_t r = alloc();
@@ -6201,6 +6217,36 @@ struct FrameDeleter {
 
 using FramePtr = std::unique_ptr<Frame, FrameDeleter>;
 
+// The executor's stack of frames. A frame leaves it only through pop() and
+// truncate(), which move it out of the vector before it is destroyed: the
+// frame's releases can run a drop hook, the hook pushes frames onto this
+// same stack, and a vector in the middle of destroying one of its own
+// elements would be written to under it. With no pop_back or erase to reach
+// for, no call site can bring that back.
+class FrameStack {
+ public:
+  bool empty() const { return v_.empty(); }
+  size_t size() const { return v_.size(); }
+  FramePtr& back() { return v_.back(); }
+  const FramePtr& back() const { return v_.back(); }
+  FramePtr& operator[](size_t i) { return v_[i]; }
+  const FramePtr& operator[](size_t i) const { return v_[i]; }
+  void push_back(FramePtr f) { v_.push_back(std::move(f)); }
+
+  // Drops the top frame without pop_frame's ordered release of its locals.
+  void pop() {
+    FramePtr dead = std::move(v_.back());
+    v_.pop_back();
+  }
+  // Drops frames, top first, until `n` remain.
+  void truncate(size_t n) {
+    while (v_.size() > n) pop();
+  }
+
+ private:
+  std::vector<FramePtr> v_;
+};
+
 struct Exec {
   const Program& p;
   size_t max_frames;
@@ -6216,7 +6262,7 @@ struct Exec {
   // aimed at them, and a deque owns its elements outright, which leaves no
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
-  std::vector<FramePtr> frames;
+  FrameStack frames;
 
   // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
   // to run after the entry frame, FIFO. C++-side handles, so the collector
@@ -6428,7 +6474,7 @@ struct Exec {
       gf.gen_self = std::move(fr.gen_self);
       co->frames.push_back(std::move(gf));
     }
-    discard_to(bottom);
+    frames.truncate(bottom);
     co->state = CoroObj::State::Suspended;
   }
 
@@ -6829,7 +6875,7 @@ struct Exec {
       const std::string what =
           r.fatal_msg.empty() ? to_display(r.value) : r.fatal_msg;
       std::fprintf(stderr, "drop: %s\n", what.c_str());
-      self->discard_to(floor);
+      self->frames.truncate(floor);
     }
   }
 
@@ -6904,21 +6950,8 @@ struct Exec {
     const bool bare = f.entry && !entry_frame_drops;
     if (bare) rt.set_drop_fn(nullptr, nullptr);
     release_range(f, 0, static_cast<int32_t>(f.locals.size()));
-    discard_top();
+    frames.pop();
     if (bare) rt.set_drop_fn(this, &Exec::drop_hook);
-  }
-
-  // Drops the top frame without pop_frame's ordered release. Every frame
-  // leaves `frames` through here, never a bare pop_back or erase: the
-  // frame's releases can run a drop hook that pushes onto `frames`, so it
-  // is moved out first and destroyed once the vector is done with it.
-  void discard_top() {
-    FramePtr dead = std::move(frames.back());
-    frames.pop_back();
-  }
-
-  void discard_to(size_t n) {
-    while (frames.size() > n) discard_top();
   }
 
   // Hands a popped frame's result to whoever asked for it. Ret and Yield
@@ -6976,7 +7009,7 @@ struct Exec {
       // Every chunk the compiler emits ends in Ret; running off the end is
       // the same belt and braces the old loop condition was.
       if (f.pc >= ch.code.size()) {
-        discard_top();
+        frames.pop();
         if (frames.size() <= floor) return;
         continue;
       }
@@ -7652,7 +7685,7 @@ struct Exec {
           park_frame(go->frame, f);
           go->state = GeneratorObj::State::Suspended;
           const int32_t ret_reg = f.ret_reg;
-          discard_top();
+          frames.pop();
           deliver(ret_reg, gen_result(std::move(out), false));
           if (frames.size() <= floor) return;
           continue;
@@ -7698,11 +7731,11 @@ struct Exec {
               run_pending_defers(gf, pos);
             } catch (Raise&) {
               go->state = St::Done;
-              discard_top();
+              frames.pop();
               throw;
             }
             go->state = St::Done;
-            discard_top();
+            frames.pop();
           } else {
             // Start never ran (nothing registered, nothing to run); Done
             // holds nothing either. Both just settle the state and drop
