@@ -4068,46 +4068,74 @@ inline int64_t Runtime::collect() {
 
   // Condemn what nothing reaches, and pin it: a destructor about to run
   // may drop the last reference between two condemned objects, and that
-  // must not free one of them out from under the sweep.
+  // must not free one of them out from under the sweep. Called again after
+  // the destructors, for what they allocated.
   mark();
   std::vector<HeapObj*> dead;
-  for (HeapObj* o = head_; o; o = o->next) {
-    if (!o->gc_marked) {
-      o->gc_condemned = true;
-      ++o->rc;
-      dead.push_back(o);
+  const auto condemn_unmarked = [&] {
+    for (HeapObj* o = head_; o; o = o->next) {
+      if (!o->gc_marked && !o->gc_condemned) {
+        o->gc_condemned = true;
+        ++o->rc;
+        dead.push_back(o);
+      }
     }
-  }
+  };
+  condemn_unmarked();
 
   // Destructors, while every condemned object is still whole: newest first
   // (the heap list's order), the way a scope releases its locals in reverse.
   // One may store a condemned object somewhere reachable -- so if any ran,
   // reachability is recomputed and what it resurrected is unpinned and
-  // spared, dropped already. Allocation here is ordinary: a nested collect
-  // is refused by in_collect_, and an object dying by refcount gets its
-  // own destructor.
-  bool ran = false;
-  for (HeapObj* o : dead) {
-    if (run_drop(o)) ran = true;
-  }
-  if (ran) {
-    mark();
-    std::vector<HeapObj*> still;
-    for (HeapObj* o : dead) {
-      if (o->gc_marked) {
-        o->gc_condemned = false;
-        --o->rc;  // the pin; a reachable object holds at least one more
-      } else {
-        still.push_back(o);
+  // spared, dropped already. One may also allocate: what it made and left
+  // only in a condemned object is condemned too, and gets its own
+  // destructor before the sweep, as it would had it died by refcount.
+  // Allocation here is ordinary: a nested collect is refused by
+  // in_collect_.
+  //
+  // A destructor that throws (a host function can) abandons the collection:
+  // the pins and flags come off, and the Runtime collects again later.
+  try {
+    for (;;) {
+      bool ran = false;
+      for (HeapObj* o : dead) {
+        if (run_drop(o)) ran = true;
       }
+      if (!ran) break;
+      mark();
+      std::vector<HeapObj*> still;
+      for (HeapObj* o : dead) {
+        if (o->gc_marked) {
+          o->gc_condemned = false;
+          --o->rc;  // the pin; a reachable object holds at least one more
+        } else {
+          still.push_back(o);
+        }
+      }
+      dead.swap(still);
+      condemn_unmarked();
     }
-    dead.swap(still);
-  }
 
-  // The host's last look (while every member is still whole), then
-  // ~Runtime's strip / free on just this set.
-  if (finalize_) {
-    for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
+    // The host's last look (while every member is still whole), then
+    // ~Runtime's strip / free on just this set.
+    if (finalize_) {
+      for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
+    }
+  } catch (...) {
+    in_collect_ = false;
+    for (HeapObj* o : dead) {
+      o->gc_condemned = false;
+      --o->rc;
+    }
+    // Whatever the unpinning left at zero nothing else holds, so it is
+    // gathered first: freeing one releases its children, which may be
+    // other members of `dead`.
+    std::vector<HeapObj*> orphans;
+    for (HeapObj* o : dead) {
+      if (o->rc == 0) orphans.push_back(o);
+    }
+    for (HeapObj* o : orphans) heap_release_to_zero(o);
+    throw;
   }
   sweeping_ = true;
   for (HeapObj* o : dead) clear_heap_object_refs(o);

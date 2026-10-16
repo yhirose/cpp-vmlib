@@ -427,6 +427,111 @@ int main() {
     check_eq(joined(), "0|1|1|2|1|", "resurrect output");
   }
 
+  // --- 9. An object a destructor allocates and leaves only in the object
+  //        being collected is collected too, with its own destructor run --
+  //        as it would have been had it died by refcount. ----------------
+  // P = {mk: dc, drop: dp}; P.self = P; P = nil; collect()
+  // dp(self) { self.child = {drop: self.mk}; print("parent") }; dc(self) { print("child") }
+  {
+    const SrcPos p{1, 1};
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    auto str = [&](const char* t) { return b.str_literal(t, p); };
+    auto local = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    m.funcs.push_back({});
+    Func dc{"dropchild", 1, 0, print(str("child")), {"self"}, {}};
+    dc.num_params = 1;
+    m.funcs.push_back(dc);  // funcs[1]
+    Func dp{"dropparent", 1, 0,
+            b.block({b.set_index(
+                         local(0), str("child"),
+                         b.object_lit({{str("\x01" "drop"),
+                                        b.index(local(0), str("mk"), p)}},
+                                      p),
+                         p),
+                     print(str("parent"))},
+                    p),
+            {"self"}, {}};
+    dp.num_params = 1;
+    m.funcs.push_back(dp);  // funcs[2]
+    m.funcs[0] = {
+        "main", 1, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.object_lit({{str("mk"), b.make_closure(1, 0, p)},
+                                        {str("\x01" "drop"),
+                                         b.make_closure(2, 0, p)}},
+                                       p),
+                          p),
+                 b.set_index(local(0), str("self"), local(0), p),
+                 b.assign(VarKind::Local, 0, b.nil_literal(p), p),
+                 b.intrinsic(IntrinsicId::Collect, {}, p), print(str("end"))},
+                p),
+        {"P"}, {}};
+    check_eq(run_module(m, "collect: child destructor, heap not empty"), "",
+             "collect: child destructor: unexpected failure");
+    check_eq(joined(), "parent|child|end|", "collect: child destructor output");
+  }
+
+  // --- 10. A destructor that throws out of collect() leaves the Runtime
+  //         able to collect: the pins and in_collect_ come off, and the
+  //         cycle it was about to free is still there to be freed. --------
+  // dp(self) { boom() }; P = {drop: dp}; P.self = P; P = nil; collect()
+  {
+    const SrcPos p{1, 1};
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.natives.push_back("boom");
+    m.funcs.push_back({});
+    Func dp{"dropparent", 1, 0, b.call_value(b.native_ref(0, p), {}, p),
+            {"self"}, {}};
+    dp.num_params = 1;
+    m.funcs.push_back(dp);
+    m.funcs[0] = {
+        "main", 1, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.object_lit({{b.str_literal("\x01" "drop", p),
+                                         b.make_closure(1, 0, p)}},
+                                       p),
+                          p),
+                 b.set_index(b.varref(VarKind::Local, 0, p),
+                             b.str_literal("self", p),
+                             b.varref(VarKind::Local, 0, p), p),
+                 b.assign(VarKind::Local, 0, b.nil_literal(p), p),
+                 b.intrinsic(IntrinsicId::Collect, {}, p)},
+                p),
+        {"P"}, {}};
+    if (auto err = verify(m)) {
+      std::fprintf(stderr, "FAIL: collect throw: malformed IR: %s\n",
+                   err->c_str());
+      ++g_failures;
+    } else {
+      Runtime rt;
+      const vm::Program prog = vm::compile(m);
+      vm::RunOptions opts;
+      opts.natives = {{"boom", -1,
+                       [](NativeCall&) -> bool {
+                         throw std::runtime_error("host error");
+                       },
+                       nullptr}};
+      bool threw = false;
+      try {
+        vm::run(prog, rt, opts);
+      } catch (const std::runtime_error&) {
+        threw = true;
+      }
+      check(threw, "collect throw: the host exception escaped the run");
+      check(!rt.in_collect(), "collect throw: in_collect_ was reset");
+      check(rt.live_objects() == 2, "collect throw: the cycle is still there");
+      check(rt.collect() == 2, "collect throw: a later collect frees it");
+      check(rt.live_objects() == 0, "collect throw: and nothing is left");
+    }
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "gc: %d failure(s)\n", g_failures);
     return 1;
