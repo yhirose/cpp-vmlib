@@ -3863,46 +3863,60 @@ void visit_gen_frame(const GenFrame& gf, Visit& visit) {
   visit(gf.gen_self);
 }
 
+// The one switch over heap kinds: `f` is called with the object as its
+// concrete type. The operations that must handle every kind -- the
+// collector's edge walk, the strip, the free, the byte count -- are written
+// as one overload per type (Overloaded below), so a kind added here and
+// left out of any of them is a compile error rather than a silent `default`.
+template <class F>
+void on_heap_kind(HeapObj* o, F&& f) {
+  switch (o->kind) {
+    case ValueTag::Str:       f(*static_cast<StrObj*>(o)); break;
+    case ValueTag::Array:     f(*static_cast<ArrayObj*>(o)); break;
+    case ValueTag::Object:    f(*static_cast<ObjectObj*>(o)); break;
+    case ValueTag::Cell:      f(*static_cast<CellObj*>(o)); break;
+    case ValueTag::Func:      f(*static_cast<ClosureObj*>(o)); break;
+    case ValueTag::Generator: f(*static_cast<GeneratorObj*>(o)); break;
+    case ValueTag::Map:       f(*static_cast<MapObj*>(o)); break;
+    case ValueTag::Coroutine: f(*static_cast<CoroObj*>(o)); break;
+    case ValueTag::Native:    f(*static_cast<NativeObj*>(o)); break;
+    default: break;  // no other tag names a heap object
+  }
+}
+
+template <class... Ts>
+struct Overloaded : Ts... {
+  using Ts::operator()...;
+};
+template <class... Ts>
+Overloaded(Ts...) -> Overloaded<Ts...>;
+
 template <typename Fn>
 void visit_children(HeapObj* o, Fn fn) {
   auto visit = [&](const Value& v) {
     if (v.is_heap()) fn(reinterpret_cast<HeapObj*>(v.raw_data()));
   };
-  switch (o->kind) {
-    case ValueTag::Array:
-      for (const Value& v : static_cast<ArrayObj*>(o)->items) visit(v);
-      break;
-    case ValueTag::Object:
-      for (const auto& kv : static_cast<ObjectObj*>(o)->props) {
-        visit(kv.second);
-      }
-      break;
-    case ValueTag::Cell:
-      visit(static_cast<CellObj*>(o)->v);
-      break;
-    case ValueTag::Func:
-      for (const Value& v : static_cast<ClosureObj*>(o)->cells) visit(v);
-      break;
-    case ValueTag::Generator:
-      visit_gen_frame(static_cast<GeneratorObj*>(o)->frame, visit);
-      break;
-    case ValueTag::Map:
+  on_heap_kind(o, Overloaded{
+      [&](ArrayObj& a) { for (const Value& v : a.items) visit(v); },
+      [&](ObjectObj& x) { for (const auto& kv : x.props) visit(kv.second); },
+      [&](CellObj& c) { visit(c.v); },
+      [&](ClosureObj& c) { for (const Value& v : c.cells) visit(v); },
+      [&](GeneratorObj& g) { visit_gen_frame(g.frame, visit); },
       // Keys and values both; the index refers through the keys the
       // entries own and holds no reference of its own (MapKeyRef).
-      for (const auto& kv : static_cast<MapObj*>(o)->entries) {
-        visit(kv.first);
-        visit(kv.second);
-      }
-      break;
-    case ValueTag::Coroutine: {
-      auto* co = static_cast<CoroObj*>(o);
-      visit(co->fn);
-      for (const GenFrame& gf : co->frames) visit_gen_frame(gf, visit);
-      break;
-    }
-    default:
-      break;  // a string, or a native, refers to nothing
-  }
+      [&](MapObj& mp) {
+        for (const auto& kv : mp.entries) {
+          visit(kv.first);
+          visit(kv.second);
+        }
+      },
+      [&](CoroObj& co) {
+        visit(co.fn);
+        for (const GenFrame& gf : co.frames) visit_gen_frame(gf, visit);
+      },
+      [](StrObj&) {},     // refers to nothing
+      [](NativeObj&) {},  // likewise
+  });
 }
 
 // The owned stack's trial deletion, over the subgraph the candidates reach:
@@ -4187,50 +4201,29 @@ inline int64_t Runtime::heap_bytes() const {
     return vec(gf.locals) + vec(gf.regs) + vec(gf.cells) + vec(gf.captures) +
            vec(gf.defers) + vec(gf.defer_marks) + vec(gf.owned_marks);
   };
-  for (HeapObj* o = head_; o; o = o->next) {
-    switch (o->kind) {
-      case ValueTag::Str:
-        bytes += sizeof(StrObj) + vec(static_cast<StrObj*>(o)->s);
-        break;
-      case ValueTag::Array:
-        bytes += sizeof(ArrayObj) + vec(static_cast<ArrayObj*>(o)->items);
-        break;
-      case ValueTag::Object: {
-        auto* obj = static_cast<ObjectObj*>(o);
-        bytes += sizeof(ObjectObj) + vec(obj->props);
-        for (const auto& kv : obj->props) bytes += vec(kv.first);
-        break;
-      }
-      case ValueTag::Cell:
-        bytes += sizeof(CellObj);
-        break;
-      case ValueTag::Func:
-        bytes += sizeof(ClosureObj) + vec(static_cast<ClosureObj*>(o)->cells);
-        break;
-      case ValueTag::Generator:
-        bytes += sizeof(GeneratorObj) +
-                 gen_frame_bytes(static_cast<GeneratorObj*>(o)->frame);
-        break;
-      case ValueTag::Map: {
-        auto* mp = static_cast<MapObj*>(o);
-        bytes += sizeof(MapObj) + vec(mp->entries) +
-                 static_cast<int64_t>(mp->index.bucket_count() *
-                                      sizeof(void*));
-        break;
-      }
-      case ValueTag::Coroutine: {
-        auto* co = static_cast<CoroObj*>(o);
-        bytes += sizeof(CoroObj) + vec(co->frames);
-        for (const GenFrame& gf : co->frames) bytes += gen_frame_bytes(gf);
-        break;
-      }
-      case ValueTag::Native:
-        bytes += sizeof(NativeObj) + vec(static_cast<NativeObj*>(o)->name);
-        break;
-      default:
-        break;
-    }
-  }
+  const detail::Overloaded count{
+      [&](StrObj& x) { bytes += sizeof(StrObj) + vec(x.s); },
+      [&](ArrayObj& x) { bytes += sizeof(ArrayObj) + vec(x.items); },
+      [&](ObjectObj& x) {
+        bytes += sizeof(ObjectObj) + vec(x.props);
+        for (const auto& kv : x.props) bytes += vec(kv.first);
+      },
+      [&](CellObj&) { bytes += sizeof(CellObj); },
+      [&](ClosureObj& x) { bytes += sizeof(ClosureObj) + vec(x.cells); },
+      [&](GeneratorObj& x) {
+        bytes += sizeof(GeneratorObj) + gen_frame_bytes(x.frame);
+      },
+      [&](MapObj& x) {
+        bytes += sizeof(MapObj) + vec(x.entries) +
+                 static_cast<int64_t>(x.index.bucket_count() * sizeof(void*));
+      },
+      [&](CoroObj& x) {
+        bytes += sizeof(CoroObj) + vec(x.frames);
+        for (const GenFrame& gf : x.frames) bytes += gen_frame_bytes(gf);
+      },
+      [&](NativeObj& x) { bytes += sizeof(NativeObj) + vec(x.name); },
+  };
+  for (HeapObj* o = head_; o; o = o->next) detail::on_heap_kind(o, count);
   return bytes;
 }
 
@@ -4280,54 +4273,26 @@ inline void clear_heap_object_refs(HeapObj* o) {
   // already empty. Releasing a child can run its drop hook (owned_scope_exit
   // strips with sweeping_ off), and a hook may read or write this object --
   // which must not be half-way through destroying its own elements.
-  switch (o->kind) {
-    case ValueTag::Array: {
-      const auto dead = std::exchange(static_cast<ArrayObj*>(o)->items, {});
-      break;
-    }
-    case ValueTag::Object: {
-      const auto dead = std::exchange(static_cast<ObjectObj*>(o)->props, {});
-      break;
-    }
-    case ValueTag::Cell:
-      static_cast<CellObj*>(o)->v = Value();
-      break;
-    case ValueTag::Func: {
-      const auto dead = std::exchange(static_cast<ClosureObj*>(o)->cells, {});
-      break;
-    }
-    case ValueTag::Generator: {
-      const GenFrame dead =
-          std::exchange(static_cast<GeneratorObj*>(o)->frame, GenFrame{});
-      break;
-    }
-    case ValueTag::Map:
-      static_cast<MapObj*>(o)->clear();
-      break;
-    case ValueTag::Coroutine: {
-      auto* co = static_cast<CoroObj*>(o);
-      co->fn = Value();
-      const auto dead = std::exchange(co->frames, {});
-      break;
-    }
-    default:
-      break;  // a string, or a native, refers to nothing
-  }
+  detail::on_heap_kind(o, detail::Overloaded{
+      [](ArrayObj& a) { const auto dead = std::exchange(a.items, {}); },
+      [](ObjectObj& x) { const auto dead = std::exchange(x.props, {}); },
+      [](CellObj& c) { c.v = Value(); },
+      [](ClosureObj& c) { const auto dead = std::exchange(c.cells, {}); },
+      [](GeneratorObj& g) {
+        const GenFrame dead = std::exchange(g.frame, GenFrame{});
+      },
+      [](MapObj& mp) { mp.clear(); },
+      [](CoroObj& co) {
+        co.fn = Value();
+        const auto dead = std::exchange(co.frames, {});
+      },
+      [](StrObj&) {},     // a string, or a native, refers to nothing
+      [](NativeObj&) {},
+  });
 }
 
 inline void destroy_heap_object(HeapObj* o) {
-  switch (o->kind) {
-    case ValueTag::Str:   delete static_cast<StrObj*>(o); break;
-    case ValueTag::Array: delete static_cast<ArrayObj*>(o); break;
-    case ValueTag::Object: delete static_cast<ObjectObj*>(o); break;
-    case ValueTag::Cell:  delete static_cast<CellObj*>(o); break;
-    case ValueTag::Func:  delete static_cast<ClosureObj*>(o); break;
-    case ValueTag::Generator: delete static_cast<GeneratorObj*>(o); break;
-    case ValueTag::Map:   delete static_cast<MapObj*>(o); break;
-    case ValueTag::Coroutine: delete static_cast<CoroObj*>(o); break;
-    case ValueTag::Native: delete static_cast<NativeObj*>(o); break;
-    default: break;  // no other tag names a heap object
-  }
+  detail::on_heap_kind(o, [](auto& obj) { delete &obj; });
 }
 
 // Extracted from the Dumper's node() switch below, so dump_ir()'s vocabulary
