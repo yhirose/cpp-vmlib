@@ -12,6 +12,8 @@
 // Every case asserts the live heap-object count is zero afterward, so a
 // missing release fails the test rather than waiting for a leak checker.
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -563,6 +565,58 @@ int main() {
       check(bc.find(want) != std::string::npos,
             std::string("bytecode dump lacks '") + want + "'");
     }
+  }
+
+  // --- An int against a double compares the numbers, not the int rounded to
+  // a double: past 2^53 the two disagree, and Eq stopped being transitive
+  // (2^53 and 2^53+1 were both equal to 2^53.0, and not to each other). ---
+  {
+    using coreir::BinOp;
+    using coreir::Value;
+    const auto holds = [&](BinOp op, Value l, Value r, bool want,
+                           const char* what) {
+      const Value got = coreir::apply_binop(op, l, r);
+      check(got.is_bool() && got.as_bool() == want, std::string(what));
+    };
+    const auto I = [](int64_t v) { return Value::make_int(v); };
+    const auto D = [](double v) { return Value::make_double(v); };
+    const int64_t p53 = int64_t{1} << 53;
+    const double kTwo63 = 9223372036854775808.0;  // 2^63, not an int64
+
+    holds(BinOp::Eq, I(p53), D(9007199254740992.0), true, "2^53 == 2^53.0");
+    holds(BinOp::Eq, I(p53 + 1), D(9007199254740992.0), false,
+          "2^53+1 != 2^53.0");
+    holds(BinOp::Gt, I(p53 + 1), D(9007199254740992.0), true,
+          "2^53+1 > 2^53.0");
+    holds(BinOp::Lt, D(9007199254740992.0), I(p53 + 1), true,
+          "2^53.0 < 2^53+1 (flipped)");
+    holds(BinOp::Eq, I(p53), I(p53 + 1), false, "2^53 != 2^53+1");
+
+    holds(BinOp::Lt, I(INT64_MAX), D(kTwo63), true, "INT64_MAX < 2^63.0");
+    holds(BinOp::Eq, I(INT64_MAX), D(kTwo63), false, "INT64_MAX != 2^63.0");
+    holds(BinOp::Eq, I(INT64_MIN), D(-kTwo63), true, "INT64_MIN == -2^63.0");
+    holds(BinOp::Gt, I(INT64_MIN), D(-kTwo63 - 2048.0), true,
+          "INT64_MIN > the double below -2^63");
+    holds(BinOp::Lt, I(INT64_MAX), D(INFINITY), true, "INT64_MAX < inf");
+    holds(BinOp::Gt, I(INT64_MIN), D(-INFINITY), true, "INT64_MIN > -inf");
+
+    holds(BinOp::Lt, I(1), D(1.5), true, "1 < 1.5");
+    holds(BinOp::Gt, I(2), D(1.5), true, "2 > 1.5");
+    holds(BinOp::Gt, I(-1), D(-1.5), true, "-1 > -1.5");
+    holds(BinOp::Lt, I(-2), D(-1.5), true, "-2 < -1.5");
+    holds(BinOp::Eq, I(1), D(1.0), true, "1 == 1.0");
+    holds(BinOp::Eq, I(0), D(-0.0), true, "0 == -0.0");
+    holds(BinOp::Ge, D(1.5), I(1), true, "1.5 >= 1 (flipped)");
+    holds(BinOp::Le, D(1.0), I(1), true, "1.0 <= 1 (flipped)");
+
+    // NaN is unordered: false for everything but Ne, either way round.
+    for (const BinOp op : {BinOp::Eq, BinOp::Lt, BinOp::Le, BinOp::Gt,
+                           BinOp::Ge}) {
+      holds(op, I(1), D(NAN), false, "int vs NaN");
+      holds(op, D(NAN), I(1), false, "NaN vs int");
+    }
+    holds(BinOp::Ne, I(1), D(NAN), true, "int != NaN");
+    holds(BinOp::Ne, D(NAN), I(1), true, "NaN != int");
   }
 
   if (g_failures != 0) {

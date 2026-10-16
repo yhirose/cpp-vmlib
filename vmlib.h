@@ -2930,6 +2930,40 @@ inline Value compare(BinOp op, const T& a, const T& b) {
   }
 }
 
+// An int against a double, exactly: widening the int to double first rounds
+// anything past 2^53, which made 2^53 and 2^53+1 both equal to 2^53.0 and
+// not to each other. NaN is unordered against everything.
+enum class Order { Less, Equal, Greater, Unordered };
+
+inline Order compare_int_double(int64_t i, double d) {
+  if (std::isnan(d)) return Order::Unordered;
+  if (d >= 9223372036854775808.0) return Order::Less;     // 2^63 > any int64
+  if (d < -9223372036854775808.0) return Order::Greater;  // below -2^63
+  // Inside [-2^63, 2^63), the truncation fits an int64 and the fraction
+  // d - trunc(d) is exact.
+  const double whole = std::trunc(d);
+  const int64_t w = static_cast<int64_t>(whole);
+  if (i != w) return i < w ? Order::Less : Order::Greater;
+  const double frac = d - whole;
+  if (frac > 0) return Order::Less;
+  if (frac < 0) return Order::Greater;
+  return Order::Equal;
+}
+
+// The answer a comparison operator gives for an ordering.
+inline Value compare_order(BinOp op, Order o) {
+  switch (op) {
+    case BinOp::Eq: return Value::make_bool(o == Order::Equal);
+    case BinOp::Ne: return Value::make_bool(o != Order::Equal);
+    case BinOp::Lt: return Value::make_bool(o == Order::Less);
+    case BinOp::Le: return Value::make_bool(o == Order::Less || o == Order::Equal);
+    case BinOp::Gt: return Value::make_bool(o == Order::Greater);
+    case BinOp::Ge:
+      return Value::make_bool(o == Order::Greater || o == Order::Equal);
+    default: return Value();
+  }
+}
+
 // The check and the arithmetic in one walk of the operand ladder: on
 // success `out` takes the result and the answer is empty, and on failure the
 // diagnostic comes back and `out` is untouched. Two failure kinds, where the
@@ -3012,6 +3046,22 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
                                static_cast<uint64_t>(b));
         return {};
       default: out = compare(op, a, b); return {};  // Eq .. Ge
+    }
+  }
+  // A comparison of an int with a double is made on the numbers, not on the
+  // int rounded to a double (arithmetic still widens, below).
+  if (is_comparison(op) && l.is_number() && r.is_number()) {
+    if (l.is_int() && r.is_double()) {
+      out = compare_order(op, compare_int_double(l.as_int(), r.as_double()));
+      return {};
+    }
+    if (l.is_double() && r.is_int()) {
+      // Asked the other way round, so the answer flips.
+      Order o = compare_int_double(r.as_int(), l.as_double());
+      if (o == Order::Less) o = Order::Greater;
+      else if (o == Order::Greater) o = Order::Less;
+      out = compare_order(op, o);
+      return {};
     }
   }
   if (l.is_number() && r.is_number() && !is_int_only(op)) {
