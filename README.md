@@ -173,8 +173,9 @@ nesting rather than the total number of declarations.
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
 dynamically typed language needs and the IR has no opinion about. The
-position is bound (it is a `Builder::At` underneath) and the locals have
-names:
+position is bound (it is a `Builder::At` underneath, and by default it is
+`{0, 0}`: no source position, so a failure inside the helper is reported
+at the call into it) and the locals have names:
 
 ```cpp
 FuncWriter w(m);
@@ -782,7 +783,9 @@ line, col}` object a handler can read, and the object remembers that it
 is a trap: a handler that catches it and raises it again -- a `finally`,
 an `except` that did not match, a language's own top-level guard -- still
 fails the program with the original message and position, not
-`uncaught: <object>` at the rethrow.
+`uncaught: <object>` at the rethrow. A failure in code with no position
+of its own -- a helper written in IR, at `{0, 0}` -- is reported at the
+call that led into it.
 
 ## Scope
 

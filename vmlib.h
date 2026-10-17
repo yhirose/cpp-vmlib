@@ -54,6 +54,16 @@
 
 namespace coreir {
 
+// Where a node came from in the program's source. {0, 0} is no position at
+// all: code a front end wrote directly in IR (FuncWriter's default), which
+// has no line of its own. A failure raised there is reported at the nearest
+// point with a position that led into it -- the call into the helper, or
+// the call into whatever called it (Exec::attributed).
+struct SrcPos {
+  uint32_t line = 0;
+  uint32_t col = 0;
+};
+
 // Uninit is what a local slot holds before anything is stored in it. It is a
 // tag rather than a flag beside the value so that a slot is one word pair
 // like everything else, and so a tracing collector scanning slots does not
@@ -632,8 +642,10 @@ struct GenFrame {
   // Where this frame's own result goes in the frame below it -- only a
   // coroutine's parked stack has a "below" to keep (a generator's single
   // frame gets its ret_reg from each resume); its bottom frame's is
-  // re-patched on every resume the same way.
+  // re-patched on every resume the same way. call_pos (Frame::call_pos)
+  // the same.
   int32_t ret_reg = -1;
+  SrcPos call_pos{};
   std::vector<Value> locals;
   std::vector<Value> regs;
   std::vector<Value> cells;
@@ -1369,11 +1381,6 @@ struct NodeId {
 
 inline constexpr bool operator==(NodeId a, NodeId b) { return a.v == b.v; }
 inline constexpr bool operator!=(NodeId a, NodeId b) { return a.v != b.v; }
-
-struct SrcPos {
-  uint32_t line = 0;
-  uint32_t col = 0;
-};
 
 // `bits` is the payload for Int, Bool and Double (the last as its bit
 // pattern); for Str it indexes Module::str_consts rather than holding the
@@ -2782,10 +2789,12 @@ struct FrameLayout {
 // opinion about, each written once per module and called from the emit pass.
 //
 // Optional, like Resolver. What it is worth over Builder alone is two
-// things. The position is bound once (it is a Builder::At underneath), and
-// the locals have names: `local("carry")` hands back a Slot, the slot
-// numbers are assigned in call order, and finish() derives num_locals and
-// the local_names table from them. Written with bare slot numbers instead,
+// things. The position is bound once (it is a Builder::At underneath; the
+// default, {0, 0}, is no position, so a failure in the helper is reported
+// at the call into it -- see SrcPos), and the locals have names:
+// `local("carry")` hands back a Slot, the slot numbers are assigned in call
+// order, and finish() derives num_locals and the local_names table from
+// them. Written with bare slot numbers instead,
 // a helper's body has its indices in one place and their names in another,
 // and inserting a temporary in the middle renumbers everything after it --
 // which verify() will catch only if the *count* changed too.
@@ -3962,10 +3971,11 @@ struct NativeCall {
   // in raw pointers it would have to free on that path.
   Value call(const Value& callee, const Value* argv, int32_t argc);
 
-  // A trap at this call's position (make_trap, below), for a native that
-  // wants to fail the way a divide by zero does (`call.error =
-  // call.trap("...")`): catchable as the same {message, line, col} object,
-  // and reported uncaught with the same wording.
+  // A trap at this call's position, attributed like any raise
+  // (Exec::attributed), for a native that wants to fail the way a divide
+  // by zero does (`call.error = call.trap("...")`): catchable as the same
+  // {message, line, col} object, and reported uncaught with the same
+  // wording.
   Value trap(const std::string& msg) const;
 
   void* exec = nullptr;  // vm::detail::Exec*, set by the executor
@@ -6477,6 +6487,12 @@ struct Frame {
   // as defer_marks.
   std::vector<std::pair<uint64_t, int32_t>> owned_marks;
   int32_t ret_reg = -1;  // where in the caller the result goes
+  // Where this activation was entered from: the call, the resume, the
+  // scope exit or the close running a defer -- or, after a tail call, that
+  // call's position, the frame that made it being gone. {0, 0} when there
+  // is no such place: the entry frame, a job the scheduler started. What a
+  // failure in code with no position of its own is reported at.
+  SrcPos call_pos{};
   int32_t argc = 0;      // arguments the call supplied (Op::ArgCount)
   // The program's own frame -- vm::run's first -- as opposed to a job's,
   // which sits at the same stack depth after it: RunOptions::
@@ -6513,6 +6529,7 @@ inline void clear_frame(Frame& f) {
   f.chunk = nullptr;
   f.pc = 0;
   f.ret_reg = -1;
+  f.call_pos = {};
   f.argc = 0;
   f.entry = false;
 }
@@ -6685,9 +6702,28 @@ struct Exec {
     return f;
   }
 
+  // Where a failure raised at `pos` belongs. A position of {0, 0} is code
+  // with none of its own (SrcPos) -- a helper the front end wrote in IR --
+  // and the failure is the program's at the nearest place with one that
+  // led into it: the frames are walked down through the positions that
+  // entered them (Frame::call_pos) until one has a line. Applied as the
+  // value is raised, so a handler reading a trap's line and an uncaught
+  // report see the same place.
+  SrcPos attributed(SrcPos pos) const {
+    for (size_t i = frames.size(); pos.line == 0 && i-- > 0;) {
+      pos = frames[i]->call_pos;
+    }
+    return pos;
+  }
+
+  // Every raise goes through one of these two.
+  [[noreturn]] void raise(Value v, SrcPos pos) {
+    throw Raise{std::move(v), attributed(pos)};
+  }
   // A trap: the executor's own failure, catchable like any Throw. The
   // value a handler sees is make_trap's {message, line, col} object.
   [[noreturn]] void raise_trap(const std::string& msg, SrcPos pos) {
+    pos = attributed(pos);
     throw Raise{coreir::make_trap(msg, pos), pos};
   }
 
@@ -6756,8 +6792,8 @@ struct Exec {
   }
 
   // ...and back into a fresh executor frame, storage and all. The
-  // GenFrame's own ret_reg and gen_self come along; a caller that has its
-  // own (a generator's resume site) overwrites them.
+  // GenFrame's own ret_reg, call_pos and gen_self come along; a caller that
+  // has its own (a generator's resume site) overwrites them.
   FramePtr restore_frame(GenFrame& gf) {
     FramePtr f = take_frame();
     f->chunk = &p.chunks[static_cast<size_t>(gf.func)];
@@ -6772,15 +6808,18 @@ struct Exec {
     f->ret_reg = gf.ret_reg;
     f->argc = gf.argc;
     f->gen_self = std::move(gf.gen_self);
+    f->call_pos = gf.call_pos;
     return f;
   }
 
-  // A generator's frame, back onto the executor's stack (resume). The new
-  // frame owns the generator for as long as it runs.
-  FramePtr unpark_frame(const Value& gv, int32_t ret_reg) {
+  // A generator's frame, back onto the executor's stack (resume) from the
+  // instruction at `pos`. The new frame owns the generator for as long as
+  // it runs.
+  FramePtr unpark_frame(const Value& gv, int32_t ret_reg, SrcPos pos) {
     GeneratorObj* go = gv.as_generator();
     auto f = restore_frame(go->frame);
     f->ret_reg = ret_reg;
+    f->call_pos = pos;
     f->gen_self = gv;
     go->state = GeneratorObj::State::Running;
     return f;
@@ -6820,6 +6859,7 @@ struct Exec {
       gf.yield_reg = i + 1 == frames.size() ? yield_reg : -1;
       gf.argc = fr.argc;
       gf.ret_reg = fr.ret_reg;
+      gf.call_pos = fr.call_pos;
       park_frame(gf, fr);
       gf.gen_self = std::move(fr.gen_self);
       co->frames.push_back(std::move(gf));
@@ -6829,11 +6869,12 @@ struct Exec {
   }
 
   // Resume: the parked frames back onto the stack in order. The bottom
-  // frame's result now goes to this resume's register (`ret_reg`) and it
-  // carries the coroutine again; the top frame receives `sent` where its
-  // CoroYield's result was to land. A null `sent` (CoroClose) delivers
-  // nothing.
-  void unpark_coro(const Value& cv, int32_t ret_reg, const Value* sent) {
+  // frame's result now goes to this resume's register (`ret_reg`), it was
+  // entered from this resume's position, and it carries the coroutine
+  // again; the top frame receives `sent` where its CoroYield's result was
+  // to land. A null `sent` (CoroClose) delivers nothing.
+  void unpark_coro(const Value& cv, int32_t ret_reg, const Value* sent,
+                   SrcPos pos) {
     CoroObj* co = cv.as_coroutine();
     const size_t n = co->frames.size();
     for (size_t i = 0; i < n; ++i) {
@@ -6842,6 +6883,7 @@ struct Exec {
       auto nf = restore_frame(gf);
       if (i == 0) {
         nf->ret_reg = ret_reg;
+        nf->call_pos = pos;
         nf->coro_self = cv;
       }
       if (i + 1 == n && sent && yield_reg >= 0) {
@@ -6945,6 +6987,7 @@ struct Exec {
     }
     f->argc = argc;
     f->ret_reg = ret_reg;
+    f->call_pos = pos;
     frames.push_back(std::move(f));
   }
 
@@ -6957,6 +7000,15 @@ struct Exec {
 
   [[noreturn]] void fail(const Frame& f, const std::string& msg) {
     raise_trap(msg, pos_at(*f.chunk, f.pc));
+  }
+
+  // Where the running frame is: what a call made from C++ rather than from
+  // an instruction -- a destructor, run by a release in the middle of one
+  // -- records as the place it was entered from.
+  SrcPos running_pos() const {
+    if (frames.empty()) return {};
+    const Frame& f = *frames.back();
+    return f.pc < f.chunk->code_pos.size() ? pos_at(*f.chunk, f.pc) : SrcPos{};
   }
 
   // The two checks a field access owes before it may index props directly,
@@ -7064,7 +7116,7 @@ struct Exec {
     const Value nil;
     if (co->state == St::Start) return start_coro(cv, nil, -1, SrcPos{0, 0});
     check_depth(co->frames.size(), SrcPos{0, 0});
-    unpark_coro(cv, -1, &nil);
+    unpark_coro(cv, -1, &nil, SrcPos{0, 0});
     return true;
   }
 
@@ -7217,7 +7269,7 @@ struct Exec {
     Value arg = Value::make_ref(h);
     const size_t floor = self->frames.size();
     try {
-      self->push_closure(closure, &arg, 1, -1, SrcPos{0, 0});
+      self->push_closure(closure, &arg, 1, -1, self->running_pos());
       self->run_nested(floor);
     } catch (Raise& r) {
       const auto d = coreir::trap_diagnostic(r.value);
@@ -7254,7 +7306,9 @@ struct Exec {
           const size_t mark = f.defer_marks.back().first;
           f.defer_marks.pop_back();
           try {
-            run_defers_now(f, mark, r.pos);
+            run_defers_now(
+                f, mark,
+                pos_at(*f.chunk, static_cast<size_t>(cl.defer_mark_pc)));
           } catch (Raise& replacement) {
             r = std::move(replacement);
           }
@@ -7345,7 +7399,7 @@ struct Exec {
     call.ctx = n->ctx;
     call.pos = pos;
     call.exec = this;
-    if (!n->fn(call)) throw Raise{std::move(call.error), pos};
+    if (!n->fn(call)) raise(std::move(call.error), pos);
     deliver(ret_reg, std::move(call.result));
   }
 
@@ -7403,7 +7457,10 @@ struct Exec {
     // The new activation, in place: ret_reg, gen_self, coro_self and
     // the frame's position in the stack are the caller's and stay --
     // a tail call from a coroutine's bottom frame is still that
-    // coroutine's bottom frame.
+    // coroutine's bottom frame. call_pos moves to this call, when it has
+    // a position: the frame that made it is gone, and a helper
+    // tail-calling a helper must not erase the place that led into both.
+    if (pos.line != 0) f.call_pos = pos;
     f.chunk = &nch;
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
@@ -7437,7 +7494,7 @@ struct Exec {
       // defer that throws propagates to this call; the generator is
       // done either way (the popped frame releases what it held).
       check_can_push(pos);
-      frames.push_back(unpark_frame(gv, -1));
+      frames.push_back(unpark_frame(gv, -1, pos));
       Frame& gf = *frames.back();
       try {
         run_pending_defers(gf, pos);
@@ -7472,7 +7529,7 @@ struct Exec {
       // instruction's own, at its own pc like a Throw.
       go->state = St::Done;
       coreir::detail::release_detached(go->frame);
-      throw Raise{std::move(v), pos};
+      raise(std::move(v), pos);
     }
     // Re-enter at the Yield itself rather than after it, so the
     // regions enclosing the yield -- its handlers, its defers -- are
@@ -7480,12 +7537,12 @@ struct Exec {
     // call, which is where the throw lands if the body lets it out.
     check_can_push(pos);
     const size_t at = static_cast<size_t>(go->frame.pc) - 1;
-    auto nf = unpark_frame(gv, in.a);
+    auto nf = unpark_frame(gv, in.a, pos);
     nf->pc = at;
     const SrcPos yp = pos_at(*nf->chunk, at);
     ++f.pc;
     frames.push_back(std::move(nf));
-    throw Raise{std::move(v), yp};
+    raise(std::move(v), yp);
   }
 
   // CoroResume.
@@ -7516,7 +7573,7 @@ struct Exec {
     check_depth(co->frames.size(), pos);
     coreir_rt_poll();
     ++f.pc;
-    unpark_coro(cv, in.a, &f.regs[in.c]);
+    unpark_coro(cv, in.a, &f.regs[in.c], pos);
   }
 
   // CoroClose.
@@ -7547,7 +7604,7 @@ struct Exec {
     check_depth(co->frames.size(), pos);
     const size_t base = frames.size();
     ++f.pc;
-    unpark_coro(cv, -1, nullptr);
+    unpark_coro(cv, -1, nullptr, pos);
     try {
       while (frames.size() > base) {
         Frame& t = *frames.back();
@@ -8140,7 +8197,7 @@ struct Exec {
         }
         case Op::Throw: {
           const SrcPos sp = pos_at(ch, f.pc);
-          throw Raise{f.regs[in.a], sp};
+          raise(f.regs[in.a], sp);
         }
         case Op::Yield: {
           // Suspend: the frame's storage moves back into the generator, the
@@ -8174,7 +8231,7 @@ struct Exec {
           const bool started = go->state == St::Suspended;
           const int32_t yield_reg = go->frame.yield_reg;
           check_can_push(pos);
-          auto nf = unpark_frame(gv, in.a);
+          auto nf = unpark_frame(gv, in.a, pos);
           // The sent value lands where the Yield's own result goes; a first
           // resume has no yield in flight and its argument is ignored.
           if (started && yield_reg >= 0) {
@@ -8333,7 +8390,7 @@ inline Value NativeCall::call(const Value& callee, const Value* argv,
 }
 
 inline Value NativeCall::trap(const std::string& msg) const {
-  return make_trap(msg, pos);
+  return make_trap(msg, static_cast<vm::detail::Exec*>(exec)->attributed(pos));
 }
 
 }  // namespace coreir

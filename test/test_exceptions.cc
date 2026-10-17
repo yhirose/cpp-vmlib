@@ -22,6 +22,10 @@ std::vector<std::string> g_out;
 int g_failures = 0;
 coreir::SrcPos g_fail_pos;  // where the last coreir_rt_fail said it was
 
+std::string fail_at() {
+  return std::to_string(g_fail_pos.line) + ":" + std::to_string(g_fail_pos.col);
+}
+
 void check_eq(const std::string& got, const std::string& want,
               const std::string& what) {
   if (got != want) {
@@ -211,9 +215,76 @@ int main() {
          {}});
     check_eq(run_module(m, "rethrown trap"), "divide by zero",
              "rethrown trap: message");
-    check_eq(std::to_string(g_fail_pos.line) + ":" +
-                 std::to_string(g_fail_pos.col),
-             "7:3", "rethrown trap: position");
+    check_eq(fail_at(), "7:3", "rethrown trap: position");
+  }
+
+  // --- 4c. A failure in code with no position of its own -- a helper
+  //         written in IR, every node at {0, 0} -- is the program's at the
+  //         call into it: a trap and a plain throw alike, and through a
+  //         tail call, whose frame is gone, as through a plain one.
+  // main: f() @5:7    f: return helper() @9:3
+  // helper: print(1 / 0) | throw "boom", all @0:0
+  for (const bool tail : {false, true}) {
+    for (const bool trap : {true, false}) {
+      Module m;
+      Builder b(m);
+      const SrcPos none{0, 0};
+      m.capture_maps.push_back({});
+      m.funcs.push_back(
+          {"main", 0, 0,
+           b.call_value(b.make_closure(1, 0, p), {}, {5, 7}), {}, {}});
+      m.funcs.push_back(
+          {"f", 0, 0,
+           b.make_return(b.call_value(b.make_closure(2, 0, p), {}, {9, 3}),
+                         p),
+           {}, {}});
+      m.funcs.back().tail_calls = tail;
+      m.funcs.push_back(
+          {"helper", 0, 0,
+           trap ? b.intrinsic(IntrinsicId::Print,
+                              {b.binary(BinOp::Div, b.literal(1, none),
+                                        b.literal(0, none), none)},
+                              none)
+                : b.make_throw(b.str_literal("boom", none), none),
+           {}, {}});
+      const std::string what = std::string(tail ? "tail-called " : "") +
+                               (trap ? "helper trap" : "helper throw");
+      check_eq(run_module(m, what),
+               trap ? "divide by zero" : "uncaught: boom", what + ": message");
+      check_eq(fail_at(), "9:3", what + ": position");
+    }
+  }
+
+  // --- 4d. A defer run by the unwinder is entered from its own scope, not
+  //         from wherever the throw that unwinds it was raised: a failure
+  //         in a positionless defer is reported at the scope.
+  // scope @3:1 { defer helper; thrower() @7:1 }   thrower: throw "x" @9:9
+  // helper: print(1 / 0), all @0:0
+  {
+    Module m;
+    Builder b(m);
+    const SrcPos none{0, 0};
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.scope(0, 0,
+                 b.block({b.make_defer(b.make_closure(2, 0, p), p),
+                          b.call_value(b.make_closure(1, 0, p), {}, {7, 1})},
+                         p),
+                 {3, 1}),
+         {}, {}});
+    m.funcs.push_back(
+        {"thrower", 0, 0, b.make_throw(b.str_literal("x", p), {9, 9}), {}, {}});
+    m.funcs.push_back(
+        {"helper", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Div, b.literal(1, none),
+                               b.literal(0, none), none)},
+                     none),
+         {}, {}});
+    check_eq(run_module(m, "unwinding defer"), "divide by zero",
+             "unwinding defer: message");
+    check_eq(fail_at(), "3:1", "unwinding defer: position");
   }
 
   // --- 5. Nested: the inner handler rethrows; the outer one catches. ------
