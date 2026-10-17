@@ -37,8 +37,8 @@ print(pcall(function(a, b) return a + b end, 3, 4))
 
 -- A runtime failure is caught the same way a program's own error is,
 -- whether the executor raises it or a helper like `$add` does.
-local ok3 = pcall(function() return nil + 1 end)
-print(ok3)
+local ok3, msg3 = pcall(function() return nil + 1 end)
+print(ok3, msg3:sub(-25))
 
 -- Failure inside a coroutine surfaces at the resume rather than ending
 -- the program.

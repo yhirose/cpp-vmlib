@@ -93,7 +93,9 @@ A fourth, which had to be a host function rather than an IR one:
 `tostring` of a float. Lua formats with `"%.14g"` and then makes the result
 look like a float again, so `10/2` is `"5.0"` and `0.1+0.2` is `"0.3"` --
 neither of which is `to_display`'s shortest round trip (`"5"`,
-`"0.30000000000000004"`), and neither of which the IR could compute.
+`"0.30000000000000004"`), and neither of which the IR could compute. The
+host's `tostring` also finds `__tostring` itself, calling back into the
+program for it, because `print` has to reach the same answer from C++.
 
 ## A table is a Map
 
@@ -120,9 +122,10 @@ to step over it, which is the one place that choice shows.
 ## The rest of the metamethods, and the walk they all share
 
 `__index` predates everything below and stays written the way it always
-was (`rt_get`, inline); `__add`/`__sub`/`__mul`/`__eq`/`__tostring`/
-`__call`/`__newindex` all go through two small funcs, `$mt` (a table's
-metatable, or nil) and `$mm` (one metamethod off it, or nil):
+was (`rt_get`, inline), and `__tostring` is the host's (below);
+`__add`/`__sub`/`__mul`/`__eq`/`__call`/`__newindex` all go through two
+small funcs, `$mt` (a table's metatable, or nil) and `$mm` (one
+metamethod off it, or nil):
 
 ```
 $mm(v, name):
@@ -137,9 +140,11 @@ operation, and only when it does not apply, ask `$mm` and call what it
 finds. `+`/`-`/`*` on two numbers stay a plain `BinOp` -- the fallback
 only runs when at least one operand is not a number, checking the left
 operand's metatable first and then the right's, which is Lua's own order.
-`==` on two tables tries `__eq` before falling back to `Same`. `$str`
-(what `tostring` and string coercion both go through) tries `__tostring`
-before the host's own formatter. A call whose target turns out to be a
+`==` on two tables tries `__eq` before falling back to `Same`.
+`__tostring` is the exception: the host's `tostring` finds it itself
+(`lua_tostring_mm`), since `print` has to reach it from C++, and `$str`
+(what `tostring` and string coercion both go through) hands it anything
+that is not already a string. A call whose target turns out to be a
 table checks `__call` at the call site itself, in `emit_suffixed`, since
 building the argument list is already there and does not need to move to
 a shared helper -- `Adder(1, 2)` on a table with `__call` and a plain
@@ -155,10 +160,10 @@ metamethod detour skipped, so a logging `__newindex` can still store the
 value.
 
 `samples/operators.lua` is `Vec.__add`/`__sub`/`__mul`, `__eq`, a
-`__tostring` that `print` itself has to go through (the host's own
-formatter cannot call a Lua closure, so `print` now stringifies every
-argument with `$str` before the native ever sees them), and two
-`__call`-based callables, one of them stateful.
+`__tostring` that `print` itself goes through (the host's formatter finds
+it and calls back into the program with `NativeCall::call`), two
+`__call`-based callables, one of them stateful, and `print`/`type`/
+`tostring` called through locals.
 
 ## The real generic-`for` protocol
 
@@ -236,10 +241,14 @@ Quietly different:
   position expands only for the library functions that take their
   arguments as one array (`print`, `io.write`). A user function's arity is
   fixed at its call site.
-* **A library name is not a value**, except `print`, `type` and `tostring`,
-  which are `NativeRef`s so that `type(print)` answers. `table`, `string`,
-  `math`, `io` and `coroutine` are namespaces this front end matches
-  syntactically, not tables it could hand back.
+* **A library name is not a value**, except `print`, `type` and `tostring`.
+  Those three are host functions that take the convention every Lua
+  function value does -- arguments one by one, results as an array -- so
+  `local p = print; p("x", 1)` prints and `type(print)` answers. (Host
+  functions rather than IR ones because `print` takes any number of
+  arguments, which nothing under the fixed-arity convention can.) `table`,
+  `string`, `math`, `io` and `coroutine` are namespaces this front end
+  matches syntactically, not tables it could hand back.
 * **A string has no metatable**, so `("x"):rep(3)` is resolved by name at
   bind time -- an object of your own must not use those method names.
 

@@ -82,3 +82,11 @@ for idx, v in enumerate({"a", "b", "c"}) do
   out[#out + 1] = idx .. ":" .. v
 end
 print(table.concat(out, " "))
+
+-- print, type and tostring are values like any other function: through a
+-- local they take their arguments and answer their results the way a Lua
+-- function does, `__tostring` included.
+local show, kind, str = print, type, tostring
+show("via a local:", str(a), kind(show), a)
+local k1, k2 = kind(1)
+print(k1, k2)

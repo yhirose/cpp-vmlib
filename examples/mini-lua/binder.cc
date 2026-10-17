@@ -340,7 +340,7 @@ struct Binder {
         "$key",    "$get",  "$set",  "$len",  "$one",  "$nth",   "$append",
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$setmt",  "$getmt", "$spread", "$error",
-        "$mt", "$mm", "$add", "$subm", "$mulm", "$strall",
+        "$mt", "$mm", "$add", "$subm", "$mulm",
     };
     return names;
   }
@@ -491,13 +491,9 @@ struct Binder {
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [m] = r.locals("m");
+    // `__tostring` is the host's to find (lua_tostring_mm), so print reaches
+    // the same answer from C++.
     r.add(r.iff(r.is(r.typ(r.L(v)), "string"), r.ret(r.L(v))));
-    r.add(r.iff(r.is(r.typ(r.L(v)), "map"),
-                r.blk({r.set(m, r.call("$mm", {r.L(v), r.S("__tostring")})),
-                       r.iff(r.isnt(r.typ(r.L(m)), "nil"),
-                             r.ret(r.call("$one", {r.b.call_value(
-                                                      r.L(m), {r.L(v)})})))})));
     r.add(r.ret(r.nat("tostring", {r.L(v)})));
     r.finish("$str");
   }
@@ -505,7 +501,8 @@ struct Binder {
   // A table's metatable, and one metamethod off it -- the walk every
   // metamethod here shares. `__index` (rt_get, above) predates this and
   // stays written inline; the newer ones (`__add`/`__sub`/`__mul`/`__eq`/
-  // `__tostring`/`__call`) all go through these two.
+  // `__call`) all go through these two. `__tostring` is the host's
+  // (lua_tostring_mm).
   void rt_mt() {
     RT r(*this);
     const auto [t] = r.params("t");
@@ -546,8 +543,14 @@ struct Binder {
     };
     for (const NodeId n : try_mm(a)) r.add(n);
     for (const NodeId n : try_mm(b)) r.add(n);
-    r.add(r.b.make_throw(r.S("attempt to perform arithmetic on a table "
-                             "value")));
+    // Named by the operand that is not a number, the left one first -- the
+    // one Lua's own message names.
+    const NodeId bad = r.iff(r.is_num(r.L(ta)), r.L(b), r.L(a));
+    r.add(r.b.make_throw(r.bin(
+        BinOp::Add,
+        r.bin(BinOp::Add, r.S("attempt to perform arithmetic on a "),
+              r.nat("type", {bad})),
+        r.S(" value"))));
     r.finish(name);
   }
 
@@ -833,23 +836,6 @@ struct Binder {
     r.finish("$spread");
   }
 
-  // `print` goes through `$str` per argument before the host ever sees
-  // them, because the host's own formatter cannot call a Lua `__tostring`.
-  void rt_strall() {
-    RT r(*this);
-    const auto [vals] = r.params("vals");
-    const auto [out, i] = r.locals("out", "i");
-    r.add(r.set(out, r.arr({})));
-    r.add(r.set(i, r.I(0)));
-    r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(i), r.len(r.L(vals))),
-        r.blk({r.in(IntrinsicId::ArrayPush,
-                    {r.L(out), r.call("$str", {r.idx(r.L(vals), r.L(i))})}),
-               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
-    r.add(r.ret(r.L(out)));
-    r.finish("$strall");
-  }
-
   void emit_runtime() {
     rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
@@ -859,7 +845,6 @@ struct Binder {
     rt_arith("$add", BinOp::Add, "__add");
     rt_arith("$subm", BinOp::Sub, "__sub");
     rt_arith("$mulm", BinOp::Mul, "__mul");
-    rt_strall();
   }
 
   // A helper call. Every capture-free helper is a Func::singleton (RT::finish
@@ -998,15 +983,14 @@ struct Binder {
         const auto it = ref_of.find(&a);
         if (it != ref_of.end()) return {read_var(it->second, ctx, p)};
         // A library function used as a value rather than called -- what
-        // `type(print)` asks for. Tag::NativeRef *is* the value, so this
-        // needs nothing but naming it. A namespace (`table`, `string`) is
-        // not a value here, because this front end has no table to hand
-        // back for one.
+        // `type(print)` asks for, and what `local p = print; p(x)` calls
+        // the way it calls any function (nat_print_value). A namespace
+        // (`table`, `string`) is not a value here, because this front end
+        // has no table to hand back for one.
         const std::string g(a.token);
         if (g == "print" || g == "type" || g == "tostring") {
           Builder bb(m);
-          return {bb.native_ref(bb.declare_native(g == "print" ? "print" : g),
-                                p)};
+          return {bb.native_ref(bb.declare_native(g + "_value"), p)};
         }
         fail(a, "'" + g + "' must be called here");
       }
@@ -1278,10 +1262,7 @@ struct Binder {
     };
 
     if (mem.empty()) {
-      if (g == "print") {
-        return {native("print", {helper("$strall", {all()}, p)}, p),
-                false};
-      }
+      if (g == "print") return {native("print", {all()}, p), false};
       if (g == "type") return {native("type", {a0(0)}, p), false};
       if (g == "tostring") return {helper("$str", {a0(0)}, p), false};
       if (g == "setmetatable") {
@@ -1838,7 +1819,8 @@ struct Binder {
 // float, which is neither to_display's shortest round trip nor anything
 // this IR could compute. Table operations are *not* here (see $concat and
 // $insert): a table is a Map, and walking one from C++ would tie this front
-// end to MapObj's layout.
+// end to MapObj's layout. The one table read is `__tostring`'s, two key
+// lookups, which `print` has to make from C++ the way Lua's own does.
 
 std::string lua_tostring(const Value& v) {
   switch (v.tag()) {
@@ -1862,14 +1844,41 @@ std::string lua_tostring(const Value& v) {
   }
 }
 
-bool nat_print(NativeCall& c) {
+// Lua's tostring, `__tostring` included: what print and tostring answer,
+// called directly or through a value. The metamethod is a Lua function, so
+// it answers its results as an array (the calling convention above).
+std::string lua_tostring_mm(NativeCall& c, const Value& v) {
+  if (v.tag() == ValueTag::Map) {
+    const Value* mt = v.as_map()->find(Value::make_str(kMetaKey));
+    if (mt && mt->tag() == ValueTag::Map) {
+      const Value* mm = mt->as_map()->find(Value::make_str("__tostring"));
+      if (mm && mm->is_callable()) {
+        const Value fn = *mm;  // the call may rewrite the metatable
+        const Value self = v;
+        const Value r = c.call(fn, &self, 1);
+        if (r.tag() != ValueTag::Array) return lua_tostring(r);
+        const auto& items = r.as_array()->items;
+        return lua_tostring(items.empty() ? Value() : items[0]);
+      }
+    }
+  }
+  return lua_tostring(v);
+}
+
+void lua_print(NativeCall& c, const Value* vals, size_t n) {
   std::string out;
-  const auto& items = c.arg(0).as_array()->items;
-  for (size_t i = 0; i < items.size(); ++i) {
+  for (size_t i = 0; i < n; ++i) {
     if (i > 0) out += "\t";
-    out += lua_tostring(items[i]);
+    out += lua_tostring_mm(c, vals[i]);
   }
   coreir_rt_out_str(out.data(), static_cast<int64_t>(out.size()));
+}
+
+// print(...) at a call site: its arguments as one array, which is how
+// `print(f())` expands a call's results.
+bool nat_print(NativeCall& c) {
+  const auto& items = c.arg(0).as_array()->items;
+  lua_print(c, items.data(), items.size());
   c.result = Value();
   return true;
 }
@@ -1883,7 +1892,7 @@ bool nat_write(NativeCall& c) {
 }
 
 bool nat_tostring(NativeCall& c) {
-  c.result = Value::make_str(lua_tostring(c.arg(0)));
+  c.result = Value::make_str(lua_tostring_mm(c, c.arg(0)));
   return true;
 }
 
@@ -1904,6 +1913,25 @@ bool nat_type(NativeCall& c) {
     default: break;
   }
   c.result = Value::make_str(n);
+  return true;
+}
+
+// The same three as values a program holds (`local p = print`), so called
+// the way every Lua function value is: arguments one by one, results as an
+// array. Host functions rather than IR ones because print takes any number
+// of arguments, which no function under the fixed-arity convention can.
+bool nat_print_value(NativeCall& c) {
+  lua_print(c, c.args, static_cast<size_t>(c.argc));
+  c.result = Value::make_array({});
+  return true;
+}
+
+// A one-argument native as a value: the same work, its one result answered
+// as a results array.
+template <NativeFn F>
+bool as_value(NativeCall& c) {
+  if (!F(c)) return false;
+  c.result = Value::make_array({std::move(c.result)});
   return true;
 }
 
@@ -2010,6 +2038,9 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"write", 1, nat_write, nullptr},
       {"tostring", 1, nat_tostring, nullptr},
       {"type", 1, nat_type, nullptr},
+      {"print_value", -1, nat_print_value, nullptr},
+      {"tostring_value", -1, as_value<nat_tostring>, nullptr},
+      {"type_value", -1, as_value<nat_type>, nullptr},
       {"mathtype", 1, nat_mathtype, nullptr},
       {"floor", 1, nat_floor, nullptr},
       {"s_sub", -1, nat_s_sub, nullptr},
