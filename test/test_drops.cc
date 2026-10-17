@@ -12,8 +12,9 @@
 // last held it; one merely hanging off a plain cycle waits for the
 // collector; and a destructor runs at most once, resurrection included.
 // Then a scope's explicit release list, which puts a captured local (a
-// cell) back into declaration order with the plain ones; and the frame's
-// dead temporaries, which must not keep a scope's cycle alive.
+// cell) back into declaration order with the plain ones; the frame's dead
+// temporaries, which must not keep a scope's cycle alive; and a container's
+// own order, first to last, when it is freed with drop-bearing values in it.
 
 #include <cstdio>
 #include <stdexcept>
@@ -96,13 +97,14 @@ struct Prog {
   coreir::NodeId collect() {
     return print(b.intrinsic(coreir::IntrinsicId::Collect, {}, p));
   }
+  // {name: "<name>", "\x01drop": <local 0>}
+  coreir::NodeId obj(const char* name) {
+    return b.object_lit({{str("name"), str(name)},
+                         {str("\x01" "drop"), local(0)}},
+                        p);
+  }
   coreir::NodeId mk(int32_t slot, const char* name) {
-    return b.block({b.assign(coreir::VarKind::Local, slot,
-                             b.object_lit({{str("name"), str(name)},
-                                           {str("\x01" "drop"), local(0)}},
-                                          p),
-                             p)},
-                   p);
+    return b.block({b.assign(coreir::VarKind::Local, slot, obj(name), p)}, p);
   }
   coreir::NodeId bind_drop() {
     return b.assign(coreir::VarKind::Local, 0, b.make_closure(1, 0, p), p);
@@ -912,6 +914,46 @@ int main() {
     expect_clean(run_module(g.m, "remove: drop writes back"),
                  "remove: drop writes back");
     check_eq(joined(), "19|", "remove: drop writes back output");
+  }
+
+  // --- 17. A container freed by its count reaching zero drops what it
+  //         held first to last -- an array's elements, an object's props,
+  //         a map's entries -- whatever order the standard library's own
+  //         vector would destroy them in (libc++ goes backwards). --------
+  {
+    // { s = <container of a, b, c> }; print("after")
+    const auto run = [&](const char* what, auto fill) {
+      Prog g;
+      g.main(g.b.block({g.bind_drop(), g.b.scope(1, 2, fill(g), g.p),
+                        g.print_str("after")},
+                       g.p),
+             {"s"});
+      expect_clean(run_module(g.m, what), what);
+      check_eq(joined(), "a|b|c|after|", std::string(what) + " output");
+    };
+    run("order: array", [](Prog& g) {
+      return g.b.assign(
+          VarKind::Local, 1,
+          g.b.array_lit({g.obj("a"), g.obj("b"), g.obj("c")}, g.p), g.p);
+    });
+    run("order: object", [](Prog& g) {
+      return g.b.assign(VarKind::Local, 1,
+                        g.b.object_lit({{g.str("x"), g.obj("a")},
+                                        {g.str("y"), g.obj("b")},
+                                        {g.str("z"), g.obj("c")}},
+                                       g.p),
+                        g.p);
+    });
+    run("order: map", [](Prog& g) {
+      std::vector<NodeId> body{g.b.assign(
+          VarKind::Local, 1, g.b.intrinsic(IntrinsicId::MapNew, {}, g.p), g.p)};
+      const char* names[] = {"a", "b", "c"};
+      for (int64_t k = 0; k < 3; ++k) {
+        body.push_back(g.b.set_index(g.local(1), g.b.literal(k, g.p),
+                                     g.obj(names[k]), g.p));
+      }
+      return g.b.block(body, g.p);
+    });
   }
 
   if (g_failures != 0) {

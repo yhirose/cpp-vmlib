@@ -770,7 +770,10 @@ death, a scope exit or a collection; a defer at its scope's exit; a
 coroutine's parked defers at an explicit `CoroClose`. Dropping a suspended
 coroutine or generator runs nothing, and a native fails a program only by
 returning `false` -- every path on which the executor calls back into
-program code is one a reader can name.
+program code is one a reader can name. The order is named too: a freed
+array, object or map releases what it held first to last, and a frame
+last to first, rather than in whatever order the C++ standard library's
+vector destroys its elements (libstdc++ and libc++ disagree).
 
 ## Scope
 

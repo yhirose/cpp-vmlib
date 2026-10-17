@@ -285,6 +285,11 @@ void destroy_heap_object(HeapObj* o);
 // Teardown needs this separated from destruction: see ~Runtime.
 void clear_heap_object_refs(HeapObj* o);
 
+// Both, for an object nothing can reach any more: its references dropped in
+// clear_heap_object_refs' order, then the object freed -- one dispatch on
+// the kind, since a refcount death takes this on every free.
+void free_heap_object(HeapObj* o);
+
 struct StrObj : HeapObj {
   std::string s;
   explicit StrObj(std::string v) : HeapObj(ValueTag::Str), s(std::move(v)) {}
@@ -504,6 +509,45 @@ class Value {
   int64_t data_;
 };
 
+// The order a container of Values is emptied in, stated once. A vector's own
+// destructor and clear() leave it to the standard library -- libstdc++ goes
+// front to back, libc++ back to front -- and a release can run a drop hook
+// the program sees, so nothing here lets either release a Value: whatever
+// empties a container goes through these. A heap container goes first to
+// last (Rust's rule for a Vec); a frame goes last to first, the order a
+// scope's own exit already releases its locals in (release_frame_storage,
+// below).
+namespace detail {
+// Only a reference is released: an immediate holds nothing, so it has no
+// place in the order.
+inline void release_one(Value& v) {
+  if (v.is_heap()) v = Value();
+}
+inline void release_one(std::pair<std::string, Value>& kv) {
+  release_one(kv.second);
+}
+inline void release_one(std::pair<Value, Value>& kv) {
+  release_one(kv.first);
+  release_one(kv.second);
+}
+
+// A frame's vectors, in place (the frame is off the stack, so nothing else
+// reaches them): last to first, and in the one pass a pop_back makes, which
+// matters on the path every return takes. Capacity is kept for the pool.
+inline void release_each_reversed(std::vector<Value>& v) {
+  while (!v.empty()) v.pop_back();
+}
+
+// A heap container its owner still holds: detached first, so a drop hook
+// that reads or writes the owner finds it already empty rather than half-way
+// through releasing -- then released first to last.
+template <class T>
+void release_detached(std::vector<T>& v) {
+  std::vector<T> dead = std::exchange(v, {});
+  for (T& e : dead) release_one(e);
+}
+}  // namespace detail
+
 struct ArrayObj : HeapObj {
   ArrayObj() : HeapObj(ValueTag::Array) {}
   std::vector<Value> items;
@@ -596,6 +640,29 @@ struct GenFrame {
   // its GeneratorObj here (Running state) until the stack resumes.
   Value gen_self;
 };
+
+namespace detail {
+// What a frame holds, released in one order whether it is a running Frame
+// going back to the pool or a parked GenFrame being dropped: the generator
+// it belongs to, then the vectors from the last declared to the first --
+// the locals last of all -- each from its last slot to its first.
+template <class F>
+void release_frame_storage(F& f) {
+  f.gen_self = Value();
+  f.owned_marks.clear();
+  f.defer_marks.clear();
+  release_each_reversed(f.defers);
+  release_each_reversed(f.captures);
+  release_each_reversed(f.cells);
+  release_each_reversed(f.regs);
+  release_each_reversed(f.locals);
+}
+
+inline void release_detached(GenFrame& gf) {
+  GenFrame dead = std::exchange(gf, GenFrame{});
+  release_frame_storage(dead);
+}
+}  // namespace detail
 
 // Calling a generator function makes one of these instead of running the
 // body. Start holds the packaged arguments; Suspended holds the live frame;
@@ -742,10 +809,9 @@ struct MapObj : HeapObj {
   }
   void clear() {
     index.clear();  // first: it refers through keys the entries own
-    // Released from a vector this map no longer owns, for the same reason.
-    decltype(entries) dead;
-    dead.swap(entries);
     live = 0;
+    // Released from a vector this map no longer owns, for the same reason.
+    detail::release_detached(entries);
   }
 };
 
@@ -4392,12 +4458,14 @@ inline void heap_release_to_zero(HeapObj* h) {
   // Off the heap list before its children go: releasing them can run a
   // destructor, which can allocate, which can collect -- and a collection
   // must not find a zero-count object mid-destruction and free it a second
-  // time. The same order collect() and ~Runtime use.
+  // time. Then stripped, then freed: the same order collect() and ~Runtime
+  // use, so the children go in clear_heap_object_refs' order rather than in
+  // whichever one the containers' own destructors pick.
   if (h->owner) {
     h->owner->unlink(h);
     h->owner = nullptr;
   }
-  destroy_heap_object(h);
+  free_heap_object(h);
 }
 
 // The sweep shared by collect() and ~Runtime, over a set each of them has
@@ -4437,31 +4505,44 @@ inline HeapObj::~HeapObj() {
   if (owner) owner->unlink(this);
 }
 
+namespace detail {
+// What each kind of object refers to, and the order it goes in. Each
+// container is detached and released after the object is already empty:
+// releasing a child can run its drop hook (owned_scope_exit strips with
+// sweeping_ off), and a hook may read or write this object -- which must not
+// be half-way through releasing its own elements.
+inline constexpr Overloaded strip_refs{
+    [](ArrayObj& a) { release_detached(a.items); },
+    [](ObjectObj& x) { release_detached(x.props); },
+    [](CellObj& c) { c.v = Value(); },
+    [](ClosureObj& c) { release_detached(c.cells); },
+    [](GeneratorObj& g) { release_detached(g.frame); },
+    [](MapObj& mp) { mp.clear(); },
+    [](CoroObj& co) {
+      co.fn = Value();
+      // Top frame first, the way a stack unwinds and the order CoroClose
+      // runs the parked defers in.
+      auto dead = std::exchange(co.frames, {});
+      for (size_t i = dead.size(); i-- > 0;) release_frame_storage(dead[i]);
+    },
+    [](StrObj&) {},  // a string, or a native, refers to nothing
+    [](NativeObj&) {},
+};
+}  // namespace detail
+
 inline void clear_heap_object_refs(HeapObj* o) {
-  // Each container is detached into `dead` and released after the object is
-  // already empty. Releasing a child can run its drop hook (owned_scope_exit
-  // strips with sweeping_ off), and a hook may read or write this object --
-  // which must not be half-way through destroying its own elements.
-  detail::on_heap_kind(o, detail::Overloaded{
-      [](ArrayObj& a) { const auto dead = std::exchange(a.items, {}); },
-      [](ObjectObj& x) { const auto dead = std::exchange(x.props, {}); },
-      [](CellObj& c) { c.v = Value(); },
-      [](ClosureObj& c) { const auto dead = std::exchange(c.cells, {}); },
-      [](GeneratorObj& g) {
-        const GenFrame dead = std::exchange(g.frame, GenFrame{});
-      },
-      [](MapObj& mp) { mp.clear(); },
-      [](CoroObj& co) {
-        co.fn = Value();
-        const auto dead = std::exchange(co.frames, {});
-      },
-      [](StrObj&) {},     // a string, or a native, refers to nothing
-      [](NativeObj&) {},
-  });
+  detail::on_heap_kind(o, detail::strip_refs);
 }
 
 inline void destroy_heap_object(HeapObj* o) {
   detail::on_heap_kind(o, [](auto& obj) { delete &obj; });
+}
+
+inline void free_heap_object(HeapObj* o) {
+  detail::on_heap_kind(o, [](auto& obj) {
+    detail::strip_refs(obj);
+    delete &obj;
+  });
 }
 
 // Extracted from the Dumper's node() switch below, so dump_ir()'s vocabulary
@@ -6373,25 +6454,17 @@ struct Frame {
   Value coro_self;
 };
 
-// A blank frame, stated once: everything it holds released in the order
-// ~Frame would have released it -- the two self-references first, then the
-// vectors from the last declared to the first -- and every scalar back to
-// the value a fresh Frame's own initializer gives it. Recycling a frame
-// means running this instead of the destructor, so a drop hook a release
-// fires sees the order it saw before there was a pool, and a field added to
-// Frame is blanked on a recycled frame the way it is on a fresh one.
-// `pool` is the exception: it says where this frame goes next, not what it
-// holds.
+// A blank frame, stated once: everything it holds released -- the
+// coroutine it is the bottom of first, then release_frame_storage's order,
+// the one a dropped GenFrame goes in too -- and every scalar back to the
+// value a fresh Frame's own initializer gives it. Every way a frame dies
+// runs this (FrameDeleter), whether it then goes back to the pool or to the
+// allocator, so a field added to Frame is blanked on a recycled frame the
+// way it is on a fresh one. `pool` is the exception: it says where this
+// frame goes next, not what it holds.
 inline void clear_frame(Frame& f) {
   f.coro_self = Value();
-  f.gen_self = Value();
-  f.owned_marks.clear();
-  f.defer_marks.clear();
-  f.defers.clear();
-  f.captures.clear();
-  f.cells.clear();
-  f.regs.clear();
-  f.locals.clear();
+  coreir::detail::release_frame_storage(f);
   f.chunk = nullptr;
   f.pc = 0;
   f.ret_reg = -1;
@@ -6422,13 +6495,15 @@ struct FramePool {
 // no frame here without one.
 struct FrameDeleter {
   void operator()(Frame* f) const {
+    // Emptied first, whichever way it goes: a release here can run a drop
+    // hook, which re-enters the executor and may take a frame from the very
+    // list this one is about to join -- and a frame headed for the
+    // allocator releases in the same order as one headed for the pool.
+    clear_frame(*f);
     if (f->pool->free_list.size() >= FramePool::kMax) {
       delete f;
       return;
     }
-    // Emptied before it joins the list, never after: a release here can run
-    // a drop hook, which re-enters the executor and may take a frame.
-    clear_frame(*f);
     f->pool->free_list.push_back(std::unique_ptr<Frame>(f));
   }
 };
@@ -6443,6 +6518,11 @@ using FramePtr = std::unique_ptr<Frame, FrameDeleter>;
 // for, no call site can bring that back.
 class FrameStack {
  public:
+  // Top first, like any other way frames leave -- not in the order the
+  // vector's own destructor would pick. What a host exception unwinding
+  // through vm::run takes down.
+  ~FrameStack() { truncate(0); }
+
   bool empty() const { return v_.empty(); }
   size_t size() const { return v_.size(); }
   FramePtr& back() { return v_.back(); }
@@ -7333,7 +7413,7 @@ struct Exec {
       // holds nothing either. Both just settle the state and drop
       // whatever arguments a Start-state activation still packaged.
       go->state = St::Done;
-      go->frame = GenFrame{};
+      coreir::detail::release_detached(go->frame);
     }
     f.regs[in.a] = gen_result(std::move(out), true);
     ++f.pc;
@@ -7351,7 +7431,7 @@ struct Exec {
       // activation drops what it packaged) and the throw is this
       // instruction's own, at its own pc like a Throw.
       go->state = St::Done;
-      go->frame = GenFrame{};
+      coreir::detail::release_detached(go->frame);
       throw Raise{std::move(v), pos, {}};
     }
     // Re-enter at the Yield itself rather than after it, so the
