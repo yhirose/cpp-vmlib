@@ -94,8 +94,11 @@ jobs:
       # rest of the suite put together. The suite runs fast either way and
       # compiles two to three times faster at -O0 (test_values.cc and pl0's
       # main.cc under g++ and clang alike), so it keeps -O0.
+      # Ninja, because the Makefile generator builds the targets named on
+      # --target one after another (its top-level Makefile is .NOTPARALLEL):
+      # the four front ends were compiled two files at a time.
       - run: >
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug ${{ matrix.cmake }}
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug ${{ matrix.cmake }}
           -DVMLIB_BUILD_BENCH=OFF
           -DCMAKE_CXX_FLAGS="${{ matrix.opt }} -fsanitize=address,undefined -fno-omit-frame-pointer"
       - run: cmake --build build ${FRONTENDS:+--target $FRONTENDS}
