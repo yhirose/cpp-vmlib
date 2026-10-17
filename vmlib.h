@@ -231,6 +231,7 @@ class Runtime {
   void link(HeapObj* o);
   void unlink(HeapObj* o);
   void mark();
+  void strip_and_free(const std::vector<HeapObj*>& objs);
 
   HeapObj* head_ = nullptr;
   int64_t live_ = 0;
@@ -2041,7 +2042,7 @@ private:
     n.b = b;
     n.first_child = static_cast<uint32_t>(m_.child_ids.size());
     n.num_children = static_cast<uint32_t>(children.size());
-    for (NodeId c : children) m_.child_ids.push_back(c);
+    m_.child_ids.insert(m_.child_ids.end(), children.begin(), children.end());
     m_.nodes.push_back(n);
     return NodeId{static_cast<uint32_t>(m_.nodes.size() - 1)};
   }
@@ -4325,14 +4326,7 @@ inline int64_t Runtime::collect() {
     for (HeapObj* o : orphans) heap_release_to_zero(o);
     throw;
   }
-  sweeping_ = true;
-  for (HeapObj* o : dead) clear_heap_object_refs(o);
-  for (HeapObj* o : dead) {
-    unlink(o);
-    o->owner = nullptr;
-    destroy_heap_object(o);
-  }
-  sweeping_ = false;
+  strip_and_free(dead);
 
   next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
   in_collect_ = false;
@@ -4400,15 +4394,29 @@ inline void heap_release_to_zero(HeapObj* h) {
   destroy_heap_object(h);
 }
 
-inline Runtime::~Runtime() {
-  for (HeapObj* o = head_; o; o = o->next) ++o->rc;
-  for (HeapObj* o = head_; o; o = o->next) clear_heap_object_refs(o);
-  while (head_) {
-    HeapObj* o = head_;
+// The sweep shared by collect() and ~Runtime, over objects each of them
+// has pinned: every object is stripped before any is freed, so no free
+// meets a child already gone, and with sweeping_ set a release reaching
+// zero in between runs no destructor. Off the heap list before the free,
+// so ~HeapObj does not unlink it again.
+inline void Runtime::strip_and_free(const std::vector<HeapObj*>& objs) {
+  sweeping_ = true;
+  for (HeapObj* o : objs) clear_heap_object_refs(o);
+  for (HeapObj* o : objs) {
     unlink(o);
-    o->owner = nullptr;  // already unlinked; do not let ~HeapObj do it again
+    o->owner = nullptr;
     destroy_heap_object(o);
   }
+  sweeping_ = false;
+}
+
+inline Runtime::~Runtime() {
+  std::vector<HeapObj*> all;
+  for (HeapObj* o = head_; o; o = o->next) {
+    ++o->rc;
+    all.push_back(o);
+  }
+  strip_and_free(all);
 }
 
 inline HeapObj::HeapObj(ValueTag k) : rc(1), kind(k), owner(Runtime::current()) {
@@ -6561,6 +6569,16 @@ struct Exec {
     coreir_rt_poll();
   }
 
+  // A suspended coroutine's parked frames come back all at once, so the
+  // depth bound is checked against the whole slice on top of what is
+  // already running -- by every way back in: CoroResume, CoroClose and the
+  // scheduler.
+  void check_can_unpark(const CoroObj* co, SrcPos pos) {
+    if (frames.size() + co->frames.size() > max_frames) {
+      raise_trap("recursion limit exceeded", pos);
+    }
+  }
+
   // The {value, done} object both generator intrinsics answer with. The
   // property count is known, so the object is sized once rather than grown
   // twice -- this runs on every step of every generator loop.
@@ -6915,9 +6933,7 @@ struct Exec {
     if (co->state == St::Done || co->state == St::Running) return false;
     const Value nil;
     if (co->state == St::Start) return start_coro(cv, nil, -1, SrcPos{0, 0});
-    if (co->frames.size() > max_frames) {
-      raise_trap("recursion limit exceeded", SrcPos{0, 0});
-    }
+    check_can_unpark(co, SrcPos{0, 0});
     unpark_coro(cv, -1, &nil);
     return true;
   }
@@ -7366,11 +7382,8 @@ struct Exec {
       }
       return;
     }
-    // Suspended: the parked frames come back, all of them at once,
-    // so the depth bound is checked against the whole slice.
-    if (frames.size() + co->frames.size() > max_frames) {
-      raise_trap("recursion limit exceeded", pos);
-    }
+    // Suspended: the parked frames come back.
+    check_can_unpark(co, pos);
     coreir_rt_poll();
     ++f.pc;
     unpark_coro(cv, in.a, &f.regs[in.c]);
@@ -7401,9 +7414,7 @@ struct Exec {
     // generator activation caught in the slice is finished with it.
     // A defer that throws propagates to this call; the coroutine is
     // done either way.
-    if (frames.size() + co->frames.size() > max_frames) {
-      raise_trap("recursion limit exceeded", pos);
-    }
+    check_can_unpark(co, pos);
     const size_t base = frames.size();
     ++f.pc;
     unpark_coro(cv, -1, nullptr);
