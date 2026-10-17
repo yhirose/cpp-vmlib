@@ -34,15 +34,6 @@ jobs:
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
 
-  # Reference counting is the memory model, so "did anything leak" is a
-  # correctness question here rather than a hygiene one. LeakSanitizer sees
-  # what the tests' own live-object counts cannot: an object the executor
-  # dropped on the floor without the count ever being consulted.
-  #
-  # A reference cycle is the one thing counting cannot collect, and the tests
-  # assert those exist rather than pretending otherwise -- ~Runtime sweeps
-  # them at the end of a run, which is what keeps this lane honest instead of
-  # suppressed.
   # Every allocation collects. What this catches is the collector taking an
   # object some C++ handle still holds -- the premature-sweep class of bug --
   # anywhere in the whole suite, not only in test_gc.cc's arranged scenes.
@@ -60,18 +51,55 @@ jobs:
         env:
           COREIR_GC_STRESS: '1'
 
+  # Reference counting is the memory model, so "did anything leak" is a
+  # correctness question here rather than a hygiene one. LeakSanitizer sees
+  # what the tests' own live-object counts cannot: an object the executor
+  # dropped on the floor without the count ever being consulted.
+  #
+  # A reference cycle is the one thing counting cannot collect, and the tests
+  # assert those exist rather than pretending otherwise -- ~Runtime sweeps
+  # them at the end of a run, which is what keeps this lane honest instead of
+  # suppressed.
+  #
+  # Two jobs side by side, since the build is nearly all of this lane: the
+  # suite (test/ and PL/0), and the example front ends. Not every front end
+  # is built here -- they run the executor's same paths over and over, and
+  # each one costs a parse of peglib and an instantiation of the whole VM.
+  # These four are the ones that reach what the others do not: mini-lua the
+  # most host functions, coroutines and drops; mini-culebra host functions,
+  # drops and the release order; mini-js the job queue, generators and
+  # coroutines; mini-python the most allocation (the bignum), generators
+  # and drops. All eight run in the build and gc-stress lanes, and in
+  # `just sanitizers`.
   sanitizers:
+    name: sanitizers (${{ matrix.part }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: suite
+            opt: -O0
+            cmake: -DVMLIB_BUILD_EXAMPLES=OFF
+          - part: examples
+            opt: -O1
+            cmake: -DVMLIB_BUILD_EXAMPLES=ON -DVMLIB_BUILD_TESTS=OFF
+            frontends: mini-lua mini-culebra mini-js mini-python
+    env:
+      FRONTENDS: ${{ matrix.frontends }}
     steps:
       - uses: actions/checkout@v4
-      # -O1, as AddressSanitizer's own documentation advises: at -O0 the
-      # front ends' tail-call samples alone take longer than the rest of the
-      # suite put together.
+      # The front ends build at -O1, as AddressSanitizer's own documentation
+      # advises: at -O0 their tail-call samples alone take longer than the
+      # rest of the suite put together. The suite runs fast either way and
+      # compiles two to three times faster at -O0 (test_values.cc and pl0's
+      # main.cc under g++ and clang alike), so it keeps -O0.
       - run: >
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVMLIB_BUILD_EXAMPLES=ON
-          -DVMLIB_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
-      - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug ${{ matrix.cmake }}
+          -DVMLIB_BUILD_BENCH=OFF
+          -DCMAKE_CXX_FLAGS="${{ matrix.opt }} -fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build ${FRONTENDS:+--target $FRONTENDS}
+      - run: ctest --test-dir build --output-on-failure ${FRONTENDS:+-R "^(${FRONTENDS// /|})-"}
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
