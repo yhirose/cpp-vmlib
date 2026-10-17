@@ -9,9 +9,13 @@ on:
 # translation unit at once, and under the sanitizers one of the larger
 # binders alone needs about 1.5 GB (mini-python's, with Apple clang) -- all
 # of them together killed the compiler on a hosted runner. Four is
-# ubuntu-latest's core count.
+# ubuntu-latest's core count. ctest takes the same bound: run one by one,
+# the tests add up to a lane's slowest one many times over (mini-scheme's
+# samples alone are half the sanitizer lane's test step), and none of
+# them writes a file another reads.
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 4
+  CTEST_PARALLEL_LEVEL: 4
 
 jobs:
   # The ordinary build, on both platforms a host is likely to embed this from.
