@@ -97,5 +97,18 @@ class Program {
     words.Add("one");
     words.Add("two");
     Console.WriteLine(string.Join(" ", words));
+
+    // A Dictionary's Add refuses a key it already has; its indexer does not.
+    Dictionary<string, int> ages = new Dictionary<string, int>();
+    ages.Add("ann", 31);
+    ages["bob"] = 42;
+    ages["bob"] = 43;
+    Console.WriteLine(ages["ann"] + ages["bob"]);
+    Console.WriteLine(ages.Count);
+    try {
+      ages.Add("ann", 99);
+    } catch (Exception e) {
+      Console.WriteLine(e.Message);
+    }
   }
 }

@@ -223,15 +223,18 @@ struct Binder {
     return f;
   }
 
-  // A getter takes no source parameter beyond the implicit `this`.
-  int32_t resolve_getter(const Ast& body, int32_t parent,
-                         const std::string& name, int32_t cls) {
+  // A function whose one parameter is the implicit `this`: a getter, or
+  // the constructor C# gives a class that declares none (no body at all).
+  int32_t resolve_this_only(const Ast* body, int32_t parent,
+                            const std::string& name, int32_t cls) {
     const int32_t f = new_fn(parent, name);
     fns[static_cast<size_t>(f)].cls = cls;
-    fns[static_cast<size_t>(f)].body = &body;
+    fns[static_cast<size_t>(f)].body = body;
     rs.push_scope();
     fns[static_cast<size_t>(f)].params.push_back(declare("this", f));
-    for (const auto& s : body.nodes) resolve_stmt(*s, f);
+    if (body != nullptr) {
+      for (const auto& s : body->nodes) resolve_stmt(*s, f);
+    }
     rs.pop_scope();
     return f;
   }
@@ -292,7 +295,7 @@ struct Binder {
     if (getbody != nullptr) {
       ci.methods.emplace_back(
           "get_" + name,
-          resolve_getter(*getbody, parent, ci.name + ".get_" + name, cls));
+          resolve_this_only(getbody, parent, ci.name + ".get_" + name, cls));
     }
     if (setbody != nullptr) {
       ci.methods.emplace_back(
@@ -418,9 +421,17 @@ struct Binder {
         // whole class (including its base) is known.
       }
     }
+    // A class that declares no constructor gets the one C# gives it: no
+    // parameters and an empty body, with the same field initializers and
+    // base call as a declared one. Made here, so those resolve in it like
+    // any other's.
+    if (ci.ctor_fn < 0) {
+      ci.ctor_fn = resolve_this_only(nullptr, top, ci.name + ".ctor",
+                                     class_by_name.at(ci.name));
+    }
     // The field initializers and the base call run inside the constructor,
     // so they resolve there too.
-    if (ci.ctor_fn >= 0) resolve_ctor_extras(ci);
+    resolve_ctor_extras(ci);
   }
 
   void resolve_ctor_extras(ClassInfo& ci) {
@@ -699,10 +710,10 @@ struct Binder {
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
-        "$str",  "$add",  "$eq",   "$mfind", "$getf", "$setf", "$idx",
-        "$setidx", "$len", "$iter", "$iternext", "$join", "$exc",
-        "$mkexc", "$tnew", "$tsettle", "$ton", "$totask", "$tresolve",
-        "$adopt", "$await", "$mainwrap",
+        "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$getf", "$setf",
+        "$idx", "$setidx", "$dictadd", "$len", "$iter", "$iternext",
+        "$join", "$exc", "$mkexc", "$tnew", "$tsettle", "$ton", "$totask",
+        "$tresolve", "$adopt", "$await", "$mainwrap",
     };
     return names;
   }
@@ -735,11 +746,13 @@ struct Binder {
   };
 
   // Object.ToString, for the values this subset has. Note the double: no
-  // rule at all, because to_display already is what C# prints.
+  // rule at all, because to_display already is what C# prints. A class's
+  // own ToString overrides it, as in C# -- so Console.WriteLine and string
+  // concatenation, which come here, honor it too.
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
+    const auto [t, mth] = r.locals("t", "m");
     r.add(r.set(t, r.typ(r.L(v))));
     r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.L(v))));
     r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S(""))));
@@ -749,6 +762,9 @@ struct Binder {
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(r.isnt(r.L(t), "object"), r.ret(r.S("<value>"))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kMsgKey))));
+    r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S("ToString")})));
+    r.add(r.iff(r.isnt(r.typ(r.L(mth)), "nil"),
+                r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
                 r.ret(r.idx(r.idx(r.L(v), kClassKey), kNameKey))));
     r.add(r.ret(r.S("<object>")));
@@ -792,23 +808,43 @@ struct Binder {
   // table points at its base's, and the walk stops at the first entry it
   // finds -- so an `override` wins because the derived table is looked at
   // first, and no other machinery is needed for it at all.
+  //
+  // The walk is written into two helpers, which differ only in a miss:
+  // $mlookup answers nil (a receiver that is not a class instance, or a
+  // chain without the name), $mfind -- a call's -- fails. Inlined rather
+  // than one calling the other, since every dispatch takes $mfind.
+  void method_walk(RT& r, FuncWriter::Slot recv, FuncWriter::Slot name) {
+    const auto [cls, key] = r.locals("cls", "key");
+    r.add(r.iff(
+        r.is(r.typ(r.L(recv)), "object"),
+        r.blk({r.set(cls, r.idx(r.L(recv), kClassKey)),  // nil: no instance
+               r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix), r.L(name))),
+               r.wh(r.is(r.typ(r.L(cls)), "object"),
+                    r.blk({r.iff(r.has(r.L(cls), r.L(key)),
+                                 r.ret(r.idx(r.L(cls), r.L(key)))),
+                           r.iff(r.bin(BinOp::Eq,
+                                       r.has(r.L(cls), r.S(kBaseKey)),
+                                       r.Bo(false)),
+                                 r.b.make_break()),
+                           r.set(cls, r.idx(r.L(cls), kBaseKey))}))})));
+  }
+
+  void rt_mlookup() {
+    RT r(*this);
+    const auto [recv, name] = r.params("recv", "name");
+    method_walk(r, recv, name);
+    r.add(r.ret(r.Nil()));
+    r.finish("$mlookup");
+  }
+
   void rt_mfind() {
     RT r(*this);
     const auto [recv, name] = r.params("recv", "name");
-    const auto [cls, key] = r.locals("cls", "key");
+    method_walk(r, recv, name);
     r.add(r.iff(r.isnt(r.typ(r.L(recv)), "object"),
                 r.ret(r.call("$exc", {r.S("null reference")}))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
-    r.add(r.set(cls, r.idx(r.L(recv), kClassKey)));
-    r.add(r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix), r.L(name))));
-    r.add(r.wh(r.is(r.typ(r.L(cls)), "object"),
-               r.blk({r.iff(r.has(r.L(cls), r.L(key)),
-                            r.ret(r.idx(r.L(cls), r.L(key)))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(cls), r.S(kBaseKey)),
-                                  r.Bo(false)),
-                            r.b.make_break()),
-                      r.set(cls, r.idx(r.L(cls), kBaseKey))})));
     r.add(r.ret(r.call(
         "$exc", {r.bin(BinOp::Add, r.S("no such method: "), r.L(name))})));
     r.finish("$mfind");
@@ -859,6 +895,27 @@ struct Binder {
     r.add(r.sidx(r.L(v), r.L(k), r.L(val)));
     r.add(r.ret(r.L(val)));
     r.finish("$setidx");
+  }
+
+  // Dictionary.Add: a key it already has is an error, where the indexer
+  // would overwrite -- with .NET's own wording.
+  void rt_dictadd() {
+    RT r(*this);
+    const auto [d, k, v] = r.params("d", "k", "v");
+    r.add(r.iff(r.is(r.typ(r.L(d)), "nil"),
+                r.ret(r.call("$exc", {r.S("null reference")}))));
+    r.add(r.iff(r.isnt(r.typ(r.L(d)), "map"),
+                r.ret(r.call("$exc", {r.S("no such method: Add")}))));
+    r.add(r.iff(r.has(r.L(d), r.L(k)),
+                r.ret(r.call(
+                    "$exc",
+                    {r.bin(BinOp::Add,
+                           r.S("An item with the same key has already been "
+                               "added. Key: "),
+                           r.call("$str", {r.L(k)}))}))));
+    r.add(r.sidx(r.L(d), r.L(k), r.L(v)));
+    r.add(r.ret(r.Nil()));
+    r.finish("$dictadd");
   }
 
   void rt_len() {
@@ -1026,8 +1083,9 @@ struct Binder {
   }
 
   void emit_runtime() {
-    rt_str(); rt_add(); rt_eq(); rt_mfind(); rt_getf(); rt_setf(); rt_idx();
-    rt_setidx(); rt_len(); rt_iter(); rt_iternext(); rt_join(); rt_exc();
+    rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_getf();
+    rt_setf(); rt_idx(); rt_setidx(); rt_dictadd(); rt_len(); rt_iter();
+    rt_iternext(); rt_join(); rt_exc();
     rt_mkexc(); rt_tnew(); rt_tsettle(); rt_ton(); rt_totask();
     rt_tresolve(); rt_adopt(); rt_await(); rt_mainwrap();
   }
@@ -1603,11 +1661,38 @@ struct Binder {
     const auto a0 = [&](size_t k) {
       return k < args.size() ? args[k] : b.nil_literal();
     };
-    if (name == "Add") {
-      return b.intrinsic(IntrinsicId::ArrayPush, {recv, a0(0)});
-    }
-    if (name == "Wait") return helper("$await", {recv}, p);
+    // ToString is $str's to resolve, an override included.
     if (name == "ToString") return helper("$str", {recv}, p);
+    // List.Add, Dictionary.Add and Task.Wait are also ordinary method
+    // names: a class instance's own method of the name wins, found by the
+    // walk a call uses, and only a receiver without one gets the
+    // library's. A List is checked first, since its Add is the one a loop
+    // makes.
+    if (name == "Add" || name == "Wait") {
+      const int32_t t = ctx.alloc_local("$recv");
+      const int32_t mt = ctx.alloc_local("$m");
+      const NodeId T = b.varref(VarKind::Local, t);
+      const NodeId M = b.varref(VarKind::Local, mt);
+      std::vector<NodeId> callargs{T};
+      callargs.insert(callargs.end(), args.begin(), args.end());
+      const NodeId library = name == "Add"
+                                 ? helper("$dictadd", {T, a0(0), a0(1)}, p)
+                                 : helper("$await", {T}, p);
+      NodeId call = b.block(
+          {b.assign(VarKind::Local, mt,
+                    helper("$mlookup", {T, b.str_literal(name)}, p)),
+           b.make_if(b.binary(BinOp::Ne,
+                              b.intrinsic(IntrinsicId::TypeOf, {M}),
+                              b.str_literal("nil")),
+                     b.call_value(M, callargs), library)});
+      if (name == "Add") {
+        call = b.make_if(
+            b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {T}),
+                     b.str_literal("array")),
+            b.intrinsic(IntrinsicId::ArrayPush, {T, a0(0)}), call);
+      }
+      return b.block({b.assign(VarKind::Local, t, recv), call});
+    }
     // An ordinary method call: the lookup walks the class chain, which is
     // what makes an override win.
     return emit_dispatch(recv, name, args, ctx, p);
@@ -1800,7 +1885,7 @@ struct Binder {
     if (fi.cls >= 0 && classes[static_cast<size_t>(fi.cls)].ctor_fn == f) {
       emit_ctor_prologue(classes[static_cast<size_t>(fi.cls)], ctx, body, p);
     }
-    body.push_back(emit_block(*fi.body, ctx));
+    if (fi.body != nullptr) body.push_back(emit_block(*fi.body, ctx));
 
     std::vector<NodeId> stmts;
     stmts.insert(stmts.end(), pre.begin(), pre.end());
@@ -1852,19 +1937,20 @@ struct Binder {
                   init != nullptr ? emit_expr(*init, ctx) : b.nil_literal()},
                  p));
     }
-    if (ci.ctor == nullptr || ci.base.empty()) return;
-    for (const auto& n : ci.ctor->nodes) {
-      if (n->tag != "baseinit"_) continue;
-      const auto it = class_by_name.find(ci.base);
-      if (it == class_by_name.end()) break;
-      std::vector<NodeId> args{this_of(ctx, p)};
-      for (const auto& x : n->nodes[0]->nodes) args.push_back(emit_expr(*x, ctx));
-      out.push_back(b.call_value(
-          b.index(
-              read_var(classes[static_cast<size_t>(it->second)].var, ctx, p),
-              b.str_literal(kCtorKey)),
-          args));
+    if (ci.base.empty()) return;
+    const auto it = class_by_name.find(ci.base);
+    if (it == class_by_name.end()) return;
+    // Then the base's constructor -- the one `: base(...)` names, or, with
+    // no initializer (or no declared constructor), its parameterless one,
+    // which C# calls implicitly.
+    std::vector<NodeId> args{this_of(ctx, p)};
+    if (const Ast* bi = ci.ctor ? find_child(*ci.ctor, "baseinit") : nullptr) {
+      for (const auto& x : bi->nodes[0]->nodes) args.push_back(emit_expr(*x, ctx));
     }
+    out.push_back(b.call_value(
+        b.index(read_var(classes[static_cast<size_t>(it->second)].var, ctx, p),
+                b.str_literal(kCtorKey)),
+        args));
   }
 
   // An async method is three funcs, exactly as in examples/mini-js: the
@@ -2048,8 +2134,7 @@ struct Binder {
             initNode != nullptr ? emit_expr(*initNode, ctx) : b.nil_literal());
       }
       kvs.emplace_back(b.str_literal(kCtorKey),
-                       ci.ctor_fn >= 0 ? emit_closure(ci.ctor_fn, ctx, p)
-                                       : emit_default_ctor(ci, ctx, p));
+                       emit_closure(ci.ctor_fn, ctx, p));
       out.push_back(write_var(ci.var, b.object_lit(kvs), ctx, p));
     }
     for (const ClassInfo& ci : classes) {
@@ -2089,8 +2174,7 @@ struct Binder {
 
   // An auto property's accessors touch nothing but their own parameters,
   // so unlike a source method they need no capture at all -- built once
-  // per property, the same way emit_default_ctor builds a missing
-  // constructor.
+  // per property, directly in IR.
   NodeId emit_auto_get(const std::string& name, SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t idx = static_cast<int32_t>(m.funcs.size());
@@ -2128,69 +2212,6 @@ struct Binder {
     return b.make_closure(idx, empty_cmap);
   }
 
-  NodeId emit_default_ctor(const ClassInfo& ci, FnCtx& ctx, SrcPos p) {
-    // A class with no constructor still has to initialize its fields and
-    // call its base's, so one is synthesized with the same shape.
-    auto b = Builder(m).at(p);
-    const int32_t g = new_fn(0, ci.name + ".ctor");
-    rs.fns[static_cast<size_t>(g)].index = static_cast<int32_t>(m.funcs.size());
-    m.funcs.push_back({});
-    FnCtx cc;
-    cc.fn = g;
-    const int32_t self = cc.alloc_local("this");
-    std::vector<NodeId> body;
-    const NodeId T = b.varref(VarKind::Local, self);
-    int32_t ncaps = 0;
-    if (!ci.base.empty() && class_by_name.count(ci.base)) {
-      // The default constructor still chains: `class B : A { }` runs A's.
-      body.push_back(b.call_value(
-          b.index(b.varref(VarKind::Capture, 0), b.str_literal(kCtorKey)),
-          {T}));
-      ncaps = 1;
-    }
-    for (const Ast* fd : ci.fields) {
-      const Ast* nameNode = nullptr;
-      for (const auto& x : fd->nodes) {
-        if (x->tag == "fieldinit"_) break;
-        nameNode = x.get();
-      }
-      if (nameNode == nullptr) continue;
-      body.push_back(b.call_value(
-          b.make_closure(rt.at("$setf"), empty_cmap),
-          {T, b.str_literal(std::string(nameNode->token)), b.nil_literal()}));
-    }
-    // A default constructor runs no source expression, so like a plain
-    // field's initializer above, an auto property's is skipped too --
-    // both need an explicit constructor to take effect.
-    for (const auto& [name, init] : ci.auto_props) {
-      (void)init;
-      body.push_back(b.call_value(
-          b.make_closure(rt.at("$setf"), empty_cmap),
-          {T, b.str_literal(auto_field_key(name)), b.nil_literal()}));
-    }
-    body.push_back(b.make_return(b.nil_literal()));
-    Func f;
-    f.name = ci.name + ".ctor";
-    f.num_params = 1;
-    f.num_locals = 1;
-    f.local_names = {"this"};
-    f.num_captures = ncaps;
-    for (int32_t i = 0; i < ncaps; ++i) f.capture_names.push_back("base");
-    f.lenient_arity = true;
-    f.body = b.scope(0, 1, b.block(body));
-    m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
-        std::move(f);
-    if (ncaps == 0) {
-      return b.make_closure(rs.fns[static_cast<size_t>(g)].index, empty_cmap);
-    }
-    const auto [bk, bi] = rs.access(
-        0, classes[static_cast<size_t>(class_by_name.at(ci.base))].var);
-    std::vector<CaptureSrc> cs{{bk, bi}};
-    const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(cs);
-    (void)ctx;
-    return b.make_closure(rs.fns[static_cast<size_t>(g)].index, cm);
-  }
 };
 
 bool nat_write(NativeCall& c) {

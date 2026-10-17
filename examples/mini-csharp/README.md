@@ -43,8 +43,9 @@ An instance is an object with one hidden key, `"\x01c"`, pointing at its
 class's table; everything else in it is a field. `new Circle(2)` allocates
 that object and calls the table's `"\x02ctor"` with it as argument 0.
 
-Method lookup is then five lines of IR (`$mfind`), and it is worth reading
-because *this is all virtual dispatch is*:
+Method lookup is then five lines of IR (written into both `$mfind`, a
+call's, and `$mlookup`, which answers nil where `$mfind` fails), and it is
+worth reading because *this is all virtual dispatch is*:
 
 ```
 t = recv["\x01c"]
@@ -57,8 +58,12 @@ while typeof(t) == "object":
 Because the walk starts at the *receiver's* table and not at the class
 that contains the call site, a base-class method calling `Describe()`
 reaches the derived class's override. `samples/shapes.cs` is two levels of
-that, plus `: base(...)` chaining. Nothing in the IR knows any of it
-happened.
+that, plus `: base(...)` chaining, the implicit chain to a parameterless
+base constructor (field initializers first, then the base's constructor,
+then the body -- C#'s order, observable through a virtual call from the
+base's constructor), and an overridden `ToString`, which `$str` honors so
+that `Console.WriteLine(box)` and `"got " + box` call it too. Nothing in
+the IR knows any of it happened.
 
 The one convention that carries it is the same one examples/mini-culebra
 uses: **every method's parameter 0 is `this`**, and an implicit-`this`
@@ -116,8 +121,9 @@ rather than contradicts:
   types are unequal, `null == null`, and two references are equal when
   they are the same object -- which is `Same`.
 * `$str`, because C# prints a `bool` as `True`/`False` and `null` as
-  nothing, where `to_display` prints `true`/`false`/`nil` -- the number
-  rows above still go straight to `ToStr`.
+  nothing, where `to_display` prints `true`/`false`/`nil`, and because a
+  class's own `ToString` overrides all of it -- the number rows above
+  still go straight to `ToStr`.
 
 ## `using`, `yield return`, `async`: three tags, verbatim
 
@@ -176,11 +182,10 @@ bind-time error, matching `get`/`set` bodies being required not to mix
 with `get;`/`set;` on the same property) gets no user-written accessor at
 all: its `get_Name`/`set_Name` are built by hand at class-table time, over
 a hidden field keyed the way a method already is (`\x02` for a method,
-`\x03` for this), the same trick emit_default_ctor uses for a missing
-constructor. Its `= 0` initializer follows the exact rule a plain field's
-already does: it runs in the *constructor*, so a class with no
-constructor of its own gets `nil`, not the literal -- `Counter` in
-`samples/properties.cs` declares an empty one for exactly this reason.
+`\x03` for this). Its `= 0` initializer follows the exact rule a plain
+field's already does: it runs in the *constructor* -- the declared one,
+or the one a class without any gets, which is synthesized the same way
+(no parameters, an empty body) and so initializes and chains alike.
 
 ## What is absent, and what quietly differs
 
@@ -200,22 +205,17 @@ Quietly different:
   and no stack trace.
 * **`Dispose` is found by name**, not through `IDisposable`, because
   there are no interfaces.
-* **A `List<T>` is an array**, so `.Count` is `Len` and `.Add` is
-  `ArrayPush`; `Insert`, `Remove`, `Sort` and the rest are not here.
+* **A `List<T>` is an array and a `Dictionary<K, V>` a map**, so `.Count`
+  is `Len`, a List's `.Add` is `ArrayPush` and a Dictionary's refuses a
+  key it already has, with .NET's own message; `Insert`, `Remove`,
+  `ContainsKey`, `Sort` and the rest are not here. A class's own method
+  named `Add` or `Wait` still wins over the library's: the receiver is
+  asked first, by the same walk a call makes.
 * **`string.Join` is the only `string` static**, and `.Length`, `.Count`,
   `.Message` and `.Result` are four built-in properties -- a user-declared
   property of the same name wins over them, a field does not, and
   everything else after a `.` that names neither a method nor a declared
   property is a field.
-* **`Add`, `Wait` and `ToString` are resolved by name** on any receiver,
-  as `ArrayPush`, `$await` and `$str`, so a class's own `ToString()`
-  override is never called.
-* **A constructor without `: base(...)` does not run the base's.** C#
-  calls the base's parameterless constructor implicitly; here only an
-  explicit `: base(...)`, or the constructor synthesized for a class that
-  declares none, chains.
-* **A `Dictionary` is a map that only half works.** Indexing and `.Count`
-  go through, but `.Add` is the `ArrayPush` above and traps.
 
 ## Where it fought back
 

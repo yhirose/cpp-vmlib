@@ -80,6 +80,44 @@ class Plain : Shape {
   }
 }
 
+// Object.ToString, overridden: what Console.WriteLine and string
+// concatenation call too.
+class Box {
+  public int V;
+  public Box(int v) { V = v; }
+  public override string ToString() { return "Box(" + V + ")"; }
+}
+
+class Bare { }
+
+// A method named like a library one (List.Add) is still this class's own.
+class Bag {
+  public List<int> Items = new List<int>();
+  public void Add(int x) { Items.Add(x * 10); }
+}
+
+// Construction order: field initializers, then the base's constructor --
+// implicitly its parameterless one -- then the body. A's constructor makes
+// a virtual call, so B's override runs before B's own constructor does,
+// and sees B's field already initialized.
+class A {
+  public int X = 5;
+  public A() { Console.WriteLine("A ctor " + Describe()); }
+  public virtual string Describe() { return "A"; }
+}
+
+class B : A {
+  public string Tag = "tagged";
+  public B() { Console.WriteLine("B ctor"); }
+  public override string Describe() { return "B " + Tag; }
+}
+
+// No constructor at all: the one C# synthesizes still initializes the
+// fields and chains to A's.
+class C : A {
+  public int Y = 7;
+}
+
 class Program {
   static void Main() {
     Shape s = new Shape("s0");
@@ -117,5 +155,20 @@ class Program {
     Console.WriteLine(rr.Name + " " + rr.W + " " + rr.H);
     rr.W = 10.0;
     Console.WriteLine(rr.Area());
+
+    Box box = new Box(3);
+    Console.WriteLine(box.ToString());
+    Console.WriteLine(box);
+    Console.WriteLine("got " + box);
+    Console.WriteLine(new Bare().ToString());
+
+    Bag bag = new Bag();
+    bag.Add(2);
+    Console.WriteLine(bag.Items[0]);
+
+    B b = new B();
+    Console.WriteLine(b.X);
+    C cc = new C();
+    Console.WriteLine(cc.X + cc.Y);
   }
 }

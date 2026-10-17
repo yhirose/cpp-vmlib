@@ -12,3 +12,13 @@ circle 12
 total 49
 r2 2 6
 60
+Box(3)
+Box(3)
+got Box(3)
+Bare
+20
+A ctor B tagged
+B ctor
+5
+A ctor A
+12

@@ -57,7 +57,7 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   usingdir   <- 'using' __ qname ';' _                       { no_ast_opt }
   qname      <- ident ('.' _ ident)*                         { no_ast_opt }
 
-  classdecl  <- 'class' __ ident basespec? '{' _ member* '}' _
+  classdecl  <- 'class' __ ident basespec? '{' _ member* '}' _ { no_ast_opt }
   basespec   <- ':' _ ident (',' _ ident)*                   { no_ast_opt }
   member     <- ctordecl / propdecl / methoddecl / fielddecl
   ctordecl   <- modifier* ident '(' _ params ')' _ baseinit? block
