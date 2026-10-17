@@ -20,6 +20,15 @@
 //      count, whatever order param()/local() were called in? That is the
 //      invariant verify() checks and the one hand-numbered slots kept
 //      breaking.
+//   6. Is a closure built where its captures cannot be reached refused,
+//      rather than read out of bounds?
+//   7. Does a block keep its declarations' order beside its name map?
+//   8. Does mark/rollback give back exactly what a program added on top of
+//      a prelude -- names, call edges, parents -- and keep the prelude's?
+//   9. Does close_over_calls carry a callee's captures to every caller,
+//      self-recursion included?
+// And misuse -- a name operation with no scope open, an id out of range --
+// is reported rather than read out of bounds.
 //
 // Tests 1-4 are checked by running the module they describe, not by reading
 // the tables back: a capture numbered right but emitted wrong would pass an
@@ -137,7 +146,7 @@ int main() {
       std::fprintf(stderr, "FAIL: mid does not carry the capture it must\n");
       ++g_failures;
     }
-    if (!rs.fns[static_cast<size_t>(f_mid)].free.count(v_plain) == 0) {
+    if (rs.fns[static_cast<size_t>(f_mid)].free.count(v_plain) != 0) {
       std::fprintf(stderr, "FAIL: mid carries a capture it should not\n");
       ++g_failures;
     }
@@ -426,7 +435,7 @@ int main() {
     }
   }
 
-  // --- 7. mark/rollback: a prelude bound once, programs compiled on top.
+  // --- 8. mark/rollback: a prelude bound once, programs compiled on top.
   // The prelude's own analysis survives; everything the program added is
   // gone, including a free-set entry naming a variable that no longer is.
   {
@@ -471,7 +480,7 @@ int main() {
     }
   }
 
-  // --- 7b. rollback gives back the scopes' names and the call edges, not
+  // --- 8b. rollback gives back the scopes' names and the call edges, not
   // only the depth: a program that re-declares a prelude name, or declares
   // a new one, into the prelude's own scope leaves neither behind; a call
   // edge between two kept functions goes; a kept function a program
@@ -525,7 +534,7 @@ int main() {
     }
   }
 
-  // --- 7c. number_captures(Module&) names each capture once, however many
+  // --- 8c. number_captures(Module&) names each capture once, however many
   // times a rolled-back function is numbered again.
   {
     Resolver rs;
@@ -546,7 +555,7 @@ int main() {
     }
   }
 
-  // --- 8. close_over_calls: a language whose closures are built at every
+  // --- 9. close_over_calls: a language whose closures are built at every
   // reference to a function, not where it is written. PL/0's shape:
   //
   //   VAR x;

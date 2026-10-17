@@ -39,7 +39,6 @@
 
 #include "binder.h"
 
-#include <cctype>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -2224,8 +2223,8 @@ struct Binder {
       return helper("$isa", {recv, a0(0)}, p);
     }
     if (name == "instance_of?") return helper("$isexact", {recv, a0(0)}, p);
-    if (name == "upcase") return native("upcase", {recv}, p);
-    if (name == "downcase") return native("downcase", {recv}, p);
+    if (name == "upcase") return b.intrinsic(IntrinsicId::StrUpper, {recv}, p);
+    if (name == "downcase") return b.intrinsic(IntrinsicId::StrLower, {recv}, p);
     if (name == "arity") return helper("$arity", {recv}, p);
     if (name == "call") {
       // A Proc's own call passes no block, so the block slot is nil and
@@ -2382,27 +2381,11 @@ bool nat_write(NativeCall& c) {
   return true;
 }
 
-bool nat_upper(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::toupper(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
-bool nat_lower(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::tolower(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
 }  // namespace
 
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
-      {"upcase", 1, nat_upper, nullptr},
-      {"downcase", 1, nat_lower, nullptr},
   };
   return defs;
 }

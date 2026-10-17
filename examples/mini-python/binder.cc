@@ -30,7 +30,6 @@
 
 #include "binder.h"
 
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -713,8 +712,8 @@ struct Binder {
         "$next",
         // The methods a program actually reaches for. Every one of them is
         // a scan, so every one of them is written here rather than handed
-        // to the host -- which keeps `upper` and `lower` (ASCII case, in a
-        // host function) the only two.
+        // to the host -- `upper` and `lower` included, being the VM's own
+        // ASCII StrUpper/StrLower.
         "$isspace", "$split", "$strip", "$replace", "$find", "$scount",
         "$startswith", "$endswith", "$alldigits", "$apop", "$ainsert",
         "$aremove",
@@ -4050,9 +4049,9 @@ struct Binder {
     } else if (name == "endswith") {
       add("string", h("$endswith", {T, a0(0)}));
     } else if (name == "upper") {
-      add("string", native("upper", {T}, p));
+      add("string", b.intrinsic(IntrinsicId::StrUpper, {T}));
     } else if (name == "lower") {
-      add("string", native("lower", {T}, p));
+      add("string", b.intrinsic(IntrinsicId::StrLower, {T}));
     } else {  // join
       add("string", h("$join", {T, a0(0)}));
     }
@@ -4545,13 +4544,6 @@ bool nat_print(NativeCall& c) {
   return true;
 }
 
-bool nat_upper(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::toupper(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
 // The one number-to-string rule this front end does not write itself: a
 // fixed-precision decimal is the C library's exact expansion of the double,
 // which is what CPython's `format(x, '.2f')` is too. Everything else about
@@ -4567,20 +4559,11 @@ bool nat_ffmt(NativeCall& c) {
   return true;
 }
 
-bool nat_lower(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::tolower(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
 }  // namespace
 
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"print", 1, nat_print, nullptr},
-      {"upper", 1, nat_upper, nullptr},
-      {"lower", 1, nat_lower, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
   };
   return defs;

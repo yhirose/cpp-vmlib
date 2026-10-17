@@ -273,9 +273,9 @@ Every string, list and dict method a sample reaches for -- `split`,
 `endswith`, `join`; `append`, `extend`, `pop`, `insert`, `remove`, `index`,
 `count`, `reverse`, `sort`; `keys`, `items`, `values`, `get`, `update`,
 `pop` -- is written in this front end's own IR, because every one of them
-is a scan and none needs the host. `upper` and `lower` are the two
-exceptions: they go to a host function, which maps ASCII case only
-(`"ß".upper()` stays `"ß"`). Their trade-off is a name collision
+is a scan and none needs the host; `upper` and `lower` are the VM's own
+`StrUpper`/`StrLower`, which map ASCII case only (`"ß".upper()` stays
+`"ß"`). Their trade-off is a name collision
 `str`/`list`/`dict` do not have to worry about: `get` is a dict method and
 also the most ordinary method name a class can give itself, and a program
 that writes one is not unusual -- `x.get()` on a `Bag` instance is what the

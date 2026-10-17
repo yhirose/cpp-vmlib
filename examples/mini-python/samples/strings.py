@@ -1,8 +1,8 @@
 # f-strings and the string, list and dict methods a program reaches for.
 #
 # Every one of these is a scan, so every one is written in this front end's
-# own IR. `upper` and `lower` are the only two that are not: they go to a
-# host function, ASCII case only. See README.md.
+# own IR, or (`upper` and `lower`, ASCII case only) is one of the VM's own
+# intrinsics. See README.md.
 
 name = "world"
 n = 42

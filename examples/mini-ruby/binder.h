@@ -12,8 +12,7 @@ namespace mini_ruby {
 
 coreir::Module bind_source(const std::string& source);
 
-// The two things this front end cannot write in its own IR: output, and
-// the case-mapping `String#upcase` owes.
+// The one thing this front end cannot write in its own IR: output.
 const std::vector<vm::NativeDef>& stdlib();
 
 // How an uncaught exception reads (vm::RunOptions::describe): what ruby

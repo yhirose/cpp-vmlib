@@ -43,7 +43,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cctype>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -873,6 +872,20 @@ struct Binder {
     return b.call_value(b.native_ref(b.declare_native(name)), args);
   }
 
+  // A string library function, by name: the two case maps are the VM's
+  // own StrUpper/StrLower (ASCII, as Lua's are in the C locale), the rest
+  // host functions.
+  NodeId string_call(const std::string& name, const std::vector<NodeId>& args,
+                     SrcPos p) {
+    if (name == "upper" || name == "lower") {
+      auto b = Builder(m).at(p);
+      return b.intrinsic(
+          name == "upper" ? IntrinsicId::StrUpper : IntrinsicId::StrLower,
+          {args.empty() ? b.nil_literal() : args[0]});
+    }
+    return native("s_" + name, args, p);
+  }
+
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
@@ -1196,7 +1209,7 @@ struct Binder {
             // A string has no metatable here, so `("x"):rep(3)` is
             // resolved by name -- README.md lists the consequence.
             args.insert(args.begin(), recv);
-            cur = {native("s_" + name, args, p), false};
+            cur = {string_call(name, args, p), false};
             break;
           }
           const int32_t t = ctx.alloc_local("$self");
@@ -1324,7 +1337,7 @@ struct Binder {
       }
     }
     if (g == "string" && is_string_method(mem)) {
-      return {native("s_" + mem, args, p), false};
+      return {string_call(mem, args, p), false};
     }
     if (g == "math") {
       if (mem == "floor") return {native("floor", {a0(0)}, p), false};
@@ -2001,20 +2014,6 @@ bool nat_s_rep(NativeCall& c) {
   return true;
 }
 
-bool nat_s_upper(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::toupper(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
-bool nat_s_lower(NativeCall& c) {
-  std::string s = c.arg(0).as_str();
-  for (char& ch : s) ch = static_cast<char>(std::tolower(ch));
-  c.result = Value::make_str(std::move(s));
-  return true;
-}
-
 bool nat_s_len(NativeCall& c) {
   c.result = Value::make_int(static_cast<int64_t>(c.arg(0).as_str().size()));
   return true;
@@ -2047,8 +2046,6 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"floor", 1, nat_floor, nullptr},
       {"s_sub", -1, nat_s_sub, nullptr},
       {"s_rep", -1, nat_s_rep, nullptr},
-      {"s_upper", -1, nat_s_upper, nullptr},
-      {"s_lower", -1, nat_s_lower, nullptr},
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
   };
