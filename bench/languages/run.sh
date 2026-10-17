@@ -75,6 +75,11 @@ BUILD_DIR=${BUILD_DIR:-"$ROOT/build"}
 REPS=3
 if [ "${1:-}" = "--reps" ]; then REPS=$2; fi
 
+# One scratch directory for the whole run -- the timed runs' output and
+# the C# and Go builds below -- removed however the run ends.
+SCRATCH=$(mktemp -d)
+trap 'rm -rf "$SCRATCH"' EXIT
+
 WORKLOADS=(startup fib loop array strings)
 declare -A EXPECT=(
   [startup]=1
@@ -86,33 +91,36 @@ declare -A EXPECT=(
 
 now_ms() { date +%s%3N; }
 
-# Runs the shell function named "$1" with the workload name "$2" once to
-# check its output against that workload's known answer (a warning, not a
-# failure, on mismatch -- a wrong-but-fast number is worse than a slow
-# one), then REPS more times to find the best wall time in milliseconds.
-# Prints "-" if the command does not exist or fails outright (including
-# "not installed").
+# Runs the shell function named "$1" with the workload name "$2" REPS
+# times and prints the best wall time in milliseconds, or "-" if the
+# command does not exist or a run fails outright (including "not
+# installed"). The last run's output is then checked against that
+# workload's known answer (a warning, not a failure, on mismatch -- a
+# wrong-but-fast number is worse than a slow one). The check reads a timed
+# run's output rather than running the program once more just for it: the
+# runs are nearly all of this script's time.
 best_ms() {
   local fn=$1 workload=$2 out best="" t0 t1 dt
-  # stderr is discarded here, not merged: a diagnostic on stderr (guile's
-  # "source newer than compiled" note is the one that actually shows up)
-  # is not part of the answer, and merging it in would fail the check for
-  # a program that is behaving correctly.
-  if ! out=$("$fn" "$workload" 2>/dev/null); then
-    echo "-"
-    return
-  fi
-  local want=${EXPECT[$workload]}
-  if [ "$out" != "$want" ]; then
-    echo "warning: $fn($workload) printed '$out', expected $want" >&2
-  fi
   for _ in $(seq 1 "$REPS"); do
     t0=$(now_ms)
-    "$fn" "$workload" >/dev/null 2>&1 || true
+    # stdout goes to a file, not through $(...), so every rep times the
+    # same command. stderr is discarded, not merged: a diagnostic on
+    # stderr (guile's "source newer than compiled" note is the one that
+    # actually shows up) is not part of the answer, and merging it in
+    # would fail the check for a program that is behaving correctly.
+    if ! "$fn" "$workload" >"$SCRATCH/out" 2>/dev/null; then
+      echo "-"
+      return
+    fi
     t1=$(now_ms)
     dt=$((t1 - t0))
     if [ -z "$best" ] || [ "$dt" -lt "$best" ]; then best=$dt; fi
   done
+  out=$(<"$SCRATCH/out")
+  local want=${EXPECT[$workload]}
+  if [ "$out" != "$want" ]; then
+    echo "warning: $fn($workload) printed '$out', expected $want" >&2
+  fi
   echo "$best"
 }
 
@@ -142,10 +150,6 @@ mini_csharp() { "$BUILD_DIR/examples/mini-csharp/mini-csharp" "$1.cs"; }
 
 mini_go() { "$BUILD_DIR/examples/mini-go/mini-go" "$1.go"; }
 
-GO_TMPDIRS=()
-cleanup_go() {
-  for d in "${GO_TMPDIRS[@]:-}"; do rm -rf "$d"; done
-}
 declare -A GO_EXE
 
 # Compiles "$1.go" once and remembers the binary in GO_EXE[$1]. As with
@@ -154,11 +158,9 @@ declare -A GO_EXE
 build_go() {
   local workload=$1
   command -v go >/dev/null || return 0
-  local dir
-  dir=$(mktemp -d)
-  GO_TMPDIRS+=("$dir")
-  if go build -o "$dir/prog" "$workload.go" >/dev/null 2>&1; then
-    GO_EXE[$workload]="$dir/prog"
+  local exe=$SCRATCH/go-$workload
+  if go build -o "$exe" "$workload.go" >/dev/null 2>&1; then
+    GO_EXE[$workload]=$exe
   fi
 }
 
@@ -168,11 +170,6 @@ real_go() {
   "$exe"
 }
 
-CS_TMPDIRS=()
-cleanup_cs() {
-  for d in "${CS_TMPDIRS[@]:-}"; do rm -rf "$d"; done
-}
-trap 'cleanup_cs; cleanup_go' EXIT
 declare -A CSHARP_DLL
 
 # Builds "$1.cs" once into a scratch project's Release output and remembers
@@ -182,9 +179,8 @@ declare -A CSHARP_DLL
 build_csharp() {
   local workload=$1
   command -v dotnet >/dev/null || return 0
-  local dir
-  dir=$(mktemp -d)
-  CS_TMPDIRS+=("$dir")
+  local dir=$SCRATCH/cs-$workload
+  mkdir "$dir"
   cp "$workload.cs" "$dir/Program.cs"
   cat > "$dir/s.csproj" <<'EOP'
 <Project Sdk="Microsoft.NET.Sdk">
