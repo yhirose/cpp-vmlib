@@ -69,6 +69,11 @@
 # BUILD_DIR overrides where the mini-* binaries are looked for (default:
 # the repository's own build/ directory).
 set -euo pipefail
+# bash 5 for EPOCHREALTIME, best_ms's clock (macOS's own /bin/bash is 3.2).
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  echo "$0: needs bash 5 or later, found $BASH_VERSION" >&2
+  exit 1
+fi
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build"}
@@ -89,8 +94,6 @@ declare -A EXPECT=(
   [strings]=40000
 )
 
-now_ms() { date +%s%3N; }
-
 # Runs the shell function named "$1" with the workload name "$2" REPS
 # times and prints the best wall time in milliseconds, or "-" if the
 # command does not exist or a run fails outright (including "not
@@ -99,10 +102,18 @@ now_ms() { date +%s%3N; }
 # wrong-but-fast number is worse than a slow one). The check reads a timed
 # run's output rather than running the program once more just for it: the
 # runs are nearly all of this script's time.
+#
+# The clock is EPOCHREALTIME with its decimal point (a comma in some
+# locales) taken out: bash always prints six fractional digits, so that
+# leaves microseconds. Reading a variable needs no GNU date for a
+# sub-second format, and starts no process -- `$(date ...)` would leave
+# the exit of the date reading t0 and the startup of the one reading t1
+# inside the timed span. For the same reason, the functions below that
+# best_ms times start no process but the program itself.
 best_ms() {
   local fn=$1 workload=$2 out best="" t0 t1 dt
   for _ in $(seq 1 "$REPS"); do
-    t0=$(now_ms)
+    t0=${EPOCHREALTIME/[^0-9]/}
     # stdout goes to a file, not through $(...), so every rep times the
     # same command. stderr is discarded, not merged: a diagnostic on
     # stderr (guile's "source newer than compiled" note is the one that
@@ -112,7 +123,7 @@ best_ms() {
       echo "-"
       return
     fi
-    t1=$(now_ms)
+    t1=${EPOCHREALTIME/[^0-9]/}
     dt=$((t1 - t0))
     if [ -z "$best" ] || [ "$dt" -lt "$best" ]; then best=$dt; fi
   done
@@ -121,7 +132,7 @@ best_ms() {
   if [ "$out" != "$want" ]; then
     echo "warning: $fn($workload) printed '$out', expected $want" >&2
   fi
-  echo "$best"
+  echo $(((best + 500) / 1000))
 }
 
 mini_python() { "$BUILD_DIR/examples/mini-python/mini-python" "$1.py"; }
@@ -131,11 +142,10 @@ mini_ruby() { "$BUILD_DIR/examples/mini-ruby/mini-ruby" "$1.rb"; }
 real_ruby() { command -v ruby >/dev/null && ruby "$1.rb"; }
 
 mini_lua() { "$BUILD_DIR/examples/mini-lua/mini-lua" "$1.lua"; }
-real_lua() {
-  local l
-  l=$(command -v lua5.4 || command -v lua || true)
-  [ -n "$l" ] && "$l" "$1.lua"
-}
+# Looked up once, out here: a $(...) inside real_lua would be a subshell
+# in every timed run.
+LUA=$(command -v lua5.4 || command -v lua || true)
+real_lua() { [ -n "$LUA" ] && "$LUA" "$1.lua"; }
 
 mini_scheme() { "$BUILD_DIR/examples/mini-scheme/mini-scheme" "$1.scm"; }
 real_scheme() { command -v guile >/dev/null && guile --no-auto-compile -s "$1.scm"; }
