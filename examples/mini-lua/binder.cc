@@ -378,8 +378,8 @@ struct Binder {
   void rt_truthy() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.typ(r.L(v)), "bool"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.L(v))));
     r.add(r.ret(r.Bo(true)));
     r.finish("$truthy");
   }
@@ -390,29 +390,27 @@ struct Binder {
   void rt_eq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb, m] = r.locals("ta", "tb", "m");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
+    const auto [m] = r.locals("m");
     r.add(r.iff(
-        r.is_num(r.L(ta)),
-        r.iff(r.is_num(r.L(tb)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(ta), "nil"), r.ret(r.Bo(true))));
+        r.is_num(r.typ(a)),
+        r.iff(r.is_num(r.typ(b)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
     r.add(
-        r.iff(r.is(r.L(ta), "bool"), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
-    r.add(r.iff(r.is(r.L(ta), "string"),
+        r.iff(r.is(r.typ(a), "bool"), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    r.add(r.iff(r.is(r.typ(a), "string"),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     r.add(r.iff(
-        r.is(r.L(ta), "map"),
+        r.is(r.typ(a), "map"),
         r.blk(
             {r.set(m, r.call("$mm", {r.L(a), r.S("__eq")})),
-             r.iff(r.isnt(r.typ(r.L(m)), "nil"),
+             r.iff(r.isnt(r.typ(m), "nil"),
                    r.ret(r.call(
                        "$truthy",
                        {r.call("$one",
                                {r.b.call_value(r.L(m), {r.L(a), r.L(b)})})}))),
              r.set(m, r.call("$mm", {r.L(b), r.S("__eq")})),
-             r.iff(r.isnt(r.typ(r.L(m)), "nil"),
+             r.iff(r.isnt(r.typ(m), "nil"),
                    r.ret(r.call(
                        "$truthy",
                        {r.call("$one", {r.b.call_value(
@@ -430,8 +428,7 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const auto [i, f] = r.locals("i", "f");
     r.add(r.iff(
-        r.b.make_if(r.is(r.typ(r.L(a)), "int"), r.is(r.typ(r.L(b)), "int"),
-                    r.Bo(false)),
+        r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
         r.blk(
             {r.set(i, r.bin(BinOp::Mod, r.L(a), r.L(b))),
              r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(i), r.I(0)),
@@ -456,8 +453,7 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const auto [q] = r.locals("q");
     r.add(r.iff(
-        r.b.make_if(r.is(r.typ(r.L(a)), "int"), r.is(r.typ(r.L(b)), "int"),
-                    r.Bo(false)),
+        r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
         r.blk(
             {r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))),
              // Truncation and flooring differ exactly when the
@@ -492,7 +488,7 @@ struct Binder {
     const auto [v] = r.params("v");
     // `__tostring` is the host's to find (lua_tostring_mm), so print reaches
     // the same answer from C++.
-    r.add(r.iff(r.is(r.typ(r.L(v)), "string"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
     r.add(r.ret(r.nat("tostring", {r.L(v)})));
     r.finish("$str");
   }
@@ -505,7 +501,7 @@ struct Binder {
   void rt_mt() {
     RT r(*this);
     const auto [t] = r.params("t");
-    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"), r.ret(r.Nil())));
+    r.add(r.iff(r.isnt(r.typ(t), "map"), r.ret(r.Nil())));
     // A missing key already reads as nil (vmlib.h's own rule for a map),
     // so no metatable is the same case as one with nothing at this key.
     r.add(r.ret(r.idx(r.L(t), kMetaKey)));
@@ -517,7 +513,7 @@ struct Binder {
     const auto [v, name] = r.params("v", "name");
     const auto [mt] = r.locals("mt");
     r.add(r.set(mt, r.call("$mt", {r.L(v)})));
-    r.add(r.iff(r.is(r.typ(r.L(mt)), "nil"), r.ret(r.Nil())));
+    r.add(r.iff(r.is(r.typ(mt), "nil"), r.ret(r.Nil())));
     r.add(r.ret(r.idx(r.L(mt), r.L(name))));
     r.finish("$mm");
   }
@@ -528,15 +524,13 @@ struct Binder {
   void rt_arith(const std::string& name, BinOp op, const std::string& mm) {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb, mv] = r.locals("ta", "tb", "m");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
-    r.add(r.iff(r.is_num(r.L(ta)),
-                r.iff(r.is_num(r.L(tb)), r.ret(r.bin(op, r.L(a), r.L(b))))));
+    const auto [mv] = r.locals("m");
+    r.add(r.iff(r.is_num(r.typ(a)),
+                r.iff(r.is_num(r.typ(b)), r.ret(r.bin(op, r.L(a), r.L(b))))));
     const auto try_mm = [&](FuncWriter::Slot recv) {
       return std::vector<NodeId>{
           r.set(mv, r.call("$mm", {r.L(recv), r.S(mm)})),
-          r.iff(r.isnt(r.typ(r.L(mv)), "nil"),
+          r.iff(r.isnt(r.typ(mv), "nil"),
                 r.ret(r.call("$one",
                              {r.b.call_value(r.L(mv), {r.L(a), r.L(b)})})))};
     };
@@ -544,7 +538,7 @@ struct Binder {
     for (const NodeId n : try_mm(b)) r.add(n);
     // Named by the operand that is not a number, the left one first -- the
     // one Lua's own message names.
-    const NodeId bad = r.iff(r.is_num(r.L(ta)), r.L(b), r.L(a));
+    const NodeId bad = r.iff(r.is_num(r.typ(a)), r.L(b), r.L(a));
     r.add(r.b.make_throw(r.bin(
         BinOp::Add,
         r.bin(BinOp::Add, r.S("attempt to perform arithmetic on a "),
@@ -568,7 +562,7 @@ struct Binder {
     const auto [k] = r.params("k");
     const auto [i] = r.locals("i");
     r.add(r.iff(
-        r.is(r.typ(r.L(k)), "double"),
+        r.is(r.typ(k), "double"),
         r.blk({r.iff(r.bin(BinOp::Ne, r.L(k), r.L(k)), r.ret(r.L(k))),
                r.iff(r.b.make_if(
                          r.bin(BinOp::Gt, r.L(k), r.D(-9.007199254740992e15)),
@@ -591,7 +585,7 @@ struct Binder {
     RT r(*this);
     const auto [t, k] = r.params("t", "k");
     const auto [key, mt, idx] = r.locals("key", "mt", "idx");
-    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"),
+    r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.b.make_throw(r.S("attempt to index a non-table value"))));
     r.add(r.set(key, r.call("$key", {r.L(k)})));
     r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
@@ -600,7 +594,7 @@ struct Binder {
         r.blk({r.set(mt, r.idx(r.L(t), kMetaKey)),
                r.iff(r.has(r.L(mt), r.S("__index")),
                      r.blk({r.set(idx, r.idx(r.L(mt), r.S("__index"))),
-                            r.iff(r.is(r.typ(r.L(idx)), "map"),
+                            r.iff(r.is(r.typ(idx), "map"),
                                   r.ret(r.call("$get", {r.L(idx), r.L(key)}))),
                             r.ret(r.call(
                                 "$one",
@@ -616,10 +610,10 @@ struct Binder {
     RT r(*this);
     const auto [t, k, v] = r.params("t", "k", "v");
     const auto [key, m] = r.locals("key", "m");
-    r.add(r.iff(r.isnt(r.typ(r.L(t)), "map"),
+    r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.b.make_throw(r.S("attempt to index a non-table value"))));
     r.add(r.set(key, r.call("$key", {r.L(k)})));
-    r.add(r.iff(r.is(r.typ(r.L(v)), "nil"),
+    r.add(r.iff(r.is(r.typ(v), "nil"),
                 r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(t), r.L(key)}),
                        r.ret(r.L(v))})));
     // __newindex fires only for a key the raw table does not already
@@ -629,8 +623,8 @@ struct Binder {
         r.blk(
             {r.set(m, r.call("$mm", {r.L(t), r.S("__newindex")})),
              r.iff(
-                 r.isnt(r.typ(r.L(m)), "nil"),
-                 r.blk({r.iff(r.is(r.typ(r.L(m)), "map"),
+                 r.isnt(r.typ(m), "nil"),
+                 r.blk({r.iff(r.is(r.typ(m), "map"),
                               r.ret(r.call("$set", {r.L(m), r.L(k), r.L(v)}))),
                         r.call("$one", {r.b.call_value(
                                            r.L(m), {r.L(t), r.L(k), r.L(v)})}),
@@ -648,8 +642,8 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [n] = r.locals("n");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "string"), r.ret(r.len(r.L(v)))));
-    r.add(r.iff(r.isnt(r.typ(r.L(v)), "map"),
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.len(r.L(v)))));
+    r.add(r.iff(r.isnt(r.typ(v), "map"),
                 r.b.make_throw(r.S("attempt to get length of a non-table"))));
     r.add(r.set(n, r.I(0)));
     r.add(r.b.make_while(r.has(r.L(v), r.bin(BinOp::Add, r.L(n), r.I(1))),
@@ -796,7 +790,7 @@ struct Binder {
   void rt_error() {
     RT r(*this);
     const auto [v, where] = r.params("v", "where");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "string"),
+    r.add(r.iff(r.is(r.typ(v), "string"),
                 r.b.make_throw(r.bin(BinOp::Add, r.L(where), r.L(v)))));
     r.add(r.b.make_throw(r.L(v)));
     r.finish("$error");

@@ -753,8 +753,7 @@ struct Binder {
   void rt_isbig() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "object"),
-                r.ret(r.has(r.L(v), r.S(kBigKey)))));
+    r.add(r.iff(r.is(r.typ(v), "object"), r.ret(r.has(r.L(v), r.S(kBigKey)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isbig");
   }
@@ -1006,7 +1005,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [x, acc, i] = r.locals("x", "acc", "i");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "double"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.L(v))));
     r.add(r.iff(
         r.call("$isbig", {r.L(v)}),
         r.blk(
@@ -1051,22 +1050,19 @@ struct Binder {
   void rt_add() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb] = r.locals("ta", "tb");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
-    r.add(r.iff(r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "string")),
+    r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.is(r.typ(b), "string")),
                 r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
-    r.add(r.iff(r.both(r.is(r.L(ta), "array"), r.is(r.L(tb), "array")),
+    r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.is(r.typ(b), "array")),
                 r.ret(r.call("$listadd", {r.L(a), r.L(b)}))));
     r.add(r.iff(r.both(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
                 r.ret(r.call("$tuple",
                              {r.call("$listadd", {r.idx(r.L(a), kTupKey),
                                                   r.idx(r.L(b), kTupKey)})}))));
-    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+    r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
     r.add(r.iff(
-        int_pair(r, r.L(ta), r.L(tb)),
+        int_pair(r, r.typ(a), r.typ(b)),
         r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kAddSafe)),
                      r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kAddSafe))),
               r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))))));
@@ -1084,18 +1080,15 @@ struct Binder {
   void rt_mul() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb] = r.locals("ta", "tb");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
-    r.add(r.iff(r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "int")),
+    r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.is(r.typ(b), "int")),
                 r.ret(r.call("$strmul", {r.L(a), r.L(b)}))));
-    r.add(r.iff(r.both(r.is(r.L(ta), "array"), r.is(r.L(tb), "int")),
+    r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.is(r.typ(b), "int")),
                 r.ret(r.call("$listmul", {r.L(a), r.L(b)}))));
-    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+    r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
     r.add(r.iff(
-        int_pair(r, r.L(ta), r.L(tb)),
+        int_pair(r, r.typ(a), r.typ(b)),
         r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kMulSafe)),
                      r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kMulSafe))),
               r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b))))));
@@ -1204,8 +1197,8 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [acc, sq, e] = r.locals("acc", "sq", "e");
-    r.add(r.iff(r.either(r.is(r.typ(r.L(a)), "double"),
-                         r.either(r.is(r.typ(r.L(b)), "double"),
+    r.add(r.iff(r.either(r.is(r.typ(a), "double"),
+                         r.either(r.is(r.typ(b), "double"),
                                   r.bin(BinOp::Lt, r.L(b), r.I(0)))),
                 r.ret(r.in(IntrinsicId::Pow, {r.call("$tofloat", {r.L(a)}),
                                               r.call("$tofloat", {r.L(b)})}))));
@@ -1226,15 +1219,13 @@ struct Binder {
   void rt_cmp() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb, fa, fb, sa, sb, c, xa, xb, i, e] =
-        r.locals("ta", "tb", "fa", "fb", "sa", "sb", "c", "xa", "xb", "i", "e");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
+    const auto [fa, fb, sa, sb, c, xa, xb, i, e] =
+        r.locals("fa", "fb", "sa", "sb", "c", "xa", "xb", "i", "e");
     // A list or a tuple compares element by element, which is what makes
     // `sorted` work on a list of pairs.
     r.add(r.iff(
-        r.both(r.either(r.is(r.L(ta), "array"), r.call("$istup", {r.L(a)})),
-               r.either(r.is(r.L(tb), "array"), r.call("$istup", {r.L(b)}))),
+        r.both(r.either(r.is(r.typ(a), "array"), r.call("$istup", {r.L(a)})),
+               r.either(r.is(r.typ(b), "array"), r.call("$istup", {r.L(b)}))),
         r.blk(
             {r.set(xa, r.call("$untup", {r.L(a)})),
              r.set(xb, r.call("$untup", {r.L(b)})), r.set(i, r.I(0)),
@@ -1249,16 +1240,16 @@ struct Binder {
                          r.iff(r.bin(BinOp::Gt, r.len(r.L(xa)), r.len(r.L(xb))),
                                r.I(1), r.I(0))))})));
     r.add(r.iff(
-        r.both(r.is(r.L(ta), "string"), r.is(r.L(tb), "string")),
+        r.both(r.is(r.typ(a), "string"), r.is(r.typ(b), "string")),
         r.ret(r.iff(r.bin(BinOp::Lt, r.L(a), r.L(b)), r.I(-1),
                     r.iff(r.bin(BinOp::Gt, r.L(a), r.L(b)), r.I(1), r.I(0))))));
     // Two integers that both fit are compared directly; anything wider goes
     // through the limbs, sign first.
     r.add(r.iff(
-        int_pair(r, r.L(ta), r.L(tb)),
+        int_pair(r, r.typ(a), r.typ(b)),
         r.ret(r.iff(r.bin(BinOp::Lt, r.L(a), r.L(b)), r.I(-1),
                     r.iff(r.bin(BinOp::Gt, r.L(a), r.L(b)), r.I(1), r.I(0))))));
-    r.add(r.iff(r.either(r.is(r.L(ta), "double"), r.is(r.L(tb), "double")),
+    r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.blk({r.set(fa, r.call("$tofloat", {r.L(a)})),
                        r.set(fb, r.call("$tofloat", {r.L(b)})),
                        r.ret(r.iff(r.bin(BinOp::Lt, r.L(fa), r.L(fb)), r.I(-1),
@@ -1278,23 +1269,20 @@ struct Binder {
   void rt_eq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb, i, ks, k, f_] =
-        r.locals("ta", "tb", "i", "ks", "k", "f");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
+    const auto [i, ks, k, f_] = r.locals("i", "ks", "k", "f");
     const auto numeric = [&](NodeId t, NodeId v) {
       return r.either(r.is(t, "int"),
                       r.either(r.is(t, "double"), r.call("$isbig", {v})));
     };
     r.add(r.iff(
-        r.both(numeric(r.L(ta), r.L(a)), numeric(r.L(tb), r.L(b))),
+        r.both(numeric(r.typ(a), r.L(a)), numeric(r.typ(b), r.L(b))),
         r.ret(r.bin(BinOp::Eq, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0)))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(ta), "nil"), r.ret(r.Bo(true))));
-    r.add(r.iff(r.either(r.is(r.L(ta), "bool"), r.is(r.L(ta), "string")),
+    r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
+    r.add(r.iff(r.either(r.is(r.typ(a), "bool"), r.is(r.typ(a), "string")),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     r.add(r.iff(
-        r.is(r.L(ta), "array"),
+        r.is(r.typ(a), "array"),
         r.blk({r.iff(r.bin(BinOp::Ne, r.len(r.L(a)), r.len(r.L(b))),
                      r.ret(r.Bo(false))),
                r.set(i, r.I(0)),
@@ -1307,7 +1295,7 @@ struct Binder {
                            r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                r.ret(r.Bo(true))})));
     r.add(r.iff(
-        r.is(r.L(ta), "map"),
+        r.is(r.typ(a), "map"),
         r.blk({r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
                r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
                            r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
@@ -1335,7 +1323,7 @@ struct Binder {
                      r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
                                           r.idx(r.L(b), kTupKey)}))})));
     r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S("\x02__eq__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(f_)), "nil"),
+    r.add(r.iff(r.isnt(r.typ(f_), "nil"),
                 r.ret(r.call("$truthy",
                              {r.b.call_value(r.L(f_), {r.arr({r.L(a), r.L(b)}),
                                                        r.Nil()})}))));
@@ -1349,16 +1337,16 @@ struct Binder {
   void rt_truthy() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(t), "bool"), r.ret(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "int"), r.ret(r.bin(BinOp::Ne, r.L(v), r.I(0)))));
-    r.add(r.iff(r.is(r.L(t), "double"),
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.L(v))));
+    r.add(
+        r.iff(r.is(r.typ(v), "int"), r.ret(r.bin(BinOp::Ne, r.L(v), r.I(0)))));
+    r.add(r.iff(r.is(r.typ(v), "double"),
                 r.ret(r.bin(BinOp::Ne, r.L(v), r.D(0.0)))));
-    r.add(r.iff(r.either(r.is(r.L(t), "string"),
-                         r.either(r.is(r.L(t), "array"), r.is(r.L(t), "map"))),
-                r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0)))));
+    r.add(r.iff(
+        r.either(r.is(r.typ(v), "string"),
+                 r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "map"))),
+        r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0)))));
     r.add(r.ret(r.Bo(true)));
     r.finish("$truthy");
   }
@@ -1391,26 +1379,25 @@ struct Binder {
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t, f] = r.locals("t", "f");
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S("None"))));
-    r.add(r.iff(r.is(r.L(t), "bool"),
+    const auto [f] = r.locals("f");
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("None"))));
+    r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
-    r.add(
-        r.iff(r.is(r.L(t), "int"), r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
-    r.add(r.iff(r.is(r.L(t), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
-    r.add(r.iff(r.is(r.L(t), "array"), r.ret(r.call("$liststr", {r.L(v)}))));
-    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.call("$dictstr", {r.L(v)}))));
-    r.add(r.iff(r.is(r.L(t), "function"), r.ret(r.S("<function>"))));
-    r.add(r.iff(r.is(r.L(t), "generator"), r.ret(r.S("<generator>"))));
+    r.add(r.iff(r.is(r.typ(v), "int"),
+                r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(v), "array"), r.ret(r.call("$liststr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.call("$dictstr", {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("<function>"))));
+    r.add(r.iff(r.is(r.typ(v), "generator"), r.ret(r.S("<generator>"))));
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.call("$bstr", {r.L(v)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kTupKey)),
                 r.ret(r.call("$tupstr", {r.idx(r.L(v), kTupKey)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
                 r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__str__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(f)), "nil"),
+    r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
     // A class of the program's own that derives from a builtin exception
@@ -1435,11 +1422,11 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [f] = r.locals("f");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "string"),
+    r.add(r.iff(r.is(r.typ(v), "string"),
                 r.ret(r.bin(BinOp::Add, r.bin(BinOp::Add, r.S("'"), r.L(v)),
                             r.S("'")))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__repr__")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(f)), "nil"),
+    r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
     r.add(r.ret(r.call("$str", {r.L(v)})));
@@ -1502,7 +1489,7 @@ struct Binder {
     const auto [e, name] = r.params("e", "name");
     // A builtin exception travels as its name; a class of the program's own
     // travels as its value, and then the test is the identity walk.
-    r.add(r.iff(r.isnt(r.typ(r.L(name)), "string"),
+    r.add(r.iff(r.isnt(r.typ(name), "string"),
                 r.ret(r.call("$isinstv", {r.L(e), r.L(name)}))));
     r.add(r.iff(r.is(r.L(name), "Exception"), r.ret(r.Bo(true))));
     r.add(r.ret(r.call("$isname", {r.L(e), r.L(name)})));
@@ -1512,12 +1499,11 @@ struct Binder {
   void rt_len() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
     r.add(r.set(v, r.call("$untup", {r.L(v)})));
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.either(r.is(r.L(t), "string"),
-                         r.either(r.is(r.L(t), "array"), r.is(r.L(t), "map"))),
-                r.ret(r.len(r.L(v)))));
+    r.add(r.iff(
+        r.either(r.is(r.typ(v), "string"),
+                 r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "map"))),
+        r.ret(r.len(r.L(v)))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object has no len()")})));
     r.finish("$len");
@@ -1529,11 +1515,10 @@ struct Binder {
   void rt_idx() {
     RT r(*this);
     const auto [v, k] = r.params("v", "k");
-    const auto [t, i] = r.locals("t", "i");
+    const auto [i] = r.locals("i");
     r.add(r.set(v, r.call("$untup", {r.L(v)})));
-    r.add(r.set(t, r.typ(r.L(v))));
     r.add(r.iff(
-        r.either(r.is(r.L(t), "array"), r.is(r.L(t), "string")),
+        r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "string")),
         r.blk({r.set(i, r.L(k)),
                r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
                      r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
@@ -1541,12 +1526,12 @@ struct Binder {
                               r.bin(BinOp::Ge, r.L(i), r.len(r.L(v)))),
                      r.ret(r.call("$exc",
                                   {r.S("IndexError"),
-                                   r.iff(r.is(r.L(t), "array"),
+                                   r.iff(r.is(r.typ(v), "array"),
                                          r.S("list index out of range"),
                                          r.S("string index out of range"))}))),
                r.ret(r.idx(r.L(v), r.L(i)))})));
     r.add(r.iff(
-        r.is(r.L(t), "map"),
+        r.is(r.typ(v), "map"),
         r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
                r.ret(r.call("$exc",
                             {r.S("KeyError"), r.call("$repr", {r.L(k)})}))})));
@@ -1558,10 +1543,9 @@ struct Binder {
   void rt_setidx() {
     RT r(*this);
     const auto [v, k, val] = r.params("v", "k", "val");
-    const auto [t, i] = r.locals("t", "i");
-    r.add(r.set(t, r.typ(r.L(v))));
+    const auto [i] = r.locals("i");
     r.add(r.iff(
-        r.is(r.L(t), "array"),
+        r.is(r.typ(v), "array"),
         r.blk({r.set(i, r.L(k)),
                r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
                      r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
@@ -1571,7 +1555,7 @@ struct Binder {
                                            r.S("list assignment index out of "
                                                "range")}))),
                r.sidx(r.L(v), r.L(i), r.L(val)), r.ret(r.L(val))})));
-    r.add(r.iff(r.is(r.L(t), "map"),
+    r.add(r.iff(r.is(r.typ(v), "map"),
                 r.blk({r.sidx(r.L(v), r.L(k), r.L(val)), r.ret(r.L(val))})));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object does not support item "
@@ -1588,7 +1572,7 @@ struct Binder {
     const auto norm = [&](FuncWriter::Slot out, FuncWriter::Slot arg,
                           NodeId dflt) {
       return r.iff(
-          r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
+          r.is(r.typ(arg), "nil"), r.set(out, dflt),
           r.blk(
               {r.set(out, r.L(arg)),
                r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
@@ -1606,7 +1590,7 @@ struct Binder {
     r.add(norm(b, j, r.L(n)));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(b), r.L(a)), r.set(b, r.L(a))));
     r.add(
-        r.iff(r.is(r.typ(r.L(v)), "string"),
+        r.iff(r.is(r.typ(v), "string"),
               r.ret(r.in(IntrinsicId::StrSlice, {r.L(v), r.L(a), r.L(b)})),
               r.ret(r.in(IntrinsicId::ArraySlice, {r.L(v), r.L(a), r.L(b)}))));
     r.finish("$slice");
@@ -1615,13 +1599,12 @@ struct Binder {
   void rt_in() {
     RT r(*this);
     const auto [needle, hay] = r.params("needle", "hay");
-    const auto [t, i] = r.locals("t", "i");
+    const auto [i] = r.locals("i");
     r.add(r.set(hay, r.call("$untup", {r.L(hay)})));
-    r.add(r.set(t, r.typ(r.L(hay))));
-    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.has(r.L(hay), r.L(needle)))));
+    r.add(r.iff(r.is(r.typ(hay), "map"), r.ret(r.has(r.L(hay), r.L(needle)))));
     // `"e" in "hello"` is a substring test, not a membership one.
     r.add(
-        r.iff(r.is(r.L(t), "string"),
+        r.iff(r.is(r.typ(hay), "string"),
               r.blk({r.set(i, r.I(0)),
                      r.wh(r.bin(BinOp::Le,
                                 r.bin(BinOp::Add, r.L(i), r.len(r.L(needle))),
@@ -1636,7 +1619,7 @@ struct Binder {
                                  r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                      r.ret(r.Bo(false))})));
     r.add(r.iff(
-        r.is(r.L(t), "array"),
+        r.is(r.typ(hay), "array"),
         r.blk({r.set(i, r.I(0)),
                r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(hay))),
                     r.blk({r.iff(r.call("$eq",
@@ -1653,16 +1636,16 @@ struct Binder {
     const auto [o, name] = r.params("o", "name");
     const auto [cls, key] = r.locals("cls", "key");
     r.add(r.iff(
-        r.is(r.typ(r.L(o)), "object"),
+        r.is(r.typ(o), "object"),
         r.blk(
             {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
              r.iff(
                  r.has(r.L(o), r.S(kClassKey)),
-                 r.blk({r.set(key, r.bin(BinOp::Add, r.S("\x02"), r.L(name))),
-                        r.set(cls, r.call("$clsfind", {r.idx(r.L(o), kClassKey),
-                                                       r.L(key)})),
-                        r.iff(r.isnt(r.typ(r.L(cls)), "nil"),
-                              r.ret(r.L(cls)))}))})));
+                 r.blk(
+                     {r.set(key, r.bin(BinOp::Add, r.S("\x02"), r.L(name))),
+                      r.set(cls, r.call("$clsfind",
+                                        {r.idx(r.L(o), kClassKey), r.L(key)})),
+                      r.iff(r.isnt(r.typ(cls), "nil"), r.ret(r.L(cls)))}))})));
     r.add(r.ret(
         r.call("$exc", {r.S("AttributeError"),
                         r.bin(BinOp::Add, r.S("no attribute "), r.L(name))})));
@@ -1672,7 +1655,7 @@ struct Binder {
   void rt_setattr() {
     RT r(*this);
     const auto [o, name, val] = r.params("o", "name", "val");
-    r.add(r.iff(r.is(r.typ(r.L(o)), "object"),
+    r.add(r.iff(r.is(r.typ(o), "object"),
                 r.blk({r.sidx(r.L(o), r.L(name), r.L(val)), r.ret(r.L(val))})));
     r.add(r.ret(r.call("$exc", {r.S("AttributeError"),
                                 r.S("cannot set attribute")})));
@@ -1682,16 +1665,14 @@ struct Binder {
   void rt_iter() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
     r.add(r.set(v, r.call("$untup", {r.L(v)})));
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "generator"),
+    r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
-    r.add(r.iff(r.is(r.L(t), "map"),
+    r.add(r.iff(r.is(r.typ(v), "map"),
                 r.ret(r.obj({{"k", r.S("a")},
                              {"v", r.in(IntrinsicId::ObjectKeys, {r.L(v)})},
                              {"i", r.I(0)}}))));
-    r.add(r.iff(r.either(r.is(r.L(t), "array"), r.is(r.L(t), "string")),
+    r.add(r.iff(r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "string")),
                 r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("object is not iterable")})));
@@ -1736,17 +1717,15 @@ struct Binder {
   void rt_typename() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S("NoneType"))));
-    r.add(r.iff(r.is(r.L(t), "bool"), r.ret(r.S("bool"))));
-    r.add(r.iff(r.is(r.L(t), "int"), r.ret(r.S("int"))));
-    r.add(r.iff(r.is(r.L(t), "double"), r.ret(r.S("float"))));
-    r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.S("str"))));
-    r.add(r.iff(r.is(r.L(t), "array"), r.ret(r.S("list"))));
-    r.add(r.iff(r.is(r.L(t), "map"), r.ret(r.S("dict"))));
-    r.add(r.iff(r.is(r.L(t), "function"), r.ret(r.S("function"))));
-    r.add(r.iff(r.is(r.L(t), "generator"), r.ret(r.S("generator"))));
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("NoneType"))));
+    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.S("bool"))));
+    r.add(r.iff(r.is(r.typ(v), "int"), r.ret(r.S("int"))));
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.S("float"))));
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.S("str"))));
+    r.add(r.iff(r.is(r.typ(v), "array"), r.ret(r.S("list"))));
+    r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.S("dict"))));
+    r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("function"))));
+    r.add(r.iff(r.is(r.typ(v), "generator"), r.ret(r.S("generator"))));
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.S("int"))));
     r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.S("tuple"))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kExcKey))));
@@ -1805,14 +1784,13 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [s, i, neg, acc, c] = r.locals("s", "i", "neg", "acc", "c");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "double"),
+    r.add(r.iff(r.is(r.typ(v), "double"),
                 r.ret(r.in(IntrinsicId::ToInt, {r.L(v)}))));
-    r.add(r.iff(r.is(r.typ(r.L(v)), "bool"),
-                r.ret(r.iff(r.L(v), r.I(1), r.I(0)))));
+    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.iff(r.L(v), r.I(1), r.I(0)))));
     // `int("...")` accumulates through $mul and $add, so a literal too big
     // for an int64 becomes a bignum with nothing further to say about it.
     r.add(r.iff(
-        r.is(r.typ(r.L(v)), "string"),
+        r.is(r.typ(v), "string"),
         r.blk(
             {r.set(s, r.call("$strip", {r.L(v), r.I(0)})), r.set(i, r.I(0)),
              r.set(neg, r.Bo(false)),
@@ -1878,7 +1856,7 @@ struct Binder {
     const auto [x, a] = r.params("x", "a");
     const auto [out, i] = r.locals("out", "i");
     r.add(r.set(out, r.arr({r.L(x)})));
-    r.add(r.iff(r.isnt(r.typ(r.L(a)), "array"), r.ret(r.L(out))));
+    r.add(r.iff(r.isnt(r.typ(a), "array"), r.ret(r.L(out))));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
                r.blk({r.push(r.L(out), r.idx(r.L(a), r.L(i))),
@@ -1913,7 +1891,7 @@ struct Binder {
   void rt_kwhas() {
     RT r(*this);
     const auto [k, n] = r.params("k", "n");
-    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(k), "nil"), r.ret(r.Bo(false))));
     r.add(r.ret(r.has(r.L(k), r.L(n))));
     r.finish("$kwhas");
   }
@@ -1936,7 +1914,7 @@ struct Binder {
     const auto [k, names] = r.params("k", "names");
     const auto [out, ks, i, key] = r.locals("out", "ks", "i", "key");
     r.add(r.set(out, r.in(IntrinsicId::MapNew, {})));
-    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.L(out))));
+    r.add(r.iff(r.is(r.typ(k), "nil"), r.ret(r.L(out))));
     r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(k)})));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(
@@ -1955,7 +1933,7 @@ struct Binder {
     RT r(*this);
     const auto [k, names, fn] = r.params("k", "names", "fn");
     const auto [ks, i, key] = r.locals("ks", "i", "key");
-    r.add(r.iff(r.is(r.typ(r.L(k)), "nil"), r.ret(r.Nil())));
+    r.add(r.iff(r.is(r.typ(k), "nil"), r.ret(r.Nil())));
     r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(k)})));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(
@@ -1980,7 +1958,7 @@ struct Binder {
     RT r(*this);
     const auto [dst, src] = r.params("dst", "src");
     const auto [ks, i, key] = r.locals("ks", "i", "key");
-    r.add(r.iff(r.is(r.typ(r.L(src)), "nil"), r.ret(r.L(dst))));
+    r.add(r.iff(r.is(r.typ(src), "nil"), r.ret(r.L(dst))));
     r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(src)})));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
@@ -2091,7 +2069,7 @@ struct Binder {
     const auto [c] = r.locals("c");
     r.add(r.set(c, r.L(t)));
     r.add(r.wh(
-        r.is(r.typ(r.L(c)), "object"),
+        r.is(r.typ(c), "object"),
         r.blk(
             {r.iff(r.has(r.L(c), r.L(key)), r.ret(r.idx(r.L(c), r.L(key)))),
              r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.S(kBaseKey)), r.Bo(false)),
@@ -2108,14 +2086,14 @@ struct Binder {
     RT r(*this);
     const auto [v, name] = r.params("v", "name");
     const auto [t] = r.locals("t");
-    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
                 r.ret(r.bin(BinOp::Eq, r.idx(r.L(v), kExcKey), r.L(name)))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
     r.add(r.set(t, r.idx(r.L(v), kClassKey)));
     r.add(r.wh(
-        r.is(r.typ(r.L(t)), "object"),
+        r.is(r.typ(t), "object"),
         r.blk(
             {r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
                           r.bin(BinOp::Eq, r.idx(r.L(t), kRootKey), r.L(name))),
@@ -2133,11 +2111,11 @@ struct Binder {
     RT r(*this);
     const auto [v, cls] = r.params("v", "cls");
     const auto [t] = r.locals("t");
-    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
     r.add(r.set(t, r.idx(r.L(v), kClassKey)));
-    r.add(r.wh(r.is(r.typ(r.L(t)), "object"),
+    r.add(r.wh(r.is(r.typ(t), "object"),
                r.blk({r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
                                    r.in(IntrinsicId::Same,
                                         {r.idx(r.L(t), kIdKey), r.L(cls)})),
@@ -2153,7 +2131,7 @@ struct Binder {
   void rt_isinst() {
     RT r(*this);
     const auto [v, cls] = r.params("v", "cls");
-    r.add(r.iff(r.is(r.typ(r.L(cls)), "string"),
+    r.add(r.iff(r.is(r.typ(cls), "string"),
                 r.ret(r.either(
                     r.bin(BinOp::Eq, r.call("$typename", {r.L(v)}), r.L(cls)),
                     r.call("$isname", {r.L(v), r.L(cls)})))));
@@ -2170,9 +2148,9 @@ struct Binder {
     const auto [self, base, key, a, k] =
         r.params("self", "base", "key", "a", "k");
     const auto [f] = r.locals("f");
-    r.add(r.iff(r.is(r.typ(r.L(base)), "object"),
+    r.add(r.iff(r.is(r.typ(base), "object"),
                 r.blk({r.set(f, r.call("$clsfind", {r.L(base), r.L(key)})),
-                       r.iff(r.isnt(r.typ(r.L(f)), "nil"),
+                       r.iff(r.isnt(r.typ(f), "nil"),
                              r.ret(r.b.call_value(
                                  r.L(f), {r.call("$acons", {r.L(self), r.L(a)}),
                                           r.L(k)})))})));
@@ -2212,7 +2190,7 @@ struct Binder {
   void rt_dunder() {
     RT r(*this);
     const auto [v, key] = r.params("v", "key");
-    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Nil())));
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Nil())));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Nil())));
     r.add(r.ret(r.call("$clsfind", {r.idx(r.L(v), kClassKey), r.L(key)})));
@@ -2244,7 +2222,7 @@ struct Binder {
   void rt_istup() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.isnt(r.typ(r.L(v)), "object"), r.ret(r.Bo(false))));
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.ret(r.has(r.L(v), r.S(kTupKey))));
     r.finish("$istup");
   }
@@ -2382,7 +2360,7 @@ struct Binder {
     r.add(r.wh(
         r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
         r.blk({r.push(r.L(ks),
-                      r.iff(r.is(r.typ(r.L(key)), "nil"), r.idx(r.L(a), r.L(i)),
+                      r.iff(r.is(r.typ(key), "nil"), r.idx(r.L(a), r.L(i)),
                             r.b.call_value(
                                 r.L(key),
                                 {r.arr({r.idx(r.L(a), r.L(i))}), r.Nil()}))),
@@ -2767,13 +2745,13 @@ struct Binder {
     RT r(*this);
     const auto [c, k] = r.params("c", "k");
     r.add(r.iff(
-        r.is(r.typ(r.L(c)), "map"),
+        r.is(r.typ(c), "map"),
         r.blk({r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.L(k)), r.Bo(false)),
                      r.call("$exc",
                             {r.S("KeyError"), r.call("$repr", {r.L(k)})})),
                r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
                r.ret(r.Nil())})));
-    r.add(r.iff(r.is(r.typ(r.L(c)), "array"),
+    r.add(r.iff(r.is(r.typ(c), "array"),
                 r.blk({r.call("$apop", {r.L(c), r.L(k), r.Bo(true)}),
                        r.ret(r.Nil())})));
     r.add(r.call("$exc", {r.S("TypeError"),
@@ -2845,8 +2823,8 @@ struct Binder {
     // A number right-aligns by default and everything else left-aligns,
     // which is Python's rule and not a choice this front end gets to make.
     r.add(r.set(fill, r.S(" ")));
-    r.add(r.set(align, r.iff(r.either(r.is(r.typ(r.L(v)), "int"),
-                                      r.either(r.is(r.typ(r.L(v)), "double"),
+    r.add(r.set(align, r.iff(r.either(r.is(r.typ(v), "int"),
+                                      r.either(r.is(r.typ(v), "double"),
                                                r.call("$isbig", {r.L(v)}))),
                              r.S(">"), r.S("<"))));
     r.add(r.set(i, r.I(0)));

@@ -2917,6 +2917,7 @@ class FuncWriter {
   NodeId push(NodeId a, NodeId v) { return in(IntrinsicId::ArrayPush, {a, v}); }
   NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
   NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
+  NodeId typ(Slot s) { return typ(L(s)); }
   // A value's type string compared against a name -- `typ(v)` is what these
   // two are meant to be handed, not the value itself. Handed it directly,
   // the comparison compiles to one test of the tag (vm::Op::TypeIn), so a

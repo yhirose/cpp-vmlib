@@ -533,7 +533,7 @@ struct Binder {
     arms.emplace_back(r.S("string"),
                       r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0))));
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(false)));
-    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.Bo(true))));
+    r.add(r.b.make_switch(r.typ(v), arms, r.ret(r.Bo(true))));
     r.finish("$truthy");
   }
 
@@ -545,17 +545,14 @@ struct Binder {
   void rt_seq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb] = r.locals("ta", "tb");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)));
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(true)));
     for (const char* t : {"bool", "int", "double", "string"}) {
       arms.emplace_back(r.S(t), scalar);
     }
-    r.add(r.b.make_switch(r.L(ta), arms,
+    r.add(r.b.make_switch(r.typ(a), arms,
                           r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}))));
     r.finish("$seq");
   }
@@ -573,7 +570,7 @@ struct Binder {
     arms.emplace_back(r.S("double"), num);
     arms.emplace_back(r.S("string"), r.ret(r.S("string")));
     arms.emplace_back(r.S("function"), r.ret(r.S("function")));
-    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.S("object"))));
+    r.add(r.b.make_switch(r.typ(v), arms, r.ret(r.S("object"))));
     r.finish("$typeof");
   }
 
@@ -620,7 +617,7 @@ struct Binder {
     // mutually recursive -- and why every $helper's Module::funcs slot is
     // reserved before any body is built.
     arms.emplace_back(r.S("array"), r.ret(r.call("$join", {r.L(v), r.S(",")})));
-    r.add(r.b.make_switch(r.typ(r.L(v)), arms, r.ret(r.S("[object Object]"))));
+    r.add(r.b.make_switch(r.typ(v), arms, r.ret(r.S("[object Object]"))));
     r.finish("$str");
   }
 
@@ -638,7 +635,7 @@ struct Binder {
             r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
                   r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
             r.set(e, r.idx(r.L(a), r.L(i))),
-            r.iff(r.isnt(r.typ(r.L(e)), "nil"),
+            r.iff(r.isnt(r.typ(e), "nil"),
                   r.set(out,
                         r.bin(BinOp::Add, r.L(out), r.call("$str", {r.L(e)})))),
             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
@@ -655,8 +652,8 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const NodeId cat = r.ret(
         r.bin(BinOp::Add, r.call("$str", {r.L(a)}), r.call("$str", {r.L(b)})));
-    r.add(r.iff(r.is(r.typ(r.L(a)), "string"), cat));
-    r.add(r.iff(r.is(r.typ(r.L(b)), "string"), cat));
+    r.add(r.iff(r.is(r.typ(a), "string"), cat));
+    r.add(r.iff(r.is(r.typ(b), "string"), cat));
     r.add(r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))));
     r.finish("$add");
   }
@@ -678,17 +675,16 @@ struct Binder {
   void rt_index() {
     RT r(*this);
     const auto [recv, key] = r.params("recv", "key");
-    const auto [t, tk, i, n, k] = r.locals("t", "tk", "i", "n", "k");
+    const auto [i, n, k] = r.locals("i", "n", "k");
     std::vector<std::pair<NodeId, NodeId>> arms;
     const NodeId seq = r.blk({
-        r.set(tk, r.typ(r.L(key))),
-        r.iff(r.is(r.L(tk), "string"),
+        r.iff(r.is(r.typ(key), "string"),
               r.blk({r.iff(r.is(r.L(key), "length"),
                            r.ret(r.in(IntrinsicId::ToDouble,
                                       {r.len(r.L(recv))}))),
                      r.ret(r.Nil())})),
-        r.iff(r.isnt(r.L(tk), "double"),
-              r.iff(r.isnt(r.L(tk), "int"), r.ret(r.Nil()))),
+        r.iff(r.isnt(r.typ(key), "double"),
+              r.iff(r.isnt(r.typ(key), "int"), r.ret(r.Nil()))),
         r.iff(r.bin(BinOp::Ne, r.L(key), r.L(key)), r.ret(r.Nil())),
         r.set(n, r.len(r.L(recv))),
         r.iff(r.bin(BinOp::Lt, r.L(key), r.I(0)), r.ret(r.Nil())),
@@ -724,7 +720,7 @@ struct Binder {
         r.S("nil"),
         r.ret(r.call("$throwtype",
                      {r.S("cannot read a property of undefined")})));
-    r.add(r.b.make_switch(r.typ(r.L(recv)), arms, r.ret(r.Nil())));
+    r.add(r.b.make_switch(r.typ(recv), arms, r.ret(r.Nil())));
     r.finish("$index");
   }
 
@@ -749,7 +745,7 @@ struct Binder {
         r.S("map"),
         r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
     r.add(r.b.make_switch(
-        r.typ(r.L(recv)), arms,
+        r.typ(recv), arms,
         r.ret(r.call("$throwtype", {r.S("cannot set a property on this")}))));
     r.finish("$setidx");
   }
@@ -766,7 +762,7 @@ struct Binder {
     const auto norm = [&](FuncWriter::Slot out, FuncWriter::Slot arg,
                           NodeId dflt) {
       return r.iff(
-          r.is(r.typ(r.L(arg)), "nil"), r.set(out, dflt),
+          r.is(r.typ(arg), "nil"), r.set(out, dflt),
           r.blk(
               {r.set(out, r.in(IntrinsicId::ToInt, {r.L(arg)})),
                r.iff(r.bin(BinOp::Lt, r.L(out), r.I(0)),
@@ -779,7 +775,7 @@ struct Binder {
     r.add(norm(b, j, r.L(n)));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(b), r.L(a)), r.set(b, r.L(a))));
     r.add(
-        r.iff(r.is(r.typ(r.L(v)), "string"),
+        r.iff(r.is(r.typ(v), "string"),
               r.ret(r.in(IntrinsicId::StrSlice, {r.L(v), r.L(a), r.L(b)})),
               r.ret(r.in(IntrinsicId::ArraySlice, {r.L(v), r.L(a), r.L(b)}))));
     r.finish("$slice");
@@ -801,17 +797,15 @@ struct Binder {
   void rt_iter() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t, mm, ks, out, i, k] =
-        r.locals("t", "mm", "ks", "out", "i", "k");
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "generator"),
+    const auto [mm, ks, out, i, k] = r.locals("mm", "ks", "out", "i", "k");
+    r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
     const NodeId over =
         r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}));
-    r.add(r.iff(r.is(r.L(t), "array"), over));
-    r.add(r.iff(r.is(r.L(t), "string"), over));
+    r.add(r.iff(r.is(r.typ(v), "array"), over));
+    r.add(r.iff(r.is(r.typ(v), "string"), over));
     r.add(r.iff(
-        r.is(r.L(t), "object"),
+        r.is(r.typ(v), "object"),
         r.blk({
             r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$set")}),
                   r.ret(r.obj({{"k", r.S("a")},
@@ -868,7 +862,7 @@ struct Binder {
     RT r(*this);
     const auto [o] = r.params("o");
     r.add(
-        r.iff(r.is(r.typ(r.L(o)), "object"),
+        r.iff(r.is(r.typ(o), "object"),
               r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$map")}),
                            r.ret(r.idx(r.L(o), "$map"))),
                      r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$set")}),
@@ -963,7 +957,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     r.add(
-        r.iff(r.is(r.typ(r.L(v)), "object"),
+        r.iff(r.is(r.typ(v), "object"),
               r.ret(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$promise")}))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$ispromise");

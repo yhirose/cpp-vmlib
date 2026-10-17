@@ -752,18 +752,17 @@ struct Binder {
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [t, mth] = r.locals("t", "m");
-    r.add(r.set(t, r.typ(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "string"), r.ret(r.L(v))));
-    r.add(r.iff(r.is(r.L(t), "nil"), r.ret(r.S(""))));
-    r.add(r.iff(r.is(r.L(t), "bool"),
+    const auto [mth] = r.locals("m");
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S(""))));
+    r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
-    r.add(r.iff(r.either(r.is(r.L(t), "int"), r.is(r.L(t), "double")),
+    r.add(r.iff(r.either(r.is(r.typ(v), "int"), r.is(r.typ(v), "double")),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
-    r.add(r.iff(r.isnt(r.L(t), "object"), r.ret(r.S("<value>"))));
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kMsgKey))));
     r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S("ToString")})));
-    r.add(r.iff(r.isnt(r.typ(r.L(mth)), "nil"),
+    r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
                 r.ret(r.idx(r.idx(r.L(v), kClassKey), kNameKey))));
@@ -774,10 +773,9 @@ struct Binder {
   void rt_add() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(
-        r.either(r.is(r.typ(r.L(a)), "string"), r.is(r.typ(r.L(b)), "string")),
-        r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),
-                    r.call("$str", {r.L(b)})))));
+    r.add(r.iff(r.either(r.is(r.typ(a), "string"), r.is(r.typ(b), "string")),
+                r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),
+                            r.call("$str", {r.L(b)})))));
     r.add(r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))));
     r.finish("$add");
   }
@@ -788,17 +786,14 @@ struct Binder {
   void rt_eq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [ta, tb] = r.locals("ta", "tb");
-    r.add(r.set(ta, r.typ(r.L(a))));
-    r.add(r.set(tb, r.typ(r.L(b))));
     const auto num = [&](NodeId t) {
       return r.either(r.is(t, "int"), r.is(t, "double"));
     };
-    r.add(r.iff(r.both(num(r.L(ta)), num(r.L(tb))),
+    r.add(r.iff(r.both(num(r.typ(a)), num(r.typ(b))),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(ta), r.L(tb)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.L(ta), "nil"), r.ret(r.Bo(true))));
-    r.add(r.iff(r.either(r.is(r.L(ta), "bool"), r.is(r.L(ta), "string")),
+    r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
+    r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
+    r.add(r.iff(r.either(r.is(r.typ(a), "bool"), r.is(r.typ(a), "string")),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     r.add(r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)})));
     r.finish("$eq");
@@ -816,17 +811,17 @@ struct Binder {
   void method_walk(RT& r, FuncWriter::Slot recv, FuncWriter::Slot name) {
     const auto [cls, key] = r.locals("cls", "key");
     r.add(r.iff(
-        r.is(r.typ(r.L(recv)), "object"),
-        r.blk({r.set(cls, r.idx(r.L(recv), kClassKey)),  // nil: no instance
-               r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix), r.L(name))),
-               r.wh(r.is(r.typ(r.L(cls)), "object"),
-                    r.blk({r.iff(r.has(r.L(cls), r.L(key)),
-                                 r.ret(r.idx(r.L(cls), r.L(key)))),
-                           r.iff(r.bin(BinOp::Eq,
-                                       r.has(r.L(cls), r.S(kBaseKey)),
-                                       r.Bo(false)),
-                                 r.b.make_break()),
-                           r.set(cls, r.idx(r.L(cls), kBaseKey))}))})));
+        r.is(r.typ(recv), "object"),
+        r.blk(
+            {r.set(cls, r.idx(r.L(recv), kClassKey)),  // nil: no instance
+             r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix), r.L(name))),
+             r.wh(r.is(r.typ(cls), "object"),
+                  r.blk({r.iff(r.has(r.L(cls), r.L(key)),
+                               r.ret(r.idx(r.L(cls), r.L(key)))),
+                         r.iff(r.bin(BinOp::Eq, r.has(r.L(cls), r.S(kBaseKey)),
+                                     r.Bo(false)),
+                               r.b.make_break()),
+                         r.set(cls, r.idx(r.L(cls), kBaseKey))}))})));
   }
 
   void rt_mlookup() {
@@ -841,7 +836,7 @@ struct Binder {
     RT r(*this);
     const auto [recv, name] = r.params("recv", "name");
     method_walk(r, recv, name);
-    r.add(r.iff(r.isnt(r.typ(r.L(recv)), "object"),
+    r.add(r.iff(r.isnt(r.typ(recv), "object"),
                 r.ret(r.call("$exc", {r.S("null reference")}))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
@@ -853,7 +848,7 @@ struct Binder {
   void rt_getf() {
     RT r(*this);
     const auto [o, name] = r.params("o", "name");
-    r.add(r.iff(r.isnt(r.typ(r.L(o)), "object"),
+    r.add(r.iff(r.isnt(r.typ(o), "object"),
                 r.ret(r.call("$exc", {r.S("null reference")}))));
     r.add(r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))));
     r.add(r.ret(r.Nil()));
@@ -863,7 +858,7 @@ struct Binder {
   void rt_setf() {
     RT r(*this);
     const auto [o, name, val] = r.params("o", "name", "val");
-    r.add(r.iff(r.isnt(r.typ(r.L(o)), "object"),
+    r.add(r.iff(r.isnt(r.typ(o), "object"),
                 r.ret(r.call("$exc", {r.S("null reference")}))));
     r.add(r.sidx(r.L(o), r.L(name), r.L(val)));
     r.add(r.ret(r.L(val)));
@@ -874,7 +869,7 @@ struct Binder {
     RT r(*this);
     const auto [v, k] = r.params("v", "k");
     r.add(
-        r.iff(r.is(r.typ(r.L(v)), "map"),
+        r.iff(r.is(r.typ(v), "map"),
               r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
                      r.ret(r.call("$exc", {r.S("key not found")}))})));
     r.add(r.iff(r.either(r.bin(BinOp::Lt, r.L(k), r.I(0)),
@@ -887,7 +882,7 @@ struct Binder {
   void rt_setidx() {
     RT r(*this);
     const auto [v, k, val] = r.params("v", "k", "val");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "map"),
+    r.add(r.iff(r.is(r.typ(v), "map"),
                 r.blk({r.sidx(r.L(v), r.L(k), r.L(val)), r.ret(r.L(val))})));
     r.add(r.iff(r.either(r.bin(BinOp::Lt, r.L(k), r.I(0)),
                          r.bin(BinOp::Ge, r.L(k), r.len(r.L(v)))),
@@ -902,9 +897,9 @@ struct Binder {
   void rt_dictadd() {
     RT r(*this);
     const auto [d, k, v] = r.params("d", "k", "v");
-    r.add(r.iff(r.is(r.typ(r.L(d)), "nil"),
+    r.add(r.iff(r.is(r.typ(d), "nil"),
                 r.ret(r.call("$exc", {r.S("null reference")}))));
-    r.add(r.iff(r.isnt(r.typ(r.L(d)), "map"),
+    r.add(r.iff(r.isnt(r.typ(d), "map"),
                 r.ret(r.call("$exc", {r.S("no such method: Add")}))));
     r.add(r.iff(r.has(r.L(d), r.L(k)),
                 r.ret(r.call(
@@ -928,7 +923,7 @@ struct Binder {
   void rt_iter() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "generator"),
+    r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
     r.add(r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}})));
     r.finish("$iter");
@@ -1029,7 +1024,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [t] = r.locals("t");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "object"),
+    r.add(r.iff(r.is(r.typ(v), "object"),
                 r.iff(r.has(r.L(v), r.S("$task")), r.ret(r.L(v)))));
     r.add(r.set(t, r.call("$tnew", {})));
     r.add(r.call("$tsettle", {r.L(t), r.I(1), r.L(v)}));
@@ -1040,7 +1035,7 @@ struct Binder {
   void rt_tresolve() {
     RT r(*this);
     const auto [t, v] = r.params("t", "v");
-    r.add(r.iff(r.is(r.typ(r.L(v)), "object"),
+    r.add(r.iff(r.is(r.typ(v), "object"),
                 r.iff(r.has(r.L(v), r.S("$task")),
                       r.blk({r.setc(0, r.L(t)), r.setc(1, r.L(v)),
                              r.call("$ton", {r.L(v), r.clos("$adopt", {0, 1})}),
