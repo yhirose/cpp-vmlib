@@ -231,7 +231,8 @@ class Runtime {
   void link(HeapObj* o);
   void unlink(HeapObj* o);
   void mark();
-  void strip_and_free(const std::vector<HeapObj*>& objs);
+  template <class ForEach>
+  void strip_and_free(ForEach for_each);
 
   HeapObj* head_ = nullptr;
   int64_t live_ = 0;
@@ -4305,8 +4306,7 @@ inline int64_t Runtime::collect() {
       condemn_unmarked();
     }
 
-    // The host's last look (while every member is still whole), then
-    // ~Runtime's strip / free on just this set.
+    // The host's last look, while every member is still whole.
     if (finalize_) {
       for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
     }
@@ -4326,7 +4326,9 @@ inline int64_t Runtime::collect() {
     for (HeapObj* o : orphans) heap_release_to_zero(o);
     throw;
   }
-  strip_and_free(dead);
+  strip_and_free([&](auto&& f) {
+    for (HeapObj* o : dead) f(o);
+  });
 
   next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
   in_collect_ = false;
@@ -4394,29 +4396,33 @@ inline void heap_release_to_zero(HeapObj* h) {
   destroy_heap_object(h);
 }
 
-// The sweep shared by collect() and ~Runtime, over objects each of them
-// has pinned: every object is stripped before any is freed, so no free
-// meets a child already gone, and with sweeping_ set a release reaching
-// zero in between runs no destructor. Off the heap list before the free,
-// so ~HeapObj does not unlink it again.
-inline void Runtime::strip_and_free(const std::vector<HeapObj*>& objs) {
+// The sweep shared by collect() and ~Runtime, over a set each of them has
+// pinned and hands over as a for-each (so ~Runtime walks its list without
+// allocating): every object is stripped before any is freed, so no free
+// meets a child already gone, and each leaves the heap list before its free
+// so ~HeapObj does not unlink it again. The for-each must tolerate the
+// object it is visiting being unlinked.
+template <class ForEach>
+void Runtime::strip_and_free(ForEach for_each) {
   sweeping_ = true;
-  for (HeapObj* o : objs) clear_heap_object_refs(o);
-  for (HeapObj* o : objs) {
+  for_each([](HeapObj* o) { clear_heap_object_refs(o); });
+  for_each([this](HeapObj* o) {
     unlink(o);
     o->owner = nullptr;
     destroy_heap_object(o);
-  }
+  });
   sweeping_ = false;
 }
 
 inline Runtime::~Runtime() {
-  std::vector<HeapObj*> all;
-  for (HeapObj* o = head_; o; o = o->next) {
-    ++o->rc;
-    all.push_back(o);
-  }
-  strip_and_free(all);
+  for (HeapObj* o = head_; o; o = o->next) ++o->rc;
+  strip_and_free([this](auto&& f) {
+    for (HeapObj* o = head_; o;) {
+      HeapObj* next = o->next;
+      f(o);
+      o = next;
+    }
+  });
 }
 
 inline HeapObj::HeapObj(ValueTag k) : rc(1), kind(k), owner(Runtime::current()) {
@@ -6570,9 +6576,7 @@ struct Exec {
   }
 
   // A suspended coroutine's parked frames come back all at once, so the
-  // depth bound is checked against the whole slice on top of what is
-  // already running -- by every way back in: CoroResume, CoroClose and the
-  // scheduler.
+  // depth bound covers the whole slice.
   void check_can_unpark(const CoroObj* co, SrcPos pos) {
     if (frames.size() + co->frames.size() > max_frames) {
       raise_trap("recursion limit exceeded", pos);
@@ -7382,7 +7386,7 @@ struct Exec {
       }
       return;
     }
-    // Suspended: the parked frames come back.
+    // Suspended.
     check_can_unpark(co, pos);
     coreir_rt_poll();
     ++f.pc;
