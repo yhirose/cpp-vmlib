@@ -64,7 +64,8 @@ bool native_twice(NativeCall& c) {
   return true;
 }
 
-std::string run_module(const coreir::Module& m, const std::string& what) {
+std::string run_module(const coreir::Module& m, const std::string& what,
+                       int max_call_depth = vm::RunOptions{}.max_call_depth) {
   g_out.clear();
   if (auto err = coreir::verify(m)) {
     std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", what.c_str(),
@@ -78,6 +79,7 @@ std::string run_module(const coreir::Module& m, const std::string& what) {
     coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     vm::RunOptions opts;
+    opts.max_call_depth = max_call_depth;
     opts.natives = {{"sum", -1, &native_sum, nullptr},
                     {"twice", 2, &native_twice, nullptr}};
     try {
@@ -593,6 +595,49 @@ int main() {
              "close, throwing defer: failure");
     check_eq(joined(), "close threw|done|true|",
              "close, throwing defer output");
+  }
+
+  // --- 12. The depth bound is one rule for a call and for a resume: a
+  // coroutine suspended at the deepest frame the bound allows can be
+  // resumed at that same height. With max_call_depth 1, main plus the
+  // coroutine's one frame is the limit; the resume used to count the
+  // slice against a bound one frame tighter than the call that built it.
+  // f(x) { CoroYield(1); 2 }
+  // co = CoroCreate(f); print(CoroResume(co).value); print(CoroResume(co).value)
+  {
+    const SrcPos p{1, 1};
+    Module m;
+    Builder b(m);
+    using I = IntrinsicId;
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    Func f{"f", 1, 0,
+           b.block({b.intrinsic(I::CoroYield, {b.literal(1, p)}, p),
+                    b.literal(2, p)},
+                   p),
+           {"x"}, {}};
+    f.num_params = 1;
+    m.funcs.push_back(f);
+    const auto co = [&] { return b.varref(VarKind::Local, 0, p); };
+    const auto resume_value = [&] {
+      return b.intrinsic(
+          I::Print,
+          {b.index(b.intrinsic(I::CoroResume, {co(), b.nil_literal(p)}, p),
+                   b.str_literal("value", p), p)},
+          p);
+    };
+    m.funcs[0] = {
+        "main", 1, 0,
+        b.block({b.assign(VarKind::Local, 0,
+                          b.intrinsic(I::CoroCreate,
+                                      {b.make_closure(1, 0, p)}, p),
+                          p),
+                 resume_value(), resume_value()},
+                p),
+        {"co"}, {}};
+    check_eq(run_module(m, "resume at the bound", 1), "",
+             "resume at the bound: failure");
+    check_eq(joined(), "1|2|", "resume at the bound: output");
   }
 
   if (g_failures != 0) {

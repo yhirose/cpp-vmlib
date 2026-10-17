@@ -6567,20 +6567,24 @@ struct Exec {
     throw Raise{std::move(e), pos, msg};
   }
 
-  // Shared by both call forms: the depth bound and the interrupt point.
-  void check_can_push(SrcPos pos) {
-    if (frames.size() > max_frames) {
+  // The depth bound, stated once: after `n` more frames go on, the stack
+  // may hold max_frames of them beyond the entry frame, which is pushed
+  // unchecked. A call adds one; a suspended coroutine's whole slice comes
+  // back at once, so it is checked as one.
+  void check_depth(size_t n, SrcPos pos) {
+    if (frames.size() + n > max_frames + 1) {
       raise_trap("recursion limit exceeded", pos);
     }
+  }
+
+  // Shared by both call forms: the depth bound and the interrupt point.
+  void check_can_push(SrcPos pos) {
+    check_depth(1, pos);
     coreir_rt_poll();
   }
 
-  // A suspended coroutine's parked frames come back all at once, so the
-  // depth bound covers the whole slice.
   void check_can_unpark(const CoroObj* co, SrcPos pos) {
-    if (frames.size() + co->frames.size() > max_frames) {
-      raise_trap("recursion limit exceeded", pos);
-    }
+    check_depth(co->frames.size(), pos);
   }
 
   // The {value, done} object both generator intrinsics answer with. The
