@@ -206,15 +206,19 @@ Every other front end here is delimited by braces, by `end`, or (mini-scheme)
 by parentheses. Python's
 block structure is its indentation, and a PEG has no state to count columns
 with -- so `layout.h` rewrites the source before the parser sees it: each
-logical line is stripped of its leading whitespace and preceded by an
-INDENT (0x01) or as many DEDENTs (0x02) as it closes, and terminated by a
-NEWLINE marker (0x03). Those three bytes cannot occur in Python source,
-which is what makes the rewrite unambiguous.
+logical line is preceded by an INDENT (0x01) or as many DEDENTs (0x02) as
+it closes, and terminated by a NEWLINE marker (0x03). Those three bytes
+cannot occur in Python source, which is what makes the rewrite
+unambiguous.
 
-Two details are load-bearing. **Line numbers survive**: one `\n` is emitted
-per *physical* line consumed, so a diagnostic still points where the
-programmer looked even across a continuation. And **brackets and quotes are
-tracked while scanning**, because a newline inside `(`, `[` or `{`
+Two details are load-bearing. **Positions survive**: every physical line,
+a continuation's included, stays where it was with its own indentation, so
+a token's line and column are the programmer's. A line's INDENT takes the
+place of its indentation's last byte, so an unexpected indent is reported
+on that line; its DEDENTs go at the end of the line before, since a dedent
+to column 0 has no byte to spare. (A statement ends at its NEWLINE marker,
+so a `\n` is only whitespace to the grammar.) And **brackets and quotes
+are tracked while scanning**, because a newline inside `(`, `[` or `{`
 continues the logical line, and a `#` or a bracket inside a string is text.
 
 ## What Python does not share with the VM's defaults

@@ -23,15 +23,18 @@
 // **This is the one grammar here that a PEG cannot express on its own.**
 // Python's block structure is its indentation, and a PEG has no state to
 // count columns with. So the source is normalized before the parser sees
-// it (Binder::layout, in binder.cc): each logical line is stripped of its
-// leading whitespace and preceded by an INDENT (0x01) or as many DEDENTs
-// (0x02) as it closes, and terminated by a NEWLINE marker (0x03). Those
-// three bytes cannot occur in Python source, so the transformation is
-// unambiguous, and the newline itself is kept after the marker so that
-// peglib's line numbers -- and therefore every diagnostic -- still point at
-// the right line. Bracket depth and string quoting are tracked while
-// scanning, because a line inside `[` or `(` is a continuation and not a
-// logical line of its own.
+// it (layout.h): each logical line is preceded by an INDENT (0x01) or as
+// many DEDENTs (0x02) as it closes, and terminated by a NEWLINE marker
+// (0x03). Those three bytes cannot occur in Python source, so the
+// transformation is unambiguous. Every physical line stays where it was,
+// with its own indentation (an INDENT in place of its last byte, DEDENTs at
+// the end of the line before), so peglib's line and column -- and therefore
+// a diagnostic's -- point at the right place. That is why `_` is spaces,
+// tabs and newlines and nothing else: a statement ends at its NEWLINE
+// marker, never at a newline, and the rewrite has already dropped every
+// comment. Bracket depth and string quoting are tracked while scanning,
+// because a line inside `[` or `(` is a continuation and not a logical
+// line of its own.
 //
 // **A suite may be on the same line, and `;` joins simple statements.**
 // `if x: return 1` and `a = 1; b = 2` are both Python and neither produces
@@ -58,7 +61,7 @@
 namespace mini_python {
 
 inline constexpr const char* kGrammar = R"GRAMMAR(
-  program    <- [\n]* NL* stmt* !.                           { no_ast_opt }
+  program    <- _ NL* stmt* !.                              { no_ast_opt }
   block      <- ':' _ NL IND stmt+ DED / ':' _ simpleline    { no_ast_opt }
 
   stmt       <- funcdef / classdef / ifstmt / whilestmt / forstmt
@@ -198,9 +201,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
                / 'raise' / 'return' / 'True' / 'try' / 'while' / 'with'
                / 'yield' / 'assert' / 'del') ![a-zA-Z0-9_]
 
-  ~_         <- ([ \t] / '#' [^\n\x01\x02\x03]*)*
+  ~_         <- [ \t\n]*
   ~__        <- ![a-zA-Z0-9_] _
-  ~NL        <- '\x03' [\n]* _
+  ~NL        <- '\x03' _
   ~IND       <- '\x01' _
   ~DED       <- '\x02' _
 )GRAMMAR";
