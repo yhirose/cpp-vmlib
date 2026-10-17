@@ -7,6 +7,9 @@ on:
 
 jobs:
   # The ordinary build, on both platforms a host is likely to embed this from.
+  # Every lane builds the example front ends too: their samples are golden
+  # transcripts from the real languages, and they reach orders and paths
+  # (libc++'s, say, on macos) that test/ alone does not.
   build:
     strategy:
       fail-fast: false
@@ -15,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
 
@@ -35,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
       - run: cmake --build build -j
       # deep_calls is excluded: its hundred-thousand live frames each pin a
       # closure, so an every-allocation collect scans O(depth) heap per call
@@ -49,9 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # -O1, as AddressSanitizer's own documentation advises: at -O0 the
+      # front ends' tail-call samples alone take longer than the rest of the
+      # suite put together.
       - run: >
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVMLIB_BUILD_EXAMPLES=ON
+          -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
         env:

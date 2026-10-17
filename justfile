@@ -30,7 +30,7 @@ bench-lang *args: build
 # touches the normal one.
 sanitizers:
     cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DVMLIB_BUILD_EXAMPLES=ON \
-        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+        -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
     cmake --build build-asan -j
     ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
         ctest --test-dir build-asan --output-on-failure
