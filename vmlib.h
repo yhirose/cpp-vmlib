@@ -564,6 +564,11 @@ struct ObjectObj : HeapObj {
   // flag Runtime::run_drop sets.
   int64_t owned_idx = -1;
   bool dropped = false;
+  // Set on the {message, line, col} object a trap carries (coreir::
+  // make_trap), and on nothing else: a trap stays a trap however it is
+  // raised again, which is what lets an uncaught one report its own
+  // diagnostic (coreir::trap_diagnostic).
+  bool trap = false;
 
   Value* find(const std::string& k) {
     for (auto& kv : props) {
@@ -911,7 +916,8 @@ int64_t coreir_rt_in(int64_t line, int64_t col);
 // stack first, and one a TryCatch guards resumes at its handler. What does
 // arrive is fatal by construction: an unguarded failure whose frames the
 // unwinder has already popped and released, reported with a trap's original
-// diagnostic or as "uncaught: <value>" for a Throw no handler took.
+// diagnostic (however often a handler caught it and raised it again) or as
+// "uncaught: <value>" for any other value no handler took.
 //
 // What "terminate" means is the host's choice -- exit the process, or throw
 // a host-level exception -- as long as it does not return. A host must still
@@ -3956,13 +3962,52 @@ struct NativeCall {
   // in raw pointers it would have to free on that path.
   Value call(const Value& callee, const Value* argv, int32_t argc);
 
-  // A fresh {message, line, col} object at this call's position: the
-  // value the executor's own traps carry, for a native that wants to fail
-  // the way a divide by zero does (`call.error = call.trap("...")`).
+  // A trap at this call's position (make_trap, below), for a native that
+  // wants to fail the way a divide by zero does (`call.error =
+  // call.trap("...")`): catchable as the same {message, line, col} object,
+  // and reported uncaught with the same wording.
   Value trap(const std::string& msg) const;
 
   void* exec = nullptr;  // vm::detail::Exec*, set by the executor
 };
+
+// The value a trap carries: a fresh {message, line, col} object, marked as
+// a trap. Built here for the executor's own failures and NativeCall::trap's
+// alike, rather than each front end inventing its own materialization.
+inline Value make_trap(const std::string& msg, SrcPos pos) {
+  Value e = Value::make_object();
+  ObjectObj* o = e.as_object();
+  o->set("message", Value::make_str(msg));
+  o->set("line", Value::make_int(pos.line));
+  o->set("col", Value::make_int(pos.col));
+  o->trap = true;
+  return e;
+}
+
+// What an uncaught raise of `v` reports when `v` is a trap: its message and
+// position, read back from the object -- so a handler that caught the trap
+// and raised it again (a `finally`, an `except` that did not match, a
+// language's own top-level guard) still fails the program with the
+// original diagnostic. Nothing for any other value, or for a trap whose
+// fields the program has replaced with something that is not one.
+struct TrapDiagnostic {
+  std::string message;
+  SrcPos pos;
+};
+inline std::optional<TrapDiagnostic> trap_diagnostic(const Value& v) {
+  if (!v.is_object() || !v.as_object()->trap) return std::nullopt;
+  ObjectObj* o = v.as_object();
+  const Value* msg = o->find("message");
+  const Value* line = o->find("line");
+  const Value* col = o->find("col");
+  if (!msg || !msg->is_str() || !line || !line->is_int() || !col ||
+      !col->is_int()) {
+    return std::nullopt;
+  }
+  return TrapDiagnostic{msg->as_str(),
+                        SrcPos{static_cast<uint32_t>(line->as_int()),
+                               static_cast<uint32_t>(col->as_int())}};
+}
 
 }  // namespace coreir
 
@@ -6385,15 +6430,15 @@ namespace detail {
 // coreir_rt_* hook passes through untouched -- only the VM's own failures
 // unwind to a script handler.
 //
-// `fatal_msg` is what coreir_rt_fail gets if no handler catches this: a
-// trap keeps its original diagnostic (so an unguarded program fails with
-// byte-identical output to the pre-exception executor), while a user Throw
-// leaves it empty and is formatted as "uncaught: <value>" at that point --
-// not eagerly, since a caught throw never needs it.
+// What coreir_rt_fail gets if no handler catches this is read off the value
+// (report_uncaught): a trap reports its own diagnostic (trap_diagnostic), so
+// an unguarded program fails with byte-identical output to the
+// pre-exception executor however often the trap was caught and raised
+// again, while anything else is formatted as "uncaught: <value>" at `pos`
+// -- then, not eagerly, since a caught throw never needs it.
 struct Raise {
   Value value;
   SrcPos pos;
-  std::string fatal_msg;
 };
 
 struct FramePool;
@@ -6641,14 +6686,9 @@ struct Exec {
   }
 
   // A trap: the executor's own failure, catchable like any Throw. The
-  // value a handler sees is an object {message, line, col} -- built here,
-  // once, rather than each front end inventing its own materialization.
+  // value a handler sees is make_trap's {message, line, col} object.
   [[noreturn]] void raise_trap(const std::string& msg, SrcPos pos) {
-    Value e = Value::make_object();
-    e.as_object()->set("message", Value::make_str(msg));
-    e.as_object()->set("line", Value::make_int(pos.line));
-    e.as_object()->set("col", Value::make_int(pos.col));
-    throw Raise{std::move(e), pos, msg};
+    throw Raise{coreir::make_trap(msg, pos), pos};
   }
 
   // May `n` more frames go on? A call adds one; a suspended coroutine's
@@ -7059,10 +7099,10 @@ struct Exec {
   }
 
   void report_uncaught(const Raise& r) {
-    const std::string msg = r.fatal_msg.empty()
-                                ? "uncaught: " + to_display(r.value)
-                                : r.fatal_msg;
-    coreir_rt::fail(msg, r.pos.line, r.pos.col);
+    if (const auto d = coreir::trap_diagnostic(r.value)) {
+      coreir_rt::fail(d->message, d->pos.line, d->pos.col);
+    }
+    coreir_rt::fail("uncaught: " + to_display(r.value), r.pos.line, r.pos.col);
   }
 
   // Run one frame's pending defers back to `mark`, LIFO, each as a normal
@@ -7180,8 +7220,8 @@ struct Exec {
       self->push_closure(closure, &arg, 1, -1, SrcPos{0, 0});
       self->run_nested(floor);
     } catch (Raise& r) {
-      const std::string what =
-          r.fatal_msg.empty() ? to_display(r.value) : r.fatal_msg;
+      const auto d = coreir::trap_diagnostic(r.value);
+      const std::string what = d ? d->message : to_display(r.value);
       std::fprintf(stderr, "drop: %s\n", what.c_str());
       self->frames.truncate(floor);
     }
@@ -7305,7 +7345,7 @@ struct Exec {
     call.ctx = n->ctx;
     call.pos = pos;
     call.exec = this;
-    if (!n->fn(call)) throw Raise{std::move(call.error), pos, {}};
+    if (!n->fn(call)) throw Raise{std::move(call.error), pos};
     deliver(ret_reg, std::move(call.result));
   }
 
@@ -7432,7 +7472,7 @@ struct Exec {
       // instruction's own, at its own pc like a Throw.
       go->state = St::Done;
       coreir::detail::release_detached(go->frame);
-      throw Raise{std::move(v), pos, {}};
+      throw Raise{std::move(v), pos};
     }
     // Re-enter at the Yield itself rather than after it, so the
     // regions enclosing the yield -- its handlers, its defers -- are
@@ -7445,7 +7485,7 @@ struct Exec {
     const SrcPos yp = pos_at(*nf->chunk, at);
     ++f.pc;
     frames.push_back(std::move(nf));
-    throw Raise{std::move(v), yp, {}};
+    throw Raise{std::move(v), yp};
   }
 
   // CoroResume.
@@ -8100,7 +8140,7 @@ struct Exec {
         }
         case Op::Throw: {
           const SrcPos sp = pos_at(ch, f.pc);
-          throw Raise{f.regs[in.a], sp, {}};
+          throw Raise{f.regs[in.a], sp};
         }
         case Op::Yield: {
           // Suspend: the frame's storage moves back into the generator, the
@@ -8293,11 +8333,7 @@ inline Value NativeCall::call(const Value& callee, const Value* argv,
 }
 
 inline Value NativeCall::trap(const std::string& msg) const {
-  Value e = Value::make_object();
-  e.as_object()->set("message", Value::make_str(msg));
-  e.as_object()->set("line", Value::make_int(pos.line));
-  e.as_object()->set("col", Value::make_int(pos.col));
-  return e;
+  return make_trap(msg, pos);
 }
 
 }  // namespace coreir

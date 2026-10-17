@@ -108,7 +108,7 @@ $ mini-scheme samples/tailcalls.scm
 500000500000
 ...
 $ # the same binary built with fn.tail_calls = false:
-samples/tailcalls.scm:1:25: recursion limit exceeded
+samples/tailcalls.scm:5:25: recursion limit exceeded
 ```
 
 `samples/tailcalls.scm` covers the shapes the IR has to see *through* to

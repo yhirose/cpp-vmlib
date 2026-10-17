@@ -471,7 +471,9 @@ closure's return would; it is callable wherever a closure is -- `CallValue`,
 Its signature is `bool (*)(NativeCall&)`: read the arguments, set `result`
 and return `true`, or set `error` and return `false`, which raises that
 value at the call site exactly as a `Throw` there would, catchable by the
-program's own `TryCatch`. That is the one way a native fails a program (a
+program's own `TryCatch`. `NativeCall::trap(msg)` builds the value the
+executor's own traps carry, so such a failure reads like a divide by zero
+-- caught or not. That is the one way a native fails a program (a
 C++ exception thrown out of one is not the program's to catch: it passes
 through the executor untouched, the rule the `coreir_rt_*` hooks already
 have, and ends the run). `NativeCall::call` runs a closure -- or another
@@ -774,6 +776,13 @@ program code is one a reader can name. The order is named too: a freed
 array, object or map releases what it held first to last, and a frame
 last to first, rather than in whatever order the C++ standard library's
 vector destroys its elements (libstdc++ and libc++ disagree).
+
+**A trap is a value.** The executor's own failures raise a `{message,
+line, col}` object a handler can read, and the object remembers that it
+is a trap: a handler that catches it and raises it again -- a `finally`,
+an `except` that did not match, a language's own top-level guard -- still
+fails the program with the original message and position, not
+`uncaught: <object>` at the rethrow.
 
 ## Scope
 

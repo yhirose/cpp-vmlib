@@ -20,6 +20,7 @@ struct Failure : std::runtime_error {
 
 std::vector<std::string> g_out;
 int g_failures = 0;
+coreir::SrcPos g_fail_pos;  // where the last coreir_rt_fail said it was
 
 void check_eq(const std::string& got, const std::string& want,
               const std::string& what) {
@@ -79,7 +80,8 @@ void coreir_rt_out_raw(const char* bytes, int64_t len) {
 }
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
-[[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
+[[noreturn]] void coreir_rt_fail(const char* msg, int64_t line, int64_t col) {
+  g_fail_pos = {static_cast<uint32_t>(line), static_cast<uint32_t>(col)};
   throw Failure(msg);
 }
 }
@@ -188,6 +190,30 @@ int main() {
          {}});
     check_eq(run_module(m, "uncaught trap"), "divide by zero",
              "uncaught trap: message");
+  }
+
+  // --- 4b. ...and keeps it when a handler catches it and raises it again
+  //         (a `finally`, an `except` that did not match): the trap's own
+  //         message and position, not "uncaught: <object>" at the rethrow.
+  // try { print(1 / 0) @7:3 } catch e { throw e @9:1 }
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 1, 0,
+         b.make_try(0,
+                    b.intrinsic(IntrinsicId::Print,
+                                {b.binary(BinOp::Div, b.literal(1, p),
+                                          b.literal(0, {7, 3}), p)},
+                                p),
+                    b.make_throw(b.varref(VarKind::Local, 0, p), {9, 1}), p),
+         {"e"},
+         {}});
+    check_eq(run_module(m, "rethrown trap"), "divide by zero",
+             "rethrown trap: message");
+    check_eq(std::to_string(g_fail_pos.line) + ":" +
+                 std::to_string(g_fail_pos.col),
+             "7:3", "rethrown trap: position");
   }
 
   // --- 5. Nested: the inner handler rethrows; the outer one catches. ------

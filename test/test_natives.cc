@@ -251,6 +251,20 @@ int main() {
              "uncaught: failure");
     check_eq(joined(), "", "uncaught output");
   }
+  // A native's c.trap() error, uncaught, reads like the executor's own trap.
+  {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.block({hoist(b, 0, "add"),
+                  call(b, 0, {b.str_literal("a", p), b.literal(1, p)})},
+                 p),
+         {}, {}});
+    m.funcs[0].num_cells = 1;
+    check_eq(run_module(m, "uncaught trap", host()), "add wants two ints",
+             "uncaught trap: failure");
+  }
 
   // --- 3. Calling back: twice(f, x) = f(f(x)); a throw out of f reaches
   // the program's handler around the native call. ------------------------
