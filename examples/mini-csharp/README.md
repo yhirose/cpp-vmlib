@@ -257,3 +257,10 @@ and two samples in one would both declare `Main`.
 
 All six samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1`.
+
+`ctest -R mini-csharp-uncaught` runs `uncaught/`, programs that each end in
+an exception nothing catches, and requires the report -- message,
+position and exit code -- to match `uncaught/expected/`, through the
+`test/run_errors.cmake` PL/0's error cases use. The words after the
+position are `RunOptions::describe`'s, and they are `dotnet`'s own:
+what follows "Unhandled exception.", which each case's comment quotes.

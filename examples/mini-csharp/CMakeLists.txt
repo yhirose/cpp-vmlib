@@ -10,3 +10,12 @@ add_test(NAME mini-csharp-samples
                 -DMINI_CSHARP=$<TARGET_FILE:mini-csharp>
                 -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+
+# An exception nothing catches is reported in the language's own words
+# (RunOptions::describe): uncaught/expected/ holds each case's report.
+add_test(NAME mini-csharp-uncaught
+        COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:mini-csharp>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/uncaught
+                -DEXT=cs
+                -P ${PROJECT_SOURCE_DIR}/test/run_errors.cmake)

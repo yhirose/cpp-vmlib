@@ -1,0 +1,1 @@
+from_helper.rb:4:9: uncaught: divided by 0 (ZeroDivisionError)

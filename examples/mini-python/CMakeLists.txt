@@ -12,3 +12,12 @@ add_test(NAME mini-python-samples
                 -DMINI_PYTHON=$<TARGET_FILE:mini-python>
                 -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+
+# An exception nothing catches is reported in the language's own words
+# (RunOptions::describe): uncaught/expected/ holds each case's report.
+add_test(NAME mini-python-uncaught
+        COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:mini-python>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/uncaught
+                -DEXT=py
+                -P ${PROJECT_SOURCE_DIR}/test/run_errors.cmake)

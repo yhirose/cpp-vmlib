@@ -364,3 +364,10 @@ Beyond the sample check, all eight samples are clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --
 ASan/UBSan/LeakSanitizer, and `COREIR_GC_STRESS=1` (a full collection at
 every single allocation).
+
+`ctest -R mini-js-uncaught` runs `uncaught/`, programs that each end in
+an exception nothing catches, and requires the report -- message,
+position and exit code -- to match `uncaught/expected/`, through the
+`test/run_errors.cmake` PL/0's error cases use. The words after the
+position are `RunOptions::describe`'s, and they are `node`'s own:
+the line under its source excerpt, which each case's comment quotes.

@@ -7,10 +7,15 @@ add_test(NAME samples
                  -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/..
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
 
+# The errors are not golden-compared against culebra: the binder reports
+# undefined names, constant assignment and duplicate declarations at bind
+# time where pl0.cul reports them at run time, and this runtime writes to
+# stderr where pl0.cul writes to stdout. Both are deliberate.
 add_test(NAME errors
          COMMAND ${CMAKE_COMMAND}
-                 -DPL0=$<TARGET_FILE:pl0>
-                 -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/..
+                 -DBIN=$<TARGET_FILE:pl0>
+                 -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/errors
+                 -DEXT=pas
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_errors.cmake)
 
 # Not PL/0 tests: these exercise coreir/vm directly, building their Core-IR by

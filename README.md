@@ -850,6 +850,12 @@ Each front end owns its own verification, but the shape is the same
 everywhere: run every sample and check the output against an oracle this
 repository does not contain. Passing your own test suite is not the same as
 matching the language -- see a front end's own README for what its oracle is.
+A failing program is checked the same way from the other side:
+`test/run_errors.cmake` runs a directory of programs that each end in an
+error and requires each report -- message, position and exit code -- to
+match its transcript, for PL/0's diagnostics (`test/errors/`) and for the
+uncaught exceptions of the five front ends that word their own
+(`RunOptions::describe`, `examples/mini-*/uncaught/`).
 
 `test/` holds what the samples cannot reach: one executable per property,
 each building its Core-IR by hand and supplying its own `coreir_rt` host.

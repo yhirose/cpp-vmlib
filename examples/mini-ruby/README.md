@@ -240,3 +240,10 @@ build.
 
 All eight samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1`.
+
+`ctest -R mini-ruby-uncaught` runs `uncaught/`, programs that each end in
+an exception nothing catches, and requires the report -- message,
+position and exit code -- to match `uncaught/expected/`, through the
+`test/run_errors.cmake` PL/0's error cases use. The words after the
+position are `RunOptions::describe`'s, and they are `ruby`'s own:
+the message and class after its position, which each case's comment quotes.
