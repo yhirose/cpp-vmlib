@@ -3914,9 +3914,12 @@ struct NativeDef {
 struct RunOptions {
   // Calls do not recurse through this thread's C++ stack -- the executor
   // keeps its own stack of heap-allocated frames -- so the bound is on how
-  // many of those may be live at once, not on how much machine stack they
-  // would need. A runaway program still fails cleanly, at its call site,
-  // rather than growing the heap until the allocator gives out.
+  // many of those may be live at once above the bottom one (the entry
+  // frame, or a job's), not on how much machine stack they would need: 0
+  // allows no calls, and a negative value counts as 0. A resumed
+  // coroutine's frames count as they come back, so a runaway program fails
+  // cleanly at the call or resume that would pass the bound, rather than
+  // growing the heap until the allocator gives out.
   int max_call_depth = 10000;
   // Whether the entry frame's own values run their drop hooks when the
   // program ends -- at its Ret, or as an uncaught throw unwinds past it.
@@ -6465,7 +6468,7 @@ class FrameStack {
 // initializer, which -Wextra checks and test_verify's -Werror enforces.
 struct Exec {
   const Program& p;
-  size_t max_frames;
+  size_t max_frames;  // live at once, the bottom frame included
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
 
@@ -6567,14 +6570,15 @@ struct Exec {
     throw Raise{std::move(e), pos, msg};
   }
 
-  // The depth bound, stated once: after `n` more frames go on, the stack
-  // may hold max_frames of them beyond the entry frame, which is pushed
-  // unchecked. A call adds one; a suspended coroutine's whole slice comes
-  // back at once, so it is checked as one.
+  // May `n` more frames go on? A call adds one; a suspended coroutine's
+  // whole slice comes back at once, so it is checked as one. The trap is a
+  // function of its own so that this stays a compare and a branch on the
+  // path every call takes.
   void check_depth(size_t n, SrcPos pos) {
-    if (frames.size() + n > max_frames + 1) {
-      raise_trap("recursion limit exceeded", pos);
-    }
+    if (frames.size() + n > max_frames) depth_exceeded(pos);
+  }
+  [[noreturn]] void depth_exceeded(SrcPos pos) {
+    raise_trap("recursion limit exceeded", pos);
   }
 
   // Shared by both call forms: the depth bound and the interrupt point.
@@ -6583,9 +6587,6 @@ struct Exec {
     coreir_rt_poll();
   }
 
-  void check_can_unpark(const CoroObj* co, SrcPos pos) {
-    check_depth(co->frames.size(), pos);
-  }
 
   // The {value, done} object both generator intrinsics answer with. The
   // property count is known, so the object is sized once rather than grown
@@ -6941,7 +6942,7 @@ struct Exec {
     if (co->state == St::Done || co->state == St::Running) return false;
     const Value nil;
     if (co->state == St::Start) return start_coro(cv, nil, -1, SrcPos{0, 0});
-    check_can_unpark(co, SrcPos{0, 0});
+    check_depth(co->frames.size(), SrcPos{0, 0});
     unpark_coro(cv, -1, &nil);
     return true;
   }
@@ -7391,7 +7392,7 @@ struct Exec {
       return;
     }
     // Suspended.
-    check_can_unpark(co, pos);
+    check_depth(co->frames.size(), pos);
     coreir_rt_poll();
     ++f.pc;
     unpark_coro(cv, in.a, &f.regs[in.c]);
@@ -7422,7 +7423,7 @@ struct Exec {
     // generator activation caught in the slice is finished with it.
     // A defer that throws propagates to this call; the coroutine is
     // done either way.
-    check_can_unpark(co, pos);
+    check_depth(co->frames.size(), pos);
     const size_t base = frames.size();
     ++f.pc;
     unpark_coro(cv, -1, nullptr);
@@ -8224,9 +8225,11 @@ namespace vm {
 
 inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   coreir::Runtime::Scope scope(rt);
-  const int depth = opts.max_call_depth;
-  detail::Exec e{p, depth < 0 ? 0 : static_cast<size_t>(depth), rt,
-                 opts.entry_frame_drops};
+  // A frame cap, not a call count: the bottom frame (this entry frame, or
+  // later a job's) is not a call, so it comes on top of the bound.
+  const size_t max_frames =
+      static_cast<size_t>(std::max(opts.max_call_depth, 0)) + 1;
+  detail::Exec e{p, max_frames, rt, opts.entry_frame_drops};
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.

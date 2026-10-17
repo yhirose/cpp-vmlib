@@ -597,42 +597,28 @@ int main() {
              "close, throwing defer output");
   }
 
-  // --- 12. The depth bound is one rule for a call and for a resume: a
-  // coroutine suspended at the deepest frame the bound allows can be
-  // resumed at that same height. With max_call_depth 1, main plus the
-  // coroutine's one frame is the limit; the resume used to count the
-  // slice against a bound one frame tighter than the call that built it.
+  // --- 12. A coroutine suspended at the depth bound resumes at it
+  // (max_call_depth 1: main plus f's one frame). ----------------------------
   // f(x) { CoroYield(1); 2 }
   // co = CoroCreate(f); print(CoroResume(co).value); print(CoroResume(co).value)
   {
-    const SrcPos p{1, 1};
     Module m;
     Builder b(m);
-    using I = IntrinsicId;
     m.capture_maps.push_back({});
     m.funcs.push_back({});
-    Func f{"f", 1, 0,
-           b.block({b.intrinsic(I::CoroYield, {b.literal(1, p)}, p),
-                    b.literal(2, p)},
-                   p),
-           {"x"}, {}};
-    f.num_params = 1;
-    m.funcs.push_back(f);
-    const auto co = [&] { return b.varref(VarKind::Local, 0, p); };
-    const auto resume_value = [&] {
-      return b.intrinsic(
-          I::Print,
-          {b.index(b.intrinsic(I::CoroResume, {co(), b.nil_literal(p)}, p),
-                   b.str_literal("value", p), p)},
-          p);
-    };
+    m.funcs.push_back({"f", 1, 0,
+                       b.block({b.intrinsic(I::CoroYield, {b.literal(1, p)}, p),
+                                b.literal(2, p)},
+                               p),
+                       {"x"}, {}});
+    m.funcs.back().num_params = 1;
+    const NodeId co = loc(b, 0);
     m.funcs[0] = {
         "main", 1, 0,
-        b.block({b.assign(VarKind::Local, 0,
-                          b.intrinsic(I::CoroCreate,
-                                      {b.make_closure(1, 0, p)}, p),
-                          p),
-                 resume_value(), resume_value()},
+        b.block({set_local(b, 0, b.intrinsic(I::CoroCreate,
+                                             {b.make_closure(1, 0, p)}, p)),
+                 pr(b, field(b, resume(b, co, b.nil_literal(p)), "value")),
+                 pr(b, field(b, resume(b, co, b.nil_literal(p)), "value"))},
                 p),
         {"co"}, {}};
     check_eq(run_module(m, "resume at the bound", 1), "",

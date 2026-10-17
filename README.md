@@ -580,7 +580,7 @@ unavailable.
 
 `coreir_rt_poll()` is your interrupt point (Ctrl+C, a cancellation flag), and
 `RunOptions::max_call_depth` turns a runaway call chain into a reported
-failure at its call site.
+failure at the call (or coroutine resume) that would pass it.
 
 ## Building
 
