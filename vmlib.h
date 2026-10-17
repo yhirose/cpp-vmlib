@@ -4056,6 +4056,13 @@ struct RunOptions {
   // (Program::natives) must be here, or the run fails before its first
   // instruction; names the program does not declare are simply unused.
   std::vector<NativeDef> natives;
+  // How a raised value that is not a trap is worded where the executor
+  // reports one itself: after "uncaught: " when nothing caught it, after
+  // "drop: " when a destructor let it out. Null: to_display's. A front end
+  // whose exceptions are objects of its own answers what its language
+  // would print ("IndexError: list index out of range") rather than
+  // "<object>"; one that raises plain strings needs nothing.
+  std::string (*describe)(const coreir::Value&) = nullptr;
 };
 
 // Run the bytecode, on a heap the caller owns. Use this to inspect what a
@@ -6607,13 +6614,14 @@ class FrameStack {
   std::vector<FramePtr> v_;
 };
 
-// Built from its first four members (vm::run); every later one has an
+// Built from its first five members (vm::run); every later one has an
 // initializer, which -Wextra checks and test_verify's -Werror enforces.
 struct Exec {
   const Program& p;
   size_t max_frames;  // live at once, the bottom frame included
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
+  std::string (*describe)(const Value&);  // RunOptions::describe
 
   // Declared before `frames`, so it outlives them: a frame returning to the
   // pool during teardown must find the pool still there.
@@ -7154,7 +7162,12 @@ struct Exec {
     if (const auto d = coreir::trap_diagnostic(r.value)) {
       coreir_rt::fail(d->message, d->pos.line, d->pos.col);
     }
-    coreir_rt::fail("uncaught: " + to_display(r.value), r.pos.line, r.pos.col);
+    coreir_rt::fail("uncaught: " + worded(r.value), r.pos.line, r.pos.col);
+  }
+
+  // A raised value as a report words it (RunOptions::describe).
+  std::string worded(const Value& v) const {
+    return describe ? describe(v) : to_display(v);
   }
 
   // Run one frame's pending defers back to `mark`, LIFO, each as a normal
@@ -7273,7 +7286,7 @@ struct Exec {
       self->run_nested(floor);
     } catch (Raise& r) {
       const auto d = coreir::trap_diagnostic(r.value);
-      const std::string what = d ? d->message : to_display(r.value);
+      const std::string what = d ? d->message : self->worded(r.value);
       std::fprintf(stderr, "drop: %s\n", what.c_str());
       self->frames.truncate(floor);
     }
@@ -8403,7 +8416,7 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   // later a job's) is not a call, so it comes on top of the bound.
   const size_t max_frames =
       static_cast<size_t>(std::max(opts.max_call_depth, 0)) + 1;
-  detail::Exec e{p, max_frames, rt, opts.entry_frame_drops};
+  detail::Exec e{p, max_frames, rt, opts.entry_frame_drops, opts.describe};
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.

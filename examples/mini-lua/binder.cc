@@ -1897,22 +1897,24 @@ bool nat_tostring(NativeCall& c) {
 }
 
 // Lua's type names, which are not the VM's: a table is a Map here and a
-// coroutine is a "thread" there.
-bool nat_type(NativeCall& c) {
-  const char* n = "userdata";
-  switch (c.arg(0).tag()) {
-    case ValueTag::Nil: n = "nil"; break;
-    case ValueTag::Bool: n = "boolean"; break;
+// coroutine is a "thread" there. luaL_typename, in lua's own terms.
+const char* lua_typename(const Value& v) {
+  switch (v.tag()) {
+    case ValueTag::Nil: return "nil";
+    case ValueTag::Bool: return "boolean";
     case ValueTag::Int:
-    case ValueTag::Double: n = "number"; break;
-    case ValueTag::Str: n = "string"; break;
-    case ValueTag::Map: n = "table"; break;
-    case ValueTag::Coroutine: n = "thread"; break;
+    case ValueTag::Double: return "number";
+    case ValueTag::Str: return "string";
+    case ValueTag::Map: return "table";
+    case ValueTag::Coroutine: return "thread";
     case ValueTag::Func:
-    case ValueTag::Native: n = "function"; break;
-    default: break;
+    case ValueTag::Native: return "function";
+    default: return "userdata";
   }
-  c.result = Value::make_str(n);
+}
+
+bool nat_type(NativeCall& c) {
+  c.result = Value::make_str(lua_typename(c.arg(0)));
   return true;
 }
 
@@ -2051,6 +2053,12 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_byte", -1, nat_s_byte, nullptr},
   };
   return defs;
+}
+
+// lua.c's own words for an error object that is not a string or a number.
+std::string describe(const Value& v) {
+  if (v.is_str() || v.is_int() || v.is_double()) return lua_tostring(v);
+  return std::string("(error object is a ") + lua_typename(v) + " value)";
 }
 
 Module bind_source(const std::string& source, const std::string& chunkname) {

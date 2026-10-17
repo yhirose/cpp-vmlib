@@ -15,4 +15,8 @@ coreir::Module bind_source(const std::string& source);
 // The one thing this front end cannot write in its own IR: output.
 const std::vector<vm::NativeDef>& stdlib();
 
+// How an uncaught exception reads (vm::RunOptions::describe): what dotnet
+// prints for one, rather than the executor's "<object>".
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_csharp

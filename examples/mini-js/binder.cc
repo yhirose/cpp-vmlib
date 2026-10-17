@@ -2280,6 +2280,21 @@ struct Binder {
 
 }  // namespace
 
+// The first line of node's report for an Error: its name, then its message.
+// An Error here is the plain {name, message} object `new Error(...)` builds.
+std::string describe(const Value& v) {
+  if (v.is_object()) {
+    ObjectObj* o = v.as_object();
+    const Value* name = o->find("name");
+    const Value* msg = o->find("message");
+    if (name != nullptr && name->is_str() && msg != nullptr && msg->is_str()) {
+      return msg->as_str().empty() ? name->as_str()
+                                   : name->as_str() + ": " + msg->as_str();
+    }
+  }
+  return to_display(v);
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,

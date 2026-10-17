@@ -2407,6 +2407,20 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
+// ruby's own wording after the position: the message, then the class in
+// parentheses.
+std::string describe(const Value& v) {
+  if (v.is_object()) {
+    ObjectObj* o = v.as_object();
+    const Value* kind = o->find(kExcKey);
+    const Value* msg = o->find(kMsgKey);
+    if (kind != nullptr && kind->is_str() && msg != nullptr) {
+      return to_display(*msg) + " (" + kind->as_str() + ")";
+    }
+  }
+  return to_display(v);
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,

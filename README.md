@@ -785,7 +785,9 @@ an `except` that did not match, a language's own top-level guard -- still
 fails the program with the original message and position, not
 `uncaught: <object>` at the rethrow. A failure in code with no position
 of its own -- a helper written in IR, at `{0, 0}` -- is reported at the
-call that led into it.
+call that led into it. And a value that is not a trap, a front end's own
+exception object, is worded by the front end (`RunOptions::describe`):
+`uncaught: IndexError: list index out of range`, not `<object>`.
 
 ## Scope
 

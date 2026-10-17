@@ -2209,6 +2209,19 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
+// What .NET prints after "Unhandled exception." -- every exception here is
+// a System.Exception, there being no hierarchy.
+std::string describe(const Value& v) {
+  if (v.is_object()) {
+    ObjectObj* o = v.as_object();
+    const Value* msg = o->find(kMsgKey);
+    if (o->find(kExcKey) != nullptr && msg != nullptr) {
+      return "System.Exception: " + to_display(*msg);
+    }
+  }
+  return to_display(v);
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,

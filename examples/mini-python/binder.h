@@ -17,4 +17,8 @@ coreir::Module bind_source(const std::string& source);
 // and the float formatting `str()` owes.
 const std::vector<vm::NativeDef>& stdlib();
 
+// How an uncaught exception reads (vm::RunOptions::describe): what python3
+// prints for one, rather than the executor's "<object>".
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_python

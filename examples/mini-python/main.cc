@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
 
   vm::RunOptions opts;
   opts.natives = mini_python::stdlib();
+  opts.describe = mini_python::describe;
   coreir::Runtime rt;
   vm::run(p, rt, opts);
   return 0;

@@ -13,4 +13,8 @@ namespace mini_js {
 // through the same formatter the runtime uses.
 coreir::Module bind_source(const std::string& source);
 
+// How an uncaught exception reads (vm::RunOptions::describe): what node
+// prints for one, rather than the executor's "<object>".
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_js

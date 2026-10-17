@@ -72,6 +72,9 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  vm::run(p);
+  vm::RunOptions opts;
+  opts.describe = mini_js::describe;
+  coreir::Runtime rt;
+  vm::run(p, rt, opts);
   return 0;
 }

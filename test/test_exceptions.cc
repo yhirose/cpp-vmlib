@@ -44,7 +44,8 @@ std::string joined() {
   return s;
 }
 
-std::string run_module(const coreir::Module& m, const std::string& what) {
+std::string run_module(const coreir::Module& m, const std::string& what,
+                       const vm::RunOptions& opts = {}) {
   g_out.clear();
   if (auto err = coreir::verify(m)) {
     std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", what.c_str(),
@@ -58,7 +59,7 @@ std::string run_module(const coreir::Module& m, const std::string& what) {
     coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     try {
-      vm::run(p, rt);
+      vm::run(p, rt, opts);
     } catch (const Failure& e) {
       failure = e.what();
     }
@@ -285,6 +286,33 @@ int main() {
     check_eq(run_module(m, "unwinding defer"), "divide by zero",
              "unwinding defer: message");
     check_eq(fail_at(), "3:1", "unwinding defer: position");
+  }
+
+  // --- 4e. RunOptions::describe words an uncaught value that is not a
+  //         trap -- a front end's own exception object -- and leaves a
+  //         trap's diagnostic alone. -------------------------------------
+  // throw {kind: "Oops"}  /  print(1 / 0)
+  for (const bool trap : {false, true}) {
+    Module m;
+    Builder b(m);
+    m.funcs.push_back(
+        {"main", 0, 0,
+         trap ? b.intrinsic(IntrinsicId::Print,
+                            {b.binary(BinOp::Div, b.literal(1, p),
+                                      b.literal(0, p), p)},
+                            p)
+              : b.make_throw(b.object_lit({{b.str_literal("kind", p),
+                                            b.str_literal("Oops", p)}},
+                                          p),
+                             p),
+         {}, {}});
+    vm::RunOptions opts;
+    opts.describe = [](const Value& v) {
+      return v.is_object() ? v.as_object()->find("kind")->as_str() + "!"
+                           : std::string("?");
+    };
+    check_eq(run_module(m, "describe", opts),
+             trap ? "divide by zero" : "uncaught: Oops!", "describe: message");
   }
 
   // --- 5. Nested: the inner handler rethrows; the outer one catches. ------

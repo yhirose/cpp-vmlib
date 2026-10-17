@@ -4586,6 +4586,25 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
+// python3's last line for an uncaught exception: the class, then the
+// message when there is one -- a builtin's name travels in the object, a
+// program's own class names itself in its table.
+std::string describe(const Value& v) {
+  if (!v.is_object()) return to_display(v);
+  ObjectObj* o = v.as_object();
+  std::string name;
+  if (const Value* k = o->find(kExcKey); k && k->is_str()) {
+    name = k->as_str();
+  } else if (const Value* c = o->find(kClassKey); c && c->is_object()) {
+    const Value* n = c->as_object()->find(kNameKey);
+    if (n && n->is_str()) name = n->as_str();
+  }
+  const Value* msg = o->find(kMsgKey);
+  if (name.empty() || msg == nullptr) return to_display(v);
+  const std::string text = to_display(*msg);
+  return text.empty() ? name : name + ": " + text;
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,

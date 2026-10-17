@@ -18,4 +18,9 @@ coreir::Module bind_source(const std::string& source,
 // declares the names it calls.
 const std::vector<vm::NativeDef>& stdlib();
 
+// How an uncaught error object reads (vm::RunOptions::describe): what lua
+// prints for one ("(error object is a table value)"), rather than the
+// executor's "<map>".
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_lua

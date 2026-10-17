@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
 
   vm::RunOptions opts;
   opts.natives = mini_ruby::stdlib();
+  opts.describe = mini_ruby::describe;
   // Left at its default: a tail call reuses the frame, so a runaway
   // recursion that is *not* in tail position still fails cleanly here
   // rather than growing the heap -- which is what samples/tailcalls.lua

@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
 
   vm::RunOptions opts;
   opts.natives = mini_csharp::stdlib();
+  opts.describe = mini_csharp::describe;
   // Left at its default, so a runaway recursion fails cleanly here rather
   // than growing the heap.
 
