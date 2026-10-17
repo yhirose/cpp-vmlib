@@ -35,8 +35,8 @@ end))
 -- pcall passes its extra arguments to the function it calls.
 print(pcall(function(a, b) return a + b end, 3, 4))
 
--- A runtime failure the executor raises itself is caught the same way a
--- program's own error is -- TryCatch lands both.
+-- A runtime failure is caught the same way a program's own error is,
+-- whether the executor raises it or a helper like `$add` does.
 local ok3 = pcall(function() return nil + 1 end)
 print(ok3)
 

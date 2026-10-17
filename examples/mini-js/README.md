@@ -50,15 +50,16 @@ JavaScript wants `false`. `$seq` is `===`: different types are unequal,
 **How a number prints.** `ToStr` is shortest-round-trip, which agrees with
 ES `Number::toString` on `0.1 + 0.2` and on `3.5` but has no reason to
 prefer `"3"` over `"3E0"` for a whole double. `$numstr` routes integral
-values within ±2^53 through the integer path and leaves the rest to
-`ToStr`.
+values within ±2^53 through the integer path, spells `NaN` and `±Infinity`
+itself, and leaves the rest to `ToStr`.
 
 Each of those is a `$`-named func built once per module, and the `$` keeps
 them out of the source language's reach -- the same convention mini-go's
-channel runtime uses. They are reached through a cell the calling
-function's preamble fills once per activation (the top-level README's
-**Static calls** recipe), not through a fresh `MakeClosure` at each of the
-hundreds of call sites a program's conditions add up to.
+channel runtime uses. Each call site is a plain `MakeClosure` +
+`CallValue`; the helpers are `Func::singleton` (the top-level README's
+**Static calls** recipe), so the executor builds each one's closure once
+per run, however many of the hundreds of call sites a program's conditions
+add up to name it.
 
 ## A worked example: `let` in a loop is a new binding every time
 
@@ -74,7 +75,7 @@ iterations keep the old cell."* `--dump-ir` on that loop:
 
 ```
 while  @2:1
-  literal 1  @2:1                     ; while (true)
+  literal true  @2:1                  ; while (true)
   block  @2:1
     if  @2:1
       varref local[1]  @2:1           ; $first?
@@ -91,12 +92,12 @@ while  @2:1
       eq                               ; if (!(i < 3)) break
         lt  @2:19
           varref cell[0]  @2:17
-        literal 0
+        literal false
       break  @2:1
     block  @2:29
       callvalue  @3:5                  ; fs.push(...)
         ...
-        makeclosure <anon> #34 cmap=3  ; captures cell[0] -- *this* box
+        makeclosure <arrow> #34 cmap=3 ; captures cell[0] -- *this* box
 ```
 
 Two things in that shape are load-bearing:
@@ -206,15 +207,15 @@ and what a generator's single-frame `Yield` could not do.
 ```
 func #34 twice  locals=1 captures=0
   cellfresh cell[0]; assign cell[0] <- $pnew()          ; the promise
-  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #36
+  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #35
   cellfresh cell[2]; assign cell[2] <- varref local[0]  ; the argument
   cororesume
     corocreate
-      makeclosure twice$run #37 cmap=6
-    literal 0
+      makeclosure twice$run #36 cmap=5
+    literal nil
   return varref cell[0]                                  ; the promise
-func #36 twice$body   ; the body you wrote, with twice's own captures
-func #37 twice$run    ; calls the body, settles the promise with the
+func #35 twice$body   ; the body you wrote, with twice's own captures
+func #36 twice$run    ; calls the body, settles the promise with the
                       ; value it returned or the value it threw
 ```
 
@@ -254,8 +255,9 @@ that is what a call *through the class table* would need, but
 make, `emit_method`'s generic fallback -- calls with just `(...declared)`.
 So each instance gets a small per-member wrapper instead, closing over
 the class table and itself, that supplies `this` and forwards the rest.
-It is built once per `new` expression (a `Func` shared across however
-many times that expression runs, a fresh capture map per instance), the
+It is built once per `new` expression (a `Func` and capture map shared
+across however many times that expression runs, fresh cells and a fresh
+closure per instance), the
 same shape `new Promise(...)` above already uses for its own per-
 occurrence state.
 
@@ -272,10 +274,12 @@ An arrow function written inside a method closes over `this` lexically,
 through the ordinary capture machinery (`this` is a scoped variable,
 `resolve()` walks to it like any other free name) -- which is
 JavaScript's own rule for an arrow's `this`. An ordinary `function`
-(declared or as an object literal's property) does not get one: real
-JavaScript binds a plain function's `this` *dynamically*, by how it is
+(declared or as an object literal's property) gets no `this` of its own:
+real JavaScript binds a plain function's `this` *dynamically*, by how it is
 called, which this front end does not model outside of a class's own
-methods -- `this` used there is a bind-time error.
+methods. Outside any method, `this` there is a bind-time error; inside
+one, it resolves outward to the method's `this` the way an arrow's would
+(see "quietly different" below).
 
 ## What is deliberately absent, and what quietly differs
 
@@ -290,6 +294,8 @@ Absent, because none of it exercises a recipe further:
   per-iteration rule `CellFresh` exists to implement, so having it would
   subtract from what this front end demonstrates. Declaring one is a
   bind-time error rather than a silent `let`.
+* **`i++`/`i--` as expressions.** Statements and `for` updates only;
+  `let j = i++` is a bind-time error.
 * **Destructuring, spread, template literals, `switch`, labels, `for...in`,
   regular expressions, getters/setters, `yield*`, async arrows and
   top-level `await`.** Syntax, mostly. `switch` is already mini-go's to
@@ -323,6 +329,10 @@ Quietly different, and therefore worth knowing:
   is a run failure here and `NaN` in JavaScript; the coercion ladder again.
   `+` is the exception, because string concatenation is not coercion so
   much as the operator's other meaning.
+* **A plain function inside a method sees the method's `this`.** It
+  resolves outward like an arrow's, where JavaScript would rebind it by
+  how the function is called -- `function f() { return this.x }` called
+  bare inside a method answers the instance's `x` here.
 * **An unhandled rejection is silent.** `node` prints the error and exits
   1; here the promise simply stays rejected. (An `await` on a promise
   nothing ever settles, on the other hand, matches: both just exit.)
@@ -342,9 +352,9 @@ about quoting, spacing, depth and colour that have nothing to do with the
 language, and reproducing those would be work that proves nothing. Both
 sides running the same JavaScript to build their output strings leaves the
 comparison testing the only thing worth testing -- whether the two agree
-about what the program computes. (The prelude is also the largest program
-in this subset, and its own first test: mutual recursion between two
-hoisted declarations, closures, `for` over arrays, and `typeof`.)
+about what the program computes. (The prelude is also its own first test:
+mutual recursion between two hoisted declarations, closures, `for` over
+arrays, and `typeof`.)
 
 `samples/gen_golden.sh` regenerates the goldens. It is run by hand, never
 by the build, for the reason `test/gen_golden.sh` states: a golden file the

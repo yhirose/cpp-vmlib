@@ -39,6 +39,6 @@ foreach(s ${SAMPLES})
 endforeach()
 
 if(failed)
-  message(FATAL_ERROR "mini-lua sample output does not match culebra")
+  message(FATAL_ERROR "mini-lua sample output does not match lua")
 endif()
-message(STATUS "mini-lua samples OK (matches culebra)")
+message(STATUS "mini-lua samples OK (matches lua)")

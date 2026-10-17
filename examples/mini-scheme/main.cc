@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
   opts.natives = mini_scheme::stdlib();
   // Left at its default: a tail call reuses the frame, so a runaway
   // recursion that is *not* in tail position still fails cleanly here
-  // rather than growing the heap -- which is what samples/tailcalls.lua
+  // rather than growing the heap -- which is what samples/tailcalls.scm
   // shows from both sides.
 
   coreir::Runtime rt;

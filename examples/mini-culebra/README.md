@@ -12,11 +12,13 @@ working, against `culebra` itself.
 | A Scope's explicit release order | "A front end that needs reverse declaration order across the two hands the scope its release list as an optional second child." | Every block, `Binder::release_list` |
 | `entry_frame_drops = false` | "That is culebra's rule for top-level bindings (only top-level defers run at exit)." | `main.cc`, plus a `[0, 0)` Scope on `funcs[0]` |
 
-And one recipe from the top-level README that no other front end here
-reaches at all: **Host functions**. culebra's standard library is not part
-of its language, and it is not part of this IR either -- `println`,
+And one recipe from the top-level README that is this front end's whole
+standard library: **Host functions**. culebra's standard library is not
+part of its language, and it is not part of this IR either -- `println`,
 `type_of`, `.size()`, `.push()`, `.map()` are `Tag::NativeRef`, declared by
-the module and supplied by the run.
+the module and supplied by the run. Other front ends here supply natives
+too; this one has no library besides them, and `map` calls back into the
+program.
 
 Every sample runs unmodified under `culebra`, and each `golden/` file was
 captured that way.
@@ -231,8 +233,8 @@ Quietly different:
   instances -- because a printed object shows `mut` per property and this
   front end does not track that per property. It infers it: a class
   instance's fields are all mutable, a literal's are not.
-* **Runtime traps are not culebra's errors.** A divide by zero or an
-  out-of-range slice raises the executor's own trap value, which a `catch`
+* **Runtime traps are not culebra's errors.** A divide by zero or a call
+  with the wrong arity raises the executor's own trap value, which a `catch`
   lands but which has no `.kind`. The two container errors this binder
   raises itself -- `IndexError` and `KeyError` -- do carry `kind` and
   `message`, because they are the ones the samples ask about.

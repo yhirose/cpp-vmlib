@@ -1,8 +1,9 @@
 # mini-csharp
 
-The ninth front end, and the only *statically-typed* one -- which is the
-whole of what it is here to prove. The top-level README's Scope section
-says:
+The ninth front end, and statically typed like examples/mini-go -- but
+where mini-go's types decide its lowering, this one erases them, which is
+the whole of what it is here to prove. The top-level README's Scope
+section says:
 
 > "A managed, statically-typed language (a C#, Java or Go subset) is in
 > scope too -- a binder that has already type-checked can erase types on
@@ -12,9 +13,11 @@ says:
 > goroutines with channels without changes."
 
 examples/mini-go proves the second half of that list. This one is the
-first half: **classes with inheritance and virtual dispatch**, which no
-other front end here has, and **types that are parsed and then erased**,
-which is the claim itself. Nothing in `coreir` or `vm` was added for it.
+first half: **classes with inheritance and virtual dispatch** -- the same
+class-table walk examples/mini-python and examples/mini-ruby use, here with
+`virtual`/`override` and `: base(...)` -- and **types that are parsed and
+then erased**, which is the claim itself. Nothing in `coreir` or `vm` was
+added for it.
 
 ## Running
 
@@ -54,8 +57,7 @@ while typeof(t) == "object":
 Because the walk starts at the *receiver's* table and not at the class
 that contains the call site, a base-class method calling `Describe()`
 reaches the derived class's override. `samples/shapes.cs` is two levels of
-that, plus `: base(...)` chaining and a default constructor that chains
-because the binder synthesized one. Nothing in the IR knows any of it
+that, plus `: base(...)` chaining. Nothing in the IR knows any of it
 happened.
 
 The one convention that carries it is the same one examples/mini-culebra
@@ -72,10 +74,10 @@ compile under `dotnet` unmodified, which is what makes `dotnet` an oracle
 declaration, and both are about *what calling it builds*, not about what
 it returns:
 
-* `static` decides where the method is bound (on the class table, reached
-  without a receiver) rather than what it means.
-* `async`, and the presence of a `yield` in the body, decide whether the
-  method compiles to one func or three.
+* `static` decides where the method is bound (a file-scope binding,
+  called without a receiver) rather than what it means.
+* `async` decides whether the method compiles to one func or three, and a
+  `yield` in the body sets `Func::is_generator`.
 
 Everything else -- `int` vs `long` vs `double`, `List<Shape>` vs
 `IEnumerable<int>`, the base list, the return type -- is discarded. A
@@ -96,14 +98,14 @@ neither:
 
 | The VM's rule | C# | So this front end |
 |---|---|---|
-| `Value::truthy()` calls `0` and `""` false, NaN true | only `bool` is a condition | passes the condition through |
+| `Value::truthy()` calls `0`, `null` and `false` false, `""` and NaN true | only `bool` is a condition | passes the condition through |
 | `to_display` prints `4.0` as `4` | `Console.WriteLine(4.0)` prints `4` | prints what `ToStr` gives |
 | `BinOp::Div` and `Mod` truncate toward zero, C-style | `/` and `%` on two `int`s do the same, including `-7 / 2 == -3` | emits the `BinOp` |
 | two ints stay int, a double widens the pair | the same | emits the `BinOp` |
 
 `samples/basics.cs` is that table, run against `dotnet`.
 
-Two helpers survive, and both are there for a reason the table explains
+Three helpers survive, and all are there for a reason the table explains
 rather than contradicts:
 
 * `$add`, because `"count: " + 3` concatenates -- the *operands* need
@@ -113,6 +115,9 @@ rather than contradicts:
   that question. C#'s answer is: numbers compare numerically, different
   types are unequal, `null == null`, and two references are equal when
   they are the same object -- which is `Same`.
+* `$str`, because C# prints a `bool` as `True`/`False` and `null` as
+  nothing, where `to_display` prints `true`/`false`/`nil` -- the number
+  rows above still go straight to `ToStr`.
 
 ## `using`, `yield return`, `async`: three tags, verbatim
 
@@ -198,9 +203,19 @@ Quietly different:
 * **A `List<T>` is an array**, so `.Count` is `Len` and `.Add` is
   `ArrayPush`; `Insert`, `Remove`, `Sort` and the rest are not here.
 * **`string.Join` is the only `string` static**, and `.Length`, `.Count`,
-  `.Message` and `.Result` are four built-in properties a user-declared
-  one cannot shadow -- everything else after a `.` that names neither a
-  method nor a declared property is a field.
+  `.Message` and `.Result` are four built-in properties -- a user-declared
+  property of the same name wins over them, a field does not, and
+  everything else after a `.` that names neither a method nor a declared
+  property is a field.
+* **`Add`, `Wait` and `ToString` are resolved by name** on any receiver,
+  as `ArrayPush`, `$await` and `$str`, so a class's own `ToString()`
+  override is never called.
+* **A constructor without `: base(...)` does not run the base's.** C#
+  calls the base's parameterless constructor implicitly; here only an
+  explicit `: base(...)`, or the constructor synthesized for a class that
+  declares none, chains.
+* **A `Dictionary` is a map that only half works.** Indexing and `.Count`
+  go through, but `.Add` is the `ArrayPush` above and traps.
 
 ## Where it fought back
 

@@ -1,27 +1,30 @@
 # mini-lua
 
-The fifth front end, and the one that proves **Tail calls** -- the last
-recipe in the top-level README that no front end reached.
+The fifth front end, and the first to prove **Tail calls** -- the last
+recipe in the top-level README that no front end had reached (mini-scheme
+depends on them too).
 
 Lua is one of the few languages whose *specification* requires proper tail
 calls, which is what makes `lua` an oracle for the property rather than an
 implementation that happens to agree. And it makes the sample honest in a
-way a feature demo usually is not: every recursion in `samples/tailcalls.lua`
-runs past `RunOptions::max_call_depth`, so the sample does not merely
-exercise `Func::tail_calls`, it **fails without it**:
+way a feature demo usually is not: every tail-call chain in
+`samples/tailcalls.lua` runs past `RunOptions::max_call_depth` (the one
+non-tail recursion stays inside it on purpose), so the sample does not
+merely exercise `Func::tail_calls`, it **fails without it**:
 
 ```
 $ mini-lua samples/tailcalls.lua
 20000100000
 ...
 $ # the same binary built with fn.tail_calls = false:
-samples/tailcalls.lua:1:34: recursion limit exceeded
+samples/tailcalls.lua:10:8: recursion limit exceeded
 ```
 
 It also proves **Coroutines** in the shape they were named for. `vmlib.h`'s
 comment on `CoroCreate` opens with *"What Lua's coroutines, Ruby's Fibers
-and a goroutine are made of"*; mini-go drives coroutines from a scheduler
-and mini-js from `async`/`await`, so both use them from underneath. Lua
+and a goroutine are made of"*; mini-go drives coroutines from a scheduler,
+and mini-js and mini-csharp from `async`/`await`, so all three use them
+from underneath. Lua
 hands `coroutine.create` / `resume` / `yield` / `status` / `wrap` to the
 program, which is the other half.
 
@@ -72,10 +75,10 @@ Three, and each is a func this binder writes in IR -- the same shape
 mini-js needed for JavaScript and mini-culebra needed for almost nothing:
 
 **Truthiness.** Only `nil` and `false` are false; `0` and `""` are *true*.
-`Value::truthy()` calls 0 false, and its comment names this exact
-disagreement as the reason it refuses to decide: *"JavaScript calls both
-falsy, Lua calls neither."* So `$truthy`, and every condition goes through
-it.
+`Value::truthy()` fixes nil, false and zero as false, and leaves to a
+language only what its comment names -- a string's emptiness and NaN:
+*"JavaScript calls both falsy, Lua calls neither."* Lua disagrees about
+zero too, so `$truthy`, and every condition goes through it.
 
 **`%` and `//` floor.** `-7 % 3` is 2 in Lua and -1 in C, and `BinOp::Mod`
 is C's; `-7 // 2` is -4 in Lua and -3 from `BinOp::Div`. `$mod` and `$idiv`
@@ -182,8 +185,9 @@ rules rather than the intrinsics':
 * `CoroStatus` answers `"start"`/`"done"`; Lua says `"suspended"`/`"dead"`.
 * `CoroResume` answers `{value, done}`; Lua answers `true` followed by the
   values, or `false` and a message.
-* Resuming a finished coroutine **traps** in the IR and **answers false**
-  in Lua, so `$resume` checks the status first.
+* Resuming a finished coroutine answers `{nil, true}` in the IR, which
+  looks like an ordinary finish, and **answers false** with "cannot resume
+  dead coroutine" in Lua, so `$resume` checks the status first.
 * A throw the coroutine's frames do not catch *"continues at the
   CoroResume, into the resumer's own handlers"* -- and Lua turns it into
   `false, err` instead, so `$resume` wraps the resume in a `TryCatch`.
@@ -204,7 +208,7 @@ the value of the `TryCatch` is the arm that ran.
 `error(msg)` prefixes a *string* message with the chunk name and line, Lua's
 default error level, which is why the binder is told the script's path.
 Anything else is raised unchanged, so a table can carry structured detail.
-A trap the executor raises itself -- `nil + 1` -- is caught by the same
+A trap the executor raises itself -- `{} < 1` -- is caught by the same
 `pcall`, since `TryCatch` lands both.
 
 ## What is absent, and what quietly differs
@@ -250,8 +254,6 @@ build. Both sides are run from the samples directory with a bare filename,
 because Lua's error messages name the chunk as it was given.
 
 All eight samples are clean under ASan/UBSan/LeakSanitizer and under
-`COREIR_GC_STRESS=1` -- `tailcalls.lua` included, though its two hundred
-thousand iterations times a full collection per allocation take several
-minutes under that lane, which is why `ctest` itself does not run it
-there and `.github/workflows/ci.yml` leaves out `deep_calls` for the same
-reason.
+`COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.lua`
+included -- a full collection per allocation costs it seconds, not the
+quadratic blowup that keeps `deep_calls` out of that lane.

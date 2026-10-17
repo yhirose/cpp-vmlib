@@ -2,9 +2,9 @@
 -- frame instead of stacking on it, which makes `lua` a real oracle for
 -- Func::tail_calls rather than an implementation that happens to agree.
 --
--- Every number below is past RunOptions::max_call_depth (10000), so this
--- sample does not merely exercise the feature: it *fails* without it, with
--- "recursion limit exceeded".
+-- Every tail-call chain below runs past RunOptions::max_call_depth (10000),
+-- so this sample does not merely exercise the feature: it *fails* without
+-- it, with "recursion limit exceeded".
 
 local function sum(n, acc)
   if n == 0 then return acc end

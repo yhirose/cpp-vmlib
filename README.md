@@ -119,10 +119,11 @@ A few things worth knowing before you write a binder:
   `ReadInt`, `Len`, `ToStr`, `TypeOf`, numeric conversions, the array,
   object and map primitives (`ArrayPush`, `ArraySlice`, `ObjectKeys`,
   `MapNew`, ...), the string primitives (`StrSlice`, `StrByte`,
-  `StrFromByte`), `Same`, `Collect`, the generator and coroutine protocols
-  (`GenResume`, `CoroResume`, `CoroYield`, ...) and the job queue
-  (`Enqueue`). Everything else -- map, filter, a channel, a Promise -- is a
-  loop or an object your front end writes in its own language.
+  `StrFromByte`, `StrUpper`, `StrLower`), `Same`, `Collect`, the generator
+  and coroutine protocols (`GenResume`, `CoroResume`, `CoroYield`, ...) and
+  the job queue (`Enqueue`). Everything else -- map, filter, a channel, a
+  Promise -- is a loop or an object your front end writes in its own
+  language.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
@@ -130,10 +131,11 @@ The authoritative reference is the commentary in `vmlib.h` itself, in the
 ## Writing a binder
 
 `Builder` and `verify()` are all a binder strictly needs; `examples/pl0/`
-uses nothing else. Three optional utilities sit beside them, in the
-`coreir/resolve.h` section of `vmlib.h`. Nothing in `coreir` or `vm` reads
-them, and each is there because every front end in `examples/` that got as
-far as closures had written the same thing.
+uses nothing else. Three optional utilities sit beside them: `Builder::at`
+on `Builder` itself, and `Resolver` (with `FrameLayout`) and `FuncWriter` in
+the `coreir/resolve.h` section of `vmlib.h`. Nothing in `coreir` or `vm`
+reads them, and each is there because every front end in `examples/` that
+got as far as closures had written the same thing.
 
 **`Builder::at(p)`** binds a source position once instead of at every node:
 
@@ -145,18 +147,26 @@ b.binary(BinOp::Add, b.varref(VarKind::Local, 0), b.literal(1))
 
 **`Resolver`** is closure conversion, for a front end whose functions nest
 lexically. `push_scope`/`declare`/`resolve` as you walk the source;
-`number_captures(m)` once afterwards; then `access(fn, var)` answers the
-`(VarKind, index)` pair each `VarRef` and `Assign` needs -- a local slot, a
-cell of this function's own, or a capture -- and `capture_map(m, here,
-target)` writes the forwarding table a `MakeClosure` for `target` needs,
-expressed in `here`'s frame. What it gets right, and a
-per-function capture list would not, is the propagation: a name read two
-levels in is recorded as free in *every* function between the reader and
-the owner, because a closure's capture map is written in the frame that
-builds it and the frame two levels down cannot name a cell it does not own.
+`number_captures(m)` once afterwards; then `read(m, fn, var, p)` and
+`write(m, fn, var, value, p)` emit the `VarRef` or `Assign` a use needs --
+through `access(fn, var)`, which answers the `(VarKind, index)` pair: a
+local slot, a cell of this function's own, or a capture -- and
+`closure(m, here, target, p)` emits the `MakeClosure` for `target`, with
+the forwarding table (`capture_map`) expressed in `here`'s frame. What it
+gets right, and a per-function capture list would not, is the propagation:
+a name read two levels in is recorded as free in *every* function between
+the reader and the owner, because a closure's capture map is written in the
+frame that builds it and the frame two levels down cannot name a cell it
+does not own.
 It knows nothing about any parse tree -- names and integers go in, and the
-front end keeps its own per-function record beside it. `FrameLayout` is the
-slot bookkeeping that goes with it: `alloc_local` for the names, `mark`/
+front end keeps its own per-function record beside it. Past that walk it
+has hooks for the less regular cases: `declare_var` for a front end that
+resolves names through its own tables, `note_call` plus `close_over_calls`
+for one whose functions are static entities with a closure built at every
+call site (the call graph's fixpoint), `set_parent` for nesting learned
+after the fact, and `mark`/`rollback` for a prelude bound once with program
+after program compiled on top of it. `FrameLayout` is the slot
+bookkeeping that goes with it: `alloc_local` for the names, `mark`/
 `release` so sibling blocks reuse slots and a frame's width is the deepest
 nesting rather than the total number of declarations.
 
@@ -185,10 +195,14 @@ one place and their names in another, and inserting a temporary in the
 middle renumbers everything after it -- which `verify()` catches only if the
 *count* changed too.
 
-`examples/pl0/` deliberately uses none of the three: its captures travel
-through calls rather than through nesting, so it needs a fixpoint `Resolver`
-does not do, and it is short enough that the rest is clearer spelled out.
-The other eight front ends use all three.
+`examples/pl0/` deliberately uses none of the three: it is the binder
+written against `Builder` and `verify()` alone, and short enough that its
+own block table and capture fixpoint are clearer spelled out -- though its
+case, captures that travel through calls rather than through nesting, is
+the one `declare_var` and `note_call`/`close_over_calls` exist for.
+[examples/mini-go/](examples/mini-go/) uses only `Builder::at`: its funcs
+are all top-level, so there is nothing to closure-convert. The other seven
+front ends use all three.
 
 ## Fixed-width integers
 
@@ -298,7 +312,7 @@ forward.
 
 Every front end in `examples/` that writes an IR-level helper library uses
 this: [mini-go](examples/mini-go/) for its top-level funcs and channel
-runtime, and the seven dynamic ones for the dozens of `$truthy`/`$str`-shaped
+runtime, and the other seven for the dozens of `$truthy`/`$str`-shaped
 helpers each writes. Before the flag existed, each of them hand-built the
 hoist above -- a synthetic `$helpers` variable owned by file scope, threaded
 into every function's captures, holding an array of pre-built closures
@@ -427,7 +441,10 @@ anything else traps; a language that clamps or counts from the end
 normalizes first), always a fresh value -- and `StrByte(s, i)` /
 `StrFromByte(n)` are what `ord`/`chr`, and any UTF-8 decoding a front end
 writes itself, bottom out in. Strings stay byte sequences; what a code point
-is belongs to the language.
+is belongs to the language. `StrUpper` and `StrLower` follow the same line
+for case: ASCII only, byte by byte, so a multi-byte character passes
+through whole -- the ASCII half is the same everywhere, and what case means
+above it is the language's own table.
 
 ## Host functions
 
@@ -478,9 +495,10 @@ before the callee's output rather than after -- which is why a front end
 switches it on rather than getting it by default. The compiler leaves a
 call alone inside a `TryCatch` body (the handler is a pc range of this
 chunk and would go with the frame) and inside a `Scope` that declares
-defers; the executor leaves one alone when the callee is a native or a
-generator function, or the frame is the entry frame -- each of those is
-the call it would otherwise have been, and the frame returns its result.
+defers or a release order; the executor leaves one alone when the callee is
+a native or a generator function, or the frame is the entry frame -- each
+of those is the call it would otherwise have been, and the frame returns
+its result.
 `test/test_tailcalls.cc` runs a million-deep mutual recursion under the
 default 10000-frame limit.
 
@@ -602,7 +620,7 @@ front end their sample and error transcripts run. `VMLIB_BUILD_EXAMPLES`
 
 `bench/bench.cc` builds one Core-IR program per thing the executor spends
 its time on -- calls, variable traffic, tail calls, the arithmetic dispatch,
-string constants, field access, allocation -- and times `vm::run` on each. It
+strings, field access, allocation -- and times `vm::run` on each. It
 prints one TSV row per case (name, best-of-N ms, mean ms, and a checksum of
 what the program printed):
 
@@ -648,10 +666,11 @@ language is actually installed, through it too -- `python3`, `ruby`,
 `lua5.4`, `guile`, `culebra`, `node`, `dotnet`, `go`. (mini-scheme has no
 vectors and immutable pairs, so `array.scm` builds and sums a list by tail
 recursion instead of by indexing -- the same total, reached the way this
-language actually reaches it. mini-go is the one statically typed front
-end here, so its five programs are the only ones that spell out a type --
-`var total int64 = 0`, `[]int64`, `string` -- and are otherwise the same
-programs; each also runs unmodified under `go run`. `loop` and `array`
+language actually reaches it. mini-go and mini-csharp are the two
+statically typed front ends here, so theirs are the only programs that
+spell out a type -- `var total int64 = 0`, `[]int64`, `string` in Go,
+`long total = 0` in C# -- and are otherwise the same programs; each also
+runs unmodified under `go run` or `dotnet`. `loop` and `array`
 also fold their running total through a modulus on every step, not to add
 work but to keep the answer inside a JS `number`'s exact 53-bit range --
 JavaScript has no true integer, and past that range `node` would
@@ -685,14 +704,14 @@ tables out for you).
 | Front end | Parser | Notes |
 |---|---|---|
 | [PL/0](examples/pl0/) | PEG, via cpp-peglib | Wirth's teaching language. See [examples/pl0/README.md](examples/pl0/README.md). |
-| [mini-go](examples/mini-go/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers (`%` included), `float`, Static calls, Struct fields, Switch, Strings and slices (a `[]T` is an `ArrayObj`, a `string` the executor's own `Str`), and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. The one statically typed front end here, which is what its `bench/languages` numbers are measuring. See [examples/mini-go/README.md](examples/mini-go/README.md). |
+| [mini-go](examples/mini-go/) | PEG, via cpp-peglib | A narrow, real slice of Go -- proves Fixed-width integers (`%` included), `float`, Static calls, Struct fields, Switch, Strings and slices (a `[]T` is an `ArrayObj`, a `string` the executor's own `Str`), and (with goroutines and unbuffered channels) Coroutines and the Scheduler against `go run`. One of the two statically typed front ends here, and the one whose types decide the lowering rather than being erased (mini-csharp is the other), which is what its `bench/languages` numbers are measuring. See [examples/mini-go/README.md](examples/mini-go/README.md). |
 | [mini-ruby](examples/mini-ruby/) | PEG, via cpp-peglib | A slice of Ruby, and the only front end that uses **`FnArity`** and **`ArgCount`** -- Ruby makes both program-visible, as `Proc#arity` and as the difference between a proc (lenient) and a lambda (an `ArgCount` test in its prologue). Blocks travel as an implicit parameter 0, which is what `yield`, `block_given?` and `&blk` are all made of. `ensure` is a `Defer`, reached from a third direction. `class` with inheritance and `super` is the same object-holding-a-table recipe examples/mini-python and examples/mini-csharp use, `case`/`when` is a three-way `===`, and a default parameter is evaluated in the method's own scope rather than the enclosing one, both without disturbing what FnArity/ArgCount mean. See [examples/mini-ruby/README.md](examples/mini-ruby/README.md). |
-| [mini-scheme](examples/mini-scheme/) | PEG, via cpp-peglib | A slice of Scheme, and the front end that shows a *boundary* rather than a recipe: the escape half of `call/cc` is a `TryCatch` and works, while the re-entrant half is the "multi-shot continuations" entry in this README's own list of what stays out of reach -- and the binary says so by name when a program asks for it. Also where **Tail calls** are load-bearing rather than an optimization (iteration in Scheme is tail recursion and nothing else), and the smallest front end here by a wide margin. `case` and R7RS's `define-record-type` (a class table with no source body, like examples/mini-python's constructor) round out the everyday syntax without adding a grammar rule -- both are ordinary lists to a homoiconic parser. See [examples/mini-scheme/README.md](examples/mini-scheme/README.md). |
+| [mini-scheme](examples/mini-scheme/) | PEG, via cpp-peglib | A slice of Scheme, and the front end that shows a *boundary* rather than a recipe: the escape half of `call/cc` is a `TryCatch` and works, while the re-entrant half is the "multi-shot continuations" entry in this README's own list of what stays out of reach -- and the binary says so by name when a program asks for it. Also where **Tail calls** are load-bearing rather than an optimization (iteration in Scheme is tail recursion and nothing else), and the smallest grammar here by a wide margin. `case` and R7RS's `define-record-type` (a class table with no source body, like examples/mini-python's constructor) round out the everyday syntax without adding a grammar rule -- both are ordinary lists to a homoiconic parser. See [examples/mini-scheme/README.md](examples/mini-scheme/README.md). |
 | [mini-python](examples/mini-python/) | PEG, via cpp-peglib | A slice of Python 3. The only front end that proves **Arbitrary-precision integers** -- Python's `int` is unbounded by definition, so `python3` is an oracle for the bignum this library deliberately has no `Value` tag for -- and the only one that shows `with` as a `Scope` plus a `Defer`. Also the only one whose *lexical* structure a PEG cannot express, so its indentation is normalized into INDENT/DEDENT markers before parsing. See [examples/mini-python/README.md](examples/mini-python/README.md). |
-| [mini-lua](examples/mini-lua/) | PEG, via cpp-peglib | A slice of Lua 5.4. The only front end that proves **Tail calls** -- Lua's specification requires them, so `lua` is an oracle for the property and `samples/tailcalls.lua` recurses far past `max_call_depth`, failing outright without `Func::tail_calls` -- and the only one that hands **Coroutines** to the program (`coroutine.create`/`resume`/`yield`/`status`/`wrap`) rather than driving them from a scheduler. Also writes a variadic calling convention over the IR's fixed-arity one, for Lua's multiple return values, and a real generic-`for` protocol and metatable dispatch (`__add`/`__eq`/`__tostring`/`__call`/`__newindex`, alongside the original `__index`) over two small funcs every metamethod shares. See [examples/mini-lua/README.md](examples/mini-lua/README.md). |
-| [mini-culebra](examples/mini-culebra/) | PEG, via cpp-peglib | A slice of culebra, checked against `culebra` itself. The only front end that exercises the three mechanisms this header describes in culebra's own terms -- the owned stack (deterministic destructors, cycles resolved at the owning scope's exit), a `Scope`'s explicit release order, and `RunOptions::entry_frame_drops` -- and the only one that uses **Host functions**: its standard library is `vm::RunOptions::natives`. `for x in v` now reaches culebra's real custom iterator protocol (`iter`/`has_next`/`next`, on any class), with `dispose()` left out rather than risked against the destructor-ordering guarantee this front end exists to show. See [examples/mini-culebra/README.md](examples/mini-culebra/README.md). |
+| [mini-lua](examples/mini-lua/) | PEG, via cpp-peglib | A slice of Lua 5.4. Proves **Tail calls**, as mini-scheme does -- Lua's specification requires them, so `lua` is an oracle for the property and `samples/tailcalls.lua` recurses far past `max_call_depth`, failing outright without `Func::tail_calls` -- and is the only front end that hands **Coroutines** to the program (`coroutine.create`/`resume`/`yield`/`status`/`wrap`) rather than driving them from a scheduler. Also writes a variadic calling convention over the IR's fixed-arity one, for Lua's multiple return values, and a real generic-`for` protocol and metatable dispatch (`__add`/`__eq`/`__tostring`/`__call`/`__newindex`, alongside the original `__index`) over two small funcs every metamethod shares. See [examples/mini-lua/README.md](examples/mini-lua/README.md). |
+| [mini-culebra](examples/mini-culebra/) | PEG, via cpp-peglib | A slice of culebra, checked against `culebra` itself. The only front end that exercises the three mechanisms this header describes in culebra's own terms -- the owned stack (deterministic destructors, cycles resolved at the owning scope's exit), a `Scope`'s explicit release order, and `RunOptions::entry_frame_drops` -- and its standard library is **Host functions**, `vm::RunOptions::natives`. `for x in v` now reaches culebra's real custom iterator protocol (`iter`/`has_next`/`next`, on any class), with `dispose()` left out rather than risked against the destructor-ordering guarantee this front end exists to show. See [examples/mini-culebra/README.md](examples/mini-culebra/README.md). |
 | [mini-js](examples/mini-js/) | PEG, via cpp-peglib | A slice of JavaScript -- the dynamic counterpart to mini-go. Proves Closures (`let`'s per-iteration binding, through `CellFresh`), Exceptions (`finally` as a Defer), Generators (`GenResume`'s `{value, done}` *is* the iterator protocol), Maps, Strings and slices, and Coroutines + the Scheduler (`async`/`await` over a Promise it writes in IR) against `node`. Also the front end that shows what the VM deliberately does *not* decide: truthiness, `===` and number formatting are funcs it writes itself. `class`/`this`/`new` (no `extends`) followed, a method table built where the `class` stands and a per-instance wrapper closure supplying `this` to a call the generic property-call path already knew how to make. See [examples/mini-js/README.md](examples/mini-js/README.md). |
-| [mini-csharp](examples/mini-csharp/) | PEG, via cpp-peglib | A slice of C#, checked against `dotnet`. The only front end with **classes and inheritance** -- virtual dispatch is a walk up a chain of ordinary objects, so an override wins with no support from the IR -- and the only *statically-typed* one, which is the claim it exists to make: it parses types and then erases them, and the runtime it lands on needs no addition. A **property** (auto or with a `get`/`set` body) compiles to the same `get_Name`/`set_Name` pair `csc` itself would name, found by the very `$mfind` walk a method call uses -- an `override` on one costs nothing beyond declaring the derived accessor. `using` is a `Scope` plus a `Defer`, `yield return` is a generator, `async`/`await` is a coroutine and the scheduler, and `Main` itself is a coroutine so that a `Task` can be awaited from it. Notably it carries **no** truthiness helper and **no** float-formatting rule -- the two decisions this header says it leaves to a front end, and the two every dynamic front end here has to make -- because on both, C#'s answer is already the VM's. See [examples/mini-csharp/README.md](examples/mini-csharp/README.md). |
+| [mini-csharp](examples/mini-csharp/) | PEG, via cpp-peglib | A slice of C#, checked against `dotnet`. **Classes and inheritance** -- virtual dispatch is a walk up a chain of ordinary objects, so an override wins with no support from the IR -- and *static types*, which is the claim it exists to make: where mini-go's types decide its lowering, this one parses types and then erases them, and the runtime it lands on needs no addition. A **property** (auto or with a `get`/`set` body) compiles to the same `get_Name`/`set_Name` pair `csc` itself would name, found by the very `$mfind` walk a method call uses -- an `override` on one costs nothing beyond declaring the derived accessor. `using` is a `Scope` plus a `Defer`, `yield return` is a generator, `async`/`await` is a coroutine and the scheduler, and `Main` itself is a coroutine so that a `Task` can be awaited from it. Notably it carries **no** truthiness helper and **no** float-formatting rule -- the two decisions this header says it leaves to a front end, and the two every dynamic front end here has to make -- because on both, C#'s answer is already the VM's. See [examples/mini-csharp/README.md](examples/mini-csharp/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
 -- under `examples/<name>/`, plus that front end's own implementation of the
@@ -815,7 +834,9 @@ matching the language -- see a front end's own README for what its oracle is.
 each building its Core-IR by hand and supplying its own `coreir_rt` host.
 `test_singleton.cc` pins `Func::singleton` (identity, the allocation it
 saves, a generator's per-call activation, and the one combination `verify()`
-refuses); `test_binding.cc` pins the two optional binder utilities --
-`Resolver`'s propagation and cell/local decision, `FrameLayout`'s slot
-reuse, and `FuncWriter`'s name table. `just test` runs everything;
-`just sanitizers` runs it again under ASan/UBSan/LSan.
+refuses); `test_binding.cc` pins the optional binder utilities --
+`Resolver`'s propagation, cell/local decision, call-edge closure and
+`mark`/`rollback`, `FrameLayout`'s slot reuse, and `FuncWriter`'s name
+table. `just test` runs everything; `just sanitizers` runs it again under
+ASan/UBSan/LSan, and `just gc-stress` with a collection at every
+allocation (`COREIR_GC_STRESS=1`), the two extra lanes CI also runs.

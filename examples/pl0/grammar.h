@@ -1,4 +1,5 @@
-// PL/0's grammar, carried over verbatim from culebra's examples/pl0/pl0.cul.
+// PL/0's grammar, carried over verbatim from culebra's PL/0 grammar (now
+// examples/languages/pl0/pl0.cul) as it stood before its %word rewrite.
 //
 // The `no_ast_opt` annotations are load-bearing and only make sense together
 // with optimize_ast, which the binder calls. cpp-peglib's own pl0.cc does not

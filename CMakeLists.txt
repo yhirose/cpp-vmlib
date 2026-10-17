@@ -62,15 +62,15 @@ endif()
 # mini-culebra is the front end whose oracle is culebra itself. It is the
 # only one that exercises the mechanisms vmlib.h describes in culebra's own
 # terms -- the owned stack, a Scope's explicit release order and
-# RunOptions::entry_frame_drops -- and the only one that uses the Host
-# functions recipe (its standard library is vm::RunOptions::natives).
+# RunOptions::entry_frame_drops -- and its standard library is the Host
+# functions recipe, vm::RunOptions::natives.
 if(VMLIB_BUILD_EXAMPLES)
   add_subdirectory(examples/mini-culebra)
 endif()
 
-# mini-lua is the only front end that proves Tail calls -- Lua guarantees
-# them, so `lua` is an oracle for the property rather than an
-# implementation that happens to agree -- and the only one that hands
+# mini-lua proves Tail calls, as mini-scheme does -- Lua guarantees them,
+# so `lua` is an oracle for the property rather than an implementation
+# that happens to agree -- and is the only front end that hands
 # coroutines to the program the way CoroCreate/CoroResume/CoroYield were
 # named for.
 if(VMLIB_BUILD_EXAMPLES)
@@ -101,10 +101,10 @@ if(VMLIB_BUILD_EXAMPLES)
   add_subdirectory(examples/mini-ruby)
 endif()
 
-# mini-csharp is the only front end with classes and inheritance, and the
-# only statically-typed one -- which is the point: it parses types, erases
-# them, and then wants nothing the runtime does not already have. Its
-# oracle is `dotnet`.
+# mini-csharp is statically typed like mini-go, but erases its types where
+# mini-go's decide the lowering -- which is the point: it parses types,
+# erases them, and then wants nothing the runtime does not already have,
+# classes and inheritance included. Its oracle is `dotnet`.
 if(VMLIB_BUILD_EXAMPLES)
   add_subdirectory(examples/mini-csharp)
 endif()

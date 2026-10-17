@@ -1,7 +1,7 @@
-// Classes, inheritance and virtual dispatch -- which no other front end
-// here has. The mechanism is one link: a class table carries its base's
-// table, and a method lookup walks the chain. `override` is then not a
-// feature, it is what happens when the walk finds the derived entry first.
+// Classes, inheritance and virtual dispatch, the C# way round. The
+// mechanism is one link: a class table carries its base's table, and a
+// method lookup walks the chain. `override` is then not a feature, it is
+// what happens when the walk finds the derived entry first.
 
 using System;
 using System.Collections.Generic;
@@ -74,7 +74,7 @@ class Circle : Shape {
 }
 
 class Plain : Shape {
-  // No constructor of its own: the synthesized one still chains to the
+  // An empty-bodied constructor whose only job is to chain to the
   // base's.
   public Plain() : base("plain") {
   }

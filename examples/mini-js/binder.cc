@@ -2092,8 +2092,8 @@ struct Binder {
       body = b.make_return(emit_expr(*fi.body, ctx));  // an arrow's expr
     }
 
-    // The preamble, once the body is known: one MakeClosure per $helper
-    // this body reaches, into the cell every call site reads it back from.
+    // The preamble, once the body is known: each captured parameter copied
+    // into its cell.
     std::vector<NodeId> stmts;
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
@@ -2137,11 +2137,12 @@ struct Binder {
   //   f$run   the coroutine's entry: calls f$body and settles the promise
   //           with what it returned, or with what it threw.
   //
-  // Enqueue(CoroCreate(...)) is the spawn -- the same three-word shape
-  // examples/mini-go's `go` statement uses, because a goroutine and an
-  // async call are the same primitive with different rules layered on
-  // top. The rules are the difference: a goroutine's result goes nowhere,
-  // where this one settles a promise somebody may be awaiting.
+  // CoroResume(CoroCreate(...)) is the start -- next to the
+  // Enqueue(CoroCreate(...)) examples/mini-go's `go` statement uses, because
+  // a goroutine and an async call are the same primitive with different
+  // rules layered on top. The rules are the difference: a goroutine's
+  // result goes nowhere, where this one settles a promise somebody may be
+  // awaiting.
   void emit_async(const FnInfo& fi, int32_t index, Func body,
                   int32_t nparams, int32_t ncaps,
                   std::vector<std::string> capnames, SrcPos p) {

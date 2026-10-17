@@ -1,12 +1,13 @@
 # mini-go
 
 The second front end for cpp-vmlib's Core-IR, and a narrower one than
-PL/0 on purpose: it exists to prove six of `vmlib.h`'s own recipes work
+PL/0 on purpose: it exists to prove eight of `vmlib.h`'s own recipes work
 end to end, against a real oracle, rather than to be a Go implementation.
 See the top-level README's **Fixed-width integers**, **`float`**,
 **Static calls**, **Struct fields**, **Switch** and **Strings and slices**
-sections for what each recipe says a front end should do; this front end
-is those sections turned into running code, checked against `go run`.
+sections, plus **Coroutines** and **Scheduler** (see Goroutines below), for
+what each recipe says a front end should do; this front end is those
+sections turned into running code, checked against `go run`.
 
 A source file here is real Go -- every sample in `samples/` also runs
 unmodified under `go run`, and each sample's `golden/` output was captured
@@ -25,8 +26,9 @@ four escapes `\n \t \\ \"`, `+`, all six comparisons, `len(s)`),
 unbuffered channels (`go f(args)`, `chan T`, `make(chan T)`, `ch <- v`,
 `<-ch`) -- see **Goroutines** below. What is deliberately absent: methods,
 multiple return values, maps, `select`, buffered channels, a call to a
-result-less func as a statement, a slice whose element is anything but a
-scalar, and a struct as a func parameter or return type -- none of those
+result-less func as a statement, `true`/`false` literals (a `bool` only
+comes from a comparison), a slice whose element is anything but a scalar,
+and a struct as a func parameter or return type -- none of those
 exercise this front end's recipes any further, and a struct crossing a
 call boundary raises value-semantics questions (does the callee's copy
 alias the caller's?) that are orthogonal to what Struct fields is here to
@@ -57,9 +59,11 @@ Two `MakeClosure` nodes, one closure: `square` is marked `singleton`, so the
 executor builds its closure at whichever site runs first and hands the same
 object to the other. The binder writes nothing extra -- no cell reserved in
 `main`'s frame, no preamble ahead of its body -- and a call site reached a
-million times still allocates once. PL/0 does not need this (its procedures
-are called once each in every sample it has), but a Go-shaped call site,
-possibly reached many times, is exactly the case Static calls describes.
+million times still allocates once. PL/0 cannot use this: its procedures
+capture the caller's cells, which a singleton cannot carry (`verify()`
+refuses one with captures), so each `CALL` builds a fresh closure -- even
+inside `square.pas`'s loop. A Go call site, possibly reached many times, is
+exactly the case Static calls describes.
 
 `samples/switch/switch.go`'s `classify` has a `case 1, 2:` -- one body,
 two keys. `--dump-ir` shows the two keys pointing at the identical `block`
@@ -99,8 +103,9 @@ not two that happen to hold equal fields. The output diverged from `go
 run` at exactly the sample above: `p.X` had moved to 999 along with
 `l.To.X`.
 
-This is the top-level README's Scope section, concretely: *"struct value
-semantics -- the front end emits explicit copy code"*. `copy_struct`
+This is the gap the top-level README's Struct fields section leaves to the
+front end: `FieldGet`/`FieldSet` reach an `ObjectObj` by reference, so Go's
+value semantics have to be emitted as explicit copies. `copy_struct`
 (`binder.cc`) is that code, called at every point a struct-typed value
 crosses into new storage -- a `var`, a plain assignment, a field
 assignment, a struct literal's own field -- and it is unconditional except
@@ -122,8 +127,9 @@ run`. Three things the binder does, none of which needed a change to
 **`go f(a, b)` is `Enqueue(CoroCreate(wrapper))`.** The arguments are
 evaluated at the `go` statement (Go's rule) into fresh cells of the
 current frame -- `CellFresh` first, so a `go` inside a loop gives each
-goroutine its own values -- and a synthesized wrapper func captures the
-callee's closure and those cells and makes the real call. The wrapper is
+goroutine its own values -- and a synthesized wrapper func captures those
+cells and makes the real call, building the callee's closure itself (the
+callee is a singleton, so there is nothing to hand over). The wrapper is
 `lenient_arity`, since the scheduler resumes a coroutine with one
 argument (nil) and a Go func may take none.
 
@@ -237,4 +243,4 @@ agreeing with itself. Each
 sample lives in its own subdirectory because it is a real, standalone `go
 run`-able `package main`; two of them sharing a directory would both
 declare `func main`, which `go build` (though not the single-file `go run`
-this test itself uses) rejects.
+the goldens were captured with) rejects.

@@ -39,6 +39,6 @@ foreach(s ${SAMPLES})
 endforeach()
 
 if(failed)
-  message(FATAL_ERROR "mini-scheme sample output does not match culebra")
+  message(FATAL_ERROR "mini-scheme sample output does not match guile")
 endif()
-message(STATUS "mini-scheme samples OK (matches culebra)")
+message(STATUS "mini-scheme samples OK (matches guile)")

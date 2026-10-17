@@ -35,7 +35,7 @@
 (display (find-first (lambda (x) (> x 2)) '(1 2 3 4))) (newline)
 (display (find-first (lambda (x) (> x 9)) '(1 2 3 4))) (newline)
 
-; Through several frames at once: the escape unwinds all of them.
+; From the bottom of a hundred tail calls: the escape leaves all of them.
 (define (deep n k) (if (= n 0) (k 'bottom) (deep (- n 1) k)))
 (display (call/cc (lambda (k) (deep 100 k)))) (newline)
 

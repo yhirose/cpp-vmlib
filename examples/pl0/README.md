@@ -6,13 +6,14 @@ statements -- small enough that the whole chain (grammar, binder, compiler,
 executor) fits together in one place, which is why it was chosen to validate
 the IR before anything larger is pointed at it.
 
-The grammar in `grammar.h` is carried over verbatim from culebra's
-`examples/pl0/pl0.cul`, including its `no_ast_opt` annotations -- the binder
-calls `parser.optimize_ast()`, and those annotations only make sense together
-with that call. `binder.cc` is the only file in this repository that includes
-`peglib.h`; nothing in `vmlib.h` knows PL/0 or peglib exist. `main.cc` is
-the one translation unit that defines `VMLIB_DEFAULT_RUNTIME`, taking the
-stdio host the header carries.
+The grammar in `grammar.h` is carried over verbatim from culebra's PL/0
+grammar (now `examples/languages/pl0/pl0.cul`) as it stood before that file
+moved to `%whitespace`/`%word`, including its `no_ast_opt` annotations -- the
+binder calls `parser.optimize_ast()`, and those annotations only make sense
+together with that call. `binder.cc` is the only file in this front end that
+includes `peglib.h`; nothing in `vmlib.h` knows PL/0 or peglib exist.
+`main.cc` is this front end's one translation unit that defines
+`VMLIB_DEFAULT_RUNTIME`, taking the stdio host the header carries.
 
 ## Running
 
@@ -48,14 +49,14 @@ would die with the frame.
 
 ## Testing
 
-`ctest -R samples` runs `samples/*.pas` and requires the output to match a
-golden file (`samples/golden/`) taken from culebra's own PL/0 interpreter
-(`examples/pl0/pl0.cul` in the culebra repository) -- an independent
-implementation in a different language. Passing your own tests is not the
-same as matching the language: see "What the reference implementations get
-wrong" below for a case where two lanes of a different independent
-implementation agree with each other and are both wrong, which a
-self-consistency check alone would never catch.
+`ctest -R '^samples$'` runs `samples/*.pas` and requires the output to
+match a golden file (`samples/golden/`) taken from culebra's own PL/0
+interpreter (`examples/languages/pl0/pl0.cul` in the culebra repository) --
+an independent implementation in a different language. Passing your own
+tests is not the same as matching the language: see "What the reference
+implementations get wrong" below for a case where two lanes of a different
+independent implementation agree with each other and are both wrong, which
+a self-consistency check alone would never catch.
 
 `ctest -R errors` covers the diagnostics (`test/errors/`). These are not
 golden-compared: the binder reports undefined names, constant assignment and
@@ -76,9 +77,9 @@ ship untested too.
 ## What the reference implementations get wrong
 
 Two existing PL/0 implementations informed this one, and neither could be
-copied whole: culebra's own `examples/pl0/pl0.cul`, and cpp-peglib's
-`pl0/pl0.cc` (a from-scratch interpreter plus LLVM JIT written in C++, by the
-same author).
+copied whole: culebra's own `examples/languages/pl0/pl0.cul`, and
+cpp-peglib's `pl0/pl0.cc` (a from-scratch interpreter plus LLVM JIT written
+in C++, by the same author).
 
 | | `pl0.cul` (culebra) | `pl0.cc` (cpp-peglib) | here |
 |---|---|---|---|

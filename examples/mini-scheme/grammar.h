@@ -18,10 +18,10 @@
 // grammar, and everything about what they mean is the binder's problem,
 // which a homoiconic syntax is what makes that split so clean.
 //
-// There is no `no_ast_opt` anywhere below, and no rule that could fold
-// wrongly: `list` keeps its identity because it is the only rule with
-// parentheses, and every atom is a token. A grammar with nothing to get
-// wrong is what a homoiconic language buys.
+// `no_ast_opt` sits only on the three rules whose node has to survive
+// whatever it holds -- `program`, `list` and `quoted` -- and every atom is
+// a token. A grammar with that little to get wrong is what a homoiconic
+// language buys.
 
 #pragma once
 

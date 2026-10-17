@@ -19,19 +19,21 @@ to be the more interesting measurement:
 
 | Front end | Grammar rules | Binder |
 |---|---:|---:|
-| mini-scheme | 11 | 1406 |
+| mini-scheme | 11 | 1509 |
 | PL/0 | 27 | 542 |
-| mini-go | 49 | 1307 |
-| mini-culebra | 63 | 1821 |
-| mini-lua | 68 | 1990 |
-| mini-js | 72 | 2276 |
-| mini-python | 73 | 2426 |
+| mini-go | 53 | 1547 |
+| mini-culebra | 63 | 1719 |
+| mini-lua | 68 | 2049 |
+| mini-js | 75 | 2305 |
+| mini-csharp | 81 | 2235 |
+| mini-ruby | 96 | 2433 |
+| mini-python | 106 | 4614 |
 
-Eleven rules against seventy, and a binder in the same range as everyone
-else's. That gap is the point: **the syntax is not the front end**. What
-survives when the syntax goes away is scope resolution, closure conversion
-and a library -- which is what every other binder here is mostly made of
-too, under the parsing.
+Eleven rules against fifty to a hundred, and a binder in the same range as
+everyone else's. That gap is the point: **the syntax is not the front
+end**. What survives when the syntax goes away is scope resolution,
+closure conversion and a library -- which is what every other binder here
+is mostly made of too, under the parsing.
 
 ## Running
 
@@ -59,8 +61,8 @@ unwinds to the `call/cc` and the handler answers with it. Nested `call/cc`s
 each name their own activation, which is why the inner one leaves only the
 inner. `samples/continuations.scm` uses it for the four things programs
 actually use `call/cc` for: an early return with a value, escaping out of a
-fold, stopping a `for-each` that has no `break`, and unwinding a hundred
-frames at once.
+fold, stopping a `for-each` that has no `break`, and escaping from the
+bottom of a hundred tail calls.
 
 ## The half that does not, and what it says when you ask
 
@@ -119,12 +121,12 @@ a name that tail-calls itself. Nothing about it is a loop construct.
 
 ## What is left when the syntax goes away
 
-Eleven grammar rules, and four of them are atoms. There is no expression
+Eleven grammar rules, and five of them are atoms. There is no expression
 grammar, no precedence table, no statement forms and no layout pass,
-because an s-expression has none of those -- and no `no_ast_opt` anywhere,
-because there is no rule that could fold wrongly.
+because an s-expression has none of those -- and `no_ast_opt` only on the
+three rules whose node has to survive whatever it holds.
 
-The binder is still fourteen hundred lines. That is the measurement worth
+The binder is still fifteen hundred lines. That is the measurement worth
 having: what a front end costs is not its syntax. Scope resolution alone is
 four different answers to when a name becomes visible -- `let` binds after
 its initializers, `let*` between them, `letrec` before them, and an
@@ -135,9 +137,10 @@ Two details of that library are worth noting:
 
 **Every builtin is an ordinary function**, so a symbol naming one is a
 *value* with nothing special done for it -- `(map car xs)` works because
-`car` is `MakeClosure` of a func like any other. A direct call goes through
-the **Static calls** recipe's cell instead, which is the same optimization
-examples/mini-go describes.
+`car` is `MakeClosure` of a func like any other. A direct call is the same
+`MakeClosure`: every library func is a `Func::singleton` (the **Static
+calls** recipe, the same one examples/mini-go describes), so both share one
+closure.
 
 **Scheme's variadic forms fold at the call site**, where the arity is
 known: `(+ a b c)` becomes two calls to a two-argument `$add`, and
@@ -150,9 +153,10 @@ Lua needs the *count* at run time and Scheme does not.
 ## What Scheme does not share with the VM's defaults
 
 * **Only `#f` is false.** `'()` and `0` are both *true*, where
-  `Value::truthy()` calls both false -- and its comment names precisely
-  this disagreement as the reason it will not decide. So `$true`, and every
-  condition goes through it.
+  `Value::truthy()` calls both false -- its comment fixes nil, false and
+  zero as false and leaves only a string's emptiness and NaN to the
+  language. So Scheme overrides it with `$true`, and every condition goes
+  through it.
 * **A whole inexact number prints with a point.** `to_display` gives `"1"`
   for `1.0`, and Guile gives `1.0`; its comment says a front end that cares
   builds the string, so `$fstr` does.
@@ -197,7 +201,7 @@ and macros, `do`, vectors, characters, ports, `dynamic-wind`, `values` and
 `call-with-values`, variadic lambdas (`(lambda args ...)`) and `apply` --
 both would need a call-site convention change on top of the one this
 front end already writes for `+`/`<`/`list`, which is more than its
-remaining budget covers -- and tail patterns in `case-lambda`.
+remaining budget covers -- and `case-lambda`.
 
 Quietly different:
 
@@ -225,7 +229,7 @@ progress notes to stderr the first time it sees a file and the golden
 becomes a record of the cache's state rather than of the program.
 
 All six samples are clean under ASan/UBSan/LeakSanitizer and under
-`COREIR_GC_STRESS=1` -- `tailcalls.scm` included, though its million
-iterations times a full collection per allocation take real time under
-that lane, which is why `ctest` itself does not run it there and
-`.github/workflows/ci.yml` leaves out `deep_calls` for the same reason.
+`COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.scm`
+included -- its million iterations times a full collection per allocation
+take seconds, not the quadratic blowup that keeps `deep_calls` out of that
+lane.

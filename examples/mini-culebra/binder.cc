@@ -23,13 +23,13 @@
 //     an empty local range, [0, 0)." That is exactly what emit_fn does for
 //     funcs[0].
 //
-// And one recipe no other front end here reaches at all: **Host functions**.
-// culebra's standard library is not part of its language, and it is not
-// part of this IR either -- `println`, `type_of`, `.size()`, `.push()`,
-// `.map()` and the rest are Tag::NativeRef, declared by the module and
-// supplied by the run (stdlib(), at the bottom of this file). `map` in
-// particular calls back into the program, which is the half of the contract
-// a purely outward-facing native would not show.
+// And one recipe that is this front end's whole standard library: **Host
+// functions**. culebra's standard library is not part of its language, and
+// it is not part of this IR either -- `println`, `type_of`, `.size()`,
+// `.push()`, `.map()` and the rest are Tag::NativeRef, declared by the
+// module and supplied by the run (stdlib(), at the bottom of this file).
+// `map` in particular calls back into the program, which is the half of
+// the contract a purely outward-facing native would not show.
 //
 // What this front end does *not* need, and the contrast is the point:
 // mini-js writes `$truthy` and `$seq` in IR because JavaScript disagrees

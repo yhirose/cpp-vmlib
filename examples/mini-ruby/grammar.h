@@ -22,10 +22,10 @@
 //
 // Three things about this grammar are worth knowing.
 //
-// **A method name may end in `?` or `!`.** That is Ruby, and it is why
-// there is no ternary operator here: `x ? a : b` and a predicate named `x?`
-// cannot both be parsed without the whitespace rule Ruby itself resorts
-// to. `if`/`else` is the replacement, and it is one line either way.
+// **A method name may end in `?` or `!`.** That is Ruby, and `ident`
+// binds the `?` into the token only when it is adjacent: `x?` is a
+// predicate, while `x ? a : b` leaves the spaced `?` for `ternary` -- the
+// same line Ruby draws (see README.md).
 //
 // **A `{` after a call is a block; a `{` starting an expression is a
 // hash.** Ruby draws the same line and has the same ambiguity. Here the

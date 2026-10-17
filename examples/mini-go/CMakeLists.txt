@@ -1,6 +1,6 @@
-# The only target that knows what a PEG is. Reuses examples/pl0's vendored
-# peglib.h rather than a second copy of the same 7000-line header -- both
-# front ends use the same library, just different grammars.
+# Reuses examples/pl0's vendored peglib.h rather than a second copy of the
+# same 7000-line header -- every front end uses the same library, just a
+# different grammar.
 add_executable(mini-go main.cc binder.cc)
 target_include_directories(mini-go PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
                                            ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)

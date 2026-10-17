@@ -1,12 +1,13 @@
 // The pass that makes Python parseable by a PEG at all.
 //
 // Python's block structure is its indentation, and a PEG has no state to
-// count columns with -- every other front end here is delimited by braces
-// or by `end`, and needs nothing of the sort. So the source is normalized
-// first: each logical line is stripped of its leading whitespace and
-// preceded by an INDENT (0x01), or by as many DEDENTs (0x02) as it closes,
-// and terminated by a NEWLINE marker (0x03). Those three bytes cannot
-// occur in Python source, which is what makes the rewrite unambiguous.
+// count columns with -- every other front end here is delimited by braces,
+// by `end` or by parentheses, and needs nothing of the sort. So the source
+// is normalized first: each logical line is stripped of its leading
+// whitespace and preceded by an INDENT (0x01), or by as many DEDENTs (0x02)
+// as it closes, and terminated by a NEWLINE marker (0x03). Those three
+// bytes cannot occur in Python source, which is what makes the rewrite
+// unambiguous.
 //
 // Two details are load-bearing:
 //

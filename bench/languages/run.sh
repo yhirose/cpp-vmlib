@@ -28,12 +28,13 @@
 # total, reached the way this language actually reaches it, not a
 # structurally different benchmark.
 #
-# mini-go is the one front end here with a static type system, so its five
-# programs are the only ones that spell out a type: `var total int64 = 0`,
-# `[]int64`, `string`. They are otherwise the same programs -- the same
-# loop, the same append-and-index, the same naive concatenation -- and
-# every one of them also runs unmodified under `go run`, the same
-# relationship examples/mini-go's own samples have to it.
+# mini-go and mini-csharp are the two front ends here with a static type
+# system, so theirs are the only programs that spell out a type: `var total
+# int64 = 0`, `[]int64`, `string` in Go, `long total = 0` in C#. They are
+# otherwise the same programs -- the same loop, the same append-and-index,
+# the same naive concatenation -- and every one of them also runs
+# unmodified under `go run` or `dotnet`, the same relationship each front
+# end's own samples have to it.
 #
 # loop and array fold their running total through `% 1000000007` on every
 # step, not to make the arithmetic harder but to keep the *answer* small:

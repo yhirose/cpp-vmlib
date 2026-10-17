@@ -26,7 +26,7 @@
 // **Python's layout is not a PEG's.** See layout.h: the indentation is
 // turned into explicit INDENT/DEDENT/NEWLINE bytes before the parser runs,
 // because a PEG has no state to count columns with. Every other front end
-// here is delimited by braces or by `end` and needs nothing of the sort.
+// here is delimited by braces, by `end` or by parentheses.
 
 #include "binder.h"
 
@@ -713,8 +713,8 @@ struct Binder {
         "$next",
         // The methods a program actually reaches for. Every one of them is
         // a scan, so every one of them is written here rather than handed
-        // to the host -- which keeps `upper` and `lower` the only two, and
-        // they are here because case is a Unicode table and not a scan.
+        // to the host -- which keeps `upper` and `lower` (ASCII case, in a
+        // host function) the only two.
         "$isspace", "$split", "$strip", "$replace", "$find", "$scount",
         "$startswith", "$endswith", "$alldigits", "$apop", "$ainsert",
         "$aremove",
@@ -1496,8 +1496,8 @@ struct Binder {
     r.finish("$exc");
   }
 
-  // `except Exception` catches everything, which is close enough to
-  // Python's hierarchy for a subset with no inheritance.
+  // `except Exception` catches everything; a class of the program's own
+  // matches its subclasses too. The builtin names have no hierarchy.
   void rt_isexc() {
     RT r(*this);
     const auto [e, name] = r.params("e", "name");
@@ -3294,8 +3294,8 @@ struct Binder {
 
   // try/except/finally. `finally` is a Defer inside the Scope wrapping the
   // try, so it runs however the block is left; `except NAME` re-raises
-  // what it does not match, which is how a subset with no exception
-  // hierarchy gets the selective behaviour right.
+  // what it does not match, which is how the selective behaviour comes
+  // out right without a handler table.
   NodeId emit_try(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);

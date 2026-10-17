@@ -65,10 +65,8 @@ int main(int argc, char** argv) {
 
   vm::RunOptions opts;
   opts.natives = mini_csharp::stdlib();
-  // Left at its default: a tail call reuses the frame, so a runaway
-  // recursion that is *not* in tail position still fails cleanly here
-  // rather than growing the heap -- which is what samples/tailcalls.lua
-  // shows from both sides.
+  // Left at its default, so a runaway recursion fails cleanly here rather
+  // than growing the heap.
 
   coreir::Runtime rt;
   vm::run(p, rt, opts);

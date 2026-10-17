@@ -579,8 +579,8 @@ struct Binder {
   // queues hold waiters, each a {co, value} object: the coroutine parked
   // on the channel and the value it is sending or (once woken) received.
   // $chan_send and $chan_recv are the two operations, as ordinary funcs
-  // built here once and called through the same Static calls cells any
-  // user func is; the `$` keeps them out of the source language's reach.
+  // built here once and, like any user func, `Func::singleton` (the Static
+  // calls recipe); the `$` keeps them out of the source language's reach.
   // The library supplies only the primitives -- CoroCurrent, CoroYield,
   // Enqueue -- and Go's own rendezvous rule (a sender with a receiver
   // waiting hands off and goes on; one without parks until a receiver
@@ -1076,9 +1076,9 @@ struct Binder {
         const FuncInfo& info = func_of(a, callee);
         const std::vector<NodeId> args = emit_call_args(a, ctx, info, callee);
         if (!info.has_ret) fail(a, callee + " does not return a value");
-        // The recipe: read the closure this function's preamble built once
-        // (the cell claimed here, filled in build()), rather than a fresh
-        // MakeClosure at every call site.
+        // The recipe: the callee is a singleton, so this MakeClosure hands
+        // back the one closure the executor built at the first call site
+        // to run, rather than allocating at every visit.
         const NodeId closure =
             b.make_closure(funcs.at(callee).index, empty_cmap);
         return {b.call_value(closure, args), info.ret.type,
@@ -1496,8 +1496,7 @@ struct Binder {
         ++ctx.next_local;
       }
 
-      // The body first: each call it emits claims a cell for its callee
-      // (FuncCtx::cell_for), and each `go` claims cells for its arguments.
+      // The body first: each `go` it emits claims cells for its arguments.
       const Ast* stmtsNode = find_child(fn, "stmts");
       std::vector<NodeId> stmts;
       for (const auto& s : stmtsNode->nodes) {

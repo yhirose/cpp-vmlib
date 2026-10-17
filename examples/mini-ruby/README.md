@@ -25,9 +25,10 @@ Ruby's own distinction between its two kinds of callable is exactly
 
 `samples/procs.rb` is that table, run against `ruby`.
 
-`ensure` is the third thing: a Defer, reached here from a third direction
-after culebra's `defer` and Python's `with` -- which is a reasonable
-argument for the tag being where it is rather than being three features.
+`ensure` is the third thing: a Defer, reached here from yet another
+direction after culebra's `defer`, Python's `with` and JavaScript's
+`finally` -- which is a reasonable argument for the tag being where it is
+rather than being several features.
 
 ## Running
 
@@ -178,7 +179,8 @@ Ruby's `case` tests each `when` value against the subject with `===`,
 which means something different per value: a `Range` asks inclusion, a
 class asks `is_a?`, anything else falls back to `==`. `$caseeq` is that
 three-way branch, so `when 4..10`, `when SomeClass`, and `when 1, 2, 3`
-all work from the one helper -- see `samples/control.rb`.
+all work from the one helper -- `samples/control.rb` covers the range and
+the list.
 
 ## Symbols are strings, quietly
 

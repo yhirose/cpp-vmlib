@@ -9,9 +9,9 @@
 // only thing worth testing: whether the two agree about what the program
 // computes.
 //
-// It is also, incidentally, the largest program in this subset, and its
-// own first test: closures, recursion, `for` over arrays, string building,
-// `typeof`, and mutual recursion between two hoisted declarations.
+// It is also, incidentally, its own first test: closures, recursion,
+// `for` over arrays, string building, `typeof`, and mutual recursion
+// between two hoisted declarations.
 
 function fmtIn(v) {
   // Inside a container a string shows its quotes, the way util.inspect and

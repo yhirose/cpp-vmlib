@@ -6,15 +6,15 @@
 // changes. examples/mini-go proves the numeric half of that list; this one
 // is the rest of it, checked against `dotnet`.
 //
-// Two things here are new to this repository:
+// Two things here are worth the reading:
 //
-// **Inheritance and virtual dispatch.** No other front end has a base
-// class. The mechanism is one link: a class table carries its base's
-// table, and a method lookup walks the chain. `override` is then not a
-// feature at all -- it is what happens when the derived table has an entry
-// the base also has, and the walk stops at the first one. `samples/shapes.cs`
-// calls an override through a base-typed variable, which is the whole
-// point of the exercise.
+// **Inheritance and virtual dispatch**, the C# way round (`virtual`,
+// `override`, `: base(...)`). The mechanism is one link: a class table
+// carries its base's table, and a method lookup walks the chain.
+// `override` is then not a feature at all -- it is what happens when the
+// derived table has an entry the base also has, and the walk stops at the
+// first one. `samples/shapes.cs` calls an override through a base-typed
+// variable, which is the whole point of the exercise.
 //
 // **Types are parsed and erased.** `type` exists in the grammar so that a
 // sample is real C#; nothing downstream reads it. The binder keeps exactly

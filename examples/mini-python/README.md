@@ -79,8 +79,9 @@ positional array and the keyword object, nil when the call had no keywords
 -- and a prologue turns them back into what the source declared: a
 positional argument by position, then by name, then its default; `*rest`
 takes what those did not; `**kwargs` takes what no parameter's name
-claimed; and a call with too many positional arguments or an unclaimed
-keyword raises the exact `TypeError` CPython does, by name and by count,
+claimed; and a call missing a required argument, with too many positional
+arguments, or with an unclaimed keyword raises the exact `TypeError`
+CPython does, by name and by count,
 because the executor's own arity check knows neither. It is the same trade
 examples/mini-ruby makes for a block (parameter 0 is always the block) and
 examples/mini-lua makes for multiple return values (always an array): a
@@ -107,7 +108,7 @@ Three things follow from it once and are then just true:
   convention like anything else.
 
 `samples/functions.py` is the whole of this, checked line for line against
-`python3`, including the exact wording of `TypeError`'s two messages.
+`python3`, including the exact wording of `TypeError`'s three messages.
 
 ## Inheritance, and the walk it is
 
@@ -178,20 +179,7 @@ than running it. `samples/comprehensions.py` traces exactly when a
 generator expression's body runs, including inside `sum(...)` and a `for`
 loop that `break`s early.
 
-## What Python does not share with the VM's defaults
-
-* **Truthiness.** `0`, `""`, `[]`, `{}` and `None` are false.
-  `Value::truthy()` agrees about the first and the last and calls the
-  middle three true -- which its own comment gives as the reason it refuses
-  to decide.
-* **`//` and `%` floor**, where `BinOp::Div` truncates and `BinOp::Mod` is
-  C's; `/` is *always* a float, even on two ints.
-* **`==` across two types is `False`**, where `eval_binop` refuses the
-  comparison.
-* **Comparisons chain.** `a < b <= c` means `a < b and b <= c` with `b`
-  evaluated once, which no left fold can express -- the fold would compare
-  a bool with `c`. Each operand lands in a slot and each link is guarded by
-  the one before it.
+## `with` is a Scope plus a Defer
 
 `Tag::Defer` runs its callable "however it exits -- falling through,
 `Break`, `Continue`, `Return`, or an unwinding throw". That is a context
@@ -214,7 +202,8 @@ exception nothing catches.
 
 ## Python's layout is not a PEG's
 
-Every other front end here is delimited by braces or by `end`. Python's
+Every other front end here is delimited by braces, by `end`, or (mini-scheme)
+by parentheses. Python's
 block structure is its indentation, and a PEG has no state to count columns
 with -- so `layout.h` rewrites the source before the parser sees it: each
 logical line is stripped of its leading whitespace and preceded by an
@@ -252,23 +241,6 @@ continues the logical line, and a `#` or a bracket inside a string is text.
   languages want opposite things from the same tag, which is a good
   argument for it being a tag rather than a policy.
 
-## A builtin method name loses to a user's own
-
-`get` is a dict method and also the most ordinary method name there is, and
-a Python program that defines one is not unusual -- `x.get()` on a class
-instance is the first thing `samples/classes.py` would have broken on. The
-other front ends here resolve such a name at bind time and say so in their
-READMEs; this one asks what the receiver is:
-
-```
-$self = <receiver>
-if typeof($self) == "map" then <the dict method> else <the user's method>
-```
-
-Both arms are static, so only the branch is new. It is the honest answer,
-and the reason it is affordable here and not elsewhere is that the set is
-small: `append`, `keys`, `get`, `upper`, `lower`, `join`.
-
 ## `yield from`, `global`/`nonlocal`, `del`, `assert`, `is`, decorators
 
 Each of these is a small, exact rewrite once the calling convention and
@@ -297,19 +269,20 @@ machinery beyond `CallValue` through the same two-argument convention.
 ## A builtin method name loses to a user's own
 
 Every string, list and dict method a sample reaches for -- `split`,
-`strip`, `replace`, `find`, `count`, `startswith`, `endswith`, `join`;
-`append`, `extend`, `pop`, `insert`, `remove`, `index`, `count`, `reverse`,
-`sort`; `keys`, `items`, `values`, `get`, `update`, `pop` -- is written in
-this front end's own IR, because every one of them is a scan and none
-needs the host. `upper` and `lower` are the two exceptions, because case
-folding is a Unicode table and not a scan, so they alone go to a host
-function. Their trade-off is a name collision `str`/`list`/`dict` do not
-have to worry about: `get` is a dict method and also the most ordinary
-method name a class can give itself, and a program that writes one is not
-unusual -- `x.get()` on a `Bag` instance is the first thing
-`samples/strings.py` checks. The other front ends here resolve such a name
-at bind time and say so in their READMEs; this one asks what the receiver
-is at the call, for every name a builtin might also answer to:
+`strip`, `lstrip`, `rstrip`, `replace`, `find`, `count`, `startswith`,
+`endswith`, `join`; `append`, `extend`, `pop`, `insert`, `remove`, `index`,
+`count`, `reverse`, `sort`; `keys`, `items`, `values`, `get`, `update`,
+`pop` -- is written in this front end's own IR, because every one of them
+is a scan and none needs the host. `upper` and `lower` are the two
+exceptions: they go to a host function, which maps ASCII case only
+(`"ß".upper()` stays `"ß"`). Their trade-off is a name collision
+`str`/`list`/`dict` do not have to worry about: `get` is a dict method and
+also the most ordinary method name a class can give itself, and a program
+that writes one is not unusual -- `x.get()` on a `Bag` instance is what the
+last section of `samples/strings.py` checks. The other front ends here
+resolve such a name at bind time and say so in their READMEs; this one
+asks what the receiver is at the call, for every name a builtin might also
+answer to:
 
 ```
 $self = <receiver>
@@ -355,9 +328,9 @@ or a `return` value from a generator (dropped by `yield from`, refused by
 A decorated *method* is refused rather than silently mis-bound, because
 `class_body` walks a fixed shape (`def` or `pass`) and a decorator there
 would need to know whether it is a plain function, and this subset does
-not have `@staticmethod`/`@classmethod` to tell it. A decorated top-level
-`def` is the one shape this front end supports, and it is the shape every
-`samples/scoping.py` decorator uses.
+not have `@staticmethod`/`@classmethod` to tell it. A decorated `def`
+anywhere outside a class body is supported, and a top-level one is the
+shape every `samples/scoping.py` decorator uses.
 
 Quietly different:
 
@@ -372,8 +345,10 @@ Quietly different:
 * **A context manager cannot suppress an exception.** `__exit__` is called
   with three `None`s and its result is ignored, so `with` here never
   swallows what it did not raise.
-* **`except` matches one name, with `Exception` as the catch-all.** There
-  is no exception hierarchy, since there is no inheritance.
+* **`except` matches one name, with `Exception` as the catch-all.** The
+  builtin exception names have no hierarchy among themselves (no
+  `LookupError`), but a program's own exception classes do: `except
+  AppError` catches its subclasses, as described under Inheritance.
 * **Runtime failures raise this front end's own exceptions**, not the
   executor's traps, for the cases a sample asks about -- `IndexError`,
   `KeyError`, `ZeroDivisionError`, `TypeError`. Anything else the executor

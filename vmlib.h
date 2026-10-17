@@ -2084,8 +2084,9 @@ template <class E> std::optional<E> from_name(std::string_view s);
 // Closure conversion, for a front end whose functions nest lexically.
 //
 // Optional: nothing in `coreir` or `vm` reads it, a binder may ignore it
-// entirely (examples/pl0 does -- its captures travel through calls rather
-// than through nesting, which needs a fixpoint this does not do), and it
+// entirely (examples/pl0 does, and spells out its own fixpoint for
+// captures that travel through calls rather than through nesting -- the
+// case declare_var and note_call/close_over_calls below exist for), and it
 // knows nothing about any parse tree. What it holds is the bookkeeping every
 // front end that *does* nest lexically was writing identically: which
 // binding a name means, which of them a function reads from outside itself,

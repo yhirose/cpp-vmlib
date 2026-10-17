@@ -39,6 +39,6 @@ foreach(s ${SAMPLES})
 endforeach()
 
 if(failed)
-  message(FATAL_ERROR "mini-python sample output does not match culebra")
+  message(FATAL_ERROR "mini-python sample output does not match python3")
 endif()
-message(STATUS "mini-python samples OK (matches culebra)")
+message(STATUS "mini-python samples OK (matches python3)")
