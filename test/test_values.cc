@@ -468,6 +468,69 @@ int main() {
     check_eq(joined(), "int|double|string|bool|nil|array|", "typeof output");
   }
 
+  // --- 12c. TypeOf compared straight against a string literal, or against
+  // another TypeOf, is a test of the tags: the answers the string
+  // comparison gives, either way round, under Eq and Ne, "function" for a
+  // closure, false for a name type_name never answers -- with the operands
+  // still evaluated, left first, and no string built on either side.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    auto ty = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::TypeOf, {v}, p);
+    };
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    auto test = [&](BinOp op, NodeId l, NodeId r) {
+      return print(b.binary(op, l, r, p));
+    };
+    // The value v, once `n` has been printed.
+    auto after = [&](int64_t n, NodeId v) {
+      return b.block({print(b.literal(n, p)), v}, p);
+    };
+    const NodeId body = b.block(
+        {test(BinOp::Eq, ty(after(7, b.literal(1, p))),
+              b.str_literal("int", p)),
+         test(BinOp::Eq, b.str_literal("int", p), ty(b.double_literal(1.5, p))),
+         test(BinOp::Ne, ty(b.nil_literal(p)), b.str_literal("nil", p)),
+         test(BinOp::Ne, b.str_literal("nil", p), ty(b.array_lit({}, p))),
+         test(BinOp::Eq, ty(b.make_closure(1, 0, p)),
+              b.str_literal("function", p)),
+         test(BinOp::Eq, ty(b.literal(1, p)), b.str_literal("integer", p)),
+         test(BinOp::Eq, ty(after(8, b.literal(1, p))),
+              ty(after(9, b.literal(2, p)))),
+         test(BinOp::Eq, ty(b.literal(1, p)), ty(b.double_literal(1.0, p))),
+         test(BinOp::Ne, ty(b.bool_literal(true, p)), ty(b.array_lit({}, p))),
+         test(BinOp::Ne, ty(b.nil_literal(p)), ty(b.nil_literal(p)))},
+        p);
+    m.funcs.push_back({"main", 0, 0, body, {}, {}});
+    m.funcs.push_back({"f", 0, 0, b.nil_literal(p), {}, {}});
+    const std::string failed = run_module(m, "type test");
+    check_eq(failed, "", "type test: unexpected failure");
+    check_eq(joined(),
+             "7|true|false|false|true|true|false|8|9|true|false|true|false|",
+             "type test output");
+    const std::string dump = vm::to_string(vm::compile(m));
+    for (const char* want :
+         {"\ttypein r0, r0, {int}\t", "\ttypein r0, r0, not {nil}\t",
+          "\ttypein r0, r0, {function}\t", "\ttypein r0, r0, {}\t",
+          "\tsametype r0, r0, r1\t", "\tnot r0, r0\t"}) {
+      check(dump.find(want) != std::string::npos,
+            std::string("type test dump lacks '") + want + "'");
+    }
+    check(dump.find("typeof") == std::string::npos &&
+              dump.find("loadconst r0, \"") == std::string::npos,
+          "a type test builds no string");
+    // A host function's tag is not a closure's, and the two still answer
+    // the same name -- which is what SameType compares.
+    check(same_type_name(ValueTag::Func, ValueTag::Native),
+          "a closure and a host function are the same type");
+    check(!same_type_name(ValueTag::Func, ValueTag::Object),
+          "a closure and an object are not");
+  }
+
   // --- 13. Same: identity, where Eq refuses to answer. --------------------
   // a = [1]; b = [1]; c = a; print(same(a, b)); print(same(a, c));
   // print(same(1, 1)); print(same(1, 1.0)); print(same(nil, nil))

@@ -123,7 +123,11 @@ A few things worth knowing before you write a binder:
   and coroutine protocols (`GenResume`, `CoroResume`, `CoroYield`, ...) and
   the job queue (`Enqueue`). Everything else -- map, filter, a channel, a
   Promise -- is a loop or an object your front end writes in its own
-  language.
+  language. `TypeOf` answers a string, but compared straight against a
+  string literal (`TypeOf(x) == "array"`) or against another `TypeOf` it
+  compiles to a test of the tags and builds no string at all; a type
+  string kept in a variable and compared later builds one, and so does
+  each literal it meets.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <climits>
 #include <cmath>
@@ -91,6 +92,10 @@ enum class ValueTag : uint8_t {
   Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator,
   Map, Coroutine, Native
 };
+
+// The last enumerator, for the scans (tags_named) that walk the enum's
+// range -- kLastTag's own reason, for the value model's enum.
+inline constexpr ValueTag kLastValueTag = ValueTag::Native;
 
 // The immediates come first and the heap tags last, so Value::is_heap is a
 // single comparison against Str. Order is load-bearing, not cosmetic.
@@ -1176,7 +1181,12 @@ inline constexpr BinOp kLastBinOp = BinOp::UGe;
 // TypeOf yields the value's tag as a string -- type_name's vocabulary
 // ("int", "double", "string", ...). A dynamic front end needs it for any
 // dispatch its own semantics do on a value's kind; its own type names are
-// its own mapping to write over this one.
+// its own mapping to write over this one. Compared straight against a
+// string literal (Eq or Ne, either side) or against another TypeOf, it
+// builds no string at all: the compiler lowers the comparison to a test of
+// the tags (vm::Op::TypeIn, vm::Op::SameType). A TypeOf stored in a
+// variable and compared later does build one, and so does each literal it
+// is compared to.
 // The numeric conversions and the two float operations a front end cannot
 // write in-language: ToInt truncates a double toward zero (and traps on
 // NaN, an infinity, or a value outside int64's range); ToDouble widens an
@@ -2908,7 +2918,10 @@ class FuncWriter {
   NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
   NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
   // A value's type string compared against a name -- `typ(v)` is what these
-  // two are meant to be handed, not the value itself.
+  // two are meant to be handed, not the value itself. Handed it directly,
+  // the comparison compiles to one test of the tag (vm::Op::TypeIn), so a
+  // helper testing one value many times asks `typ(v)` afresh each time
+  // rather than keeping the string in a local.
   NodeId is(NodeId t, const std::string& s) { return bin(BinOp::Eq, t, S(s)); }
   NodeId isnt(NodeId t, const std::string& s) {
     return bin(BinOp::Ne, t, S(s));
@@ -3040,6 +3053,26 @@ inline const char* type_name(ValueTag t) {
     case ValueTag::Native: return "function";
   }
   return "?";
+}
+
+// type_name read backwards, as a set of tags (bit t for ValueTag t): every
+// tag type_name calls `name` -- two for "function" -- and none for a name it
+// never answers. kAllTags is the whole set, which `!=` complements against.
+inline constexpr uint32_t kAllTags =
+    (1u << (static_cast<uint32_t>(kLastValueTag) + 1)) - 1;
+
+inline uint32_t tags_named(std::string_view name) {
+  uint32_t set = 0;
+  for (uint32_t t = 0; t <= static_cast<uint32_t>(kLastValueTag); ++t) {
+    if (name == type_name(static_cast<ValueTag>(t))) set |= 1u << t;
+  }
+  return set;
+}
+
+// Whether type_name answers two tags alike: the same tag, or two that
+// share a name (a closure and a host function are both "function").
+inline bool same_type_name(ValueTag a, ValueTag b) {
+  return a == b || std::string_view(type_name(a)) == type_name(b);
 }
 
 // Wrapping, always: signed overflow is UB in C++, so the arithmetic goes
@@ -3614,6 +3647,14 @@ enum class Op : uint8_t {
   Collect,      // a = dst   (runs Runtime::collect; the count it freed)
   HeapStats,    // a = dst   (fresh {live_objects, heap_bytes} object)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
+  // A comparison of TypeOf's answer as a question about tags, which is
+  // all it ever asks: no instruction of its own in the IR, but what the
+  // compiler lowers `TypeOf(x) == "name"` (TypeIn) and `TypeOf(x) ==
+  // TypeOf(y)` (SameType) to, so a type test builds no string. V8's
+  // TestTypeOf and SpiderMonkey's TypeofEq fuse the first pattern the
+  // same way.
+  TypeIn,       // a = dst, b = src, c = tag set (coreir::tags_named's bits)
+  SameType,     // a = dst, b = lhs, c = rhs   (coreir::same_type_name)
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
   FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
@@ -5400,6 +5441,8 @@ inline const char* name_of(Op op) {
     case Op::Collect:      return "collect";
     case Op::HeapStats:    return "heapstats";
     case Op::TypeOf:      return "typeof";
+    case Op::TypeIn:      return "typein";
+    case Op::SameType:    return "sametype";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";
     case Op::FMod:        return "fmod";
@@ -5427,6 +5470,27 @@ inline const char* name_of(Op op) {
     case Op::CoroCurrent: return "corocurrent";
   }
   return "?";
+}
+
+// A TypeIn's tag set in type_name's words, each name once ("function" is
+// two tags). A set holding most tags is a `!=`, so it prints as the few it
+// leaves out: "not {nil}" rather than eleven names.
+inline std::string tag_set_text(uint32_t set) {
+  const bool negated =
+      std::popcount(set) > std::popcount(~set & coreir::kAllTags);
+  if (negated) set = ~set & coreir::kAllTags;
+  std::string out = negated ? "not {" : "{";
+  for (uint32_t t = 0; t <= static_cast<uint32_t>(coreir::kLastValueTag);
+       ++t) {
+    const char* name = coreir::type_name(static_cast<coreir::ValueTag>(t));
+    // Only at the name's first tag, so "function" is not printed twice.
+    if ((set >> t & 1u) && std::countr_zero(coreir::tags_named(name)) ==
+                               static_cast<int>(t)) {
+      if (out.back() != '{') out += ",";
+      out += name;
+    }
+  }
+  return out + "}";
 }
 
 }  // namespace detail
@@ -5469,7 +5533,7 @@ inline std::string to_string(const Program& p) {
         case Op::Ge: case Op::BitAnd: case Op::BitOr: case Op::BitXor:
         case Op::Shl: case Op::Shr: case Op::UDiv: case Op::UMod:
         case Op::UShr: case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
-        case Op::Index: case Op::SetIndex:
+        case Op::Index: case Op::SetIndex: case Op::SameType:
           out << " r" << in.a << ", r" << in.b << ", r" << in.c;
           break;
         // The opcode's own name says which storage class this is, so the
@@ -5533,6 +5597,10 @@ inline std::string to_string(const Program& p) {
           break;
         case Op::FieldSet:
           out << " r" << in.a << ", field[" << in.b << "], r" << in.c;
+          break;
+        case Op::TypeIn:
+          out << " r" << in.a << ", r" << in.b << ", "
+              << detail::tag_set_text(static_cast<uint32_t>(in.c));
           break;
         // An intrinsic's operands are its arity's worth, after the
         // destination when it writes one -- compile_intrinsic's layout.
@@ -6077,6 +6145,46 @@ struct FnCompiler {
   }
 
 
+  // Eq or Ne over TypeOf's answer, which asks about tags and nothing else,
+  // so no string is built on either side: against a string literal (either
+  // way round) it is one TypeIn over the tags type_name calls that -- `!=`
+  // takes the complement -- and against another TypeOf it is a SameType,
+  // with a Not for `!=`. Anything else is not a type test, a non-string
+  // literal included: Eq refuses to compare a string with anything else,
+  // and that refusal is the program's.
+  bool is_typeof(NodeId e) const {
+    return m.at(e).tag == Tag::Intrinsic &&
+           view_intrinsic(m, e).id == IntrinsicId::TypeOf;
+  }
+
+  std::optional<int32_t> compile_type_test(const BinaryView& v, uint32_t pos) {
+    if (v.op != BinOp::Eq && v.op != BinOp::Ne) return std::nullopt;
+    const bool ne = v.op == BinOp::Ne;
+    const int32_t base = top;
+    if (is_typeof(v.lhs) && is_typeof(v.rhs)) {
+      const int32_t x = compile_expr(m.child(v.lhs, 0));
+      const int32_t y = compile_expr(m.child(v.rhs, 0));
+      top = base;
+      const int32_t r = alloc();
+      emit(Op::SameType, r, x, y, pos);
+      if (ne) emit(Op::Not, r, r, 0, pos);
+      return r;
+    }
+    const auto [t, s] = is_typeof(v.lhs) ? std::pair{v.lhs, v.rhs}
+                                         : std::pair{v.rhs, v.lhs};
+    if (!is_typeof(t) || m.at(s).tag != Tag::Literal ||
+        m.const_kind(s) != ConstKind::Str) {
+      return std::nullopt;
+    }
+    const uint32_t tags = tags_named(m.str_const(s));
+    const int32_t x = compile_expr(m.child(t, 0));
+    top = base;
+    const int32_t r = alloc();
+    emit(Op::TypeIn, r, x, static_cast<int32_t>(ne ? ~tags & kAllTags : tags),
+         pos);
+    return r;
+  }
+
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
   int32_t compile_expr(NodeId id, bool tail = false) {
@@ -6103,6 +6211,7 @@ struct FnCompiler {
         return compile_try(id);
       case Tag::Binary: {
         auto v = view_binary(m, id);
+        if (const auto r = compile_type_test(v, n.pos)) return *r;
         // A failing division reports at its right operand, so that is the
         // position stamped on the instruction that can trap.
         const uint32_t pos = (v.op == BinOp::Div || v.op == BinOp::Mod)
@@ -7924,6 +8033,15 @@ struct Exec {
           break;
         case Op::TypeOf:
           f.regs[in.a] = Value::make_str(type_name(f.regs[in.b].tag()));
+          break;
+        case Op::TypeIn:
+          f.regs[in.a] = Value::make_bool(
+              (static_cast<uint32_t>(in.c) >>
+               static_cast<uint32_t>(f.regs[in.b].tag())) & 1u);
+          break;
+        case Op::SameType:
+          f.regs[in.a] = Value::make_bool(
+              same_type_name(f.regs[in.b].tag(), f.regs[in.c].tag()));
           break;
         case Op::ArrayPush: {
           const Value& a = f.regs[in.a];
