@@ -5,6 +5,14 @@ on:
     branches: ['**']
   pull_request:
 
+# A bounded build (`cmake --build` reads this). A bare `-j` compiles every
+# translation unit at once, and under the sanitizers one of the larger
+# binders alone needs about 1.5 GB (mini-python's, with Apple clang) -- all
+# of them together killed the compiler on a hosted runner. Four is
+# ubuntu-latest's core count.
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
 jobs:
   # The ordinary build, on both platforms a host is likely to embed this from.
   # Every lane builds the example front ends too: their samples are golden
@@ -19,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
-      - run: cmake --build build -j
+      - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
 
   # Reference counting is the memory model, so "did anything leak" is a
@@ -38,8 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
-      - run: cmake --build build -j
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON -DVMLIB_BUILD_BENCH=OFF
+      - run: cmake --build build
       # deep_calls is excluded: its hundred-thousand live frames each pin a
       # closure, so an every-allocation collect scans O(depth) heap per call
       # -- the quadratic blowup, not a bug the lane could catch. Everything
@@ -57,8 +65,8 @@ jobs:
       # suite put together.
       - run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DVMLIB_BUILD_EXAMPLES=ON
-          -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
-      - run: cmake --build build -j
+          -DVMLIB_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+      - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -103,7 +111,7 @@ jobs:
           sudo mv culebra-*/culebra /usr/local/bin/
           culebra --version
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVMLIB_BUILD_EXAMPLES=ON
-      - run: cmake --build build -j
+      - run: cmake --build build
       # `shell: bash` for its `-o pipefail`: the default `run:` shell does
       # not have it, and both commands below end in a pipe -- without it a
       # crashed bench or a run.sh that failed outright would be reported as
