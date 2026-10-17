@@ -60,16 +60,8 @@ jobs:
         env:
           COREIR_GC_STRESS: '1'
 
-  # Built with clang, not the runner's default g++: under these flags g++
-  # compiles the same translation unit about four times slower (mini-python's
-  # binder, 96 s against clang's 24 s; measured on macOS, g++ 15 against
-  # Apple clang), and the build was this lane's ten minutes. The build lanes
-  # above keep g++.
   sanitizers:
     runs-on: ubuntu-latest
-    env:
-      CC: clang
-      CXX: clang++
     steps:
       - uses: actions/checkout@v4
       # -O1, as AddressSanitizer's own documentation advises: at -O0 the
