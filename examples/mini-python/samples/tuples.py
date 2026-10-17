@@ -56,6 +56,12 @@ try:
 except ValueError as e:
     print("ValueError:", e)
 
+# Python 3.14 counts the values only from a list, a tuple or a dict.
+try:
+    p, q = "abc"
+except ValueError as e:
+    print("ValueError:", e)
+
 
 # enumerate and zip build tuples; a for loop takes them apart.
 xs = ["a", "b", "c"]

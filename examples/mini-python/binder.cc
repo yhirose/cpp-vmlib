@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -716,7 +717,7 @@ struct Binder {
         // ASCII StrUpper/StrLower.
         "$isspace", "$split", "$strip", "$replace", "$find", "$scount",
         "$startswith", "$endswith", "$alldigits", "$apop", "$ainsert",
-        "$aremove",
+        "$aremove", "$afind",
         "$aindex", "$acount", "$areverse", "$asort", "$dpop", "$delitem",
         "$fmt",
         "$specerr",
@@ -1163,8 +1164,7 @@ struct Binder {
     const auto [q] = r.locals("q");
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
-                                      r.S("integer division or modulo by "
-                                          "zero")}))));
+                                      r.S("division by zero")}))));
     r.add(r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))));
     r.add(r.iff(
         r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
@@ -1180,8 +1180,7 @@ struct Binder {
     const auto [m] = r.locals("m");
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
-                                      r.S("integer division or modulo by "
-                                          "zero")}))));
+                                      r.S("division by zero")}))));
     r.add(r.set(m, r.bin(BinOp::Mod, r.L(a), r.L(b))));
     r.add(r.iff(
         r.both(r.bin(BinOp::Ne, r.L(m), r.I(0)),
@@ -1196,12 +1195,23 @@ struct Binder {
   void rt_pow() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [acc, sq, e] = r.locals("acc", "sq", "e");
-    r.add(r.iff(r.either(r.is(r.typ(a), "double"),
-                         r.either(r.is(r.typ(b), "double"),
-                                  r.bin(BinOp::Lt, r.L(b), r.I(0)))),
-                r.ret(r.in(IntrinsicId::Pow, {r.call("$tofloat", {r.L(a)}),
-                                              r.call("$tofloat", {r.L(b)})}))));
+    const auto [acc, sq, e, fa, fb] = r.locals("acc", "sq", "e", "fa", "fb");
+    const double inf = std::numeric_limits<double>::infinity();
+    // A negative exponent always lands in the double branch, so that is
+    // where zero to a negative power -- no value, in either number kind --
+    // is refused. Zero to -inf is inf, the way Python and Pow both say.
+    r.add(r.iff(
+        r.either(r.is(r.typ(a), "double"),
+                 r.either(r.is(r.typ(b), "double"),
+                          r.bin(BinOp::Lt, r.L(b), r.I(0)))),
+        r.blk({r.set(fa, r.call("$tofloat", {r.L(a)})),
+               r.set(fb, r.call("$tofloat", {r.L(b)})),
+               r.iff(r.both(r.bin(BinOp::Eq, r.L(fa), r.D(0.0)),
+                            r.both(r.bin(BinOp::Lt, r.L(fb), r.D(0.0)),
+                                   r.bin(BinOp::Gt, r.L(fb), r.D(-inf)))),
+                     r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
+                                           r.S("zero to a negative power")}))),
+               r.ret(r.in(IntrinsicId::Pow, {r.L(fa), r.L(fb)}))})));
     r.add(r.set(acc, r.I(1)));
     r.add(r.set(sq, r.L(a)));
     r.add(r.set(e, r.L(b)));
@@ -2248,31 +2258,33 @@ struct Binder {
   }
 
   // `a, b = expr`: any iterable, and exactly as many values as targets.
+  // Too many is reported with the count only for a list, a tuple or a
+  // dict: the exact types CPython 3.14 counts, not everything with a len.
   void rt_unpack() {
     RT r(*this);
     const auto [v, n] = r.params("v", "n");
     const auto [a] = r.locals("a");
+    const auto cat = [&](NodeId x, NodeId y) {
+      return r.bin(BinOp::Add, x, y);
+    };
+    const auto expected = [&](const char* what) {
+      return cat(r.S(std::string(what) + " values to unpack (expected "),
+                 r.call("$str", {r.L(n)}));
+    };
+    const auto got = [&] {
+      return cat(r.S(", got "), cat(r.call("$str", {r.len(r.L(a))}), r.S(")")));
+    };
+    const auto sized = r.either(
+        r.is(r.typ(v), "array"),
+        r.either(r.is(r.typ(v), "map"), r.call("$istup", {r.L(v)})));
     r.add(r.set(a, r.call("$tolist", {r.L(v)})));
-    r.add(r.iff(
-        r.bin(BinOp::Lt, r.len(r.L(a)), r.L(n)),
-        r.call("$exc", {r.S("ValueError"),
-                        r.bin(BinOp::Add,
-                              r.bin(BinOp::Add,
-                                    r.S("not enough values to unpack "
-                                        "(expected "),
-                                    r.call("$str", {r.L(n)})),
-                              r.bin(BinOp::Add,
-                                    r.bin(BinOp::Add, r.S(", got "),
-                                          r.call("$str", {r.len(r.L(a))})),
-                                    r.S(")")))})));
+    r.add(r.iff(r.bin(BinOp::Lt, r.len(r.L(a)), r.L(n)),
+                r.call("$exc", {r.S("ValueError"),
+                                cat(expected("not enough"), got())})));
     r.add(r.iff(r.bin(BinOp::Gt, r.len(r.L(a)), r.L(n)),
                 r.call("$exc", {r.S("ValueError"),
-                                r.bin(BinOp::Add,
-                                      r.bin(BinOp::Add,
-                                            r.S("too many values to unpack "
-                                                "(expected "),
-                                            r.call("$str", {r.L(n)})),
-                                      r.S(")"))})));
+                                cat(expected("too many"),
+                                    r.iff(sized, got(), r.S(")")))})));
     r.add(r.ret(r.L(a)));
     r.finish("$unpack");
   }
@@ -2673,7 +2685,8 @@ struct Binder {
     r.finish("$ainsert");
   }
 
-  void rt_aindex() {
+  // The first index holding a value equal to v, or -1.
+  void rt_afind() {
     RT r(*this);
     const auto [a, v] = r.params("a", "v");
     const auto [i] = r.locals("i");
@@ -2682,18 +2695,33 @@ struct Binder {
                r.blk({r.iff(r.call("$eq", {r.idx(r.L(a), r.L(i)), r.L(v)}),
                             r.ret(r.L(i))),
                       r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
-    r.add(r.call(
-        "$exc", {r.S("ValueError"), r.bin(BinOp::Add, r.call("$repr", {r.L(v)}),
-                                          r.S(" is not in list"))}));
-    r.add(r.ret(r.Nil()));
+    r.add(r.ret(r.I(-1)));
+    r.finish("$afind");
+  }
+
+  // `list.index(x)` and `list.remove(x)` search the same way and each
+  // names itself when x is absent.
+  void rt_aindex() {
+    RT r(*this);
+    const auto [a, v] = r.params("a", "v");
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.call("$afind", {r.L(a), r.L(v)})));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                r.call("$exc", {r.S("ValueError"),
+                                r.S("list.index(x): x not in list")})));
+    r.add(r.ret(r.L(i)));
     r.finish("$aindex");
   }
 
   void rt_aremove() {
     RT r(*this);
     const auto [a, v] = r.params("a", "v");
-    r.add(r.call("$apop",
-                 {r.L(a), r.call("$aindex", {r.L(a), r.L(v)}), r.Bo(true)}));
+    const auto [i] = r.locals("i");
+    r.add(r.set(i, r.call("$afind", {r.L(a), r.L(v)})));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
+                r.call("$exc", {r.S("ValueError"),
+                                r.S("list.remove(x): x not in list")})));
+    r.add(r.call("$apop", {r.L(a), r.L(i), r.Bo(true)}));
     r.add(r.ret(r.Nil()));
     r.finish("$aremove");
   }
@@ -2912,8 +2940,8 @@ struct Binder {
     rt_minmax(); rt_next();
     rt_isspace(); rt_split(); rt_strip(); rt_replace(); rt_find();
     rt_scount(); rt_startswith(); rt_endswith(); rt_apop(); rt_ainsert();
-    rt_aindex(); rt_aremove(); rt_acount(); rt_areverse(); rt_asort();
-    rt_dpop(); rt_delitem(); rt_alldigits(); rt_specerr(); rt_fmt();
+    rt_afind(); rt_aindex(); rt_aremove(); rt_acount(); rt_areverse();
+    rt_asort(); rt_dpop(); rt_delitem(); rt_alldigits(); rt_specerr(); rt_fmt();
   }
 
   // A helper call. Every capture-free helper is a Func::singleton (RT::finish

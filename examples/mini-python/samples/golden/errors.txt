@@ -1,5 +1,7 @@
 ok 2
-caught ZeroDivisionError: integer division or modulo by zero
+caught ZeroDivisionError: division by zero
+caught ZeroDivisionError: division by zero
+caught ZeroDivisionError: zero to a negative power
 caught ValueError: something broke
 ['try', 'except TypeError', 'finally', 'after']
 returned ['body', 'finally on return']

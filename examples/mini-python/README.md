@@ -358,6 +358,10 @@ Quietly different:
   where it is a function this front end writes for exactly that purpose).
 * **`sort`/`sorted` are a stable insertion sort**, not Timsort, though the
   stability a program can observe is the same.
+* **`range`, `enumerate`, `zip` and a dict's `keys`/`values`/`items` build
+  lists**, not lazy objects or views. It shows where Python treats the two
+  apart: `a, b = range(3)` reports `got 3`, a count Python gives only for a
+  list, a tuple or a dict.
 
 ## Testing
 
@@ -367,7 +371,12 @@ own README for why an external, independent oracle is what "passing" means
 here.
 
 `samples/gen_golden.sh` regenerates the goldens, by hand and never from the
-build.
+build, and only from Python 3.14. CPython rewords its messages between
+releases -- 3.14 made every division by zero "division by zero" and gave
+"too many values to unpack" its count -- and the words this front end
+raises are 3.14's, so a golden captured from another version would differ
+in wording rather than catch a bug. The script checks the version and
+refuses any other.
 
 All fourteen samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (a full collection at every single allocation) --

@@ -78,6 +78,10 @@ try:
     [1].index(9)
 except ValueError as e:
     print("ValueError:", e)
+try:
+    [1].remove(9)
+except ValueError as e:
+    print("ValueError:", e)
 
 
 # Dict methods.

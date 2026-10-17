@@ -10,6 +10,8 @@ def attempt(f):
 
 print(attempt(lambda: 1 + 1))
 print(attempt(lambda: 1 // 0))
+print(attempt(lambda: 1.5 % 0))
+print(attempt(lambda: 0 ** -1))
 
 def boom():
     raise ValueError("something broke")
