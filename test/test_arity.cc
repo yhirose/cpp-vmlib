@@ -7,8 +7,10 @@
 // declares, read without calling it. Func::rest_param and Tag::CallSpread
 // are the two ends of a count decided at run time -- a callee collecting
 // what is left over, a caller spreading an array -- pinned through every
-// way into an activation.
+// way into an activation, and last crossed with every callee shape against
+// a model of the contract.
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -206,6 +208,113 @@ coreir::Module spread_module(const std::vector<int64_t>& fixed,
                     print(b.varref(VarKind::Local, 1))});
   m.funcs.push_back(f);
   return m;
+}
+
+// #15: one call, written one way and reaching one callee shape. The callee
+// has `fixed` params, then a rest param if `rest`; the arguments are the
+// ints 1..argc, all by CallValue or, with `spread` on, the first `before`
+// of them fixed and the others spread from an array.
+struct CallShape {
+  Via via;
+  int fixed;
+  bool rest;
+  bool lenient;
+  int argc;
+  bool spread;
+  int before;
+};
+
+std::string describe(const CallShape& s) {
+  static const char* const vias[] = {"call", "generator", "tail call"};
+  return std::string(vias[static_cast<int>(s.via)]) + " of f(" +
+         std::to_string(s.fixed) + (s.rest ? " + rest" : "") +
+         (s.lenient ? ", lenient" : "") + ") with " + std::to_string(s.argc) +
+         (s.spread ? " (" + std::to_string(s.before) + " before the spread)"
+                   : "");
+}
+
+// f { print(argcount()); print(typeof(p)) and then print(p) for each fixed
+// p; print(len(r)) and each of r's elements }, called as CallShape says.
+coreir::Module shape_module(const CallShape& s) {
+  using namespace coreir;
+  Module m;
+  Builder bld(m);
+  auto b = bld.at({1, 1});
+  m.capture_maps.push_back({});
+
+  std::vector<NodeId> before, spread;
+  for (int i = 0; i < s.argc; ++i) {
+    (s.spread && i >= s.before ? spread : before).push_back(b.literal(i + 1));
+  }
+  const NodeId callee = b.make_closure(1, 0);
+  const NodeId call = s.spread
+                          ? b.call_spread(callee, before, b.array_lit(spread))
+                          : b.call_value(callee, before);
+  NodeId main_body = call;
+  if (s.via == Via::Generator) {
+    main_body = b.intrinsic(IntrinsicId::GenResume, {call, b.nil_literal()});
+  } else if (s.via == Via::TailCall) {
+    main_body = b.call_value(b.make_closure(2, 0), {});
+  }
+  m.funcs.push_back({"main", 0, 0, main_body, {}, {}});
+
+  auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
+  auto print = [&](NodeId v) { return b.intrinsic(IntrinsicId::Print, {v}); };
+  const int32_t params = s.fixed + (s.rest ? 1 : 0);
+  const int32_t r = s.fixed, i = params;  // the rest param, a loop counter
+  std::vector<std::string> names;
+  for (int32_t k = 0; k < params; ++k) names.push_back("p" + std::to_string(k));
+  names.push_back("i");
+  Func f{"f", params + 1, 0, NodeId{}, names, {}};
+  f.num_params = params;
+  f.rest_param = s.rest;
+  f.lenient_arity = s.lenient;
+  f.is_generator = s.via == Via::Generator;
+  std::vector<NodeId> body{print(b.intrinsic(IntrinsicId::ArgCount, {}))};
+  for (int32_t k = 0; k < s.fixed; ++k) {
+    body.push_back(print(b.intrinsic(IntrinsicId::TypeOf, {L(k)})));
+    body.push_back(print(L(k)));
+  }
+  if (s.rest) {
+    body.push_back(print(b.intrinsic(IntrinsicId::Len, {L(r)})));
+    body.push_back(b.assign(VarKind::Local, i, b.literal(0)));
+    body.push_back(b.make_while(
+        b.binary(BinOp::Lt, L(i), b.intrinsic(IntrinsicId::Len, {L(r)})),
+        b.block({print(b.index(L(r), L(i))),
+                 b.assign(VarKind::Local, i,
+                          b.binary(BinOp::Add, L(i), b.literal(1)))})));
+  }
+  f.body = b.block(body);
+  m.funcs.push_back(f);
+
+  if (s.via == Via::TailCall) {
+    Func t{"t", 0, 0, call, {}, {}};
+    t.tail_calls = true;
+    m.funcs.push_back(t);
+  }
+  return m;
+}
+
+// What that call prints, or the trap it raises, worked out from the arity
+// contract alone: the count is exact, or a minimum with a rest param; a
+// lenient callee fills a missing param with nil; the rest param holds what
+// the fixed params left over, in order.
+std::string shape_expected(const CallShape& s) {
+  const bool fits = s.rest ? s.argc >= s.fixed : s.argc == s.fixed;
+  if (!fits && !s.lenient) {
+    return "trap: f takes " + std::string(s.rest ? "at least " : "") +
+           std::to_string(s.fixed) + " argument(s), given " +
+           std::to_string(s.argc);
+  }
+  std::string out = std::to_string(s.argc) + "|";
+  for (int k = 0; k < s.fixed; ++k) {
+    out += k < s.argc ? "int|" + std::to_string(k + 1) + "|" : "nil|nil|";
+  }
+  if (s.rest) {
+    out += std::to_string(std::max(s.argc - s.fixed, 0)) + "|";
+    for (int k = s.fixed; k < s.argc; ++k) out += std::to_string(k + 1) + "|";
+  }
+  return out;
 }
 
 }  // namespace
@@ -627,6 +736,40 @@ int main() {
     const auto err = verify(m);
     check_eq(err ? *err : "", "CallSpread needs a callee and a spread",
              "spread with no spread: verify message");
+  }
+
+  // --- 15. Every way of writing a call meets every callee shape. ----------
+  // The cases above pin each piece; this crosses them. A tail call's
+  // replaced frame meets a rest param through a spread here, for one, and
+  // a lenient callee meets a spread -- each a path of its own through
+  // take_args and fill_params. 720 calls, a few milliseconds.
+  for (const Via via : {Via::Call, Via::Generator, Via::TailCall}) {
+    for (int fixed = 0; fixed <= 2; ++fixed) {
+      for (const bool rest : {false, true}) {
+        for (const bool lenient : {false, true}) {
+          for (int argc = 0; argc <= 4; ++argc) {
+            for (int before = 0; before <= argc + 1; ++before) {
+              // before == argc + 1 stands for the CallValue form.
+              const bool spread = before <= argc;
+              const CallShape s{via, fixed, rest, lenient, argc, spread,
+                                spread ? before : argc};
+              const std::string what = describe(s);
+              const Module m = shape_module(s);
+              const RunResult r = run_module(m, what);
+              check_eq(r.failure.empty() ? joined() : "trap: " + r.failure,
+                       shape_expected(s), what);
+              check_eq(std::to_string(r.leaked), "0", what + ": leaked");
+              if (via == Via::TailCall) {
+                const std::string bc = vm::to_string(vm::compile(m));
+                const char* op = spread ? "tailcallspread r" : "tailcall r";
+                check_eq(std::to_string(bc.find(op) != std::string::npos),
+                         "1", what + ": compiled as a tail call");
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   if (g_failures != 0) {
