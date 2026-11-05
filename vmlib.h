@@ -33,6 +33,20 @@
 #include <utility>
 #include <vector>
 
+// Keeps a rarely taken path's code out of the function that reaches it, so
+// that function stays small enough to inline where it is hot -- the
+// executor's way into every call, say. A compiler left to itself inlines a
+// helper called from one place regardless, and the hot function around it
+// then grows past its own inlining limit. CPython's Py_NO_INLINE and V8's
+// V8_NOINLINE are the same macro.
+#if defined(__GNUC__) || defined(__clang__)
+#define VMLIB_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define VMLIB_NOINLINE __declspec(noinline)
+#else
+#define VMLIB_NOINLINE
+#endif
+
 // ===== coreir/value.h =====
 
 // A tagged runtime value, reference counted.
@@ -1215,7 +1229,8 @@ enum class IntrinsicId : uint8_t {
   ObjectRemove, // (object, key) -> nil; removing an absent key is a no-op
   // How many arguments the running function was called with -- the count
   // the caller supplied, not num_params. Only interesting under
-  // Func::lenient_arity, where the two can differ; 0 at the entry point.
+  // Func::lenient_arity or Func::rest_param, where the two can differ; 0 at
+  // the entry point.
   ArgCount,     // () -> int
   // Reference identity: whether two values are the same heap object (or,
   // for scalars, the same tag and payload). Eq deliberately refuses two
@@ -1226,9 +1241,12 @@ enum class IntrinsicId : uint8_t {
   // is every parameter (there are no hidden ones: captures travel as cells,
   // and a generator's parameters are the same locals). The one fact a front
   // end needs to check "this callback takes two arguments" before calling
-  // it. A host function answers the arity it was registered with, or -1
-  // when it was registered as taking any count; anything else traps.
-  FnArity,      // (f) -> int, or -1 for a variadic host function
+  // it. A function with a rest param answers -num_params, -(required + 1):
+  // negative is "and any number more", and the one int keeps both facts. A
+  // host function answers the arity it was registered with, or -1 when it
+  // was registered as taking any count -- the same answer, none required;
+  // anything else traps.
+  FnArity,      // (f) -> int, or -(required + 1) for a variadic function
   // The tracing collector, on demand: a full collection right now, on top
   // of the ones the allocators run on their own (Runtime::collect). Answers
   // how many objects it freed. A condemned Object carrying the drop key
@@ -1473,6 +1491,19 @@ struct Func {
   // num_captures == 0 (verify enforces it); a generator function is fine,
   // since the activation is built by the call, not by the closure.
   bool singleton = false;
+  // The last param collects the arguments past the ones before it, as a
+  // fresh Array -- JavaScript's `...rest`, Python's `*args`, Scheme's
+  // `(a . rest)`, Lua's `...` -- so a function takes at least
+  // num_params - 1 arguments and any number more. Fresh on every call,
+  // empty when nothing was left over: it is never an array the caller can
+  // also see. Fewer than num_params - 1 traps, or under lenient_arity
+  // fills the missing ones with nil and leaves the rest param empty.
+  // ArgCount still answers what the caller supplied, and FnArity answers
+  // -num_params -- -(required + 1), the value a host function that takes
+  // any count already answers as -1. Requires num_params >= 1, and not on
+  // the entry function, which no call supplies arguments to (verify
+  // enforces both).
+  bool rest_param = false;
 };
 
 struct Node {
@@ -2963,6 +2994,10 @@ class FuncWriter {
   // choice that comment reserves for the front end.
   bool lenient_arity = true;
   bool singleton = true;
+  // Not a decision this writer makes for anyone: off, the IR's own default.
+  // A helper that collects its trailing arguments -- a `$select`, an
+  // `$apply` -- turns it on, and its last param() is then the rest param.
+  bool rest_param = false;
 
   // Writes everything added so far into `f` as its whole body, with the
   // parameter count, slot count and name table taken from param()/local().
@@ -3002,6 +3037,7 @@ class FuncWriter {
     // -- there is something per call site to forward in, which is what
     // verify() refuses.
     f.singleton = singleton && ncaps == 0;
+    f.rest_param = rest_param;
     f.body = b.scope(0, nlocals, blk(body));
   }
 
@@ -3644,7 +3680,7 @@ enum class Op : uint8_t {
   ObjectRemove, // a = object reg, b = key reg
   ArgCount,     // a = dst   (the frame's supplied argument count)
   Same,         // a = dst, b = lhs, c = rhs   (reference identity)
-  FnArity,      // a = dst, b = src   (num_params, or a native's arity)
+  FnArity,      // a = dst, b = src   (ir.h's FnArity, rest param included)
   Collect,      // a = dst   (runs Runtime::collect; the count it freed)
   HeapStats,    // a = dst   (fresh {live_objects, heap_bytes} object)
   TypeOf,       // a = dst, b = src   (type_name's vocabulary, as a string)
@@ -3941,6 +3977,9 @@ struct Chunk {
   bool lenient_arity = false;
   bool tail_calls = false;
   bool singleton = false;  // Func::singleton
+  bool rest_param = false;  // Func::rest_param
+  // The params before the rest param, which is all of them without one.
+  int32_t fixed_params() const { return num_params - (rest_param ? 1 : 0); }
   std::vector<std::string> local_names;
   std::vector<std::string> capture_names;
   std::vector<Cleanup> cleanups;
@@ -5315,7 +5354,7 @@ inline std::optional<std::string> verify(const Module& m) {
     }
     // The params are the first num_params locals, so a frame that declares
     // more params than locals has the call write past its own locals array
-    // (push_closure fills [0, num_params) of a vector sized num_locals).
+    // (fill_params fills [0, num_params) of a vector sized num_locals).
     // The name-table check above already pins num_locals and num_captures to
     // a real size; num_cells and num_params have no table to be pinned by.
     if (f.num_cells < 0 || f.num_params < 0) {
@@ -5329,6 +5368,10 @@ inline std::optional<std::string> verify(const Module& m) {
     if (f.singleton && f.num_captures != 0) {
       return std::string("singleton func cannot take captures");
     }
+    // The rest param is the last param, so there has to be one.
+    if (f.rest_param && f.num_params < 1) {
+      return std::string("rest-param func declares no params");
+    }
     if (!v.check_node(f.body, f, 0, 0)) return v.err;
   }
   if (!m.funcs[0].capture_names.empty()) {
@@ -5336,6 +5379,11 @@ inline std::optional<std::string> verify(const Module& m) {
   }
   if (m.funcs[0].is_generator) {
     return std::string("entry function cannot be a generator");
+  }
+  // The entry frame is built, not called: no arguments arrive, and nothing
+  // packs a rest param for it.
+  if (m.funcs[0].rest_param) {
+    return std::string("entry function cannot take a rest param");
   }
   return std::nullopt;
 }
@@ -5347,6 +5395,7 @@ inline std::string to_string(const Module& m) {
     d.out << "func #" << i << " " << f.name << "  locals=" << f.num_locals
           << " captures=" << f.num_captures;
     if (f.singleton) d.out << " singleton";
+    if (f.rest_param) d.out << " rest";
     if (!f.capture_names.empty()) {
       d.out << " [";
       for (size_t j = 0; j < f.capture_names.size(); ++j) {
@@ -5503,6 +5552,7 @@ inline std::string to_string(const Program& p) {
     out << "chunk #" << i << " " << ch.name << "  locals=" << ch.num_locals
         << " captures=" << ch.num_captures << " regs=" << ch.num_regs;
     if (ch.singleton) out << " singleton";
+    if (ch.rest_param) out << " rest";
     out << "\n";
     for (size_t j = 0; j < ch.code.size(); ++j) {
       const Insn& in = ch.code[j];
@@ -6523,6 +6573,7 @@ inline Program compile(const coreir::Module& m) {
     ch.lenient_arity = fn.lenient_arity;
     ch.tail_calls = fn.tail_calls;
     ch.singleton = fn.singleton;
+    ch.rest_param = fn.rest_param;
 
     detail::FnCompiler fc{m, ch};
     const uint32_t body_pos = m.at(fn.body).pos;
@@ -7044,48 +7095,81 @@ struct Exec {
   // A call's arguments become an activation's params in two steps, and every
   // way into an activation -- push_closure for a fresh frame or a
   // generator's packaged one, Op::TailCall for the frame it reuses -- takes
-  // both: check_arity while the caller's frame is still whole, then
+  // both: take_args while the caller's frame is still whole, then
   // fill_params into the callee's locals.
   //
+  // What take_args hands fill_params: how many arguments the fixed params
+  // take -- the extras stay with the caller, or go to the rest param -- and,
+  // for a chunk with a rest param, the fresh array of those extras.
+  struct TakenArgs {
+    int32_t fixed = 0;
+    Value rest;
+  };
+
   // The arity contract, stated once: a mismatch traps unless the chunk is
-  // lenient. Answers how many arguments the params window takes -- extras
-  // stay with the caller.
-  int32_t check_arity(const Chunk& ch, int32_t argc, SrcPos pos) {
-    if (argc != ch.num_params && !ch.lenient_arity) {
-      raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
-                     " argument(s), given " + std::to_string(argc),
-                 pos);
-    }
-    return std::min(argc, ch.num_params);
+  // lenient, and a rest param makes the count a minimum. Building the rest
+  // array is the one allocation on the way into an activation, and it
+  // happens here, before anything about the caller's frame has changed --
+  // an allocation can run a destructor, and a destructor is program code.
+  TakenArgs take_args(const Chunk& ch, const Value* args, int32_t argc,
+                      SrcPos pos) {
+    const int32_t fixed = ch.fixed_params();
+    const bool fits = ch.rest_param ? argc >= fixed : argc == fixed;
+    if (!fits && !ch.lenient_arity) arity_mismatch(ch, argc, pos);
+    TakenArgs t;
+    t.fixed = std::min(argc, fixed);
+    if (ch.rest_param) t.rest = rest_array(args, fixed, argc);
+    return t;
   }
 
-  // The params window, filled the one way: the first `taken` locals from
-  // the arguments, and a param nothing arrived for nil rather than Uninit,
-  // so the body can test it without tripping the read-before-init check.
-  // `locals` is already sized to the chunk's num_locals. Nothing here traps
-  // or allocates, so it is safe on a frame halfway through being replaced.
+  // take_args' two slow paths, kept out of it: inlined, their code would
+  // make take_args too big to inline into the call sites, and every call
+  // would pay for a function call and a returned TakenArgs it does not need.
+  [[noreturn]] VMLIB_NOINLINE void arity_mismatch(const Chunk& ch,
+                                                  int32_t argc, SrcPos pos) {
+    raise_trap(ch.name + " takes " + (ch.rest_param ? "at least " : "") +
+                   std::to_string(ch.fixed_params()) +
+                   " argument(s), given " + std::to_string(argc),
+               pos);
+  }
+  VMLIB_NOINLINE static Value rest_array(const Value* args, int32_t from,
+                                         int32_t argc) {
+    std::vector<Value> items;
+    if (argc > from) items.reserve(static_cast<size_t>(argc - from));
+    for (int32_t i = from; i < argc; ++i) items.push_back(args[i]);
+    return Value::make_array(std::move(items));
+  }
+
+  // The params window, filled the one way: the fixed params from the
+  // arguments, a fixed param nothing arrived for nil rather than Uninit --
+  // so the body can test it without tripping the read-before-init check --
+  // and the rest param from take_args' array. `locals` is already sized to
+  // the chunk's num_locals. Nothing here traps or allocates, so it is safe
+  // on a frame halfway through being replaced.
   //
   // A call copies its arguments out of the caller's registers (Arg is
   // const Value); Op::TailCall moves them out of its own argument window
   // (Arg is Value), so a call loop pays no refcount traffic for them.
   template <class Arg>
-  static void fill_params(const Chunk& ch, Arg* args, int32_t taken,
+  static void fill_params(const Chunk& ch, Arg* args, TakenArgs&& t,
                           std::vector<Value>& locals) {
-    for (int32_t i = 0; i < taken; ++i) {
+    for (int32_t i = 0; i < t.fixed; ++i) {
       if constexpr (std::is_const_v<Arg>) {
         locals[static_cast<size_t>(i)] = args[i];
       } else {
         locals[static_cast<size_t>(i)] = std::move(args[i]);
       }
     }
-    for (int32_t i = taken; i < ch.num_params; ++i) {
+    const int32_t fixed = ch.fixed_params();
+    for (int32_t i = t.fixed; i < fixed; ++i) {
       locals[static_cast<size_t>(i)] = Value();
     }
+    if (ch.rest_param) locals[static_cast<size_t>(fixed)] = std::move(t.rest);
   }
 
   // Calling a closure into a fresh frame. Op::TailCall is the other way
   // into an activation -- it reuses this frame rather than pushing one --
-  // and the two share check_arity and fill_params above. The callee gets
+  // and the two share take_args and fill_params above. The callee gets
   // the closure's cells, which are shared rather than pointed at, so
   // nothing here depends on the caller still being alive.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
@@ -7099,7 +7183,7 @@ struct Exec {
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
-    const int32_t taken = check_arity(ch, argc, pos);
+    TakenArgs taken = take_args(ch, args, argc, pos);
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.
@@ -7109,7 +7193,7 @@ struct Exec {
       gf.func = c->func;
       gf.argc = argc;
       gf.locals.assign(static_cast<size_t>(ch.num_locals), Value::uninit());
-      fill_params(ch, args, taken, gf.locals);
+      fill_params(ch, args, std::move(taken), gf.locals);
       gf.regs.resize(static_cast<size_t>(ch.num_regs));
       gf.cells.resize(static_cast<size_t>(ch.num_cells));
       gf.captures = c->cells;
@@ -7119,7 +7203,7 @@ struct Exec {
     check_can_push(pos);
     FramePtr f = make_frame(ch);
     f->captures = c->cells;  // shared, not copied: each element is a Cell
-    fill_params(ch, args, taken, f->locals);
+    fill_params(ch, args, std::move(taken), f->locals);
     f->argc = argc;
     f->ret_reg = ret_reg;
     f->call_pos = pos;
@@ -7569,10 +7653,12 @@ struct Exec {
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& nch = p.chunks[static_cast<size_t>(c->func)];
-    // Checked while this is still the caller's frame: a wrong count
-    // traps at the call, as push_closure's would, rather than from a
-    // half-replaced frame whose pc already names the callee's code.
-    const int32_t taken = check_arity(nch, in.d, pos);
+    // Taken while this is still the caller's frame: a wrong count traps
+    // at the call, as push_closure's would, rather than from a
+    // half-replaced frame whose pc already names the callee's code; and a
+    // rest param's array is built while there is no half-replaced frame
+    // for a destructor its allocation runs to find.
+    TakenArgs taken = take_args(nch, f.regs.data() + in.c, in.d, pos);
     // This frame's exit, in full, before the callee starts: every
     // temporary except the argument window, the locals
     // last-slot-first, then each open scope's owned resolution
@@ -7604,7 +7690,7 @@ struct Exec {
     f.chunk = &nch;
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-    fill_params(nch, f.regs.data() + in.c, taken, f.locals);
+    fill_params(nch, f.regs.data() + in.c, std::move(taken), f.locals);
     f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
     f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
     f.captures = c->cells;
@@ -7926,8 +8012,10 @@ struct Exec {
             fail(f, std::string("cannot take the arity of ") +
                         type_name(v.tag()));
           }
-          const size_t fi = static_cast<size_t>(v.as_closure()->func);
-          f.regs[in.a] = Value::make_int(p.chunks[fi].num_params);
+          const Chunk& fch =
+              p.chunks[static_cast<size_t>(v.as_closure()->func)];
+          f.regs[in.a] = Value::make_int(fch.rest_param ? -fch.num_params
+                                                        : fch.num_params);
           break;
         }
         case Op::NativeRef:

@@ -120,6 +120,61 @@ coreir::Module two_param_module(const std::vector<int64_t>& args,
   return m;
 }
 
+// The three ways into an activation, each of which takes its arguments
+// itself: a call's fresh frame, a generator's packaged activation (run by
+// its first resume), and a tail call's reused frame.
+enum class Via { Call, Generator, TailCall };
+
+// #8: fn (a, ...r) { print(argcount()); print(typeof(a)); print(len(r));
+// for each x in r: print(x) }, reached `via` with the given arguments.
+coreir::Module rest_module(const std::vector<int64_t>& args, bool lenient,
+                           Via via) {
+  using namespace coreir;
+  Module m;
+  Builder bld(m);
+  auto b = bld.at({1, 1});
+  m.capture_maps.push_back({});
+
+  std::vector<NodeId> arg_nodes;
+  for (const int64_t v : args) arg_nodes.push_back(b.literal(v));
+  // In main for a call or a generator; in a tail-calling go-between for a
+  // tail call, since the entry frame's own tail call is an ordinary one.
+  const NodeId call = b.call_value(b.make_closure(1, 0), arg_nodes);
+  NodeId main_body = call;
+  if (via == Via::Generator) {
+    main_body = b.intrinsic(IntrinsicId::GenResume, {call, b.nil_literal()});
+  } else if (via == Via::TailCall) {
+    main_body = b.call_value(b.make_closure(2, 0), {});
+  }
+  m.funcs.push_back({"main", 0, 0, main_body, {}, {}});
+
+  auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
+  auto print = [&](NodeId v) { return b.intrinsic(IntrinsicId::Print, {v}); };
+  Func f{"f", 3, 0, NodeId{}, {"a", "r", "i"}, {}};
+  f.num_params = 2;
+  f.rest_param = true;
+  f.lenient_arity = lenient;
+  f.is_generator = via == Via::Generator;
+  f.body = b.block(
+      {print(b.intrinsic(IntrinsicId::ArgCount, {})),
+       print(b.intrinsic(IntrinsicId::TypeOf, {L(0)})),
+       print(b.intrinsic(IntrinsicId::Len, {L(1)})),
+       b.assign(VarKind::Local, 2, b.literal(0)),
+       b.make_while(
+           b.binary(BinOp::Lt, L(2), b.intrinsic(IntrinsicId::Len, {L(1)})),
+           b.block({print(b.index(L(1), L(2))),
+                    b.assign(VarKind::Local, 2,
+                             b.binary(BinOp::Add, L(2), b.literal(1)))}))});
+  m.funcs.push_back(f);
+
+  if (via == Via::TailCall) {
+    Func t{"t", 0, 0, call, {}, {}};
+    t.tail_calls = true;
+    m.funcs.push_back(t);
+  }
+  return m;
+}
+
 }  // namespace
 
 extern "C" {
@@ -345,6 +400,114 @@ int main() {
     m.funcs.push_back(f);
     const auto err = coreir::verify(m);
     check_eq(err ? *err : "", "", "params fit locals: accepted");
+  }
+
+  // --- 8. A rest param collects the arguments past the fixed ones. --------
+  // The same three counts reach it every way into an activation: extras
+  // collected in order, none collected as an empty array, and too few
+  // trapping with a message that says the count is a minimum.
+  for (const auto& [via, name] :
+       {std::pair{Via::Call, "rest call"},
+        std::pair{Via::Generator, "rest generator"},
+        std::pair{Via::TailCall, "rest tail call"}}) {
+    const std::string what = name;
+    {
+      const RunResult r = run_module(rest_module({1, 2, 3}, false, via), what);
+      expect_clean(r, what + ": extras");
+      check_eq(joined(), "3|int|2|2|3|", what + ": extras output");
+    }
+    {
+      const RunResult r = run_module(rest_module({1}, false, via), what);
+      expect_clean(r, what + ": none over");
+      check_eq(joined(), "1|int|0|", what + ": none over output");
+    }
+    {
+      const RunResult r = run_module(rest_module({}, false, via), what);
+      check_eq(r.failure, "f takes at least 1 argument(s), given 0",
+               what + ": too few message");
+    }
+  }
+  {
+    // The tail-call case above has to have taken the TailCall path, or the
+    // reused frame's own filling went untested.
+    const vm::Program prog =
+        vm::compile(rest_module({1, 2, 3}, false, Via::TailCall));
+    check_eq(std::to_string(vm::to_string(prog).find("tailcall") !=
+                            std::string::npos),
+             "1", "rest tail call: compiled as a TailCall");
+  }
+
+  // --- 9. Lenient with a rest param: too few is nil and an empty rest. ----
+  {
+    const RunResult r = run_module(rest_module({}, true, Via::Call), "lenient");
+    expect_clean(r, "rest lenient");
+    check_eq(joined(), "0|nil|0|", "rest lenient output");
+  }
+
+  // --- 10. FnArity of a variadic function: -(required + 1). ---------------
+  // fnarity(f (a, ...r)) is -2, and fnarity(g (...r)) is -1 -- the answer
+  // a host function registered as taking any count already gives.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    auto print_arity = [&](int32_t fn) {
+      return b.intrinsic(
+          IntrinsicId::Print,
+          {b.intrinsic(IntrinsicId::FnArity, {b.make_closure(fn, 0, p)}, p)},
+          p);
+    };
+    m.funcs.push_back(
+        {"main", 0, 0, b.block({print_arity(1), print_arity(2)}, p), {}, {}});
+    Func f{"f", 2, 0, NodeId{}, {"a", "r"}, {}};
+    f.num_params = 2;
+    f.rest_param = true;
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+    Func g{"g", 1, 0, NodeId{}, {"r"}, {}};
+    g.num_params = 1;
+    g.rest_param = true;
+    g.body = b.block({}, p);
+    m.funcs.push_back(g);
+
+    const RunResult r = run_module(m, "rest fnarity");
+    expect_clean(r, "rest fnarity");
+    check_eq(joined(), "-2|-1|", "rest fnarity output");
+    check_eq(std::to_string(to_string(m).find("func #1 f  locals=2 captures=0 "
+                                              "rest") != std::string::npos),
+             "1", "rest: the IR dump says so");
+    check_eq(std::to_string(vm::to_string(vm::compile(m)).find(" rest\n") !=
+                            std::string::npos),
+             "1", "rest: the bytecode dump says so");
+  }
+
+  // --- 11. verify(): where a rest param cannot be. ------------------------
+  {
+    // With no params there is no last param to collect into.
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 0, 0, b.block({}, p), {}, {}});
+    Func f{"f", 0, 0, NodeId{}, {}, {}};
+    f.rest_param = true;
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+    const auto err = verify(m);
+    check_eq(err ? *err : "", "rest-param func declares no params",
+             "rest with no params: verify message");
+  }
+  {
+    // The entry frame is built, not called, so nothing would pack it.
+    Module m;
+    Builder b(m);
+    Func main_fn{"main", 1, 0, NodeId{}, {"r"}, {}};
+    main_fn.num_params = 1;
+    main_fn.rest_param = true;
+    main_fn.body = b.block({}, p);
+    m.funcs.push_back(main_fn);
+    const auto err = verify(m);
+    check_eq(err ? *err : "", "entry function cannot take a rest param",
+             "rest on entry: verify message");
   }
 
   if (g_failures != 0) {
