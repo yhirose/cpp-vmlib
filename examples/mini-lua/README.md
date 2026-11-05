@@ -53,6 +53,7 @@ and every call site adjusts:
 | a multiple assignment (`local a, b = f()`) | `$nth` per name |
 | the last item of an expression list | the array, appended to the ones before it |
 | a table constructor's last field (`{f()}`) | `$spread`, since the count is not known until it runs |
+| a call's last argument (`g(a, f())`) | the array, spread into the call -- a `CallSpread`, the top-level README's **Variadic calls** |
 | `(f())` | truncated to one value, which is what Lua's parentheses mean |
 | `return f(x)` | the array, handed straight back -- **which is what keeps a tail call a tail call** |
 
@@ -68,6 +69,18 @@ the IR's calling convention is fixed-arity by design, and putting a
 variadic one on top costs an allocation. The hot loop of a tail-recursive
 function pays nothing *extra*, because a returned array is what it hands
 back either way.
+
+**`...` is the same array, arriving instead of leaving.** A vararg
+function's `...` is its last param, a `Func::rest_param` under a name no
+identifier can spell, and `...` in an expression is that array, marked as
+several values the way a call's results are -- so every row above applies
+to it unchanged: `local a = ...` takes the first, `{...}` spreads it into
+a table, `f(...)` spreads it into a call (and `return f(...)` stays a tail
+call), and `return ...` hands it back. Nothing writes to it; what keeps it
+copies it. `select`, `table.pack` and `table.unpack` are helpers over the
+same arrays. One function reads every call's argument list, so a
+method, a `__call` and `pcall` expand their last argument as a plain call
+does.
 
 ## What Lua does not share with the VM's defaults
 
@@ -218,10 +231,8 @@ A trap the executor raises itself -- `{} < 1` -- is caught by the same
 
 ## What is absent, and what quietly differs
 
-Absent: `goto`, varargs (`...` and `select`) -- both would need a
-call-site convention change on top of the results-array one already here,
-which is more than this front end's remaining budget covers -- string
-patterns and `string.format`, `os`, `io` beyond `io.write`, integer
+Absent: `goto`, string patterns and `string.format`, `os`, `io` beyond
+`io.write`, integer
 overflow's wrap to float, weak tables, `__gc`, and the remaining
 metamethods (`__lt`/`__le`/`__concat`/`__len`/`__unm`/`__div`/`__mod`/
 `__pow`).
@@ -236,17 +247,17 @@ Quietly different:
   samples use `ipairs` or a single key so the two cannot disagree.
 * **`tostring` of a table or a function has no address.** Lua prints
   `table: 0x...`, which nothing could reproduce.
-* **A call in a *non-final* argument position to a user function is
-  truncated to one value**, which is Lua's rule; a call in the final
-  position expands only for the library functions that take their
-  arguments as one array (`print`, `io.write`). A user function's arity is
-  fixed at its call site.
+* **Most library functions take their arguments one value each.** An
+  expanding last argument -- `string.rep(s, f())` -- is cut to its first
+  value there, where Lua would pass them all. `print`, `io.write`,
+  `select`, `table.pack` and `pcall` take every value, as any call to a
+  function of the program's own does.
 * **A library name is not a value**, except `print`, `type` and `tostring`.
   Those three are host functions that take the convention every Lua
   function value does -- arguments one by one, results as an array -- so
   `local p = print; p("x", 1)` prints and `type(print)` answers. (Host
-  functions rather than IR ones because `print` takes any number of
-  arguments, which nothing under the fixed-arity convention can.) `table`,
+  functions, registered as taking any number of arguments, because that
+  is what `print` takes.) `table`,
   `string`, `math`, `io` and `coroutine` are namespaces this front end
   matches syntactically, not tables it could hand back.
 * **A string has no metatable**, so `("x"):rep(3)` is resolved by name at
@@ -254,7 +265,7 @@ Quietly different:
 
 ## Testing
 
-`ctest -R mini-lua-samples` runs the eight samples and requires each one's
+`ctest -R mini-lua-samples` runs the nine samples and requires each one's
 output to match a golden file captured from `lua` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
@@ -262,7 +273,7 @@ for why an external, independent oracle is what "passing" means here.
 build. Both sides are run from the samples directory with a bare filename,
 because Lua's error messages name the chunk as it was given.
 
-All eight samples are clean under ASan/UBSan/LeakSanitizer and under
+All nine samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.lua`
 included -- a full collection per allocation costs it seconds, not the
 quadratic blowup that keeps `deep_calls` out of that lane.

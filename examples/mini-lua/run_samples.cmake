@@ -6,7 +6,8 @@
 # front end here reaches, plus the calling convention it writes over the
 # IR's fixed-arity one.
 
-set(SAMPLES basics tables closures tailcalls coroutines metatables operators errors)
+set(SAMPLES basics tables closures tailcalls coroutines metatables operators errors
+            varargs)
 
 set(dir ${SRC}/samples)
 set(failed 0)

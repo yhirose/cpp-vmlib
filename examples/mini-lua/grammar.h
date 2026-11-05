@@ -13,9 +13,9 @@
 // `__add`/`__sub`/`__mul`/`__eq`/`__tostring`/`__call`, `if`/`elseif`/
 // `else`, `while`, `repeat`/`until`, both `for` forms (including the real
 // generic-`for` protocol, not just `ipairs`/`pairs`), `break`, multiple
-// assignment and multiple return, the operator set including `//`, `%`,
-// `^` and `..`, and the standard-library slice the samples need. What it
-// does not: `goto`, varargs (`...`), `string` patterns, `os`/`io` beyond
+// assignment and multiple return, varargs (`...`), the operator set
+// including `//`, `%`, `^` and `..`, and the standard-library slice the
+// samples need. What it does not: `goto`, `string` patterns, `os`/`io` beyond
 // `io.write`, integer division by zero's own error, weak tables, `__gc`,
 // and the remaining metamethods -- see README.md.
 //
@@ -75,7 +75,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   dotname    <- '.' _ ident                                  { no_ast_opt }
   colonname  <- ':' _ ident                                  { no_ast_opt }
   funcbody   <- '(' _ params ')' _ block 'end' __
-  params     <- (ident (',' _ ident)*)? ','? _               { no_ast_opt }
+  params     <- (vararg / ident (',' _ ident)* (',' _ vararg)?)? ','? _
+                                                             { no_ast_opt }
+  vararg     <- '...' _                                      { no_ast_opt }
 
   ifstat     <- 'if' __ expr 'then' __ block elseifpart* elsepart? 'end' __
   elseifpart <- 'elseif' __ expr 'then' __ block
@@ -120,8 +122,8 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   dotsfx     <- '.' _ ident                                  { no_ast_opt }
   indexsfx   <- '[' _ expr ']' _                             { no_ast_opt }
 
-  primaryexp <- funcexpr / tablector / float / number / string / literal
-              / ident / paren
+  primaryexp <- vararg / funcexpr / tablector / float / number / string
+              / literal / ident / paren
   paren      <- '(' _ expr ')' _                             { no_ast_opt }
   funcexpr   <- 'function' __ funcbody                       { no_ast_opt }
 

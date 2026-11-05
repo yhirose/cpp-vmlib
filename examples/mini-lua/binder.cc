@@ -120,6 +120,10 @@ bool is_string_method(const std::string& n) {
 struct FnInfo {
   std::string name = "?";
   std::vector<int32_t> params;
+  // A vararg function's `...`: its last param, a Func::rest_param under a
+  // name no Lua identifier can be, holding the extra arguments as an
+  // array. -1 for a function that takes none.
+  int32_t varargs = -1;
   const Ast* body = nullptr;
 };
 
@@ -178,9 +182,11 @@ struct Binder {
       fns[static_cast<size_t>(f)].params.push_back(rs.declare("self", f));
     }
     for (const auto& p : body.nodes[0]->nodes) {
-      const int32_t v = rs.declare(std::string(p->token), f);
+      const bool va = p->tag == "vararg"_;
+      const int32_t v = rs.declare(va ? "..." : std::string(p->token), f);
       decl_of[p.get()] = v;
       fns[static_cast<size_t>(f)].params.push_back(v);
+      if (va) fns[static_cast<size_t>(f)].varargs = v;
     }
     resolve_block(*body.nodes[1], f);
     rs.pop_scope();
@@ -309,6 +315,18 @@ struct Binder {
       case "funcexpr"_:
         resolve_fn(a, *a.nodes[0], fn, "<anon>", false);
         return;
+      case "vararg"_: {
+        // The enclosing function's own -- a nested function does not see
+        // its parent's, which is Lua's rule too. The main chunk is vararg
+        // in Lua, and given no arguments here (emit_val).
+        const int32_t va = fns[static_cast<size_t>(fn)].varargs;
+        if (va >= 0) {
+          ref_of[&a] = va;
+        } else if (fn != 0) {
+          fail(a, "cannot use '...' outside a vararg function");
+        }
+        return;
+      }
       case "namedfield"_:
         resolve_expr(*a.nodes[1], fn);
         return;
@@ -340,6 +358,7 @@ struct Binder {
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$setmt",  "$getmt", "$spread", "$error",
         "$mt", "$mm", "$add", "$subm", "$mulm",
+        "$select", "$pack", "$unpack",
     };
     return names;
   }
@@ -829,12 +848,74 @@ struct Binder {
     r.finish("$spread");
   }
 
+  // select('#', ...) is how many values follow; select(n, ...) is the
+  // values from the nth of them on, counting from the end when n is
+  // negative. `all` is every argument, n included, so that n may be among
+  // the values an expanding argument brought (`select(...)`).
+  void rt_select() {
+    RT r(*this);
+    const auto [all] = r.params("all");
+    const auto [n, k, len] = r.locals("n", "k", "len");
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(all)), r.I(0)),
+                r.b.make_throw(r.S("bad argument #1 to 'select' (number "
+                                   "expected, got no value)"))));
+    r.add(r.set(n, r.idx(r.L(all), r.I(0))));
+    r.add(r.set(len, r.bin(BinOp::Sub, r.len(r.L(all)), r.I(1))));
+    r.add(r.iff(r.both(r.is(r.typ(n), "string"),
+                       r.bin(BinOp::Eq, r.L(n), r.S("#"))),
+                r.ret(r.arr({r.L(len)}))));
+    r.add(r.set(k, r.L(n)));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(0)),
+                r.set(k, r.bin(BinOp::Add, r.L(len),
+                               r.bin(BinOp::Add, r.L(k), r.I(1))))));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(1)),
+                r.b.make_throw(
+                    r.S("bad argument #1 to 'select' (index out of range)"))));
+    r.add(r.iff(r.bin(BinOp::Gt, r.L(k), r.L(len)), r.ret(r.arr({}))));
+    // The kth value is all[k], n being all[0].
+    r.add(r.ret(r.in(IntrinsicId::ArraySlice,
+                     {r.L(all), r.L(k), r.len(r.L(all))})));
+    r.finish("$select");
+  }
+
+  // table.pack: the values at 1..n, and n itself -- which is what keeps a
+  // nil among them countable.
+  void rt_pack() {
+    RT r(*this);
+    const auto [vals] = r.params("vals");
+    const auto [t] = r.locals("t");
+    r.add(r.set(t, r.in(IntrinsicId::MapNew, {})));
+    r.add(r.call("$spread", {r.L(t), r.I(1), r.L(vals)}));
+    r.add(r.call("$set", {r.L(t), r.S("n"), r.len(r.L(vals))}));
+    r.add(r.ret(r.L(t)));
+    r.finish("$pack");
+  }
+
+  // table.unpack(t, i, j): t[i]..t[j] as values, i defaulting to 1 and j
+  // to #t. Each read is `$get`, so __index answers for a missing one, as
+  // in Lua 5.4.
+  void rt_unpack() {
+    RT r(*this);
+    const auto [t, i, j] = r.params("t", "i", "j");
+    const auto [out, k] = r.locals("out", "k");
+    r.add(r.iff(r.is(r.typ(i), "nil"), r.set(i, r.I(1))));
+    r.add(r.iff(r.is(r.typ(j), "nil"), r.set(j, r.call("$len", {r.L(t)}))));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(k, r.L(i)));
+    r.add(r.wh(r.bin(BinOp::Le, r.L(k), r.L(j)),
+               r.blk({r.push(r.L(out), r.call("$get", {r.L(t), r.L(k)})),
+                      r.set(k, r.bin(BinOp::Add, r.L(k), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$unpack");
+  }
+
   void emit_runtime() {
     rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
     rt_insert(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
     rt_mt(); rt_mm();
+    rt_select(); rt_pack(); rt_unpack();
     rt_arith("$add", BinOp::Add, "__add");
     rt_arith("$subm", BinOp::Sub, "__sub");
     rt_arith("$mulm", BinOp::Mul, "__mul");
@@ -949,23 +1030,65 @@ struct Binder {
            s.nodes.back()->tag == "methodsfx"_;
   }
 
-  // An expression list as one array of values -- Lua's rule that only the
-  // *last* expression expands to all of its results.
-  NodeId emit_exprlist(const Ast& list, FnCtx& ctx) {
-    const SrcPos p = pos_of(list);
-    auto b = Builder(m).at(p);
+  // Expressions under Lua's rule for the end of a list: every one but the
+  // last is one value, and the last, when it has several -- a call, or
+  // `...` -- is all of them. `rest` is that last one's array of values,
+  // and invalid when it is one value too.
+  struct Values {
     std::vector<NodeId> firsts;
-    for (size_t i = 0; i + 1 < list.nodes.size(); ++i) {
-      firsts.push_back(emit_expr(*list.nodes[i], ctx));
+    NodeId rest;
+  };
+
+  Values emit_values(const std::vector<std::shared_ptr<Ast>>& xs,
+                     FnCtx& ctx) {
+    Values out;
+    for (size_t i = 0; i < xs.size(); ++i) {
+      if (i + 1 < xs.size()) {
+        out.firsts.push_back(emit_expr(*xs[i], ctx));
+        continue;
+      }
+      const Val v = emit_val(*xs[i], ctx);
+      if (v.multi) {
+        out.rest = v.n;
+      } else {
+        out.firsts.push_back(v.n);
+      }
     }
-    const Ast& last = *list.nodes.back();
-    const Val lv = emit_val(last, ctx);
-    if (!lv.multi) {
-      firsts.push_back(lv.n);
-      return b.array_lit(firsts);
-    }
-    if (firsts.empty()) return lv.n;
-    return helper("$append", {b.array_lit(firsts), lv.n}, p);
+    return out;
+  }
+
+  // Those values as one array.
+  NodeId values_array(const Values& vs, SrcPos p) {
+    auto b = Builder(m).at(p);
+    if (!vs.rest.valid()) return b.array_lit(vs.firsts);
+    if (vs.firsts.empty()) return vs.rest;
+    return helper("$append", {b.array_lit(vs.firsts), vs.rest}, p);
+  }
+
+  // Those values as a call's arguments, after `before` -- a method's
+  // receiver, or the table a __call metamethod is handed. An expanding
+  // last argument is spread (Tag::CallSpread): how many values it has is
+  // not known until it runs.
+  NodeId call_with(NodeId callee, std::vector<NodeId> before,
+                   const Values& args, SrcPos p) {
+    auto b = Builder(m).at(p);
+    before.insert(before.end(), args.firsts.begin(), args.firsts.end());
+    if (args.rest.valid()) return b.call_spread(callee, before, args.rest);
+    return b.call_value(callee, before);
+  }
+
+  // A call's argument list, whichever form it takes: `(a, b)`, or the
+  // single string of `f"lit"` (a strargsfx around it). Every call reads
+  // its arguments here, a library one included.
+  Values emit_args(const Ast* arglist, FnCtx& ctx) {
+    if (arglist == nullptr) return {};
+    if (arglist->tag == "args"_) return emit_values(arglist->nodes, ctx);
+    return {{emit_expr(*arglist->nodes[0], ctx)}, NodeId{}};
+  }
+
+  // An expression list as one array of values.
+  NodeId emit_exprlist(const Ast& list, FnCtx& ctx) {
+    return values_array(emit_values(list.nodes, ctx), pos_of(list));
   }
 
   Val emit_val(const Ast& a, FnCtx& ctx) {
@@ -1004,6 +1127,14 @@ struct Binder {
       case "paren"_:
         // Lua's parentheses truncate a call to one value, deliberately.
         return {emit_expr(*a.nodes[0], ctx)};
+      case "vararg"_: {
+        // The array the rest param collected, which nothing writes to:
+        // whatever keeps it -- a table constructor, select, a spread call
+        // -- copies it. The main chunk's has nothing in it.
+        const auto it = ref_of.find(&a);
+        if (it == ref_of.end()) return {b.array_lit({}), true};
+        return {read_var(it->second, ctx, p), true};
+      }
       case "funcexpr"_:
         return {emit_closure(fn_of.at(&a), ctx, p)};
       case "notexp"_:
@@ -1111,12 +1242,14 @@ struct Binder {
                              {T, b.str_literal(std::string(f.nodes[0]->token)),
                               emit_expr(*f.nodes[1], ctx)},
                              p));
-      } else if (i + 1 == a.nodes.size() && is_call_expr(f)) {
-        // The last positional field, when it is a call, contributes every
-        // value the call returned -- Lua's rule, and the same one
-        // emit_exprlist applies to an expression list.
+      } else if (i + 1 == a.nodes.size()) {
+        // The last positional field, when it is a call or `...`,
+        // contributes every value it has -- Lua's rule, and the same one
+        // emit_values applies to an expression list.
+        const Val v = emit_val(f, ctx);
         out.push_back(
-            helper("$spread", {T, b.literal(next), emit_val(f, ctx).n}, p));
+            v.multi ? helper("$spread", {T, b.literal(next), v.n}, p)
+                    : helper("$set", {T, b.literal(next++), v.n}, p));
       } else {
         out.push_back(
             helper("$set", {T, b.literal(next++), emit_expr(f, ctx)}, p));
@@ -1153,20 +1286,12 @@ struct Binder {
                         {recv, emit_expr(*sfx.nodes[0], ctx)}, p)};
           break;
         case "callsfx"_: {
-          std::vector<NodeId> args;
-          if (!sfx.nodes.empty() && sfx.nodes[0]->tag == "args"_) {
-            for (const auto& c : sfx.nodes[0]->nodes) {
-              args.push_back(emit_expr(*c, ctx));
-            }
-          } else if (!sfx.nodes.empty()) {
-            args.push_back(emit_expr(*sfx.nodes[0], ctx));  // f"lit"
-          }
+          const Values args =
+              emit_args(sfx.nodes.empty() ? nullptr : sfx.nodes[0].get(), ctx);
           const int32_t fv = ctx.alloc_local("$fn");
           const NodeId F = b.varref(VarKind::Local, fv, p);
           const int32_t mv = ctx.alloc_local("$callmm");
           const NodeId M = b.varref(VarKind::Local, mv, p);
-          std::vector<NodeId> callargs{F};
-          callargs.insert(callargs.end(), args.begin(), args.end());
           cur = {b.block(
                      {b.assign(VarKind::Local, fv, recv, p),
                       b.make_if(
@@ -1183,38 +1308,38 @@ struct Binder {
                                                   b.intrinsic(IntrinsicId::TypeOf,
                                                               {M}, p),
                                                   b.str_literal("nil", p), p),
-                                         b.call_value(M, callargs, p),
-                                         b.call_value(F, args, p), p)},
+                                         call_with(M, {F}, args, p),
+                                         call_with(F, {}, args, p), p)},
                               p),
-                          b.call_value(F, args, p), p)},
+                          call_with(F, {}, args, p), p)},
                      p),
                  true};
           break;
         }
         default: {  // methodsfx
           const std::string name(sfx.nodes[0]->token);
-          std::vector<NodeId> args;
-          for (size_t k = 1; k < sfx.nodes.size(); ++k) {
-            for (const auto& c : sfx.nodes[k]->nodes) {
-              args.push_back(emit_expr(*c, ctx));
-            }
-          }
+          Values args = emit_args(
+              sfx.nodes.size() > 1 ? sfx.nodes[1].get() : nullptr, ctx);
           if (is_string_method(name)) {
             // A string has no metatable here, so `("x"):rep(3)` is
-            // resolved by name -- README.md lists the consequence.
-            args.insert(args.begin(), recv);
-            cur = {string_call(name, args, p), false};
+            // resolved by name -- README.md lists the consequence. Like
+            // every library call here, it takes its arguments one value
+            // each.
+            std::vector<NodeId> one_each{recv};
+            one_each.insert(one_each.end(), args.firsts.begin(),
+                            args.firsts.end());
+            if (args.rest.valid()) {
+              one_each.push_back(helper("$one", {args.rest}, p));
+            }
+            cur = {string_call(name, one_each, p), false};
             break;
           }
           const int32_t t = ctx.alloc_local("$self");
           const NodeId T = b.varref(VarKind::Local, t, p);
-          std::vector<NodeId> call_args{T};
-          call_args.insert(call_args.end(), args.begin(), args.end());
           cur = {b.block({b.assign(VarKind::Local, t, recv, p),
-                          b.call_value(
-                              helper("$get",
-                                     {T, b.str_literal(name, p)}, p),
-                              call_args, p)},
+                          call_with(helper("$get",
+                                           {T, b.str_literal(name, p)}, p),
+                                    {T}, args, p)},
                          p),
                  true};
           break;
@@ -1247,26 +1372,22 @@ struct Binder {
     if (callsfx == nullptr) {
       fail(prim, "'" + g + "' is only supported as a call here");
     }
+    // The arguments are read once, the way any call reads them, and each
+    // library function takes them in the shape it needs: one value each
+    // (a0, the expanding last argument cut to its first), or all of them
+    // as one array (all), which is how `print(f())` prints every result.
     const Ast* arglist =
         callsfx->nodes.empty() ? nullptr : callsfx->nodes[0].get();
-    std::vector<NodeId> args;
-    if (arglist != nullptr && arglist->tag == "args"_) {
-      for (const auto& c : arglist->nodes) args.push_back(emit_expr(*c, ctx));
-    }
+    const Values vals = emit_args(arglist, ctx);
+    std::vector<NodeId> args = vals.firsts;
+    if (vals.rest.valid()) args.push_back(helper("$one", {vals.rest}, p));
     const auto a0 = [&](size_t k) {
       return k < args.size() ? args[k] : b.nil_literal(p);
     };
-    i = after;
-
-    // Everything that takes all of its arguments takes them as one array,
-    // which is how `print(f())` expands a call's results the way Lua does.
-    const auto all = [&]() -> NodeId {
-      if (arglist == nullptr || arglist->tag != "args"_ ||
-          arglist->nodes.empty()) {
-        return b.array_lit({}, p);
-      }
-      return emit_exprlist(*arglist, ctx);
+    const auto all = [&] {
+      return values_array(vals, arglist != nullptr ? pos_of(*arglist) : p);
     };
+    i = after;
 
     if (mem.empty()) {
       if (g == "print") return {native("print", {all()}, p), false};
@@ -1286,7 +1407,8 @@ struct Binder {
                        p),
                 false};
       }
-      if (g == "pcall") return {emit_pcall(args, ctx, p), true};
+      if (g == "pcall") return {emit_pcall(vals, ctx, p), true};
+      if (g == "select") return {helper("$select", {all()}, p), true};
       // rawset/rawget: `$set`/`$get` without the metamethod detour --
       // `__newindex`'s own thunk needs one, on pain of calling itself.
       if (g == "rawset") {
@@ -1329,6 +1451,10 @@ struct Binder {
       if (mem == "insert") {
         return {helper("$insert", {a0(0), a0(1)}, p), false};
       }
+      if (mem == "pack") return {helper("$pack", {all()}, p), false};
+      if (mem == "unpack") {
+        return {helper("$unpack", {a0(0), a0(1), a0(2)}, p), true};
+      }
     }
     if (g == "string" && is_string_method(mem)) {
       return {string_call(mem, args, p), false};
@@ -1345,17 +1471,31 @@ struct Binder {
 
   // pcall: a TryCatch, which is what it is. The value of the whole thing
   // is the arm that ran, so both arms build the array Lua answers with.
-  NodeId emit_pcall(const std::vector<NodeId>& args, FnCtx& ctx, SrcPos p) {
+  // pcall(f, ...): f called with the rest, by the rule any call's
+  // arguments follow -- f included, when it is the first of the expanding
+  // last argument's values (`pcall(...)`).
+  NodeId emit_pcall(const Values& args, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     const int32_t exc = ctx.alloc_local("$exc");
-    std::vector<NodeId> callargs(args.begin() + (args.empty() ? 0 : 1),
-                                 args.end());
-    const NodeId body = helper(
-        "$append",
-        {b.array_lit({b.bool_literal(true)}),
-         b.call_value(args.empty() ? b.nil_literal() : args[0], callargs)},
-        p);
+    NodeId call;
+    if (!args.firsts.empty()) {
+      call = call_with(
+          args.firsts[0], {},
+          {{args.firsts.begin() + 1, args.firsts.end()}, args.rest}, p);
+    } else if (args.rest.valid()) {
+      const int32_t vv = ctx.alloc_local("$vals");
+      const NodeId V = b.varref(VarKind::Local, vv);
+      call = b.block(
+          {b.assign(VarKind::Local, vv, args.rest),
+           b.call_spread(
+               helper("$one", {V}, p), {},
+               helper("$select", {values_array({{b.literal(2)}, V}, p)}, p))});
+    } else {
+      call = b.call_value(b.nil_literal(), {});
+    }
+    const NodeId body =
+        helper("$append", {b.array_lit({b.bool_literal(true)}), call}, p);
     const NodeId handler =
         b.array_lit({b.bool_literal(false), b.varref(VarKind::Local, exc)});
     const NodeId out = b.make_try(exc, body, handler);
@@ -1776,6 +1916,7 @@ struct Binder {
     fn.local_names = ctx.names();
     fn.num_cells = rs.num_cells(f);
     fn.lenient_arity = true;  // Lua's own arity rule: missing args are nil
+    fn.rest_param = fi.varargs >= 0;
     // The headline. Lua guarantees that `return f(...)` reuses the frame,
     // so samples/tailcalls.lua recurses far past max_call_depth and has to
     // still work.
