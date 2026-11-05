@@ -8,8 +8,9 @@
 // catch; a native can call back into the program (NativeCall::call), and a
 // throw the callee lets out travels through the native to the caller's
 // handler; natives are callable wherever a closure is (Enqueue, Defer, the
-// drop key); and every native value is gone from the heap when the run
-// ends.
+// drop key); a CallSpread reaches one with its own copy of the arguments,
+// whatever the native's callbacks do to the array spread; and every native
+// value is gone from the heap when the run ends.
 
 #include <cstdio>
 #include <stdexcept>
@@ -110,6 +111,16 @@ bool native_twice(NativeCall& c) {
   return true;
 }
 
+// callsum(f, ...): calls f, then sums the rest -- reading its arguments
+// after a callback that may have changed whatever they were spread from.
+bool native_callsum(NativeCall& c) {
+  c.call(c.arg(0), nullptr, 0);
+  int64_t total = 0;
+  for (int32_t i = 1; i < c.argc; ++i) total += c.args[i].as_int();
+  c.result = Value::make_int(total);
+  return true;
+}
+
 // count(): the ctx pointer, verbatim -- a host's own state.
 bool native_count(NativeCall& c) {
   auto* n = static_cast<int*>(c.ctx);
@@ -139,6 +150,7 @@ vm::RunOptions host() {
                {"sum", -1, &native_sum, nullptr},
                {"boom", 0, &native_boom, nullptr},
                {"twice", 2, &native_twice, nullptr},
+               {"callsum", -1, &native_callsum, nullptr},
                {"count", 0, &native_count, &g_count},
                {"pair", 2, &native_pair, nullptr},
                {"say", 1, &native_say, nullptr}};
@@ -394,6 +406,59 @@ int main() {
     m.funcs.push_back({"main", 0, 0, pr(b, b.native_ref(0, p)), {}, {}});
     const auto err = verify(m);
     check_eq(err ? *err : "", "native index out of range", "verify: index");
+  }
+
+  // --- 9. CallSpread reaches a native too, and copies what it spreads. ----
+  // sum(1, ...[2, 3]); add(...[1, 2]); add(...[1, 2, 3]) traps by count.
+  // Then xs = [grow, 1, 2] with grow() { arrayconcat(xs, arrayfill(1000, 0)) }:
+  // callsum(...xs) calls grow, which moves every element of xs, and only
+  // then reads its other two arguments -- still 1 and 2, since a native
+  // reads its arguments in place and they must not be xs's own elements.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({{VarKind::Cell, 3}});
+    m.funcs.push_back({});
+    m.funcs.push_back(
+        {"grow", 0, 1,
+         b.intrinsic(IntrinsicId::ArrayConcat,
+                     {b.varref(VarKind::Capture, 0, p),
+                      b.intrinsic(IntrinsicId::ArrayFill,
+                                  {b.literal(1000, p), b.literal(0, p)}, p)},
+                     p),
+         {}, {"xs"}});
+    auto cell = [&](int32_t i) { return b.varref(VarKind::Cell, i, p); };
+    auto ints = [&](std::vector<int64_t> vs) {
+      std::vector<NodeId> items;
+      for (const int64_t v : vs) items.push_back(b.literal(v, p));
+      return b.array_lit(items, p);
+    };
+    m.funcs[0] = {
+        "main", 1, 0,
+        b.block({hoist(b, 0, "sum"), hoist(b, 1, "add"),
+                 hoist(b, 2, "callsum"),
+                 pr(b, b.call_spread(cell(0), {b.literal(1, p)}, ints({2, 3}),
+                                     p)),
+                 pr(b, b.call_spread(cell(1), {}, ints({1, 2}), p)),
+                 b.make_try(0, b.call_spread(cell(1), {}, ints({1, 2, 3}), p),
+                            pr(b, b.index(b.varref(VarKind::Local, 0, p),
+                                          b.str_literal("message", p), p)),
+                            p),
+                 b.assign(VarKind::Cell, 3,
+                          b.array_lit({b.make_closure(1, 0, p),
+                                       b.literal(1, p), b.literal(2, p)},
+                                      p),
+                          p),
+                 pr(b, b.call_spread(cell(2), {}, cell(3), p)),
+                 pr(b, b.intrinsic(IntrinsicId::Len, {cell(3)}, p)),
+                 // xs holds grow, which holds xs's cell: break the cycle.
+                 b.assign(VarKind::Cell, 3, b.nil_literal(p), p)},
+                p),
+        {"e"}, {}};
+    m.funcs[0].num_cells = 4;
+    check_eq(run_module(m, "spread", host()), "", "spread: failure");
+    check_eq(joined(), "6|3|add takes 2 argument(s), given 3|3|1003|",
+             "spread output");
   }
 
   if (g_failures != 0) {

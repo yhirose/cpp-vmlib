@@ -1041,6 +1041,16 @@ enum class Tag : uint8_t {
   // examples/pl0 does exactly that.
   MakeClosure,  // a = func index, b = capture map index
   CallValue,    // children: callee, args...
+  // CallValue with the argument count decided at run time: the args as they
+  // are, then every element of the last child, which must be an Array when
+  // it runs. Fixed arguments first and one spread last is the shape
+  // JavaScript's f(a, ...xs), Python's f(a, *xs), Lua's f(a, g()) and
+  // Scheme's (apply f a xs) share; a spread anywhere else is an array the
+  // front end builds first (ArrayLit, ArrayConcat). The elements are copied
+  // at the call, so the callee never holds the array itself -- a rest param
+  // is a fresh one -- and nothing done to it during the call reaches the
+  // arguments. In tail position it is a tail call by CallValue's own rules.
+  CallSpread,   // children: callee, args..., spread
   // Containers. Index and SetIndex dispatch on what the receiver turns out
   // to be, rather than there being a separate pair per container type: a[0]
   // and o["k"] differ only in what a and o are, and a front end that wants
@@ -1597,6 +1607,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::Intrinsic: return -1;  // per IntrinsicId
     case Tag::MakeClosure: return 0;
     case Tag::CallValue:   return -1;  // callee, then args
+    case Tag::CallSpread:  return -1;  // callee, args, then the spread
     case Tag::ArrayLit:    return -1;
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
     case Tag::Index:       return 2;
@@ -1697,6 +1708,7 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::Switch:
     case Tag::MakeClosure:
     case Tag::CallValue:
+    case Tag::CallSpread:
     case Tag::ArrayLit:
     case Tag::ObjectLit:
     case Tag::Index:
@@ -2015,6 +2027,13 @@ public:
     children.insert(children.end(), args.begin(), args.end());
     return emit(Tag::CallValue, 0, p, 0, 0, children);
   }
+  NodeId call_spread(NodeId callee, const std::vector<NodeId>& args,
+                     NodeId spread, SrcPos p) {
+    std::vector<NodeId> children{callee};
+    children.insert(children.end(), args.begin(), args.end());
+    children.push_back(spread);
+    return emit(Tag::CallSpread, 0, p, 0, 0, children);
+  }
   // The host function Module::natives[index] names, as a callable value.
   NodeId native_ref(int32_t index, SrcPos p) {
     return emit(Tag::NativeRef, 0, p, index, 0, {});
@@ -2113,6 +2132,10 @@ public:
     }
     NodeId call_value(NodeId callee, const std::vector<NodeId>& args) {
       return b().call_value(callee, args, p_);
+    }
+    NodeId call_spread(NodeId callee, const std::vector<NodeId>& args,
+                       NodeId spread) {
+      return b().call_spread(callee, args, spread, p_);
     }
     NodeId native_ref(int32_t index) { return b().native_ref(index, p_); }
 
@@ -3648,6 +3671,11 @@ enum class Op : uint8_t {
   // rather than being pushed on top of it. The instructions after it (the
   // exits and Ret the compiler emits regardless) run only on the call path.
   TailCall,     // a = dst, b = callee reg, c = first arg reg, d = arg count
+  // ir.h's CallSpread: CallValue's operands, with d counting only the fixed
+  // args and the array to spread in the register right after them, c + d.
+  // TailCallSpread is to CallSpread what TailCall is to CallValue.
+  CallSpread,      // a = dst, b = callee reg, c = first arg reg, d = fixed
+  TailCallSpread,  // a = dst, b = callee reg, c = first arg reg, d = fixed
   CellNew,      // a = cell index   (fresh box, holding nil)
   LoadNil,      // a = dst
   Move,         // a = dst, b = src
@@ -4706,6 +4734,7 @@ inline const char* name_of(Tag t) {
     case Tag::Intrinsic:   return "intrinsic";
     case Tag::MakeClosure: return "makeclosure";
     case Tag::CallValue:   return "callvalue";
+    case Tag::CallSpread:  return "callspread";
     case Tag::ArrayLit:    return "arraylit";
     case Tag::ObjectLit:   return "objectlit";
     case Tag::Index:       return "index";
@@ -5079,6 +5108,11 @@ struct Verifier {
       case Tag::CallValue:
         if (n.num_children < 1) return fail("CallValue needs a callee");
         break;
+      case Tag::CallSpread:
+        if (n.num_children < 2) {
+          return fail("CallSpread needs a callee and a spread");
+        }
+        break;
       case Tag::Scope:
         if (!check_scope(id, n, f)) return false;
         break;
@@ -5178,6 +5212,7 @@ struct Verifier {
       case Tag::FieldGet:
       case Tag::FieldSet:
       case Tag::CallValue:  // callee, then args -- all value positions
+      case Tag::CallSpread:
         for (uint32_t i = 0; i < n.num_children; ++i) {
           if (!operand(i)) return false;
         }
@@ -5313,6 +5348,9 @@ struct Dumper {
         break;
       case Tag::CallValue:
         out << "callvalue";
+        break;
+      case Tag::CallSpread:
+        out << "callspread";
         break;
       case Tag::ArrayLit:  out << "arraylit"; break;
       case Tag::ObjectLit: out << "objectlit"; break;
@@ -5465,6 +5503,8 @@ inline const char* name_of(Op op) {
     case Op::MakeClosure: return "makeclosure";
     case Op::CallValue:   return "callvalue";
     case Op::TailCall:    return "tailcall";
+    case Op::CallSpread:  return "callspread";
+    case Op::TailCallSpread: return "tailcallspread";
     case Op::CellNew:     return "cellnew";
     case Op::LoadNil:     return "loadnil";
     case Op::Move:        return "move";
@@ -5606,6 +5646,11 @@ inline std::string to_string(const Program& p) {
         case Op::TailCall:
           out << " r" << in.a << ", r" << in.b << ", args r" << in.c << ".."
               << (in.c + in.d);
+          break;
+        case Op::CallSpread:
+        case Op::TailCallSpread:
+          out << " r" << in.a << ", r" << in.b << ", args r" << in.c << ".."
+              << (in.c + in.d) << ", spread r" << (in.c + in.d);
           break;
         case Op::CellNew:
           out << " cell[" << in.a << "]";
@@ -6364,16 +6409,20 @@ struct FnCompiler {
         emit(Op::FieldGet, r, recv, v.slot, n.pos, v.name_const);
         return r;
       }
-      case Tag::CallValue: {
+      case Tag::CallValue:
+      case Tag::CallSpread: {
         // The callee and the arguments go into one contiguous run of
         // registers, so the instruction needs only where the run starts and
         // how long it is. `top` is already a stack, so "contiguous" costs
-        // nothing to arrange -- just do not reset it between operands.
+        // nothing to arrange -- just do not reset it between operands. A
+        // CallSpread's array is one more operand at the end of the run, and
+        // its count is of the args before it.
+        const bool spread = n.tag == Tag::CallSpread;
         const int32_t base = top;
         const int32_t callee = compile_expr(m.child(id, 0));
-        const int32_t argc = static_cast<int32_t>(n.num_children) - 1;
+        const int32_t operands = static_cast<int32_t>(n.num_children) - 1;
         const int32_t args_at = top;
-        for (int32_t i = 0; i < argc; ++i) {
+        for (int32_t i = 0; i < operands; ++i) {
           compile_operand(m.child(id, static_cast<uint32_t>(i + 1)));
         }
         top = base;
@@ -6383,8 +6432,10 @@ struct FnCompiler {
         // the Ret a Return or the body's end emits -- stays emitted: when
         // the replacement does not happen (a native or generator callee,
         // the entry frame) TailCall is a CallValue and that code runs.
-        emit(tail && tail_call_ok() ? Op::TailCall : Op::CallValue, r, callee,
-             args_at, n.pos, argc);
+        const bool replace = tail && tail_call_ok();
+        const Op op = spread ? (replace ? Op::TailCallSpread : Op::CallSpread)
+                             : (replace ? Op::TailCall : Op::CallValue);
+        emit(op, r, callee, args_at, n.pos, operands - (spread ? 1 : 0));
         return r;
       }
       default:
@@ -7632,11 +7683,57 @@ struct Exec {
   // so dispatch carries straight on after the call. Switch and ArraySlice
   // are the long cases still inline.
   //
-  // A TailCall: the callee replaces this frame when it can, and is an
-  // ordinary call when it cannot.
-  void tail_call(Frame& f, const Insn& in) {
+  // CallSpread's arguments as one run: the d fixed ones from the registers,
+  // then every element of the array in the register after them. Copied,
+  // because the call must not read them out of the array in place: a native
+  // reads its arguments for its whole run, and even a closure's take_args
+  // can run a destructor before it has read them all -- either can change
+  // the array, and pushing onto it can move every element.
+  std::vector<Value> spread_args(const Frame& f, const Insn& in) {
+    const Value& s = f.regs[static_cast<size_t>(in.c + in.d)];
+    if (!s.is_array()) {
+      fail(f, std::string("cannot spread ") + type_name(s.tag()));
+    }
+    const std::vector<Value>& items = s.as_array()->items;
+    // An argument count is an int32_t from here on.
+    if (items.size() > static_cast<size_t>(INT32_MAX - in.d)) {
+      fail(f, "too many arguments to spread");
+    }
+    std::vector<Value> args;
+    args.reserve(static_cast<size_t>(in.d) + items.size());
+    args.insert(args.end(), f.regs.begin() + in.c,
+                f.regs.begin() + in.c + in.d);
+    args.insert(args.end(), items.begin(), items.end());
+    return args;
+  }
+
+  // A CallSpread: the arguments spread_args laid out, called the way
+  // CallValue calls its window.
+  void call_spread(Frame& f, const Insn& in) {
     const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value callee = f.regs[in.b];
+    std::vector<Value> args = spread_args(f, in);
+    ++f.pc;
+    push_closure(callee, args.data(), static_cast<int32_t>(args.size()), in.a,
+                 pos);
+  }
+
+  // A TailCallSpread: a TailCall over the arguments spread_args laid out.
+  void tail_call_spread(Frame& f, const Insn& in) {
+    std::vector<Value> args = spread_args(f, in);
+    tail_call(f, in, &args);
+  }
+
+  // A TailCall: the callee replaces this frame when it can, and is an
+  // ordinary call when it cannot. The arguments are the instruction's own
+  // register window, or -- for a TailCallSpread -- `spread`, a run of their
+  // own that no register has to keep alive.
+  void tail_call(Frame& f, const Insn& in,
+                 std::vector<Value>* spread = nullptr) {
+    const SrcPos pos = pos_at(*f.chunk, f.pc);
+    const Value callee = f.regs[in.b];
+    Value* const args = spread ? spread->data() : f.regs.data() + in.c;
+    const int32_t argc = spread ? static_cast<int32_t>(spread->size()) : in.d;
     // The replacement needs a callee whose activation is a plain frame
     // (a native runs on the spot, a generator call builds an object),
     // and a frame that is not the program's own (the entry frame's
@@ -7648,7 +7745,7 @@ struct Exec {
              .is_generator;
     if (!replace) {
       ++f.pc;
-      push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+      push_closure(callee, args, argc, in.a, pos);
       return;
     }
     const ClosureObj* c = callee.as_closure();
@@ -7658,7 +7755,7 @@ struct Exec {
     // half-replaced frame whose pc already names the callee's code; and a
     // rest param's array is built while there is no half-replaced frame
     // for a destructor its allocation runs to find.
-    TakenArgs taken = take_args(nch, f.regs.data() + in.c, in.d, pos);
+    TakenArgs taken = take_args(nch, args, argc, pos);
     // This frame's exit, in full, before the callee starts: every
     // temporary except the argument window, the locals
     // last-slot-first, then each open scope's owned resolution
@@ -7675,9 +7772,12 @@ struct Exec {
     // and may tail-call again, so a buffer Exec owned would be
     // clobbered under them -- and copying them out would be an
     // allocation per call, on the one path that exists to make a call
-    // loop cheap.
-    clear_refs(f, 0, static_cast<size_t>(in.c));
-    clear_refs(f, static_cast<size_t>(in.c + in.d), f.regs.size());
+    // loop cheap. A TailCallSpread's arguments are already a copy of their
+    // own, so it keeps no window and every register goes.
+    const size_t keep_from = spread ? 0 : static_cast<size_t>(in.c);
+    const size_t keep_to = spread ? 0 : static_cast<size_t>(in.c + in.d);
+    clear_refs(f, 0, keep_from);
+    clear_refs(f, keep_to, f.regs.size());
     release_range(f, 0, static_cast<int32_t>(f.locals.size()));
     while (!f.owned_marks.empty()) leave_scope_owned(f);
     // The new activation, in place: ret_reg, gen_self, coro_self and
@@ -7690,11 +7790,11 @@ struct Exec {
     f.chunk = &nch;
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-    fill_params(nch, f.regs.data() + in.c, std::move(taken), f.locals);
+    fill_params(nch, args, std::move(taken), f.locals);
     f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
     f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
     f.captures = c->cells;
-    f.argc = in.d;
+    f.argc = argc;
     // A tail call is the loop back-edge of a program written as calls:
     // the same interrupt point Jump gives a While.
     coreir_rt_poll();
@@ -8424,6 +8524,14 @@ struct Exec {
         }
         case Op::TailCall: {
           tail_call(f, in);
+          continue;
+        }
+        case Op::CallSpread: {
+          call_spread(f, in);
+          continue;
+        }
+        case Op::TailCallSpread: {
+          tail_call_spread(f, in);
           continue;
         }
         case Op::Throw: {

@@ -4,11 +4,15 @@
 // with ArgCount reporting what the caller actually passed. The generator
 // path packages its arguments separately, so it is pinned separately.
 // FnArity is the other side of the same count: what a function value
-// declares, read without calling it.
+// declares, read without calling it. Func::rest_param and Tag::CallSpread
+// are the two ends of a count decided at run time -- a callee collecting
+// what is left over, a caller spreading an array -- pinned through every
+// way into an activation.
 
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "vmlib.h"
@@ -172,6 +176,35 @@ coreir::Module rest_module(const std::vector<int64_t>& args, bool lenient,
     t.tail_calls = true;
     m.funcs.push_back(t);
   }
+  return m;
+}
+
+// #12: fn (a, b) { print(argcount()); print(a); print(b) }, called as
+// f(fixed..., ...[items]) -- or, with `array` off, as f(fixed..., ...5).
+coreir::Module spread_module(const std::vector<int64_t>& fixed,
+                             const std::vector<int64_t>& items,
+                             bool array = true) {
+  using namespace coreir;
+  Module m;
+  Builder bld(m);
+  auto b = bld.at({1, 1});
+  m.capture_maps.push_back({});
+
+  std::vector<NodeId> fixed_nodes, item_nodes;
+  for (const int64_t v : fixed) fixed_nodes.push_back(b.literal(v));
+  for (const int64_t v : items) item_nodes.push_back(b.literal(v));
+  const NodeId spread = array ? b.array_lit(item_nodes) : b.literal(5);
+  m.funcs.push_back(
+      {"main", 0, 0, b.call_spread(b.make_closure(1, 0), fixed_nodes, spread),
+       {}, {}});
+
+  auto print = [&](NodeId v) { return b.intrinsic(IntrinsicId::Print, {v}); };
+  Func f{"f", 2, 0, NodeId{}, {"a", "b"}, {}};
+  f.num_params = 2;
+  f.body = b.block({print(b.intrinsic(IntrinsicId::ArgCount, {})),
+                    print(b.varref(VarKind::Local, 0)),
+                    print(b.varref(VarKind::Local, 1))});
+  m.funcs.push_back(f);
   return m;
 }
 
@@ -508,6 +541,92 @@ int main() {
     const auto err = verify(m);
     check_eq(err ? *err : "", "entry function cannot take a rest param",
              "rest on entry: verify message");
+  }
+
+  // --- 12. CallSpread: the fixed args, then the array's elements. ---------
+  // The callee sees one argument list either way, the arity check counts it
+  // after the spread, and a spread that is not an array traps.
+  for (const auto& [fixed, items, name] :
+       {std::tuple{std::vector<int64_t>{1}, std::vector<int64_t>{2}, "mixed"},
+        std::tuple{std::vector<int64_t>{}, std::vector<int64_t>{1, 2},
+                   "all spread"},
+        std::tuple{std::vector<int64_t>{1, 2}, std::vector<int64_t>{},
+                   "empty spread"}}) {
+    const std::string what = std::string("spread ") + name;
+    const RunResult r = run_module(spread_module(fixed, items), what);
+    expect_clean(r, what);
+    check_eq(joined(), "2|1|2|", what + " output");
+  }
+  {
+    const RunResult r = run_module(spread_module({1}, {2, 3}), "spread arity");
+    check_eq(r.failure, "f takes 2 argument(s), given 3",
+             "spread arity: counted after the spread");
+  }
+  {
+    const RunResult r =
+        run_module(spread_module({1}, {}, false), "spread not an array");
+    check_eq(r.failure, "cannot spread int", "spread not an array: message");
+  }
+  {
+    // Both dumps name it, and a call outside tail position stays a call.
+    const Module m = spread_module({1}, {2});
+    check_eq(std::to_string(to_string(m).find("callspread") !=
+                            std::string::npos),
+             "1", "spread: the IR dump says so");
+    const std::string bc = vm::to_string(vm::compile(m));
+    check_eq(std::to_string(bc.find("callspread r") != std::string::npos &&
+                            bc.find("tailcallspread") == std::string::npos),
+             "1", "spread: the bytecode dump says so");
+  }
+
+  // --- 13. A rest param reached through a spread is its own array. --------
+  // g(...rest) { arraypush(rest, 9); rest }; xs = [1, 2]; r = g(...xs)
+  // print(same(r, xs)); print(len(xs)); print(len(r))
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(p);
+    m.capture_maps.push_back({});
+    auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
+    auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v});
+    };
+    m.funcs.push_back(
+        {"main", 2, 0,
+         b.block({b.assign(VarKind::Local, 0,
+                           b.array_lit({b.literal(1), b.literal(2)})),
+                  b.assign(VarKind::Local, 1,
+                           b.call_spread(b.make_closure(1, 0), {}, L(0))),
+                  print(b.intrinsic(IntrinsicId::Same, {L(1), L(0)})),
+                  print(b.intrinsic(IntrinsicId::Len, {L(0)})),
+                  print(b.intrinsic(IntrinsicId::Len, {L(1)}))}),
+         {"xs", "r"}, {}});
+    Func g{"g", 1, 0, NodeId{}, {"rest"}, {}};
+    g.num_params = 1;
+    g.rest_param = true;
+    g.body = b.block(
+        {b.intrinsic(IntrinsicId::ArrayPush, {L(0), b.literal(9)}), L(0)});
+    m.funcs.push_back(g);
+
+    const RunResult r = run_module(m, "spread into rest");
+    expect_clean(r, "spread into rest");
+    check_eq(joined(), "false|2|3|", "spread into rest output");
+  }
+
+  // --- 14. verify(): a CallSpread has a spread to spread. -----------------
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    const NodeId call = b.call_value(b.make_closure(1, 0, p), {}, p);
+    m.nodes[call.v].tag = Tag::CallSpread;  // a callee and nothing after it
+    m.funcs.push_back({"main", 0, 0, call, {}, {}});
+    Func f{"f", 0, 0, NodeId{}, {}, {}};
+    f.body = b.block({}, p);
+    m.funcs.push_back(f);
+    const auto err = verify(m);
+    check_eq(err ? *err : "", "CallSpread needs a callee and a spread",
+             "spread with no spread: verify message");
   }
 
   if (g_failures != 0) {

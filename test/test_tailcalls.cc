@@ -8,8 +8,9 @@
 // a plain call has it follow); the compiler leaves a call alone inside a
 // try body and a defer-declaring scope, and the executor leaves one alone
 // when the callee is a native or a generator function or the frame is the
-// entry frame -- each of those keeps its ordinary meaning; and Func::
-// tail_calls off changes nothing at all. Zero live heap objects after every
+// entry frame -- each of those keeps its ordinary meaning; Func::
+// tail_calls off changes nothing at all; and a CallSpread in tail position
+// is a tail call by the same rules. Zero live heap objects after every
 // case.
 
 #include <cstdio>
@@ -517,6 +518,57 @@ int main() {
     check_eq(run_module(m, "arity, callee try"),
              "one takes 1 argument(s), given 0", "arity, callee try: failure");
     check_eq(joined(), "", "arity, callee try: output");
+  }
+
+  // --- 11. A CallSpread in tail position is a tail call too. -------------
+  // down(n) = n == 0 ? 0 : down(...[n - 1]), twice the 10000-frame limit
+  // deep. A native callee there is an ordinary call -- add(...[2, 3]) -- and
+  // a spread that is not an array traps at the call, as anywhere else.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({{VarKind::Cell, 0}});
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    m.funcs.push_back(
+        {"down", 1, 1,
+         b.make_if(is_zero(b, loc(b, 0)), b.literal(0, p),
+                   b.call_spread(cap(b, 0), {},
+                                 b.array_lit({dec(b, loc(b, 0))}, p), p),
+                   p),
+         {"n"}, {"down"}});
+    m.funcs.back().num_params = 1;
+    m.funcs.back().tail_calls = true;
+    const int32_t add = b.declare_native("add");
+    m.funcs.push_back(
+        {"native", 0, 0,
+         b.call_spread(b.native_ref(add, p), {},
+                       b.array_lit({b.literal(2, p), b.literal(3, p)}, p), p),
+         {}, {}});
+    m.funcs.back().tail_calls = true;
+    m.funcs.push_back({"bad", 0, 0,
+                       b.call_spread(b.native_ref(add, p), {}, b.literal(7, p),
+                                     p),
+                       {}, {}});
+    m.funcs.back().tail_calls = true;
+    m.funcs[0] = {
+        "main", 1, 0,
+        b.block({b.assign(VarKind::Cell, 0, b.make_closure(1, 0, p), p),
+                 pr(b, b.call_value(cell(b, 0), {b.literal(20000, p)}, p)),
+                 b.assign(VarKind::Cell, 0, b.nil_literal(p), p),
+                 pr(b, b.call_value(b.make_closure(2, 1, p), {}, p)),
+                 b.make_try(0, b.call_value(b.make_closure(3, 1, p), {}, p),
+                            pr(b, b.index(loc(b, 0),
+                                          b.str_literal("message", p), p)),
+                            p)},
+                p),
+        {"e"}, {}};
+    m.funcs[0].num_cells = 1;
+    check_eq(run_module(m, "spread"), "", "spread: failure");
+    check_eq(joined(), "0|5|cannot spread int|", "spread output");
+    const std::string bc = vm::to_string(vm::compile(m));
+    check_eq(std::to_string(bc.find("tailcallspread") != std::string::npos),
+             "1", "spread: compiled as a TailCallSpread");
   }
 
   if (g_failures != 0) {
