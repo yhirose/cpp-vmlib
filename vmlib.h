@@ -1468,9 +1468,9 @@ struct Func {
   // "missing argument" diagnostic (with the parameter's name, which the
   // executor never knew) or fill a default. Off, a mismatch traps.
   bool lenient_arity = false;
-  // A CallValue in tail position (the operand of a Return, or the value the
-  // body ends in, through any Block / If / Switch / Scope on the way)
-  // replaces this activation instead of stacking on it, so a loop written
+  // A CallValue or CallSpread in tail position (a Return's operand, or the
+  // value the body ends in, through any Block / If / Switch / Scope on the
+  // way) replaces this activation instead of stacking on it, so a loop written
   // as a call chain runs in one frame. The frame's exit happens *before*
   // the callee runs: locals released last-slot-first, each open Scope's
   // owned cycles resolved -- Rust's rule for `become`, and the one
@@ -3906,8 +3906,9 @@ struct Insn {
   int32_t a = 0;
   int32_t b = 0;
   int32_t c = 0;
-  int32_t d = 0;  // CallValue's arg count, FieldGet/FieldSet's name const,
-                  // a slice's second bound; zero for everything else
+  int32_t d = 0;  // a call's arg count (CallSpread's: the fixed ones),
+                  // FieldGet/FieldSet's name const, a slice's second bound;
+                  // zero for everything else
 };
 
 // One record per lexical region the compiler closed. Children close before
@@ -5817,7 +5818,7 @@ struct FnCompiler {
   };
   std::vector<OpenTry> open_tries{};
 
-  // Whether a CallValue here may be emitted as a TailCall: the function
+  // Whether a call here may be emitted as a tail call: the function
   // asked for them (Func::tail_calls), no try body is open, and no open
   // Scope declares defers or a release order -- Func::tail_calls' comment
   // has the reasons for the first two. The third is the same shape: TailCall
@@ -6062,7 +6063,7 @@ struct FnCompiler {
   // `tail` says the value is what the function returns, with nothing left
   // to run in this frame after it -- a Return's operand, or the body's
   // last value -- and follows the value down through Block, If, Switch and
-  // Scope to whatever CallValue ends it, which may then be a TailCall. A
+  // Scope to whatever call ends it, which may then be a tail call. A
   // TryCatch body is never in tail position (its handler must survive the
   // call), and nothing else propagates it.
   int32_t compile_value(NodeId id, bool tail = false) {

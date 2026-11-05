@@ -355,8 +355,8 @@ The elements are copied at the call. A native reads its arguments in place
 for its whole run, and a closure's way in can run a destructor before it
 has read them all; either can change the array, and growing it moves every
 element. The copy is also why a rest param reached through a spread is
-never the caller's array -- the rule JavaScript, Python and R7RS each state
-for their own.
+never the caller's array -- the rule JavaScript and R7RS each state for
+their own.
 
 Several return values are the same two pieces from the other side: the
 function returns an array, and a caller that forwards them all -- Lua's
