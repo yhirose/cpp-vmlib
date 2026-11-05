@@ -90,7 +90,7 @@ to it:
 | Values | `Literal`, `VarRef`, `Assign` |
 | Operators | `Unary`, `Binary`, `Intrinsic` |
 | Control flow | `If`, `Switch`, `While`, `Block`, `Break`, `Continue`, `Return` |
-| Functions | `MakeClosure`, `CallValue`, `Yield`, `NativeRef` |
+| Functions | `MakeClosure`, `CallValue`, `CallSpread`, `Yield`, `NativeRef` |
 | Containers | `ArrayLit`, `ObjectLit`, `Index`, `SetIndex`, `FieldGet`, `FieldSet` |
 | Lifetimes | `Scope`, `Defer`, `CellFresh` |
 | Exceptions | `Throw`, `TryCatch` |
@@ -106,11 +106,12 @@ A few things worth knowing before you write a binder:
   releases it on *every* exit -- falling off the end, `Break`, `Return`, or
   an unwinding throw. That is what makes a value die with its scope rather
   than with the frame.
-- **Calling is two tags.** `MakeClosure` builds a callable over cells;
+- **Calling is two steps.** `MakeClosure` builds a callable over cells;
   `CallValue` calls whatever a value turns out to be -- a closure, or a host
   function a `NativeRef` named (see [Host functions](#host-functions)).
-  There is no "call function #n" shortcut -- see
-  [Design notes](#design-notes).
+  `CallSpread` is the same call with the argument count decided at run
+  time (see [Variadic calls](#variadic-calls)). There is no "call function
+  #n" shortcut -- see [Design notes](#design-notes).
 - **`Break` and `Continue` name their loop by depth.** `a = 0` is the
   innermost `While` (the plain form), `a = 1` the one around it: Java's and
   Go's labeled `break`/`continue`, with the label resolved to a depth by
@@ -193,7 +194,9 @@ w.write(m.funcs[idx], "$umul");     // counts and name table derived
 Its `lenient_arity` and `singleton` fields default to what a helper library
 wants and are the caller's to clear -- a function the *program* can get hold
 of as a value wants neither, and `singleton` especially is a decision
-[Static calls](#static-calls) reserves for the front end.
+[Static calls](#static-calls) reserves for the front end. Its `rest_param`
+is off, the IR's own default, until a helper that collects its trailing
+arguments turns it on (see [Variadic calls](#variadic-calls)).
 
 Written with bare slot numbers instead, a helper's body has its indices in
 one place and their names in another, and inserting a temporary in the
@@ -323,6 +326,49 @@ hoist above -- a synthetic `$helpers` variable owned by file scope, threaded
 into every function's captures, holding an array of pre-built closures
 indexed per helper. That is about forty lines per front end the flag
 deleted.
+
+## Variadic calls
+
+`CallValue` fixes its argument count where the call is written, and a
+`Func` fixes `num_params`. A language whose functions take "these, then any
+number more" needs both ends decided at run time instead, and gets two
+pieces, usable apart and meant to meet:
+
+- **`Func::rest_param`** makes the last param collect the arguments past
+  the ones before it, as an `Array` -- JavaScript's `...rest`, Python's
+  `*args`, Scheme's `(a . rest)`, Lua's `...`. The function takes at least
+  `num_params - 1` arguments; fewer traps with "takes at least N
+  argument(s)", or under `lenient_arity` fills the missing ones with nil
+  and leaves the rest param empty. The array is new on every call, and
+  empty when nothing was left over.
+- **`Tag::CallSpread`**, children `callee, args..., spread`, calls with the
+  fixed args and then every element of the last child, which must be an
+  `Array` when it runs. One spread, last, is the shape JavaScript's
+  `f(a, ...xs)`, Python's `f(a, *xs)`, Lua's `f(a, g())` and Scheme's
+  `(apply f a xs)` share, and the one V8's `CallWithSpread` takes; a
+  spread anywhere else is an array the front end builds first, with
+  `ArrayLit` and `ArrayConcat`. The arity check counts the arguments after
+  the spread, and in tail position it is a tail call by the rules
+  [Tail calls](#tail-calls) gives.
+
+The elements are copied at the call. A native reads its arguments in place
+for its whole run, and a closure's way in can run a destructor before it
+has read them all; either can change the array, and growing it moves every
+element. The copy is also why a rest param reached through a spread is
+never the caller's array -- the rule JavaScript, Python and R7RS each state
+for their own.
+
+Several return values are the same two pieces from the other side: the
+function returns an array, and a caller that forwards them all -- Lua's
+`f(g())`, Scheme's `call-with-values` -- spreads it.
+
+`ArgCount` still answers what the caller supplied. `FnArity` answers
+`-num_params` for a function with a rest param, which is `-(required + 1)`:
+negative means "and any number more", the one int keeps both facts, and a
+host function registered as taking any count already answered `-1`, which
+reads the same way. A language's own arity number is the binder's
+arithmetic from there -- Ruby's `Proc#arity` counts this way already, and
+JavaScript's `Function.length` is `-n - 1` for a negative `n`.
 
 ## Struct fields
 
@@ -468,11 +514,14 @@ A native's `arity` is checked the way a closure's `num_params` is -- a
 mismatch traps at the call site with the same wording -- except for `-1`,
 which registers it as taking any count, so the function reads
 `NativeCall::argc` to find out what it got. `FnArity` answers that number,
-`-1` and all, where for a closure it answers `num_params`.
+`-1` and all, where for a closure it answers `num_params` -- negated for one
+with a rest param, so `-1` reads the same either way (see
+[Variadic calls](#variadic-calls)).
 
 A native runs on the spot, with no frame, and its answer lands where a
 closure's return would; it is callable wherever a closure is -- `CallValue`,
-`Enqueue`, `Defer`, the drop key -- and `TypeOf` says "function" for it.
+`CallSpread`, `Enqueue`, `Defer`, the drop key -- and `TypeOf` says
+"function" for it.
 Its signature is `bool (*)(NativeCall&)`: read the arguments, set `result`
 and return `true`, or set `error` and return `false`, which raises that
 value at the call site exactly as a `Throw` there would, catchable by the
@@ -490,16 +539,16 @@ the same saving [Static calls](#static-calls) gets from `Func::singleton`.
 
 ## Tail calls
 
-With `Func::tail_calls` on, a `CallValue` in tail position -- a `Return`'s
-operand, or the value the body ends in, followed down through `Block`,
-`If`, `Switch` and `Scope` -- replaces the frame instead of stacking on it,
-so a loop written as a call chain runs in one frame however long it goes,
-and `max_call_depth` stops mattering for it. The frame exits *before* the
-callee runs: temporaries, then locals last-slot-first, then each open
-scope's owned resolution. That is Rust's rule for `become`, and the one
-observable difference from a plain call -- a local's destructor now prints
-before the callee's output rather than after -- which is why a front end
-switches it on rather than getting it by default. The compiler leaves a
+With `Func::tail_calls` on, a `CallValue` or `CallSpread` in tail position
+-- a `Return`'s operand, or the value the body ends in, followed down
+through `Block`, `If`, `Switch` and `Scope` -- replaces the frame instead of
+stacking on it, so a loop written as a call chain runs in one frame however
+long it goes, and `max_call_depth` stops mattering for it. The frame exits
+*before* the callee runs: temporaries, then locals last-slot-first, then
+each open scope's owned resolution. That is Rust's rule for `become`, and
+the one observable difference from a plain call -- a local's destructor now
+prints before the callee's output rather than after -- which is why a front
+end switches it on rather than getting it by default. The compiler leaves a
 call alone inside a `TryCatch` body (the handler is a pc range of this
 chunk and would go with the frame) and inside a `Scope` that declares
 defers or a release order; the executor leaves one alone when the callee is
@@ -754,8 +803,10 @@ borrowed slot pointer and an owned cell -- with the meaning of a capture
 depending on which kind of call got you there. A front end wanting the old
 shape builds a closure and calls it on the spot, which is what the PL/0
 example does. A host function is called by that same `CallValue` (it is a
-value a `NativeRef` produced), and a tail call is that same call in tail
-position -- neither added a second way.
+value a `NativeRef` produced), a tail call is that same call in tail
+position, and `CallSpread` is that same call with its argument count decided
+at run time -- it copies its arguments into a run of their own and calls the
+way `CallValue` does -- so none of them added a second way.
 
 **Calls do not recurse through the host's C++ stack.** The executor keeps its
 own stack of heap-allocated frames, so a deep call chain costs heap rather
