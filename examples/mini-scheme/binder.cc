@@ -103,6 +103,18 @@ bool is_special(const std::string& s) {
          s == "call/cc" || s == "call-with-current-continuation";
 }
 
+// How a variadic builtin comes down to its two-argument helper: Left takes
+// `(+ a b c)` as `(+ (+ a b) c)`, and Chain takes `(< a b c)` as the
+// conjunction of `(< a b)` and `(< b c)`. A direct call folds where it is
+// written, since the count is known there; the builtin as a value is a
+// procedure with a rest param that folds the same way at run time. Both
+// read the rules below, so `(+ a b c)` and `(apply + (list a b c))` cannot
+// disagree.
+enum class Fold { None, Left, Chain };
+
+// A constant a Fold::Left builtin falls back on.
+enum class Unit { None, Zero, One, EmptyString, EmptyList };
+
 // The library, as (name -> the IR func that implements it, arity). Every
 // one is an ordinary function, so a symbol naming it is a *value* --
 // `(map car xs)` needs `car` to be one, and nothing special had to happen
@@ -110,7 +122,14 @@ bool is_special(const std::string& s) {
 struct Builtin {
   const char* scheme;
   const char* rt;
-  int32_t arity;
+  int32_t arity;  // -1: any count, and a direct call is the binder's own
+  Fold fold = Fold::None;
+  // Fold::Left only. `none` is what no arguments answer -- `(+)` is 0 --
+  // and Unit::None makes that an error. `one_lhs` turns one argument into
+  // a two-argument call -- `(- x)` is `(- 0 x)` -- and Unit::None makes
+  // one argument answer itself.
+  Unit none = Unit::None;
+  Unit one_lhs = Unit::None;
 };
 
 const std::vector<Builtin>& builtins() {
@@ -119,26 +138,35 @@ const std::vector<Builtin>& builtins() {
       {"cons", "$cons", 2},         {"null?", "$nullp", 1},
       {"pair?", "$pairp", 1},       {"not", "$not", 1},
       {"eq?", "$eqv", 2},           {"eqv?", "$eqv", 2},
-      {"equal?", "$equal", 2},      {"+", "$add", 2},
-      {"-", "$sub", 2},             {"*", "$mul", 2},
-      {"/", "$div", 2},             {"<", "$lt", 2},
-      {">", "$gt", 2},              {"<=", "$le", 2},
-      {">=", "$ge", 2},             {"=", "$numeq", 2},
-      {"length", "$length", 1},     {"append", "$append2", 2},
-      {"reverse", "$reverse", 1},   {"list-ref", "$listref", 2},
-      {"memq", "$memq", 2},         {"member", "$memq", 2},
-      {"assoc", "$assoc", 2},       {"number?", "$numberp", 1},
-      {"string?", "$stringp", 1},   {"procedure?", "$procp", 1},
-      {"boolean?", "$booleanp", 1}, {"zero?", "$zerop", 1},
-      {"abs", "$abs", 1},           {"min", "$min", 2},
-      {"max", "$max", 2},           {"quotient", "$quotient", 2},
-      {"remainder", "$remainder", 2}, {"modulo", "$modulo", 2},
-      {"expt", "$expt", 2},         {"number->string", "$numstr", 1},
-      {"string-append", "$strappend", 2},
+      {"equal?", "$equal", 2},
+      {"+", "$add", 2, Fold::Left, Unit::Zero},
+      {"-", "$sub", 2, Fold::Left, Unit::None, Unit::Zero},
+      {"*", "$mul", 2, Fold::Left, Unit::One},
+      {"/", "$div", 2, Fold::Left, Unit::None, Unit::One},
+      {"<", "$lt", 2, Fold::Chain},
+      {">", "$gt", 2, Fold::Chain},
+      {"<=", "$le", 2, Fold::Chain},
+      {">=", "$ge", 2, Fold::Chain},
+      {"=", "$numeq", 2, Fold::Chain},
+      {"min", "$min", 2, Fold::Left},
+      {"max", "$max", 2, Fold::Left},
+      {"append", "$append2", 2, Fold::Left, Unit::EmptyList},
+      {"string-append", "$strappend", 2, Fold::Left, Unit::EmptyString},
+      {"length", "$length", 1},     {"reverse", "$reverse", 1},
+      {"list-ref", "$listref", 2},  {"memq", "$memq", 2},
+      {"member", "$memq", 2},       {"assoc", "$assoc", 2},
+      {"number?", "$numberp", 1},   {"string?", "$stringp", 1},
+      {"procedure?", "$procp", 1},  {"boolean?", "$booleanp", 1},
+      {"zero?", "$zerop", 1},       {"abs", "$abs", 1},
+      {"quotient", "$quotient", 2}, {"remainder", "$remainder", 2},
+      {"modulo", "$modulo", 2},     {"expt", "$expt", 2},
+      {"number->string", "$numstr", 1},
       {"string-length", "$strlen", 1},
       {"map", "$map1", 2},          {"for-each", "$foreach1", 2},
       {"display", "$display", 1},   {"newline", "$newline", 0},
-      {"list", "$listof1", 1},
+      // A direct call to either is written in place (emit_form), so the
+      // helper is only ever the procedure as a value.
+      {"list", "$list", -1},        {"apply", "$apply", -1},
   };
   return v;
 }
@@ -150,26 +178,69 @@ const Builtin* find_builtin(const std::string& s) {
   return nullptr;
 }
 
-// The forms whose arguments fold pairwise: `(+ a b c)` is `(+ (+ a b) c)`,
-// and `(< a b c)` is a conjunction. Scheme's are variadic and this IR's
-// calls are not, so the fold happens where the arity is known -- at the
-// call site.
-bool folds_left(const std::string& s) {
-  return s == "+" || s == "-" || s == "*" || s == "/" || s == "append" ||
-         s == "string-append" || s == "min" || s == "max";
+// The func a builtin is as a value: its helper, or for a folding one the
+// procedure with a rest param that runs the fold.
+std::string value_rt(const Builtin& bi) {
+  return bi.fold == Fold::None ? bi.rt : std::string(bi.rt) + "*";
 }
 
-bool folds_chain(const std::string& s) {
-  return s == "<" || s == ">" || s == "<=" || s == ">=" || s == "=";
+NodeId unit_literal(Unit u, Builder::At& b) {
+  switch (u) {
+    case Unit::Zero: return b.literal(0);
+    case Unit::One: return b.literal(1);
+    case Unit::EmptyString: return b.str_literal("");
+    case Unit::EmptyList: return b.nil_literal();
+    case Unit::None: break;
+  }
+  coreir_rt::fail("internal error: Unit::None has no literal", 0, 0);
 }
 
 struct FnInfo {
   bool is_synth = false;
   std::string name = "lambda";
   std::vector<int32_t> params;
+  // The last of `params` collects the arguments past the others, as a
+  // list: Func::rest_param, with the array it hands over made a list on
+  // the way in (emit_fn).
+  bool rest = false;
   const Ast* body = nullptr;  // the enclosing `list`, whose tail is the body
   size_t body_from = 0;
 };
+
+// A procedure's formals, read from `from` on: R7RS's three shapes, `(a b)`,
+// `(a b . rest)` and a bare `args`, the last two collecting whatever the
+// others leave over. The names in order, and whether the last is that one.
+struct Formals {
+  std::vector<const Ast*> names;
+  bool rest = false;
+};
+
+Formals formals_of(const Ast& f, size_t from) {
+  Formals out;
+  if (f.tag == "symbol"_) {
+    out.names.push_back(&f);
+    out.rest = true;
+    return out;
+  }
+  if (f.tag != "list"_) fail(f, "malformed parameter list");
+  for (size_t i = from; i < f.nodes.size(); ++i) {
+    const Ast& p = *f.nodes[i];
+    if (p.tag != "symbol"_) fail(p, "malformed parameter list");
+    if (p.token != ".") {
+      out.names.push_back(&p);
+      continue;
+    }
+    // One name after the dot, and nothing after that.
+    if (i + 2 != f.nodes.size() || f.nodes[i + 1]->tag != "symbol"_ ||
+        f.nodes[i + 1]->token == ".") {
+      fail(p, "malformed parameter list");
+    }
+    out.names.push_back(f.nodes[i + 1].get());
+    out.rest = true;
+    break;
+  }
+  return out;
+}
 
 struct FnCtx : FrameLayout {
   int32_t fn = 0;
@@ -239,21 +310,24 @@ struct Binder {
     }
   }
 
-  int32_t resolve_lambda(const Ast& node, const Ast* params, const Ast& body,
-                         size_t from, int32_t parent,
-                         const std::string& name) {
+  // A procedure: its formals read from `formals_from` on -- a `define`'s
+  // signature `(f a b)` starts with the name -- and its body from `from`
+  // on.
+  int32_t resolve_lambda(const Ast& node, const Ast& formals,
+                         size_t formals_from, const Ast& body, size_t from,
+                         int32_t parent, const std::string& name) {
     const int32_t f = new_fn(parent, name);
     fns[static_cast<size_t>(f)].body = &body;
     fns[static_cast<size_t>(f)].body_from = from;
     fn_of[&node] = f;
     rs.push_scope();
-    if (params != nullptr) {
-      for (const auto& p : params->nodes) {
-        const int32_t v = declare(std::string(p->token), f);
-        decl_of[p.get()] = v;
-        fns[static_cast<size_t>(f)].params.push_back(v);
-      }
+    const Formals fs = formals_of(formals, formals_from);
+    for (const Ast* p : fs.names) {
+      const int32_t v = declare(std::string(p->token), f);
+      decl_of[p] = v;
+      fns[static_cast<size_t>(f)].params.push_back(v);
     }
+    fns[static_cast<size_t>(f)].rest = fs.rest;
     predeclare(body, from, f);
     for (size_t i = from; i < body.nodes.size(); ++i) {
       resolve_form(*body.nodes[i], f);
@@ -315,7 +389,7 @@ struct Binder {
         if (!decl_of.count(&id)) {
           decl_of[&id] = declare(std::string(id.token), fn);
         }
-        resolve_define_proc(a, t, fn);
+        resolve_lambda(a, t, 1, a, 2, fn, std::string(id.token));
         return;
       }
       if (!decl_of.count(&t)) decl_of[&t] = declare(std::string(t.token), fn);
@@ -324,7 +398,7 @@ struct Binder {
     }
     if (h == "lambda") {
       if (a.nodes.size() < 2) fail(a, "malformed lambda");
-      resolve_lambda(a, a.nodes[1].get(), a, 2, fn, "lambda");
+      resolve_lambda(a, *a.nodes[1], 0, a, 2, fn, "lambda");
       return;
     }
     if (h == "define-record-type") {
@@ -362,28 +436,6 @@ struct Binder {
       resolve_form(*a.nodes[i], fn);
     }
     if (!h.empty() && !is_special(h)) resolve_form(*a.nodes[0], fn);
-  }
-
-  // (define (f a b) body...) -- the parameters are the tail of `(f a b)`
-  // rather than a list of their own, so this walks them directly instead
-  // of going through resolve_lambda.
-  void resolve_define_proc(const Ast& node, const Ast& sig, int32_t fn) {
-    const int32_t f = new_fn(fn, std::string(sig.nodes[0]->token));
-    fns[static_cast<size_t>(f)].body = &node;
-    fns[static_cast<size_t>(f)].body_from = 2;
-    fn_of[&node] = f;
-    rs.push_scope();
-    for (size_t i = 1; i < sig.nodes.size(); ++i) {
-      const Ast& p = *sig.nodes[i];
-      const int32_t v = declare(std::string(p.token), f);
-      decl_of[&p] = v;
-      fns[static_cast<size_t>(f)].params.push_back(v);
-    }
-    predeclare(node, 2, f);
-    for (size_t i = 2; i < node.nodes.size(); ++i) {
-      resolve_form(*node.nodes[i], f);
-    }
-    rs.pop_scope();
   }
 
   void resolve_let(const Ast& a, const std::string& kind, int32_t fn) {
@@ -465,12 +517,14 @@ struct Binder {
     static std::vector<std::string> names;
     if (names.empty()) {
       for (const auto& b : builtins()) {
-        if (std::find(names.begin(), names.end(), b.rt) == names.end()) {
-          names.push_back(b.rt);
+        for (const std::string& n : {std::string(b.rt), value_rt(b)}) {
+          if (std::find(names.begin(), names.end(), n) == names.end()) {
+            names.push_back(n);
+          }
         }
       }
-      for (const char* extra :
-           {"$true", "$disp", "$listbody", "$fstr", "$escape"}) {
+      for (const char* extra : {"$true", "$disp", "$listbody", "$fstr",
+                                "$escape", "$arrlist", "$listarr"}) {
         names.push_back(extra);
       }
     }
@@ -534,7 +588,6 @@ struct Binder {
     one("$cons", 2, [&](RT& r) { return r.arr({r.L(0), r.L(1)}); }, {"a", "d"});
     one("$nullp", 1, [&](RT& r) { return r.is(r.typ(r.L(0)), "nil"); }, {"v"});
     one("$pairp", 1, [&](RT& r) { return r.pairp(r.L(0)); }, {"v"});
-    one("$listof1", 1, [&](RT& r) { return r.arr({r.L(0), r.Nil()}); }, {"v"});
 
     // Only #f is false: `'()` and 0 are both true, where Value::truthy()
     // calls both false. Its comment says why it refuses to choose.
@@ -629,6 +682,120 @@ struct Binder {
       return r.blk({r.nat("write", {r.S("\n")}), r.Nil()});
     }, {});
     rt_escape();
+
+    // What a rest param and a spread need: an array and a list each way,
+    // `list` and `apply` as values, and every folding builtin as one.
+    rt_arrlist();
+    rt_listarr();
+    rt_list();
+    rt_apply();
+    for (const Builtin& bi : builtins()) {
+      if (bi.fold != Fold::None) rt_fold_value(bi);
+    }
+  }
+
+  // A rest param arrives as an array, which emit_fn turns into a list
+  // before the body's first form -- built back to front, so each pair is
+  // made once.
+  void rt_arrlist() {
+    RT r(*this);
+    const auto [a] = r.params("a");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.Nil()));
+    r.add(r.set(i, r.len(r.L(a))));
+    r.add(r.wh(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+               r.blk({r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1))),
+                      r.set(out, r.arr({r.idx(r.L(a), r.L(i)), r.L(out)}))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$arrlist");
+  }
+
+  // apply's last argument, as the array a CallSpread spreads. It has to be
+  // a proper list: anything but '() at its end is an error, as in R7RS.
+  void rt_listarr() {
+    RT r(*this);
+    const auto [l] = r.params("l");
+    const auto [out, p] = r.locals("out", "p");
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(p, r.L(l)));
+    r.add(r.wh(r.pairp(r.L(p)), r.blk({r.push(r.L(out), r.car(r.L(p))),
+                                       r.set(p, r.cdr(r.L(p)))})));
+    r.add(r.iff(r.isnt(r.typ(p), "nil"),
+                r.err("apply: last argument is not a list")));
+    r.add(r.ret(r.L(out)));
+    r.finish("$listarr");
+  }
+
+  // `list` as a value. A direct call builds its pairs in place instead.
+  void rt_list() {
+    RT r(*this);
+    r.rest_param = true;
+    const auto [xs] = r.params("xs");
+    r.add(r.ret(r.call("$arrlist", {r.L(xs)})));
+    r.finish("$list");
+  }
+
+  // `apply` as a value; a direct call is the same CallSpread written in
+  // place (emit_form). The call is in tail position here too, so a tail
+  // call through it stays one, as R7RS requires of apply: the caller's
+  // frame becomes this one, and this one becomes the callee's.
+  void rt_apply() {
+    RT r(*this);
+    r.rest_param = true;
+    const auto [args] = r.params("args");
+    const auto [last, spread] = r.locals("last", "spread");
+    r.add(r.set(last, r.bin(BinOp::Sub, r.len(r.L(args)), r.I(1))));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(last), r.I(1)),
+                r.err("apply needs a procedure and a list")));
+    // The arguments between the procedure and the list, then the list's.
+    r.add(r.set(spread, r.in(IntrinsicId::ArraySlice,
+                             {r.L(args), r.I(1), r.L(last)})));
+    r.add(r.in(IntrinsicId::ArrayConcat,
+               {r.L(spread),
+                r.call("$listarr", {r.idx(r.L(args), r.L(last))})}));
+    r.add(r.ret(r.b.call_spread(r.idx(r.L(args), r.I(0)), {}, r.L(spread))));
+    r.finish("$apply");
+  }
+
+  // A folding builtin as a value: the fold emit_builtin_call writes out at
+  // a direct call, run over a rest param instead, from the same Builtin
+  // fields.
+  void rt_fold_value(const Builtin& bi) {
+    RT r(*this);
+    r.rest_param = true;
+    const auto [xs] = r.params("xs");
+    const auto [n, i] = r.locals("n", "i");
+    auto x = [&](NodeId k) { return r.idx(r.L(xs), k); };
+    auto next = [&] { return r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))); };
+    r.add(r.set(n, r.len(r.L(xs))));
+    r.add(r.set(i, r.I(1)));
+    if (bi.fold == Fold::Chain) {
+      const NodeId prev = x(r.bin(BinOp::Sub, r.L(i), r.I(1)));
+      r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.L(n)),
+                 r.blk({r.iff(r.bin(BinOp::Eq, r.call(bi.rt, {prev, x(r.L(i))}),
+                                    r.Bo(false)),
+                              r.ret(r.Bo(false))),
+                        next()})));
+      r.add(r.ret(r.Bo(true)));
+    } else {
+      const auto [acc] = r.locals("acc");
+      r.add(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)),
+                  bi.none == Unit::None
+                      ? r.err(std::string(bi.scheme) +
+                              " needs at least one argument")
+                      : r.ret(unit_literal(bi.none, r.b))));
+      r.add(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(1)),
+                  r.ret(bi.one_lhs == Unit::None
+                            ? x(r.I(0))
+                            : r.call(bi.rt, {unit_literal(bi.one_lhs, r.b),
+                                             x(r.I(0))}))));
+      r.add(r.set(acc, x(r.I(0))));
+      r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.L(n)),
+                 r.blk({r.set(acc, r.call(bi.rt, {r.L(acc), x(r.L(i))})),
+                        next()})));
+      r.add(r.ret(r.L(acc)));
+    }
+    r.finish(value_rt(bi));
   }
 
   void rt_modulo() {
@@ -973,8 +1140,8 @@ struct Binder {
       if (bi == nullptr) fail(a, "unbound variable: " + s);
       // A library procedure used as a value, which is how `(map car xs)`
       // reaches `car`. Every builtin is an ordinary func, so this needed
-      // nothing special.
-      return b.make_closure(rt.at(bi->rt), empty_cmap);
+      // nothing special -- beyond a folding one being its variadic form.
+      return b.make_closure(rt.at(value_rt(*bi)), empty_cmap);
     }
     if (a.tag != "list"_) return atom(a, p);
     if (a.nodes.empty()) fail(a, "empty application");
@@ -1025,35 +1192,38 @@ struct Binder {
         }
         return acc;
       }
+      if (h == "apply") {
+        // (apply f a ... lst): the arguments between f and lst as they
+        // are, then lst's elements -- a CallSpread, which in tail position
+        // is a tail call, as R7RS requires of apply.
+        if (args.size() < 2) fail(a, "apply needs a procedure and a list");
+        const std::vector<NodeId> fixed(args.begin() + 1, args.end() - 1);
+        return b.call_spread(args[0], fixed,
+                             helper("$listarr", {args.back()}, p));
+      }
       const Builtin* bi = find_builtin(h);
       if (bi != nullptr) return emit_builtin_call(*bi, h, args, ctx, p, a);
     }
     return b.call_value(emit_form(*a.nodes[0], ctx), args);
   }
 
-  // Scheme's arithmetic and comparison are variadic and this IR's calls are
-  // not, so the fold happens here, where the arity is known.
+  // A folding builtin's call is written out here, where the count is known,
+  // as a chain of its two-argument helper (Fold has the rules, and
+  // rt_fold_value is the same fold for the builtin as a value).
   NodeId emit_builtin_call(const Builtin& bi, const std::string& name,
                            const std::vector<NodeId>& args, FnCtx& ctx,
                            SrcPos p, const Ast& at) {
     auto b = Builder(m).at(p);
-    if (folds_left(name)) {
+    if (bi.fold == Fold::Left) {
       if (args.empty()) {
-        if (name == "+") return b.literal(0);
-        if (name == "*") return b.literal(1);
-        if (name == "string-append") return b.str_literal("");
-        fail(at, name + " needs at least one argument");
+        if (bi.none == Unit::None) {
+          fail(at, name + " needs at least one argument");
+        }
+        return unit_literal(bi.none, b);
       }
       if (args.size() == 1) {
-        // `(- x)` is negation and `(/ x)` is a reciprocal; the rest are
-        // the identity on one argument.
-        if (name == "-") {
-          return helper("$sub", {b.literal(0), args[0]}, p);
-        }
-        if (name == "/") {
-          return helper("$div", {b.literal(1), args[0]}, p);
-        }
-        return args[0];
+        if (bi.one_lhs == Unit::None) return args[0];
+        return helper(bi.rt, {unit_literal(bi.one_lhs, b), args[0]}, p);
       }
       NodeId acc = args[0];
       for (size_t i = 1; i < args.size(); ++i) {
@@ -1061,7 +1231,7 @@ struct Binder {
       }
       return acc;
     }
-    if (folds_chain(name)) {
+    if (bi.fold == Fold::Chain) {
       if (args.size() < 2) return b.bool_literal(true);
       NodeId acc = helper(bi.rt, {args[0], args[1]}, p);
       for (size_t i = 2; i < args.size(); ++i) {
@@ -1360,9 +1530,18 @@ struct Binder {
     }
     // After the freshes above, which would otherwise reset it, and before
     // the prologue below, which may call a helper itself.
-    for (const int32_t v : fi.params) {
+    for (size_t k = 0; k < fi.params.size(); ++k) {
+      const int32_t v = fi.params[k];
       const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
       rs.vars[static_cast<size_t>(v)].slot = s;
+      // A rest param arrives as the array Func::rest_param collects, and
+      // Scheme's is a list -- made one before anything, a cell included,
+      // can see it.
+      if (fi.rest && k + 1 == fi.params.size()) {
+        pre.push_back(
+            b.assign(VarKind::Local, s,
+                     helper("$arrlist", {b.varref(VarKind::Local, s)}, p)));
+      }
       const auto it = rf.cell_index.find(v);
       if (it != rf.cell_index.end()) {
         pre.push_back(
@@ -1416,6 +1595,7 @@ struct Binder {
     Func fn;
     fn.name = fi.name;
     fn.num_params = static_cast<int32_t>(fi.params.size());
+    fn.rest_param = fi.rest;
     fn.num_locals = ctx.high_local;
     fn.local_names = ctx.names();
     fn.num_cells = ctx.next_cell;

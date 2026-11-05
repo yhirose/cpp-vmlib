@@ -6,7 +6,7 @@
 # language where iteration is nothing else; and how small a front end gets
 # when the syntax stops fighting.
 
-set(SAMPLES basics tailcalls continuations closures lists records)
+set(SAMPLES basics tailcalls continuations closures lists records variadic)
 
 set(dir ${SRC}/samples)
 set(failed 0)

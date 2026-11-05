@@ -19,7 +19,7 @@ to be the more interesting measurement:
 
 | Front end | Grammar rules | Binder |
 |---|---:|---:|
-| mini-scheme | 11 | 1509 |
+| mini-scheme | 11 | 1684 |
 | PL/0 | 27 | 542 |
 | mini-go | 53 | 1547 |
 | mini-culebra | 63 | 1719 |
@@ -126,7 +126,7 @@ grammar, no precedence table, no statement forms and no layout pass,
 because an s-expression has none of those -- and `no_ast_opt` only on the
 three rules whose node has to survive whatever it holds.
 
-The binder is still fifteen hundred lines. That is the measurement worth
+The binder is still seventeen hundred lines. That is the measurement worth
 having: what a front end costs is not its syntax. Scope resolution alone is
 four different answers to when a name becomes visible -- `let` binds after
 its initializers, `let*` between them, `letrec` before them, and an
@@ -142,13 +142,33 @@ Two details of that library are worth noting:
 calls** recipe, the same one examples/mini-go describes), so both share one
 closure.
 
-**Scheme's variadic forms fold at the call site**, where the arity is
+**Scheme's variadic builtins fold at the call site**, where the arity is
 known: `(+ a b c)` becomes two calls to a two-argument `$add`, and
 `(< a b c)` becomes a conjunction of two comparisons with the middle
-operand shared. The IR's calls are fixed-arity by design and Scheme's are
-not, which is the same mismatch examples/mini-lua solves the other way (an
-array per call) -- two front ends, two answers, and the difference is that
-Lua needs the *count* at run time and Scheme does not.
+operand shared. The same builtin as a *value* -- `(apply + xs)`,
+`(fold + 0 xs)` -- is a procedure with a rest param that runs the same
+fold at run time. Each builtin's table entry says how it folds (`(+)` is
+0, `(- x)` is `(- 0 x)`, `(< a)` is `#t`), and both read it, so a call
+written out and a call through a value cannot disagree. The written-out
+call stays two plain calls and allocates nothing; the value pays for one
+array per call, its rest param.
+
+## Rest parameters and `apply`
+
+A procedure's own rest parameter -- `(lambda args ...)`,
+`(define (f a b . rest) ...)` -- is the top-level README's
+`Func::rest_param`. The executor collects the extra arguments into a fresh
+array, and the procedure's first line makes that a list, since a Scheme
+rest parameter is one; a closure that captures it, or a `set!` to it, sees
+the list.
+
+`apply` is the other end of the same call: `(apply f a lst)` is a
+`CallSpread` of `f` over `a` and then `lst`'s elements, which `$listarr`
+lays out as an array (refusing an improper list, as R7RS does). In tail
+position that is a tail call, which R7RS requires of `apply`, and
+`samples/variadic.scm` loops through it to twice the executor's call depth.
+`apply` as a value is a helper with a rest param whose own `CallSpread` is
+in tail position, so a tail call through it stays one too.
 
 ## What Scheme does not share with the VM's defaults
 
@@ -198,10 +218,7 @@ same list bound to a name instead, which every implementation agrees on.
 Absent: exact rationals (`(/ 1 2)` is `1/2` in Scheme and `0.5` here),
 bignums (`examples/mini-python` is where that recipe lives), `define-syntax`
 and macros, `do`, vectors, characters, ports, `dynamic-wind`, `values` and
-`call-with-values`, variadic lambdas (`(lambda args ...)`) and `apply` --
-both would need a call-site convention change on top of the one this
-front end already writes for `+`/`<`/`list`, which is more than its
-remaining budget covers -- and `case-lambda`.
+`call-with-values`, and `case-lambda`.
 
 Quietly different:
 
@@ -211,14 +228,12 @@ Quietly different:
   library at all rather than being wrong.
 * **A special form always wins over a binding of the same name.** A program
   that rebinds `if` is not in this subset.
-* **`(list e ...)` folds at the call site**, so `list` used as a *value*
-  is the one-argument version.
 * **Numbers are the machine's.** An exact integer that leaves int64 wraps
   rather than growing; Scheme's would be exact.
 
 ## Testing
 
-`ctest -R mini-scheme-samples` runs the six samples and requires each
+`ctest -R mini-scheme-samples` runs the seven samples and requires each
 one's output to match a golden file captured from `guile` -- see PL/0's own
 README for why an external, independent oracle is what "passing" means
 here.
@@ -228,7 +243,7 @@ build. It passes `--no-auto-compile`, because without it Guile writes
 progress notes to stderr the first time it sees a file and the golden
 becomes a record of the cache's state rather than of the program.
 
-All six samples are clean under ASan/UBSan/LeakSanitizer and under
+All seven samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.scm`
 included -- its million iterations times a full collection per allocation
 take seconds, not the quadratic blowup that keeps `deep_calls` out of that
