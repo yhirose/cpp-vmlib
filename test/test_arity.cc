@@ -272,10 +272,11 @@ int main() {
   }
 
   // --- 7. The params window has to fit inside the locals. -----------------
-  // push_closure fills [0, num_params) of a locals vector sized num_locals,
-  // for the ordinary frame and the generator activation alike. A func that
-  // declares more params than locals therefore writes past that vector, so
-  // verify() has to refuse it rather than leave it to the run.
+  // fill_params fills [0, num_params) of a locals vector sized num_locals,
+  // for the ordinary frame, the generator activation and a tail call's
+  // reused frame alike. A func that declares more params than locals
+  // therefore writes past that vector, so verify() has to refuse it rather
+  // than leave it to the run.
   {
     using namespace coreir;
     Module m;
@@ -294,7 +295,8 @@ int main() {
              "params past locals: verify message");
   }
   {
-    // The same shape with is_generator set takes the other filling loop.
+    // The same shape with is_generator set: a generator's activation is
+    // packaged rather than pushed, and verify() has to refuse it too.
     using namespace coreir;
     Module m;
     Builder b(m);

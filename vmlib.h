@@ -7041,12 +7041,15 @@ struct Exec {
     return true;
   }
 
+  // A call's arguments become an activation's params in two steps, and every
+  // way into an activation -- push_closure for a fresh frame or a
+  // generator's packaged one, Op::TailCall for the frame it reuses -- takes
+  // both: check_arity while the caller's frame is still whole, then
+  // fill_params into the callee's locals.
+  //
   // The arity contract, stated once: a mismatch traps unless the chunk is
-  // lenient, and the params window then takes what it can -- extras stay
-  // with the caller, and a param nothing arrived for is filled with nil
-  // rather than left Uninit, so the body can test it without tripping the
-  // read-before-init check. Both ways into an activation ask this:
-  // push_closure for a fresh frame, Op::TailCall for the one it reuses.
+  // lenient. Answers how many arguments the params window takes -- extras
+  // stay with the caller.
   int32_t check_arity(const Chunk& ch, int32_t argc, SrcPos pos) {
     if (argc != ch.num_params && !ch.lenient_arity) {
       raise_trap(ch.name + " takes " + std::to_string(ch.num_params) +
@@ -7056,11 +7059,35 @@ struct Exec {
     return std::min(argc, ch.num_params);
   }
 
+  // The params window, filled the one way: the first `taken` locals from
+  // the arguments, and a param nothing arrived for nil rather than Uninit,
+  // so the body can test it without tripping the read-before-init check.
+  // `locals` is already sized to the chunk's num_locals. Nothing here traps
+  // or allocates, so it is safe on a frame halfway through being replaced.
+  //
+  // A call copies its arguments out of the caller's registers (Arg is
+  // const Value); Op::TailCall moves them out of its own argument window
+  // (Arg is Value), so a call loop pays no refcount traffic for them.
+  template <class Arg>
+  static void fill_params(const Chunk& ch, Arg* args, int32_t taken,
+                          std::vector<Value>& locals) {
+    for (int32_t i = 0; i < taken; ++i) {
+      if constexpr (std::is_const_v<Arg>) {
+        locals[static_cast<size_t>(i)] = args[i];
+      } else {
+        locals[static_cast<size_t>(i)] = std::move(args[i]);
+      }
+    }
+    for (int32_t i = taken; i < ch.num_params; ++i) {
+      locals[static_cast<size_t>(i)] = Value();
+    }
+  }
+
   // Calling a closure into a fresh frame. Op::TailCall is the other way
   // into an activation -- it reuses this frame rather than pushing one --
-  // and the two share check_arity above. The callee gets the closure's
-  // cells, which are shared rather than pointed at, so nothing here depends
-  // on the caller still being alive.
+  // and the two share check_arity and fill_params above. The callee gets
+  // the closure's cells, which are shared rather than pointed at, so
+  // nothing here depends on the caller still being alive.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
     if (callee.is_native()) {
@@ -7082,12 +7109,7 @@ struct Exec {
       gf.func = c->func;
       gf.argc = argc;
       gf.locals.assign(static_cast<size_t>(ch.num_locals), Value::uninit());
-      for (int32_t i = 0; i < taken; ++i) {
-        gf.locals[static_cast<size_t>(i)] = args[i];
-      }
-      for (int32_t i = taken; i < ch.num_params; ++i) {
-        gf.locals[static_cast<size_t>(i)] = Value();
-      }
+      fill_params(ch, args, taken, gf.locals);
       gf.regs.resize(static_cast<size_t>(ch.num_regs));
       gf.cells.resize(static_cast<size_t>(ch.num_cells));
       gf.captures = c->cells;
@@ -7097,12 +7119,7 @@ struct Exec {
     check_can_push(pos);
     FramePtr f = make_frame(ch);
     f->captures = c->cells;  // shared, not copied: each element is a Cell
-    for (int32_t i = 0; i < taken; ++i) {
-      f->locals[static_cast<size_t>(i)] = args[i];
-    }
-    for (int32_t i = taken; i < ch.num_params; ++i) {
-      f->locals[static_cast<size_t>(i)] = Value();
-    }
+    fill_params(ch, args, taken, f->locals);
     f->argc = argc;
     f->ret_reg = ret_reg;
     f->call_pos = pos;
@@ -7587,13 +7604,7 @@ struct Exec {
     f.chunk = &nch;
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
-    for (int32_t i = 0; i < taken; ++i) {
-      f.locals[static_cast<size_t>(i)] =
-          std::move(f.regs[static_cast<size_t>(in.c + i)]);
-    }
-    for (int32_t i = taken; i < nch.num_params; ++i) {
-      f.locals[static_cast<size_t>(i)] = Value();
-    }
+    fill_params(nch, f.regs.data() + in.c, taken, f.locals);
     f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
     f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
     f.captures = c->cells;
