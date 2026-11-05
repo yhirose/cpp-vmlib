@@ -7,9 +7,10 @@
 // operator set, `if`/`while`/`for`/`for...of` with `break`/`continue`,
 // `throw` and `try`/`catch`/`finally`, `function*` with `yield`, `async`
 // functions with `await`, `class` with `this` and `new` (no `extends`),
-// and `new` for the three built-in constructors this subset has (`Error`,
-// `Map`, `Set`, plus `Promise`'s executor form). What it does not:
-// `extends`/`super`, `var`, destructuring, spread, template literals,
+// `new` for the three built-in constructors this subset has (`Error`,
+// `Map`, `Set`, plus `Promise`'s executor form), and rest parameters and
+// spread of an array into a call or an array literal. What it does not:
+// `extends`/`super`, `var`, destructuring, template literals,
 // regular expressions, labels, `switch`, `for...in`, getters/setters,
 // `yield*`, and JavaScript's implicit type coercions -- see README.md for
 // why each is out, and the top-level README for the recipes the ones
@@ -75,7 +76,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   classmember <- ident '(' _ params ')' _ block
   fnasync    <- < ('async' ![a-zA-Z0-9_])? > _
   fnstar     <- < '*'? > _
-  params     <- (ident (',' _ ident)*)? ','? _              { no_ast_opt }
+  params     <- (param (',' _ param)*)? ','? _              { no_ast_opt }
+  param      <- restparam / ident
+  restparam  <- '...' _ ident                               { no_ast_opt }
 
   vardecl    <- varkw ident ('=' ![=] _ assign)? eos        { no_ast_opt }
   varkw      <- < 'let' / 'const' / 'var' > ![a-zA-Z0-9_] _
@@ -128,7 +131,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   postfix    <- primary suffix*
   suffix     <- callsfx / membersfx / indexsfx / incsfx
   callsfx    <- '(' _ args ')' _                            { no_ast_opt }
-  args       <- (assign (',' _ assign)*)? ','? _            { no_ast_opt }
+  args       <- (arg (',' _ arg)*)? ','? _                  { no_ast_opt }
+  arg        <- spread / assign
+  spread     <- '...' _ assign                              { no_ast_opt }
   membersfx  <- '.' _ ident                                 { no_ast_opt }
   indexsfx   <- '[' _ expr ']' _                            { no_ast_opt }
   incsfx     <- < '++' / '--' > _
@@ -142,7 +147,7 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   arrowone   <- ident
   arrowbody  <- block / assign
   funcexpr   <- fnasync 'function' _ fnstar ident? '(' _ params ')' _ block
-  arraylit   <- '[' _ (assign (',' _ assign)*)? ','? _ ']' _  { no_ast_opt }
+  arraylit   <- '[' _ (arg (',' _ arg)*)? ','? _ ']' _      { no_ast_opt }
   objectlit  <- '{' _ (propdef (',' _ propdef)*)? ','? _ '}' _ { no_ast_opt }
   propdef    <- propkey ':' _ assign
   propkey    <- ident / string

@@ -133,6 +133,9 @@ struct FnInfo {
   bool is_generator = false;
   bool is_async = false;
   bool is_method = false;  // params[0] is `this`, synthetic -- no source ident
+  // The last of params is a rest param (`...xs`): Func::rest_param, an
+  // Array of whatever arguments the others left over.
+  bool rest = false;
   std::string name = "<anon>";
   std::vector<int32_t> params;  // VarIds, in order
   const Ast* body = nullptr;    // the `block` (or an arrow's expression)
@@ -245,7 +248,18 @@ struct Binder {
       if (params->tag == "ident"_) {
         param(*params);
       } else {
-        for (const auto& q : params->nodes) param(*q);
+        const auto& qs = params->nodes;
+        for (size_t k = 0; k < qs.size(); ++k) {
+          if (qs[k]->tag != "restparam"_) {
+            param(*qs[k]);
+            continue;
+          }
+          if (k + 1 != qs.size()) {
+            fail(*qs[k], "Rest parameter must be last formal parameter");
+          }
+          param(*qs[k]->nodes[0]);
+          fns[static_cast<size_t>(f)].rest = true;
+        }
       }
     }
     if (body.tag == "block"_) {
@@ -478,7 +492,8 @@ struct Binder {
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
         "$pnew",   "$ispromise", "$psettle", "$pon",    "$topromise",
         "$presolve", "$adopt", "$then",    "$react",    "$presolve1",
-        "$preject1", "$await",   "$prejected",
+        "$preject1", "$await",   "$prejected", "$arrayof", "$pushall",
+        "$logjoin",
     };
     return names;
   }
@@ -787,6 +802,48 @@ struct Binder {
     r.add(r.in(IntrinsicId::ArrayPush, {r.L(a), r.L(v)}));
     r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.len(r.L(a))})));
     r.finish("$push");
+  }
+
+  // Its arguments, as a new array: `$arrayof(...xs)` is a copy of xs, made
+  // by the CallSpread that reaches it -- which also refuses anything that
+  // is not an array, in the executor's own words, the way a call's spread
+  // is refused. What `[a, ...xs]` builds its pieces from (emit_items).
+  void rt_arrayof() {
+    RT r(*this);
+    r.rest_param = true;
+    const auto [xs] = r.params("xs");
+    r.add(r.ret(r.L(xs)));
+    r.finish("$arrayof");
+  }
+
+  // push with any number of values, as one array: `a.push(x, y)`,
+  // `a.push(...xs)`. `vals` may be `a` itself, which ArrayConcat allows.
+  void rt_pushall() {
+    RT r(*this);
+    const auto [a, vals] = r.params("a", "vals");
+    r.add(r.in(IntrinsicId::ArrayConcat, {r.L(a), r.L(vals)}));
+    r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.len(r.L(a))})));
+    r.finish("$pushall");
+  }
+
+  // console.log's line, when a spread leaves its argument count to run
+  // time: each argument through $str, a space between -- what the call
+  // site writes out itself when it knows the count.
+  void rt_logjoin() {
+    RT r(*this);
+    const auto [vals] = r.params("vals");
+    const auto [out, i] = r.locals("out", "i");
+    r.add(r.set(out, r.S("")));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(vals))),
+        r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+                     r.set(out, r.bin(BinOp::Add, r.L(out), r.S(" ")))),
+               r.set(out, r.bin(BinOp::Add, r.L(out),
+                                r.call("$str", {r.idx(r.L(vals), r.L(i))}))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$logjoin");
   }
 
   // The iteration protocol, ES2023 7.4 -- as a state object rather than as
@@ -1123,6 +1180,9 @@ struct Binder {
     rt_setidx();
     rt_slice();
     rt_push();
+    rt_arrayof();
+    rt_pushall();
+    rt_logjoin();
     rt_iter();
     rt_iternext();
     rt_minner();
@@ -1269,11 +1329,89 @@ struct Binder {
     return emit_stmt(a, ctx);
   }
 
+  // A builtin's arguments, one value each: the shapes this front end
+  // matches by name read them by position, so a spread has nowhere to go.
   std::vector<NodeId> emit_args(const Ast& args, FnCtx& ctx) {
     std::vector<NodeId> out;
     out.reserve(args.nodes.size());
-    for (const auto& c : args.nodes) out.push_back(emit_expr(*c, ctx));
+    for (const auto& c : args.nodes) {
+      if (c->tag == "spread"_) {
+        fail(*c, "a spread argument is not supported in this call here");
+      }
+      out.push_back(emit_expr(*c, ctx));
+    }
     return out;
+  }
+
+  static bool has_spread(const Ast& list) {
+    for (const auto& c : list.nodes) {
+      if (c->tag == "spread"_) return true;
+    }
+    return false;
+  }
+
+  // Items from `from` on, some of them `...x`, as one array: runs of plain
+  // values as ArrayLits, each `...x` as `$arrayof(...x)` -- a copy taken
+  // where it stands, which is when JavaScript reads it -- joined in order.
+  // A call that ends in one `...x` (`fresh` off) passes x itself instead:
+  // the CallSpread that spreads it copies it then.
+  NodeId emit_items(const Ast& list, size_t from, FnCtx& ctx, bool fresh) {
+    auto b = Builder(m).at(pos_of(list));
+    if (!fresh && from + 1 == list.nodes.size() &&
+        list.nodes[from]->tag == "spread"_) {
+      return emit_expr(*list.nodes[from]->nodes[0], ctx);
+    }
+    std::vector<NodeId> segs, run;
+    for (size_t k = from; k < list.nodes.size(); ++k) {
+      const Ast& c = *list.nodes[k];
+      if (c.tag != "spread"_) {
+        run.push_back(emit_expr(c, ctx));
+        continue;
+      }
+      if (!run.empty()) segs.push_back(b.array_lit(run));
+      run.clear();
+      const NodeId arrayof = b.make_closure(rt.at("$arrayof"), empty_cmap);
+      segs.push_back(b.call_spread(arrayof, {}, emit_expr(*c.nodes[0], ctx)));
+    }
+    if (!run.empty() || segs.empty()) segs.push_back(b.array_lit(run));
+    if (segs.size() == 1) return segs[0];
+    const int32_t t = ctx.alloc_local("$items");
+    std::vector<NodeId> out{b.assign(VarKind::Local, t, segs[0])};
+    for (size_t k = 1; k < segs.size(); ++k) {
+      out.push_back(b.intrinsic(IntrinsicId::ArrayConcat,
+                                {b.varref(VarKind::Local, t), segs[k]}));
+    }
+    out.push_back(b.varref(VarKind::Local, t));
+    return b.block(out);
+  }
+
+  // A call's arguments: the ones before the first `...` one value each,
+  // and from there on one array for a CallSpread to spread, since how
+  // many there are is not known until it runs. `spread` is invalid when
+  // nothing is spread.
+  struct Args {
+    std::vector<NodeId> fixed;
+    NodeId spread;
+  };
+
+  Args emit_call_args(const Ast& args, FnCtx& ctx) {
+    Args out;
+    size_t k = 0;
+    for (; k < args.nodes.size() && args.nodes[k]->tag != "spread"_; ++k) {
+      out.fixed.push_back(emit_expr(*args.nodes[k], ctx));
+    }
+    if (k < args.nodes.size()) out.spread = emit_items(args, k, ctx, false);
+    return out;
+  }
+
+  // A call over those arguments, after `before` -- the instance a
+  // constructor is handed.
+  NodeId call_with(NodeId callee, std::vector<NodeId> before,
+                   const Args& args, SrcPos p) {
+    auto b = Builder(m).at(p);
+    before.insert(before.end(), args.fixed.begin(), args.fixed.end());
+    if (args.spread.valid()) return b.call_spread(callee, before, args.spread);
+    return b.call_value(callee, before);
   }
 
   NodeId arg_or_nil(const std::vector<NodeId>& a, size_t i, SrcPos p) {
@@ -1633,6 +1771,7 @@ struct Binder {
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
       case "arraylit"_: {
+        if (has_spread(a)) return emit_items(a, 0, ctx, true);
         std::vector<NodeId> items;
         items.reserve(a.nodes.size());
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
@@ -1712,7 +1851,7 @@ struct Binder {
       fail(a, "`new` takes a constructor call here");
     }
     const std::string n(a.nodes[0]->token);
-    const std::vector<NodeId> args = emit_args(*a.nodes[1]->nodes[0], ctx);
+    const Ast& arglist = *a.nodes[1]->nodes[0];
     const auto chain = [&](NodeId built) {
       return apply_suffixes(built, a, 2, a.nodes.size(), ctx);
     };
@@ -1729,6 +1868,7 @@ struct Binder {
     // place a `new` needs storage of its own. CellFresh gives a `new
     // Promise` inside a loop its own cell per iteration.
     if (n == "Promise") {
+      const std::vector<NodeId> args = emit_args(arglist, ctx);
       const int32_t c = ctx.next_cell++;
       const std::vector<CaptureSrc> cs{{VarKind::Cell, c}};
       const int32_t cm1 = static_cast<int32_t>(m.capture_maps.size());
@@ -1743,6 +1883,7 @@ struct Binder {
            b.varref(VarKind::Cell, c)}));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
+      const std::vector<NodeId> args = emit_args(arglist, ctx);
       return chain(
           b.object_lit({{b.str_literal("name"), b.str_literal(n)},
                         {b.str_literal("message"),
@@ -1774,8 +1915,8 @@ struct Binder {
         b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
         b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
     for (const auto& [name, g] : ci.methods) {
-      const int32_t nparams =
-          static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
+      const FnInfo& gi = fns[static_cast<size_t>(g)];
+      const int32_t nparams = static_cast<int32_t>(gi.params.size()) - 1;
       Func wf;
       wf.name = name + ".bound";
       wf.num_params = nparams;
@@ -1784,15 +1925,24 @@ struct Binder {
       wf.num_captures = 2;
       wf.capture_names = {"cls", "self"};
       wf.lenient_arity = true;
+      // A method's rest param is the wrapper's too, spread back out to the
+      // method, whose own collects it afresh.
+      wf.rest_param = gi.rest;
       std::vector<NodeId> wargs{b.varref(VarKind::Capture, 1)};
       for (int32_t k = 0; k < nparams; ++k) {
         wargs.push_back(b.varref(VarKind::Local, k));
       }
-      wf.body = b.scope(
-          0, nparams,
-          b.make_return(b.call_value(
-              b.index(b.varref(VarKind::Capture, 0), b.str_literal(name)),
-              wargs)));
+      const NodeId method =
+          b.index(b.varref(VarKind::Capture, 0), b.str_literal(name));
+      NodeId call;
+      if (gi.rest) {
+        const NodeId rest = wargs.back();
+        wargs.pop_back();
+        call = b.call_spread(method, wargs, rest);
+      } else {
+        call = b.call_value(method, wargs);
+      }
+      wf.body = b.scope(0, nparams, b.make_return(call));
       const int32_t widx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(wf));
       const int32_t wcm = static_cast<int32_t>(m.capture_maps.size());
@@ -1808,9 +1958,8 @@ struct Binder {
       const NodeId ctorClosure = helper(
           "$index",
           {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
-      std::vector<NodeId> ca{T};
-      ca.insert(ca.end(), args.begin(), args.end());
-      steps.push_back(b.call_value(ctorClosure, ca));
+      steps.push_back(
+          call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p));
     }
     steps.push_back(T);
     return chain(b.block(steps));
@@ -1846,7 +1995,7 @@ struct Binder {
           cur = helper("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_:
-          cur = b.call_value(cur, emit_args(*sfx.nodes[0], ctx), p);
+          cur = call_with(cur, {}, emit_call_args(*sfx.nodes[0], ctx), p);
           break;
         default:
           fail(sfx, "'++'/'--' is only supported as a statement");
@@ -1896,6 +2045,14 @@ struct Binder {
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
+    if (g == "console" && mem == "log" && c != nullptr &&
+        has_spread(*c->nodes[0])) {
+      i = 3;
+      return b.intrinsic(
+          IntrinsicId::Print,
+          {helper("$logjoin", {emit_items(*c->nodes[0], 0, ctx, false)}, p)},
+          p);
+    }
     if (!mem.empty() && c != nullptr) {
       const std::vector<NodeId> args = emit_args(*c->nodes[0], ctx);
       i = 3;
@@ -1941,16 +2098,32 @@ struct Binder {
                      const Ast& at, FnCtx& ctx) {
     const SrcPos p = pos_of(at);
     auto b = Builder(m).at(p);
-    const std::vector<NodeId> args = emit_args(*call.nodes[0], ctx);
-    const auto a0 = [&] { return arg_or_nil(args, 0, p); };
-    const auto a1 = [&] { return arg_or_nil(args, 1, p); };
+    const Ast& arglist = *call.nodes[0];
+    // A builtin reads its arguments one value each, emitted the first time
+    // it asks; a method of the program's own never asks, and takes them
+    // the way any call does.
+    std::optional<std::vector<NodeId>> args_;
+    const auto args = [&]() -> const std::vector<NodeId>& {
+      if (!args_) args_ = emit_args(arglist, ctx);
+      return *args_;
+    };
+    const auto a0 = [&] { return arg_or_nil(args(), 0, p); };
+    const auto a1 = [&] { return arg_or_nil(args(), 1, p); };
 
-    if (name == "push") return helper("$push", {recv, a0()}, p);
+    // push takes any number of values, and a spread among them.
+    if (name == "push") {
+      if (arglist.nodes.size() == 1 && !has_spread(arglist)) {
+        return helper("$push", {recv, a0()}, p);
+      }
+      return helper("$pushall", {recv, emit_items(arglist, 0, ctx, false)},
+                    p);
+    }
     if (name == "pop") return b.intrinsic(IntrinsicId::ArrayPop, {recv});
     if (name == "slice") return helper("$slice", {recv, a0(), a1()}, p);
     if (name == "join") {
       return helper("$join",
-                    {recv, args.empty() ? b.str_literal(",") : args[0]}, p);
+                    {recv, args().empty() ? b.str_literal(",") : args()[0]},
+                    p);
     }
     // The generator protocol is GenResume/GenReturn/GenThrow, whose
     // {value, done} answer already is what `g.next()` evaluates to in
@@ -1978,7 +2151,8 @@ struct Binder {
     if (name == "delete") return helper("$mdel", {recv, a0()}, p);
     if (name == "add") return helper("$sadd", {recv, a0()}, p);
 
-    return b.call_value(helper("$index", {recv, b.str_literal(name)}, p), args);
+    return call_with(helper("$index", {recv, b.str_literal(name)}, p), {},
+                     emit_call_args(arglist, ctx), p);
   }
 
   // Assignment, in the one shape both a variable and a property need: let
@@ -2099,6 +2273,7 @@ struct Binder {
     built.local_names = ctx.names();
     built.num_cells = ctx.next_cell;
     built.lenient_arity = true;  // JavaScript's own arity rule
+    built.rest_param = fi.rest;
     built.is_generator = fi.is_generator;
     built.body = b.scope(0, nparams, b.block(stmts));
 
@@ -2202,6 +2377,9 @@ struct Binder {
     f.num_captures = ncaps;
     f.capture_names = capnames;
     f.lenient_arity = true;
+    // A rest param arrives here as the array, and is spread back out to
+    // f$body below, whose own rest param collects it afresh.
+    f.rest_param = fi.rest;
     f.body = b.scope(0, nparams, b.block(launch));
     m.funcs[static_cast<size_t>(index)] = std::move(f);
 
@@ -2210,6 +2388,14 @@ struct Binder {
     callargs.reserve(static_cast<size_t>(nparams));
     for (int32_t i = 0; i < nparams; ++i) {
       callargs.push_back(b.varref(VarKind::Capture, 2 + i));
+    }
+    NodeId call_body;
+    if (fi.rest) {
+      const NodeId rest = callargs.back();
+      callargs.pop_back();
+      call_body = b.call_spread(b.varref(VarKind::Capture, 0), callargs, rest);
+    } else {
+      call_body = b.call_value(b.varref(VarKind::Capture, 0), callargs);
     }
     Func run;
     run.name = fi.name + "$run";
@@ -2227,9 +2413,7 @@ struct Binder {
         0, 1,
         b.make_try(
             0,
-            rtcall("$presolve",
-                   {b.varref(VarKind::Capture, 1),
-                    b.call_value(b.varref(VarKind::Capture, 0), callargs)}),
+            rtcall("$presolve", {b.varref(VarKind::Capture, 1), call_body}),
             rtcall("$psettle", {b.varref(VarKind::Capture, 1), b.literal(2),
                                 b.varref(VarKind::Local, 0)})));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);

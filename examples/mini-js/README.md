@@ -281,6 +281,33 @@ methods. Outside any method, `this` there is a bind-time error; inside
 one, it resolves outward to the method's `this` the way an arrow's would
 (see "quietly different" below).
 
+## Rest parameters and spread
+
+A rest parameter is `Func::rest_param` -- the top-level README's
+**Variadic calls** -- and already the right type, since JavaScript's is an
+Array too. A call with `...` among its arguments is a `CallSpread`: the
+arguments before the first `...` as they are, and everything from there
+on as one array. A call that ends in a single `...xs` passes `xs` itself,
+because the `CallSpread` copies it when it runs and nothing after it can
+run first; anywhere else each `...x` is copied where it stands, as
+JavaScript reads it, so `f(...a, a.push(1), ...a)` sees `a` before the
+push and after it. The copy is `$arrayof(...x)` -- a `CallSpread` into a
+helper whose rest param is its whole answer -- so checking that `x` is an
+array and copying it are the executor's own work, with its own words for
+a value that is not one. Array literals build `[a, ...xs]` from the same
+pieces.
+
+Two of this front end's functions forward their arguments to another:
+an async function's launcher hands them to its body, and `new` gives each
+instance a wrapper per method that adds `this`. Both take a rest param
+where the function they forward to has one, and spread it back out, so
+the callee's own rest param collects it afresh.
+
+`console.log` and `push` take any number of arguments, and a spread among
+them; `a.push(1, 2)` used to push only the first. Every other builtin
+matched by name reads its arguments one value each, and a spread in one is
+a bind-time error rather than a silently dropped argument.
+
 ## What is deliberately absent, and what quietly differs
 
 Absent, because none of it exercises a recipe further:
@@ -296,7 +323,7 @@ Absent, because none of it exercises a recipe further:
   bind-time error rather than a silent `let`.
 * **`i++`/`i--` as expressions.** Statements and `for` updates only;
   `let j = i++` is a bind-time error.
-* **Destructuring, spread, template literals, `switch`, labels, `for...in`,
+* **Destructuring, template literals, `switch`, labels, `for...in`,
   regular expressions, getters/setters, `yield*`, async arrows and
   top-level `await`.** Syntax, mostly. `switch` is already mini-go's to
   prove, and top-level `await` would need `funcs[0]` itself to be a
@@ -333,13 +360,16 @@ Quietly different, and therefore worth knowing:
   resolves outward like an arrow's, where JavaScript would rebind it by
   how the function is called -- `function f() { return this.x }` called
   bare inside a method answers the instance's `x` here.
+* **Only an array can be spread.** JavaScript spreads any iterable -- a
+  string, a Map, a Set, a generator; here anything but an array stops the
+  run with the executor's "cannot spread" error.
 * **An unhandled rejection is silent.** `node` prints the error and exits
   1; here the promise simply stays rejected. (An `await` on a promise
   nothing ever settles, on the other hand, matches: both just exit.)
 
 ## Testing
 
-`ctest -R mini-js-samples` runs the eight samples and requires each one's
+`ctest -R mini-js-samples` runs the nine samples and requires each one's
 output to match a golden file captured from `node` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here, not
 just this binary agreeing with itself.
@@ -360,7 +390,7 @@ arrays, and `typeof`.)
 by the build, for the reason `test/gen_golden.sh` states: a golden file the
 tests could refresh themselves is not evidence of anything.
 
-Beyond the sample check, all eight samples are clean under the two lanes
+Beyond the sample check, all nine samples are clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --
 ASan/UBSan/LeakSanitizer, and `COREIR_GC_STRESS=1` (a full collection at
 every single allocation).

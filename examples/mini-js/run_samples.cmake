@@ -12,7 +12,7 @@
 # output with the same code -- see its own header comment for why that is
 # the honest comparison.
 
-set(SAMPLES basics closures objects errors generators mapset async classes)
+set(SAMPLES basics closures objects errors generators mapset async classes spread)
 
 set(dir ${SRC}/samples)
 set(failed 0)
