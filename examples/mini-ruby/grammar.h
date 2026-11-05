@@ -10,15 +10,17 @@
 // nil) and a lambda (a mismatch raises ArgumentError) is exactly
 // lenient_arity plus an ArgCount check.
 //
-// What it covers: `def` with an optional `&block` parameter and default
-// parameters, blocks in both `{ |x| }` and `do |x| ... end` forms, `yield`,
+// What it covers: `def` with an optional `&block` parameter, default
+// parameters and a last `*rest`, splats among a call's arguments and in an
+// array literal, blocks in both `{ |x| }` and `do |x| ... end` forms, `yield`,
 // `block_given?`, `lambda`/`Proc.new` and `.call`/`.arity`,
 // `begin`/`rescue`/`ensure`, `raise`, `if`/`elsif`/`else`/`unless`/`while`/
 // `until`/`case`/`when`, statement modifiers (`x if c`), the ternary
 // operator, `class` with inheritance/`super`/`attr_accessor`, symbols,
 // arrays, hashes, ranges, strings with `#{}` interpolation, and the
-// iterator methods the samples need. What it does not: modules, splats,
-// keyword arguments, and `method_missing` -- see README.md.
+// iterator methods the samples need. What it does not: modules, a
+// parameter after the splat, keyword arguments, and `method_missing` -- see
+// README.md.
 //
 // Three things about this grammar are worth knowing.
 //
@@ -83,8 +85,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   defname    <- opname / ident
   opname     <- < '==' / '<=>' > hs
   paramlist  <- ('(' _ (param (',' _ param)*)? ','? _ ')' _)? { no_ast_opt }
-  param      <- blockparam / defparam / ident
+  param      <- blockparam / splatparam / defparam / ident
   blockparam <- '&' _ ident                                  { no_ast_opt }
+  splatparam <- '*' _ ident                                  { no_ast_opt }
   defparam   <- ident '=' ![=] _ expr
 
   # A class is a table of methods and (with `attr_accessor`) of generated
@@ -145,15 +148,17 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   indexsfx   <- '[' _ expr ']' hs                            { no_ast_opt }
   callargs   <- '(' _ args ')' hs                            { no_ast_opt }
   args       <- (arg (',' _ arg)*)? ','? _                    { no_ast_opt }
-  arg        <- blockpass / expr
+  arg        <- blockpass / splatarg / expr
+  splatarg   <- '*' _ expr                                    { no_ast_opt }
   blockpass  <- '&' _ expr                                    { no_ast_opt }
 
   blockarg   <- braceblock / doblock
   braceblock <- '{' _ blockparams body '}' hs                { no_ast_opt }
   doblock    <- 'do' __ blockparams body 'end' ![a-zA-Z0-9_?!] hs
                                                              { no_ast_opt }
-  blockparams <- ('|' _ (ident (',' _ ident)*)? ','? _ '|' _)?
+  blockparams <- ('|' _ (bparam (',' _ bparam)*)? ','? _ '|' _)?
                                                              { no_ast_opt }
+  bparam     <- splatparam / ident
 
   primary    <- cmdcall / supercall / yieldexpr / returnstmt / nextstmt
               / breakstmt / float / number / istring / string / symbol
@@ -166,13 +171,14 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   callexpr   <- ident callargs blockarg? / ident blockarg
   cmdcall    <- cmdname args1?                               { no_ast_opt }
   cmdname    <- < ('puts' / 'print' / 'raise' / 'p') > ![a-zA-Z0-9_?!] hs
-  args1      <- expr (',' _ expr)*                           { no_ast_opt }
+  args1      <- arg1 (',' _ arg1)*                           { no_ast_opt }
+  arg1       <- splatarg / expr
   yieldexpr  <- 'yield' ![a-zA-Z0-9_?!] hs args1?            { no_ast_opt }
   returnstmt <- 'return' ![a-zA-Z0-9_?!] hs expr?            { no_ast_opt }
   nextstmt   <- 'next' ![a-zA-Z0-9_?!] _                     { no_ast_opt }
   breakstmt  <- 'break' ![a-zA-Z0-9_?!] _                    { no_ast_opt }
 
-  arraylit   <- '[' _ (expr (',' _ expr)*)? ','? _ ']' hs    { no_ast_opt }
+  arraylit   <- '[' _ (arg1 (',' _ arg1)*)? ','? _ ']' hs    { no_ast_opt }
   hashlit    <- '{' _ (hpair (',' _ hpair)*)? ','? _ '}' hs  { no_ast_opt }
   hpair      <- expr '=>' _ expr
   literal    <- < ('true' / 'false' / 'nil') ![a-zA-Z0-9_] > hs

@@ -115,6 +115,9 @@ struct FnInfo {
   std::string name = "?";
   std::vector<int32_t> params;  // params[0] is always the block
   std::vector<const Ast*> defaults;
+  // The last of params is `*rest`: Func::rest_param, an Array of the
+  // arguments the others left over.
+  bool rest = false;
   const Ast* body = nullptr;
   // Set on an instance method: params[1] is `self`, `cls_base` is the
   // enclosing class's own base-table binding (what `super` looks up on),
@@ -259,8 +262,10 @@ struct Binder {
         decl_of[p->nodes[0].get()] = blk;
         continue;
       }
+      if (fi.rest) fail(*p, "a parameter after a splat is not supported here");
+      fi.rest = p->tag == "splatparam"_;
       const bool has_default = p->tag == "defparam"_;
-      const Ast& id = has_default ? *p->nodes[0] : *p;
+      const Ast& id = has_default || fi.rest ? *p->nodes[0] : *p;
       const int32_t v = declare_param(std::string(id.token), f);
       decl_of[&id] = v;
       fi.params.push_back(v);
@@ -290,10 +295,14 @@ struct Binder {
     fns[static_cast<size_t>(f)].params.push_back(declare_param("__block", f));
     fns[static_cast<size_t>(f)].defaults.push_back(nullptr);
     for (const auto& p : params.nodes) {
-      const int32_t v = declare_param(std::string(p->token), f);
-      decl_of[p.get()] = v;
-      fns[static_cast<size_t>(f)].params.push_back(v);
-      fns[static_cast<size_t>(f)].defaults.push_back(nullptr);
+      FnInfo& fi = fns[static_cast<size_t>(f)];
+      if (fi.rest) fail(*p, "a parameter after a splat is not supported here");
+      fi.rest = p->tag == "splatparam"_;
+      const Ast& id = fi.rest ? *p->nodes[0] : *p;
+      const int32_t v = declare_param(std::string(id.token), f);
+      decl_of[&id] = v;
+      fi.params.push_back(v);
+      fi.defaults.push_back(nullptr);
     }
     for (const auto& s : body.nodes) resolve_stmt(*s, f);
     pop_scope();
@@ -519,7 +528,7 @@ struct Binder {
         "$iternext", "$each", "$map", "$select", "$inject", "$inject1",
         "$eachwi", "$push", "$keys", "$sort", "$include", "$join", "$toa",
         "$first",  "$last", "$exc",  "$mkexc", "$puts", "$putsone",
-        "$arity",  "$times", "$reverse", "$argerr",
+        "$arity",  "$times", "$reverse", "$argerr", "$splat", "$pushall",
         // Classes: a table of ordinary objects, walked.
         "$classof", "$mfind", "$clsname", "$isa", "$isexact", "$nometh",
         "$caseeq",
@@ -1145,6 +1154,27 @@ struct Binder {
     r.finish("$toa");
   }
 
+  // What `*x` contributes: nothing for nil, and otherwise to_a's answer --
+  // an array's elements, a range's members, any other value by itself.
+  // An array comes back as itself; whatever keeps it copies it.
+  void rt_splat() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.arr({}))));
+    r.add(r.ret(r.call("$toa", {r.L(v)})));
+    r.finish("$splat");
+  }
+
+  // push with any number of values, as one array: `a.push(x, y)`,
+  // `a.push(*xs)`. `vals` may be `a` itself, which ArrayConcat allows.
+  void rt_pushall() {
+    RT r(*this);
+    const auto [a, vals] = r.params("a", "vals");
+    r.add(r.in(IntrinsicId::ArrayConcat, {r.L(a), r.L(vals)}));
+    r.add(r.ret(r.L(a)));
+    r.finish("$pushall");
+  }
+
   void rt_first() {
     one("$first",
         [&](RT& r) {
@@ -1191,13 +1221,17 @@ struct Binder {
   // gives every function, so the answer is one less than the intrinsic's
   // -- and one less again for an instance method's implicit `self`, but no
   // sample here asks a bound method its arity, so that case is not tried.
+  // With a `*rest` FnArity is -(required + 1), Ruby's own form, so taking
+  // the block out of `required` moves it one toward zero instead.
   void rt_arity() {
-    one("$arity",
-        [&](RT& r) {
-          return r.bin(BinOp::Sub, r.in(IntrinsicId::FnArity, {r.L(0)}),
-                       r.I(1));
-        },
-        {"f"});
+    RT r(*this);
+    const auto [f] = r.params("f");
+    const auto [n] = r.locals("n");
+    r.add(r.set(n, r.in(IntrinsicId::FnArity, {r.L(f)})));
+    r.add(r.iff(r.bin(BinOp::Lt, r.L(n), r.I(0)),
+                r.ret(r.bin(BinOp::Add, r.L(n), r.I(1)))));
+    r.add(r.ret(r.bin(BinOp::Sub, r.L(n), r.I(1))));
+    r.finish("$arity");
   }
 
   void rt_reverse() {
@@ -1383,7 +1417,7 @@ struct Binder {
     rt_inject1(); rt_eachwi(); rt_push(); rt_keys(); rt_sort(); rt_include();
     rt_join(); rt_toa(); rt_first(); rt_last(); rt_exc(); rt_mkexc();
     rt_puts(); rt_putsone(); rt_arity(); rt_times(); rt_reverse();
-    rt_argerr();
+    rt_argerr(); rt_splat(); rt_pushall();
     rt_classof(); rt_mfind(); rt_clsname(); rt_isa(); rt_isexact();
     rt_nometh(); rt_caseeq();
   }
@@ -1788,18 +1822,15 @@ struct Binder {
       case "supercall"_: {
         const FnInfo& fi = fns[static_cast<size_t>(ctx.fn)];
         if (!fi.is_method) fail(a, "'super' used outside a method");
-        std::vector<NodeId> args;
-        if (!a.nodes.empty()) {
-          for (const auto& c : a.nodes[0]->nodes) args.push_back(emit_expr(*c, ctx));
-        }
+        const Args args =
+            emit_call_args(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx);
         if (fi.cls_base < 0) return b.nil_literal();  // no explicit superclass
         const NodeId base = read_var(fi.cls_base, ctx, p);
         const NodeId self = read_var(fi.params[1], ctx, p);
-        const NodeId blk = read_var(fi.params[0], ctx, p);
+        const NodeId blk =
+            args.block.valid() ? args.block : read_var(fi.params[0], ctx, p);
         const int32_t mv = ctx.alloc_local("$super");
         const NodeId M = b.varref(VarKind::Local, mv);
-        std::vector<NodeId> callargs{blk, self};
-        callargs.insert(callargs.end(), args.begin(), args.end());
         return b.block(
             {b.assign(
                  VarKind::Local, mv,
@@ -1810,7 +1841,7 @@ struct Binder {
              b.make_if(
                  b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                           b.str_literal("nil")),
-                 b.call_value(M, callargs),
+                 call_with(M, {blk, self}, args, p),
                  helper("$nometh", {self, b.str_literal(fi.method_name)}, p))});
       }
       case "notop"_:
@@ -1831,13 +1862,11 @@ struct Binder {
       case "nextstmt"_:
         return b.make_continue();
       case "yieldexpr"_: {
-        std::vector<NodeId> args{b.nil_literal()};
-        if (!a.nodes.empty()) {
-          for (const auto& c : a.nodes[0]->nodes) {
-            args.push_back(emit_expr(*c, ctx));
-          }
-        }
-        return b.call_value(block_of(ctx, p), args);
+        const NodeId blk = block_of(ctx, p);
+        return call_with(
+            blk, {b.nil_literal()},
+            emit_call_args(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx),
+            p);
       }
       case "cmdcall"_:
         return emit_cmd(a, ctx);
@@ -1895,6 +1924,11 @@ struct Binder {
         return acc;
       }
       case "arraylit"_: {
+        if (has_splat(a)) {
+          std::vector<const Ast*> xs;
+          for (const auto& c : a.nodes) xs.push_back(c.get());
+          return emit_items(xs, 0, ctx, true, p);
+        }
         std::vector<NodeId> items;
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
         return b.array_lit(items);
@@ -1945,14 +1979,138 @@ struct Binder {
     fail(a, "undefined local variable or method '" + n + "'");
   }
 
+  static bool has_splat(const Ast& list) {
+    for (const auto& c : list.nodes) {
+      if (c->tag == "splatarg"_) return true;
+    }
+    return false;
+  }
+
+  // Items from `from` on, some of them `*x`, as one array: each `*x` read
+  // where it stands, through $splat, and copied into a fresh array then. A
+  // call that ends in a single `*x` (`fresh` off) passes $splat's answer
+  // as it is instead -- the CallSpread that spreads it copies it.
+  NodeId emit_items(const std::vector<const Ast*>& items, size_t from,
+                    FnCtx& ctx, bool fresh, SrcPos p) {
+    auto b = Builder(m).at(p);
+    const auto splat = [&](const Ast& x) {
+      return helper("$splat", {emit_expr(*x.nodes[0], ctx)}, p);
+    };
+    if (!fresh && from + 1 == items.size() &&
+        items[from]->tag == "splatarg"_) {
+      return splat(*items[from]);
+    }
+    std::vector<NodeId> run;
+    size_t k = from;
+    for (; k < items.size() && items[k]->tag != "splatarg"_; ++k) {
+      run.push_back(emit_expr(*items[k], ctx));
+    }
+    const int32_t t = ctx.alloc_local("$items");
+    const NodeId T = b.varref(VarKind::Local, t);
+    std::vector<NodeId> out{b.assign(VarKind::Local, t, b.array_lit(run))};
+    run.clear();
+    const auto flush = [&] {
+      if (!run.empty()) {
+        out.push_back(
+            b.intrinsic(IntrinsicId::ArrayConcat, {T, b.array_lit(run)}));
+      }
+      run.clear();
+    };
+    for (; k < items.size(); ++k) {
+      if (items[k]->tag != "splatarg"_) {
+        run.push_back(emit_expr(*items[k], ctx));
+        continue;
+      }
+      flush();
+      out.push_back(
+          b.intrinsic(IntrinsicId::ArrayConcat, {T, splat(*items[k])}));
+    }
+    flush();
+    out.push_back(T);
+    return b.block(out);
+  }
+
+  // A call's arguments: the ones before the first `*x` one value each,
+  // and from there on one array for a CallSpread to spread, since how many
+  // there are is not known until it runs. A `&blk` among them is the
+  // block, not an argument.
+  struct Args {
+    std::vector<NodeId> fixed;
+    NodeId spread;  // invalid when nothing is spread
+    NodeId block;   // a `&blk`, or invalid
+  };
+
+  Args emit_call_args(const Ast* list, FnCtx& ctx) {
+    Args out;
+    if (list == nullptr) return out;
+    std::vector<const Ast*> items;
+    for (const auto& c : list->nodes) {
+      if (c->tag == "blockpass"_) {
+        out.block = emit_expr(*c->nodes[0], ctx);
+      } else {
+        items.push_back(c.get());
+      }
+    }
+    size_t k = 0;
+    for (; k < items.size() && items[k]->tag != "splatarg"_; ++k) {
+      out.fixed.push_back(emit_expr(*items[k], ctx));
+    }
+    if (k < items.size()) {
+      out.spread = emit_items(items, k, ctx, false, pos_of(*list));
+    }
+    return out;
+  }
+
+  // A call over those arguments, after `before` -- the block, and a
+  // method's `self`.
+  NodeId call_with(NodeId callee, std::vector<NodeId> before,
+                   const Args& args, SrcPos p) {
+    auto b = Builder(m).at(p);
+    before.insert(before.end(), args.fixed.begin(), args.fixed.end());
+    if (args.spread.valid()) return b.call_spread(callee, before, args.spread);
+    return b.call_value(callee, before);
+  }
+
+  // Every argument as one array, a spread included.
+  NodeId values_array(const Args& args, FnCtx& ctx, SrcPos p) {
+    auto b = Builder(m).at(p);
+    if (!args.spread.valid()) return b.array_lit(args.fixed);
+    if (args.fixed.empty()) return args.spread;
+    const int32_t t = ctx.alloc_local("$items");
+    const NodeId T = b.varref(VarKind::Local, t);
+    return b.block({b.assign(VarKind::Local, t, b.array_lit(args.fixed)),
+                    b.intrinsic(IntrinsicId::ArrayConcat, {T, args.spread}),
+                    T});
+  }
+
+  // A builtin's arguments, one value each: the shapes this front end
+  // matches by name read them by position, so a splat has nowhere to go.
+  std::vector<NodeId> emit_args(const Ast* list, FnCtx& ctx) {
+    std::vector<NodeId> out;
+    if (list == nullptr) return out;
+    for (const auto& c : list->nodes) {
+      if (c->tag == "splatarg"_) {
+        fail(*c, "a splat argument is not supported in this call here");
+      }
+      out.push_back(emit_expr(*c, ctx));
+    }
+    return out;
+  }
+
   NodeId emit_cmd(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const std::string name(a.nodes[0]->token);
-    std::vector<NodeId> args;
-    if (a.nodes.size() > 1) {
-      for (const auto& c : a.nodes[1]->nodes) args.push_back(emit_expr(*c, ctx));
+    const Ast* list = a.nodes.size() > 1 ? a.nodes[1].get() : nullptr;
+    // puts takes any number of values, and a splat among them.
+    if (name == "puts" && list != nullptr && has_splat(*list)) {
+      std::vector<const Ast*> items;
+      for (const auto& c : list->nodes) items.push_back(c.get());
+      return native(
+          "write",
+          {helper("$puts", {emit_items(items, 0, ctx, false, p)}, p)}, p);
     }
+    const std::vector<NodeId> args = emit_args(list, ctx);
     if (name == "puts") {
       return native("write", {helper("$puts", {b.array_lit(args)}, p)}, p);
     }
@@ -2009,25 +2167,15 @@ struct Binder {
     }
     NodeId blk = blockn != nullptr ? emit_closure(fn_of.at(blockn), ctx, p)
                                    : b.nil_literal();
-    std::vector<NodeId> rest;
-    if (argsn != nullptr) {
-      for (const auto& c : argsn->nodes) {
-        // `f(&blk)` hands a callable over as the block rather than as an
-        // argument -- Ruby's own way of forwarding one.
-        if (c->tag == "blockpass"_) {
-          blk = emit_expr(*c->nodes[0], ctx);
-          continue;
-        }
-        rest.push_back(emit_expr(*c, ctx));
-      }
-    }
-    std::vector<NodeId> args{blk};
-    args.insert(args.end(), rest.begin(), rest.end());
+    const Args args = emit_call_args(argsn, ctx);
+    // `f(&blk)` hands a callable over as the block rather than as an
+    // argument -- Ruby's own way of forwarding one.
+    if (args.block.valid()) blk = args.block;
     const auto it = ref_of.find(&id);
     if (it == ref_of.end()) {
       fail(id, "undefined method '" + n + "'");
     }
-    return b.call_value(read_var(it->second, ctx, p), args);
+    return call_with(read_var(it->second, ctx, p), {blk}, args, p);
   }
 
   NodeId emit_postfix(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -2078,21 +2226,18 @@ struct Binder {
   // every other method call goes through.
   NodeId emit_new(NodeId cls, const Ast& sfx, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
-    std::vector<NodeId> args;
+    const Ast* list = nullptr;
     for (size_t i = 1; i < sfx.nodes.size(); ++i) {
-      if (sfx.nodes[i]->tag != "callargs"_ || sfx.nodes[i]->nodes.empty()) {
-        continue;
-      }
-      for (const auto& x : sfx.nodes[i]->nodes[0]->nodes) {
-        args.push_back(emit_expr(*x, ctx));
+      if (sfx.nodes[i]->tag == "callargs"_ && !sfx.nodes[i]->nodes.empty()) {
+        list = sfx.nodes[i]->nodes[0].get();
       }
     }
+    const Args args = emit_call_args(list, ctx);
     const int32_t t = ctx.alloc_local("$new");
     const int32_t mv = ctx.alloc_local("$init");
     const NodeId T = b.varref(VarKind::Local, t);
     const NodeId M = b.varref(VarKind::Local, mv);
-    std::vector<NodeId> callargs{b.nil_literal(), T};
-    callargs.insert(callargs.end(), args.begin(), args.end());
+    const NodeId blk = args.block.valid() ? args.block : b.nil_literal();
     return b.block(
         {b.assign(VarKind::Local, t,
                   b.object_lit({{b.str_literal(kClassKey), cls}})),
@@ -2103,7 +2248,7 @@ struct Binder {
                          p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
-                   b.call_value(M, callargs), NodeId{}),
+                   call_with(M, {blk, T}, args, p), NodeId{}),
          T});
   }
 
@@ -2119,36 +2264,49 @@ struct Binder {
       return helper("$idx", {recv, emit_expr(*sfx.nodes[0], ctx)}, p);
     }
     const std::string name(sfx.nodes[0]->token);
-    std::vector<NodeId> args;
+    Args cargs;
     NodeId blk = b.nil_literal();
     for (size_t i = 1; i < sfx.nodes.size(); ++i) {
       const Ast& c = *sfx.nodes[i];
       if (c.tag == "callargs"_) {
         if (!c.nodes.empty()) {
-          for (const auto& x : c.nodes[0]->nodes) {
-            if (x->tag == "blockpass"_) {
-              blk = emit_expr(*x->nodes[0], ctx);
-              continue;
-            }
-            args.push_back(emit_expr(*x, ctx));
-          }
+          cargs = emit_call_args(c.nodes[0].get(), ctx);
+          if (cargs.block.valid()) blk = cargs.block;
         }
       } else {
         blk = emit_closure(fn_of.at(&c), ctx, p);
       }
     }
+    const std::vector<NodeId>& args = cargs.fixed;
     const std::function<NodeId(size_t)> a0 = [&](size_t k) {
       return k < args.size() ? args[k] : b.nil_literal();
     };
+    // A builtin reads one value per argument -- except push, which takes
+    // any number of them, and a Proc's call, which is a call like any
+    // other. Which one runs is decided when it runs (a class of the
+    // program's own may define a method of the same name), so a splat
+    // into any other builtin raises then.
     const auto fallback = [&]() -> NodeId {
+      if ((name == "push" || name == "<<") &&
+          (cargs.spread.valid() || args.size() != 1)) {
+        return helper("$pushall", {recv, values_array(cargs, ctx, p)}, p);
+      }
+      if (cargs.spread.valid()) {
+        if (name == "call") {
+          return call_with(recv, {b.nil_literal()}, cargs, p);
+        }
+        return helper("$exc",
+                      {b.str_literal("ArgumentError"),
+                       b.str_literal("a splat argument is not supported in "
+                                     "a call to " + name + " here")},
+                      p);
+      }
       return emit_suffix_builtin(recv, sfx, name, args, blk, a0, ctx, p);
     };
     const int32_t t = ctx.alloc_local("$self");
     const int32_t mv = ctx.alloc_local("$m");
     const NodeId T = b.varref(VarKind::Local, t);
     const NodeId M = b.varref(VarKind::Local, mv);
-    std::vector<NodeId> callargs{blk, T};
-    callargs.insert(callargs.end(), args.begin(), args.end());
     return b.block(
         {b.assign(VarKind::Local, t, recv),
          b.assign(VarKind::Local, mv,
@@ -2158,7 +2316,7 @@ struct Binder {
                          p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
-                   b.call_value(M, callargs), fallback())});
+                   call_with(M, {blk, T}, cargs, p), fallback())});
   }
 
   NodeId emit_suffix_builtin(NodeId recv, const Ast& sfx,
@@ -2283,10 +2441,14 @@ struct Binder {
     // says it is "Only interesting under Func::lenient_arity, where the
     // two can differ", and this is the language where the difference has a
     // name.
+    // With a `*rest`, the count is a minimum: every parameter before it.
     if (fi.strict) {
+      const int64_t fixed = static_cast<int64_t>(fi.params.size()) -
+                            (fi.rest ? 1 : 0);
       stmts.push_back(
-          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::ArgCount, {}),
-                             b.literal(static_cast<int64_t>(fi.params.size()))),
+          b.make_if(b.binary(fi.rest ? BinOp::Lt : BinOp::Ne,
+                             b.intrinsic(IntrinsicId::ArgCount, {}),
+                             b.literal(fixed)),
                     helper("$argerr", {}, p), NodeId{}));
     }
     const NodeId body = emit_body(*fi.body, ctx);
@@ -2300,6 +2462,7 @@ struct Binder {
     Func fn;
     fn.name = fi.name;
     fn.num_params = static_cast<int32_t>(fi.params.size());
+    fn.rest_param = fi.rest;
     // funcs[0] is the entry point and is called with no arguments at all,
     // so its block parameter is a slot nothing fills -- reading it would
     // be an "uninitialized variable". At the top level there is never a

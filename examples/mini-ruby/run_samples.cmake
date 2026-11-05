@@ -5,7 +5,8 @@
 # Ruby makes program-visible as `Proc#arity` and as the difference between
 # a proc and a lambda.
 
-set(SAMPLES basics blocks procs collections errors closures classes control)
+set(SAMPLES basics blocks procs collections errors closures classes control
+            splat)
 
 set(dir ${SRC}/samples)
 set(failed 0)

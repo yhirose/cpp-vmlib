@@ -12,7 +12,7 @@ Both introduce themselves in the header:
 >
 > **ArgCount** -- "How many arguments the running function was called with
 > -- the count the caller supplied, not num_params. Only interesting under
-> `Func::lenient_arity`, where the two can differ."
+> `Func::lenient_arity` or `Func::rest_param`, where the two can differ."
 
 Ruby is where both are *program-visible*. `Proc#arity` is FnArity. And
 Ruby's own distinction between its two kinds of callable is exactly
@@ -53,7 +53,9 @@ Everything else follows from that with no further machinery:
 * `&blk` in a parameter list *names* parameter 0 rather than declaring a
   new one -- so it can be called, passed on with `f(&blk)`, and asked its
   arity.
-* `Proc#arity` is `FnArity` minus one, because FnArity counts it.
+* `Proc#arity` is `FnArity` minus one, because FnArity counts it -- or
+  plus one, for a block with a `*rest`, where FnArity is negative (see
+  Splats below).
 * And a lambda's ArgCount test compares against `num_params`, which counts
   it too -- so the one cancels the other and the check is exact.
 
@@ -202,12 +204,41 @@ for this: every call already supplies the block as argument 0, so
 exactly, and the prologue can ask "was parameter `i` supplied?" as
 `ArgCount > i` -- one check per default, no capture, no cell.
 
+## Splats
+
+A `*rest` parameter is `Func::rest_param` -- the top-level README's
+**Variadic calls** -- and FnArity already answers in Ruby's own form for
+it: `-(required + 1)`, where "required" counts the block parameter, so
+`Proc#arity` moves it one toward zero rather than subtracting one. A
+lambda's ArgCount test becomes a minimum, every parameter before the
+`*rest`. It has to be the last parameter (`&blk` aside): Ruby fills a
+required parameter written after it before any default, and counts it in
+`Proc#arity`, and FnArity has no way to know it is there -- so
+`def f(*a, b)` is a bind-time error rather than an arity that lies.
+
+A call with `*x` among its arguments is a `CallSpread`: the arguments
+before the first `*x` as they are, and everything from there on as one
+array, each `*x` read where it stands by Ruby's splat rule -- nothing for
+nil, otherwise what `to_a` answers, so an array's elements, a range's
+members, or any other value by itself. `yield`, `super`, `new`, a Proc's
+`call` and a method of the program's own all spread the same way, and an
+array literal builds `[a, *xs]` from the same pieces.
+
+`push` and `puts` take any number of values, a splat among them, and
+`a.push(1, 2)` pushes both where it pushed only the first. Every other
+builtin method reads one value per argument; whether a call reaches a
+builtin is only known when it runs (a class of the program's own may
+define a method of that name), so a splat into one raises an
+`ArgumentError` then. `p`, `print` and `raise` are matched by name, and
+refuse a splat when the program is bound.
+
 ## What is absent, and what quietly differs
 
-Absent: modules, splats (`*args`) and keyword arguments (both would need
-a call-site convention change like examples/mini-python's, which would
-also blur `FnArity`/`ArgCount` back into meaninglessness -- the one thing
-this front end exists to keep sharp), `method_missing`, operator
+Absent: modules, a parameter after a splat (see Splats), keyword
+arguments (which would need a call-site convention change like
+examples/mini-python's, and would blur `FnArity`/`ArgCount` back into
+meaninglessness -- the one thing this front end exists to keep sharp),
+`method_missing`, operator
 overloading beyond `==`, multiple inheritance, string methods beyond
 `upcase`/`downcase`/`length`, `Struct`, `require`, and a real exception
 hierarchy -- `rescue` here catches everything by default, matching Ruby's
@@ -231,14 +262,14 @@ Quietly different:
 
 ## Testing
 
-`ctest -R mini-ruby-samples` runs the eight samples and requires each one's
+`ctest -R mini-ruby-samples` runs the nine samples and requires each one's
 output to match a golden file captured from `ruby` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
 `samples/gen_golden.sh` regenerates the goldens, by hand and never from the
 build.
 
-All eight samples are clean under ASan/UBSan/LeakSanitizer and under
+All nine samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1`.
 
 `ctest -R mini-ruby-uncaught` runs `uncaught/`, programs that each end in
