@@ -48,3 +48,5 @@ missing
 KeyError: 'zz'
 bag:x 0 popped
 1 2 2
+"it's" 'say "hi"' 'both \' and "' '\\q'
+'tab\there\n' 'ABC' '\x00\x7f' ["it's"]

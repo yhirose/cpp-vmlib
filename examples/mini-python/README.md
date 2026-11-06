@@ -337,6 +337,10 @@ shape every `samples/scoping.py` decorator uses.
 
 Quietly different:
 
+* **A string is its UTF-8 bytes.** `len`, indexing and slicing count
+  bytes, so `len("é")` is 2 here and 1 in Python; an ASCII string is the
+  same either way. `repr` leaves the bytes of a non-ASCII character as
+  they are, which prints as Python's does.
 * **`global` reaches past every enclosing function to the module**, even
   past one that shadows the name -- and an assignment under `global` is
   what *creates* the module binding if nothing declared one yet, which

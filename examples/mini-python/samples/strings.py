@@ -115,3 +115,9 @@ class Bag:
 bag = Bag()
 print(bag.get("x"), bag.count(), bag.pop())
 print({"x": 1}.get("x"), [1, 1].count(1), [1, 2].pop())
+
+# Escapes are Python's -- octal, \x, \u, \U, and an unknown one keeps its
+# backslash -- and repr writes a string back the way CPython does: double
+# quotes for one holding a ' and no ", and the escapes spelled out.
+print(repr("it's"), repr('say "hi"'), repr("both ' and \""), repr("\q"))
+print(repr("tab\there\n"), repr("\101\x42C"), repr("\0\x7f"), ["it's"])

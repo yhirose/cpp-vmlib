@@ -93,21 +93,90 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
+// One escape sequence, Python's: `tok[i]` is the backslash. Appends what
+// it stands for to `out` and answers the index of its last character. An
+// escape Python does not know keeps its backslash, as Python's does.
+size_t unescape_at(const std::string& tok, size_t i, std::string& out) {
+  const auto hexval = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  // \xhh, \uhhhh and \Uhhhhhhhh: exactly that many hex digits.
+  const auto hex = [&](size_t from, size_t n, uint32_t& cp) {
+    if (from + n > tok.size()) return false;
+    cp = 0;
+    for (size_t k = 0; k < n; ++k) {
+      const int d = hexval(tok[from + k]);
+      if (d < 0) return false;
+      cp = cp * 16 + static_cast<uint32_t>(d);
+    }
+    return true;
+  };
+  const auto utf8 = [&](uint32_t cp) {
+    if (cp < 0x80) {
+      out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+      out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+  };
+  if (i + 1 >= tok.size()) {
+    out.push_back('\\');
+    return i;
+  }
+  const char c = tok[i + 1];
+  switch (c) {
+    case 'n': out.push_back('\n'); return i + 1;
+    case 't': out.push_back('\t'); return i + 1;
+    case 'r': out.push_back('\r'); return i + 1;
+    case 'a': out.push_back('\a'); return i + 1;
+    case 'b': out.push_back('\b'); return i + 1;
+    case 'f': out.push_back('\f'); return i + 1;
+    case 'v': out.push_back('\v'); return i + 1;
+    case '\\': out.push_back('\\'); return i + 1;
+    case '\'': out.push_back('\''); return i + 1;
+    case '"': out.push_back('"'); return i + 1;
+    case '\n': return i + 1;  // a backslash-newline continues the line
+    default: break;
+  }
+  if (c >= '0' && c <= '7') {  // up to three octal digits
+    uint32_t cp = 0;
+    size_t k = i + 1;
+    for (; k < tok.size() && k < i + 4 && tok[k] >= '0' && tok[k] <= '7'; ++k) {
+      cp = cp * 8 + static_cast<uint32_t>(tok[k] - '0');
+    }
+    utf8(cp);
+    return k - 1;
+  }
+  const size_t n = c == 'x' ? 2 : c == 'u' ? 4 : c == 'U' ? 8 : 0;
+  uint32_t cp = 0;
+  if (n > 0 && hex(i + 2, n, cp)) {
+    utf8(cp);
+    return i + 1 + n;
+  }
+  out.push_back('\\');
+  out.push_back(c);
+  return i + 1;
+}
+
 std::string unescape(const std::string& tok) {
   std::string out;
   for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
+    if (tok[i] == '\\') {
+      i = unescape_at(tok, i, out);
+    } else {
       out.push_back(tok[i]);
-      continue;
-    }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case 'r': out.push_back('\r'); break;
-      case '\\': out.push_back('\\'); break;
-      case '\'': out.push_back('\''); break;
-      case '"': out.push_back('"'); break;
-      default: out.push_back(tok[i]); break;
     }
   }
   return out;
@@ -124,17 +193,10 @@ std::string unescape_ftext(const std::string& tok) {
       ++i;
       continue;
     }
-    if (tok[i] != '\\' || i + 1 >= tok.size()) {
+    if (tok[i] == '\\') {
+      i = unescape_at(tok, i, out);
+    } else {
       out.push_back(tok[i]);
-      continue;
-    }
-    ++i;
-    switch (tok[i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case 'r': out.push_back('\r'); break;
-      case '0': out.push_back('\0'); break;
-      default: out.push_back(tok[i]); break;
     }
   }
   return out;
@@ -709,7 +771,7 @@ struct Binder {
         "$add", "$sub", "$mul", "$fdiv", "$idiv", "$mod", "$pow", "$cmp",
         "$eq", "$truthy",
         // Display.
-        "$fstr", "$str", "$repr", "$liststr", "$dictstr",
+        "$fstr", "$str", "$strrepr", "$repr", "$liststr", "$dictstr",
         // Containers, attributes, iteration, exceptions.
         "$len", "$idx", "$setidx", "$slice", "$in", "$getattr", "$setattr",
         "$iter", "$iternext", "$exc", "$isexc", "$range", "$listadd",
@@ -1455,13 +1517,59 @@ struct Binder {
     r.finish("$str");
   }
 
+  // A string's repr, as CPython writes it: in single quotes, or double ones
+  // when it holds a ' and no ", with the quote, the backslash, \n, \t, \r
+  // and any other control byte escaped. Bytes above 0x7f are UTF-8 and
+  // printable, and stay as they are.
+  void rt_strrepr() {
+    RT r(*this);
+    const auto [s] = r.params("s");
+    const auto [q, out, i, c, n] = r.locals("q", "out", "i", "c", "n");
+    const auto is = [&](const char* ch) {
+      return r.bin(BinOp::Eq, r.L(c), r.S(ch));
+    };
+    const auto put = [&](NodeId x) {
+      return r.set(out, r.bin(BinOp::Add, r.L(out), x));
+    };
+    const NodeId hex = r.S("0123456789abcdef");
+    const auto digit = [&](NodeId d) {
+      return r.in(IntrinsicId::StrSlice,
+                  {hex, d, r.bin(BinOp::Add, d, r.I(1))});
+    };
+    r.add(r.set(q, r.S("'")));
+    r.add(r.iff(r.both(r.call("$in", {r.S("'"), r.L(s)}),
+                       r.bin(BinOp::Eq, r.call("$in", {r.S("\""), r.L(s)}),
+                             r.Bo(false))),
+                r.set(q, r.S("\""))));
+    r.add(r.set(out, r.L(q)));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
+        r.blk({r.set(c, r.in(IntrinsicId::StrSlice,
+                             {r.L(s), r.L(i), r.bin(BinOp::Add, r.L(i), r.I(1))})),
+               r.set(n, r.in(IntrinsicId::StrByte, {r.L(s), r.L(i)})),
+               r.iff(r.either(is("\\"), r.bin(BinOp::Eq, r.L(c), r.L(q))),
+                     put(r.bin(BinOp::Add, r.S("\\"), r.L(c))),
+                     r.iff(is("\n"), put(r.S("\\n")),
+                           r.iff(is("\t"), put(r.S("\\t")),
+                                 r.iff(is("\r"), put(r.S("\\r")),
+                                       r.iff(r.either(r.bin(BinOp::Lt, r.L(n), r.I(0x20)),
+                                                      r.bin(BinOp::Eq, r.L(n), r.I(0x7f))),
+                                             put(r.bin(BinOp::Add, r.S("\\x"),
+                                                       r.bin(BinOp::Add,
+                                                             digit(r.bin(BinOp::Div, r.L(n), r.I(16))),
+                                                             digit(r.bin(BinOp::Mod, r.L(n), r.I(16)))))),
+                                             put(r.L(c))))))),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.bin(BinOp::Add, r.L(out), r.L(q))));
+    r.finish("$strrepr");
+  }
+
   void rt_repr() {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [f] = r.locals("f");
-    r.add(r.iff(r.is(r.typ(v), "string"),
-                r.ret(r.bin(BinOp::Add, r.bin(BinOp::Add, r.S("'"), r.L(v)),
-                            r.S("'")))));
+    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.call("$strrepr", {r.L(v)}))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__repr__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
@@ -2969,7 +3077,7 @@ struct Binder {
     rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
     rt_add(); rt_sub(); rt_mul(); rt_fdiv(); rt_idiv(); rt_mod(); rt_pow();
     rt_cmp(); rt_eq(); rt_truthy();
-    rt_fstr(); rt_str(); rt_repr(); rt_liststr(); rt_dictstr();
+    rt_fstr(); rt_str(); rt_strrepr(); rt_repr(); rt_liststr(); rt_dictstr();
     rt_len(); rt_idx(); rt_setidx(); rt_slice(); rt_in(); rt_getattr();
     rt_setattr(); rt_iter(); rt_iternext(); rt_exc(); rt_isexc(); rt_range();
     rt_listadd(); rt_strmul(); rt_listmul();
