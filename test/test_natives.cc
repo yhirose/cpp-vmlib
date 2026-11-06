@@ -321,7 +321,6 @@ int main() {
   {
     Module m;
     Builder b(m);
-    const NodeId o = b.varref(VarKind::Local, 0, p);
     m.funcs.push_back(
         {"main", 1, 0,
          b.scope(0, 1,

@@ -126,9 +126,6 @@ int main() {
   auto cap = [&p](Builder& b, int32_t i) {
     return b.varref(VarKind::Capture, i, p);
   };
-  auto cell = [&p](Builder& b, int32_t i) {
-    return b.varref(VarKind::Cell, i, p);
-  };
   auto str = [&p](Builder& b, const char* s) { return b.str_literal(s, p); };
   auto field = [&](Builder& b, NodeId o, const char* k) {
     return b.index(o, str(b, k), p);
