@@ -63,3 +63,7 @@
 (display (cdr (assoc 'b '((a . 1) (b . 2))))) (newline)
 ; A quote inside quoted data is data too.
 (display '(a 'b)) (display " ") (display ''c) (newline)
+; memq compares with eq?, member with equal?: a fresh list is equal to
+; another, never eq? to it.
+(display (memq (list 1) (list (list 1)))) (display " ")
+(display (member (list 1) (list 0 (list 1) 2))) (newline)

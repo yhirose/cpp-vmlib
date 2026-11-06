@@ -154,7 +154,7 @@ const std::vector<Builtin>& builtins() {
       {"string-append", "$strappend", 2, Fold::Left, Unit::EmptyString},
       {"length", "$length", 1},     {"reverse", "$reverse", 1},
       {"list-ref", "$listref", 2},  {"memq", "$memq", 2},
-      {"member", "$memq", 2},       {"assoc", "$assoc", 2},
+      {"member", "$member", 2},     {"assoc", "$assoc", 2},
       {"number?", "$numberp", 1},   {"string?", "$stringp", 1},
       {"procedure?", "$procp", 1},  {"boolean?", "$booleanp", 1},
       {"zero?", "$zerop", 1},       {"abs", "$abs", 1},
@@ -667,7 +667,8 @@ struct Binder {
     rt_append2();
     rt_reverse();
     rt_listref();
-    rt_memq();
+    rt_mem("$memq", "$eqv");
+    rt_mem("$member", "$equal");
     rt_assoc();
     rt_map1();
     rt_foreach1();
@@ -910,17 +911,19 @@ struct Binder {
     r.finish("$listref");
   }
 
-  void rt_memq() {
+  // memq and member: the first tail of l whose car is x, compared by eq?
+  // or by equal? -- the one difference between them.
+  void rt_mem(const std::string& name, const std::string& same) {
     RT r(*this);
     const auto [x, l] = r.params("x", "l");
     const auto [p] = r.locals("p");
     r.add(r.set(p, r.L(l)));
     r.add(r.wh(
         r.pairp(r.L(p)),
-        r.blk({r.iff(r.call("$equal", {r.L(x), r.car(r.L(p))}), r.ret(r.L(p))),
+        r.blk({r.iff(r.call(same, {r.L(x), r.car(r.L(p))}), r.ret(r.L(p))),
                r.set(p, r.cdr(r.L(p)))})));
     r.add(r.ret(r.Bo(false)));
-    r.finish("$memq");
+    r.finish(name);
   }
 
   void rt_assoc() {
