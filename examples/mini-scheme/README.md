@@ -144,14 +144,16 @@ closure.
 
 **Scheme's variadic builtins fold at the call site**, where the arity is
 known: `(+ a b c)` becomes two calls to a two-argument `$add`, and
-`(< a b c)` becomes a conjunction of two comparisons with the middle
-operand shared. The same builtin as a *value* -- `(apply + xs)`,
-`(fold + 0 xs)` -- is a procedure with a rest param that runs the same
-fold at run time. Each builtin's table entry says how it folds (`(+)` is
-0, `(- x)` is `(- 0 x)`, `(< a)` is `#t`), and both read it, so a call
-written out and a call through a value cannot disagree. The written-out
-call stays two plain calls and allocates nothing; the value pays for one
-array per call, its rest param.
+`(< a b c)` becomes a conjunction of two comparisons, with every operand
+evaluated once, in order, into a temporary first -- they are arguments,
+so each runs even after an earlier comparison has failed. The same
+builtin as a *value* -- `(apply + xs)`, `(fold + 0 xs)` -- is a procedure
+with a rest param that runs the same fold at run time. Each builtin's
+table entry says how it folds (`(+)` is 0, `(- x)` is `(- 0 x)`, `(< a)`
+is `#t`), and both read it, so a call written out and a call through a
+value cannot disagree. The written-out call stays plain calls and
+allocates nothing; the value pays for one array per call, its rest
+param.
 
 ## Rest parameters and `apply`
 

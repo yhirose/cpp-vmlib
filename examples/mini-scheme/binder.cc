@@ -1232,13 +1232,28 @@ struct Binder {
       return acc;
     }
     if (bi.fold == Fold::Chain) {
-      if (args.size() < 2) return b.bool_literal(true);
-      NodeId acc = helper(bi.rt, {args[0], args[1]}, p);
-      for (size_t i = 2; i < args.size(); ++i) {
-        acc = b.make_if(acc, helper(bi.rt, {args[i - 1], args[i]}, p),
+      // The operands are a procedure call's arguments: each runs once, in
+      // order, whether or not an earlier comparison has failed. Two need
+      // nothing more; with three or more, every middle one is read by two
+      // comparisons, so they all run into temporaries first and the
+      // comparisons read those.
+      if (args.empty()) return b.bool_literal(true);
+      if (args.size() == 1) return b.block({args[0], b.bool_literal(true)});
+      if (args.size() == 2) return helper(bi.rt, {args[0], args[1]}, p);
+      std::vector<NodeId> out;
+      std::vector<NodeId> vals;
+      for (const NodeId v : args) {
+        const int32_t t = ctx.alloc_local("$cmp");
+        out.push_back(b.assign(VarKind::Local, t, v));
+        vals.push_back(b.varref(VarKind::Local, t));
+      }
+      NodeId acc = helper(bi.rt, {vals[0], vals[1]}, p);
+      for (size_t i = 2; i < vals.size(); ++i) {
+        acc = b.make_if(acc, helper(bi.rt, {vals[i - 1], vals[i]}, p),
                         b.bool_literal(false));
       }
-      return acc;
+      out.push_back(acc);
+      return b.block(out);
     }
     if (static_cast<int32_t>(args.size()) != bi.arity) {
       fail(at, name + " takes " + std::to_string(bi.arity) + " arguments");
@@ -1389,13 +1404,19 @@ struct Binder {
     if (i >= a.nodes.size()) return b.nil_literal();
     const Ast& clause = *a.nodes[i];
     if (head_of(clause) == "else") return emit_seq(clause, 1, ctx, p);
-    const NodeId c = truthy(emit_form(*clause.nodes[0], ctx), ctx, p);
+    if (clause.nodes.size() > 1) {
+      const NodeId c = truthy(emit_form(*clause.nodes[0], ctx), ctx, p);
+      return b.make_if(c, emit_seq(clause, 1, ctx, p),
+                       emit_cond(a, i + 1, ctx));
+    }
     // `(cond (test))` answers the test's own value, which is why a clause
-    // with no body is not the same as one whose body is empty.
-    const NodeId body = clause.nodes.size() > 1
-                            ? emit_seq(clause, 1, ctx, p)
-                            : emit_form(*clause.nodes[0], ctx);
-    return b.make_if(c, body, emit_cond(a, i + 1, ctx));
+    // with no body is not the same as one whose body is empty -- kept in a
+    // temporary, the way `or` keeps its operand, so the test runs once.
+    const int32_t t = ctx.alloc_local("$cond");
+    const NodeId T = b.varref(VarKind::Local, t);
+    const NodeId test = emit_form(*clause.nodes[0], ctx);
+    return b.block({b.assign(VarKind::Local, t, test),
+                    b.make_if(truthy(T, ctx, p), T, emit_cond(a, i + 1, ctx))});
   }
 
   // `and` and `or` answer one of their operands, not a boolean.

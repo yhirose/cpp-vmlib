@@ -21,3 +21,6 @@ abc 5 42
 yes
 when
 unless
+[2]#t
+[1][2]#f
+[5]5

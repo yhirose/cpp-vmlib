@@ -55,3 +55,11 @@
 (newline)
 (when #t (display "when") (newline))
 (unless #f (display "unless") (newline))
+
+; Every operand of a comparison runs once, in order, even after one has
+; failed -- they are arguments -- and a `cond` clause with no body
+; answers its test's value without running the test again.
+(define (noisy x) (display "[") (display x) (display "]") x)
+(display (< 1 (noisy 2) 3)) (newline)
+(display (< 3 (noisy 1) (noisy 2))) (newline)
+(display (cond ((noisy 5)) (else 'no))) (newline)
