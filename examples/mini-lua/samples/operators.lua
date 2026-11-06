@@ -48,6 +48,10 @@ watched.b = 2
 watched.a = 99  -- already present after the first write: no log entry
 print(table.concat(log, ","))
 print(watched.a, watched.b)
+-- rawset answers the table it stored into, which it evaluates once.
+local function noisy(tag, v) io.write("[" .. tag .. "]") return v end
+local raw = {}
+print(rawset(noisy("t", raw), "a", 1) == raw, raw.a)
 
 -- The real generic-for protocol: a stateless iterator function.
 local function range(limit, i)

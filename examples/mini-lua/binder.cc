@@ -1412,9 +1412,13 @@ struct Binder {
       // rawset/rawget: `$set`/`$get` without the metamethod detour --
       // `__newindex`'s own thunk needs one, on pain of calling itself.
       if (g == "rawset") {
-        return {b.block({b.set_index(a0(0), helper("$key", {a0(1)}, p),
-                                     a0(2), p),
-                         a0(0)},
+        // The table is both where the store goes and the answer, so it is
+        // kept in a temporary rather than evaluated twice.
+        const int32_t t = ctx.alloc_local("$rawset");
+        const NodeId T = b.varref(VarKind::Local, t, p);
+        return {b.block({b.assign(VarKind::Local, t, a0(0), p),
+                         b.set_index(T, helper("$key", {a0(1)}, p), a0(2), p),
+                         T},
                         p),
                 false};
       }
