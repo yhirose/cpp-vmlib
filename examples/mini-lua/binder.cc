@@ -109,6 +109,25 @@ bool is_global(const std::string& n) {
 // A `:name(...)` whose receiver is a string. Resolved by name at bind time,
 // because a subset without a string metatable has no runtime lookup to do
 // it with -- README.md lists the consequence.
+// How many arguments a library function reads, one value each; npos for
+// one that takes every value (print, io.write, select, pcall, table.pack)
+// or reads its own (the string natives). The arguments past those still
+// run -- see spill_surplus.
+size_t library_reads(const std::string& g, const std::string& mem) {
+  static const std::map<std::string, size_t> reads = {
+      {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
+      {"getmetatable", 1}, {"error", 1},         {"rawset", 3},
+      {"rawget", 2},       {"coroutine.create", 1},
+      {"coroutine.resume", 2},                   {"coroutine.yield", 1},
+      {"coroutine.status", 1},                   {"coroutine.wrap", 1},
+      {"table.concat", 2}, {"table.insert", 3},  {"table.unpack", 3},
+      {"string.upper", 1}, {"string.lower", 1},  {"math.floor", 1},
+      {"math.type", 1},
+  };
+  const auto it = reads.find(mem.empty() ? g : g + "." + mem);
+  return it == reads.end() ? std::string::npos : it->second;
+}
+
 bool is_string_method(const std::string& n) {
   return n == "rep" || n == "sub" || n == "upper" || n == "lower" ||
          n == "len" || n == "byte";
@@ -358,7 +377,7 @@ struct Binder {
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$setmt",  "$getmt", "$spread", "$error",
         "$mt", "$mm", "$add", "$subm", "$mulm",
-        "$select", "$pack", "$unpack",
+        "$select", "$pack", "$unpack", "$insertat",
     };
     return names;
   }
@@ -793,6 +812,28 @@ struct Binder {
     r.finish("$concat");
   }
 
+  // table.insert(t, pos, v): every element from pos up moves one place,
+  // through $get/$set as lua5.4's own moves go through the metamethods,
+  // and v goes in the gap. A pos outside 1..#t+1 is the error Lua raises.
+  void rt_insertat() {
+    RT r(*this);
+    const auto [t, pos, v] = r.params("t", "pos", "v");
+    const auto [k] = r.locals("k");
+    r.add(r.set(k, r.call("$len", {r.L(t)})));
+    r.add(r.iff(
+        r.either(r.bin(BinOp::Lt, r.L(pos), r.I(1)),
+                 r.bin(BinOp::Gt, r.L(pos), r.bin(BinOp::Add, r.L(k), r.I(1)))),
+        r.b.make_throw(
+            r.S("bad argument #2 to 'insert' (position out of bounds)"))));
+    r.add(r.wh(r.bin(BinOp::Ge, r.L(k), r.L(pos)),
+               r.blk({r.call("$set", {r.L(t), r.bin(BinOp::Add, r.L(k), r.I(1)),
+                                      r.call("$get", {r.L(t), r.L(k)})}),
+                      r.set(k, r.bin(BinOp::Sub, r.L(k), r.I(1)))})));
+    r.add(r.call("$set", {r.L(t), r.L(pos), r.L(v)}));
+    r.add(r.ret(r.Nil()));
+    r.finish("$insertat");
+  }
+
   void rt_insert() {
     RT r(*this);
     const auto [t, v] = r.params("t", "v");
@@ -913,7 +954,7 @@ struct Binder {
     rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
-    rt_insert(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
+    rt_insert(); rt_insertat(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
     rt_mt(); rt_mm();
     rt_select(); rt_pack(); rt_unpack();
     rt_arith("$add", BinOp::Add, "__add");
@@ -1330,7 +1371,10 @@ struct Binder {
             if (args.rest.valid()) {
               one_each.push_back(helper("$one", {args.rest}, p));
             }
-            cur = {string_call(name, one_each, p), false};
+            const std::vector<NodeId> pre = spill_surplus(
+                one_each, library_reads("string", name), ctx, p);
+            auto bp = b.at(p);
+            cur = {run_first(bp, pre, string_call(name, one_each, p)), false};
             break;
           }
           const int32_t t = ctx.alloc_local("$self");
@@ -1350,6 +1394,39 @@ struct Binder {
 
   // The standard library, in the shapes this front end knows. A library
   // name is not a value: `print` alone is an error, `print(x)` is a call.
+  // Lua evaluates every argument of a call, whether the function reads it
+  // or not. When there are more arguments than `reads`, all of them run
+  // first, in order -- the ones the function reads into temporaries that
+  // stand in for them, the rest for their effects alone -- so `type(1,
+  // f())` still calls f, after the 1 and before type. Answers those
+  // statements; none when nothing is left over, and the call compiles as
+  // it did. Fresh slots: an argument after one of them runs after it is
+  // set, and may hold a scope (a pcall's) that gave a slot back.
+  std::vector<NodeId> spill_surplus(std::vector<NodeId>& args, size_t reads,
+                                    FnCtx& ctx, SrcPos p) {
+    std::vector<NodeId> pre;
+    if (args.size() <= reads) return pre;
+    auto b = Builder(m).at(p);
+    for (size_t k = 0; k < args.size(); ++k) {
+      if (k >= reads) {
+        pre.push_back(args[k]);
+        continue;
+      }
+      const int32_t t = ctx.alloc_fresh_local("$arg");
+      pre.push_back(b.assign(VarKind::Local, t, args[k]));
+      args[k] = b.varref(VarKind::Local, t);
+    }
+    args.resize(reads);
+    return pre;
+  }
+
+  // `n`, with `pre` run before it.
+  static NodeId run_first(Builder::At& b, std::vector<NodeId> pre, NodeId n) {
+    if (pre.empty()) return n;
+    pre.push_back(n);
+    return b.block(pre);
+  }
+
   Val emit_library(const Ast& a, size_t limit, FnCtx& ctx, size_t& i) {
     Builder b(m);
     const Ast& prim = *a.nodes[0];
@@ -1387,91 +1464,104 @@ struct Binder {
       return values_array(vals, arglist != nullptr ? pos_of(*arglist) : p);
     };
     i = after;
+    const std::vector<NodeId> pre =
+        spill_surplus(args, library_reads(g, mem), ctx, p);
+    const auto dispatch = [&]() -> Val {
 
-    if (mem.empty()) {
-      if (g == "print") return {native("print", {all()}, p), false};
-      if (g == "type") return {native("type", {a0(0)}, p), false};
-      if (g == "tostring") return {helper("$str", {a0(0)}, p), false};
-      if (g == "setmetatable") {
-        return {helper("$setmt", {a0(0), a0(1)}, p), false};
+      if (mem.empty()) {
+        if (g == "print") return {native("print", {all()}, p), false};
+        if (g == "type") return {native("type", {a0(0)}, p), false};
+        if (g == "tostring") return {helper("$str", {a0(0)}, p), false};
+        if (g == "setmetatable") {
+          return {helper("$setmt", {a0(0), a0(1)}, p), false};
+        }
+        if (g == "getmetatable") {
+          return {helper("$getmt", {a0(0)}, p), false};
+        }
+        if (g == "error") {
+          return {helper("$error",
+                         {a0(0), b.str_literal(chunk + ":" +
+                                               std::to_string(p.line) + ": ",
+                                               p)},
+                         p),
+                  false};
+        }
+        if (g == "pcall") return {emit_pcall(vals, ctx, p), true};
+        if (g == "select") return {helper("$select", {all()}, p), true};
+        // rawset/rawget: `$set`/`$get` without the metamethod detour --
+        // `__newindex`'s own thunk needs one, on pain of calling itself.
+        if (g == "rawset") {
+          // The table is both where the store goes and the answer, so it is
+          // kept in a temporary rather than evaluated twice.
+          // Fresh: the key and value run after it is set, and a scope of
+          // theirs (a pcall's) may have claimed and given back a slot.
+          const int32_t t = ctx.alloc_fresh_local("$rawset");
+          const NodeId T = b.varref(VarKind::Local, t, p);
+          return {b.block({b.assign(VarKind::Local, t, a0(0), p),
+                           b.set_index(T, helper("$key", {a0(1)}, p), a0(2), p),
+                           T},
+                          p),
+                  false};
+        }
+        if (g == "rawget") {
+          return {b.index(a0(0), helper("$key", {a0(1)}, p), p), false};
+        }
+        fail(prim, "'" + g + "' is not supported here");
       }
-      if (g == "getmetatable") {
-        return {helper("$getmt", {a0(0)}, p), false};
+      if (g == "coroutine") {
+        if (mem == "create") {
+          return {b.intrinsic(IntrinsicId::CoroCreate, {a0(0)}, p), false};
+        }
+        if (mem == "resume") {
+          return {helper("$resume", {a0(0), a0(1)}, p), true};
+        }
+        if (mem == "yield") {
+          return {b.array_lit(
+                      {b.intrinsic(IntrinsicId::CoroYield, {a0(0)}, p)}, p),
+                  true};
+        }
+        if (mem == "status") {
+          return {helper("$costatus", {a0(0)}, p), false};
+        }
+        if (mem == "wrap") return {helper("$wrap", {a0(0)}, p), false};
       }
-      if (g == "error") {
-        return {helper("$error",
-                       {a0(0), b.str_literal(chunk + ":" +
-                                             std::to_string(p.line) + ": ",
-                                             p)},
-                       p),
-                false};
+      if (g == "table") {
+        if (mem == "concat") {
+          return {helper("$concat",
+                         {a0(0), args.size() > 1 ? args[1]
+                                                 : b.str_literal("", p)},
+                         p),
+                  false};
+        }
+        // table.insert(t, v) appends; table.insert(t, pos, v) opens a
+        // gap at pos.
+        if (mem == "insert") {
+          if (args.size() >= 3) {
+            return {helper("$insertat", {a0(0), a0(1), a0(2)}, p), false};
+          }
+          return {helper("$insert", {a0(0), a0(1)}, p), false};
+        }
+        if (mem == "pack") return {helper("$pack", {all()}, p), false};
+        if (mem == "unpack") {
+          return {helper("$unpack", {a0(0), a0(1), a0(2)}, p), true};
+        }
       }
-      if (g == "pcall") return {emit_pcall(vals, ctx, p), true};
-      if (g == "select") return {helper("$select", {all()}, p), true};
-      // rawset/rawget: `$set`/`$get` without the metamethod detour --
-      // `__newindex`'s own thunk needs one, on pain of calling itself.
-      if (g == "rawset") {
-        // The table is both where the store goes and the answer, so it is
-        // kept in a temporary rather than evaluated twice.
-        // Fresh: the key and value run after it is set, and a scope of
-        // theirs (a pcall's) may have claimed and given back a slot.
-        const int32_t t = ctx.alloc_fresh_local("$rawset");
-        const NodeId T = b.varref(VarKind::Local, t, p);
-        return {b.block({b.assign(VarKind::Local, t, a0(0), p),
-                         b.set_index(T, helper("$key", {a0(1)}, p), a0(2), p),
-                         T},
-                        p),
-                false};
+      if (g == "string" && is_string_method(mem)) {
+        return {string_call(mem, args, p), false};
       }
-      if (g == "rawget") {
-        return {b.index(a0(0), helper("$key", {a0(1)}, p), p), false};
+      if (g == "math") {
+        if (mem == "floor") return {native("floor", {a0(0)}, p), false};
+        if (mem == "type") return {native("mathtype", {a0(0)}, p), false};
       }
-      fail(prim, "'" + g + "' is not supported here");
-    }
-    if (g == "coroutine") {
-      if (mem == "create") {
-        return {b.intrinsic(IntrinsicId::CoroCreate, {a0(0)}, p), false};
+      if (g == "io" && mem == "write") {
+        return {native("write", {all()}, p), false};
       }
-      if (mem == "resume") {
-        return {helper("$resume", {a0(0), a0(1)}, p), true};
-      }
-      if (mem == "yield") {
-        return {b.array_lit(
-                    {b.intrinsic(IntrinsicId::CoroYield, {a0(0)}, p)}, p),
-                true};
-      }
-      if (mem == "status") {
-        return {helper("$costatus", {a0(0)}, p), false};
-      }
-      if (mem == "wrap") return {helper("$wrap", {a0(0)}, p), false};
-    }
-    if (g == "table") {
-      if (mem == "concat") {
-        return {helper("$concat",
-                       {a0(0), args.size() > 1 ? args[1]
-                                               : b.str_literal("", p)},
-                       p),
-                false};
-      }
-      if (mem == "insert") {
-        return {helper("$insert", {a0(0), a0(1)}, p), false};
-      }
-      if (mem == "pack") return {helper("$pack", {all()}, p), false};
-      if (mem == "unpack") {
-        return {helper("$unpack", {a0(0), a0(1), a0(2)}, p), true};
-      }
-    }
-    if (g == "string" && is_string_method(mem)) {
-      return {string_call(mem, args, p), false};
-    }
-    if (g == "math") {
-      if (mem == "floor") return {native("floor", {a0(0)}, p), false};
-      if (mem == "type") return {native("mathtype", {a0(0)}, p), false};
-    }
-    if (g == "io" && mem == "write") {
-      return {native("write", {all()}, p), false};
-    }
-    fail(prim, "'" + g + "." + mem + "' is not supported here");
+      fail(prim, "'" + g + "." + mem + "' is not supported here");
+    };
+    Val v = dispatch();
+    auto bp = b.at(p);
+    v.n = run_first(bp, pre, v.n);
+    return v;
   }
 
   // pcall: a TryCatch, which is what it is. The value of the whole thing
@@ -1687,6 +1777,10 @@ struct Binder {
     const NodeId T = b.varref(VarKind::Local, tv);
     std::vector<NodeId> out{
         b.assign(VarKind::Local, tv, emit_expr(*args.nodes[0], ctx))};
+    // ipairs and pairs read the table alone; anything after it still runs.
+    for (size_t k = 1; k < args.nodes.size(); ++k) {
+      out.push_back(emit_expr(*args.nodes[k], ctx));
+    }
 
     const auto& names = a.nodes[0]->nodes;
     const int32_t kv = decl_of.at(names[0].get());
@@ -2191,13 +2285,19 @@ bool nat_s_sub(NativeCall& c) {
   return true;
 }
 
+// string.rep(s, n [, sep]): n copies of s, sep between each two.
 bool nat_s_rep(NativeCall& c) {
-  if (!c.arg(0).is_str() || !c.arg(1).is_int()) {
-    c.error = c.trap("rep wants a string and an integer");
+  if (!c.arg(0).is_str() || !c.arg(1).is_int() ||
+      (c.argc > 2 && !c.arg(2).is_nil() && !c.arg(2).is_str())) {
+    c.error = c.trap("rep wants a string, an integer and a string");
     return false;
   }
+  const bool has_sep = c.argc > 2 && c.arg(2).is_str();
   std::string out;
-  for (int64_t k = 0; k < c.arg(1).as_int(); ++k) out += c.arg(0).as_str();
+  for (int64_t k = 0; k < c.arg(1).as_int(); ++k) {
+    if (k > 0 && has_sep) out += c.arg(2).as_str();
+    out += c.arg(0).as_str();
+  }
   c.result = Value::make_str(std::move(out));
   return true;
 }

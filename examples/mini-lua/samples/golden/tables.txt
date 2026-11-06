@@ -11,3 +11,6 @@ float overwrites it	string is its own key
 3	1-2-3
 only	42
 table	0
+z,a,m,b	ab-ab-ab
+[t][extra][u]number	A
+[i]1	7

@@ -47,3 +47,14 @@ print(#m.row, table.concat(m.row, "-"))
 for key, value in pairs({only = 42}) do print(key, value) end
 
 print(type(t), #({}))
+
+-- table.insert at a position opens a gap there; string.rep takes a
+-- separator; and an argument a library function does not read still
+-- runs, after the ones before it.
+local letters = {"a", "b"}
+table.insert(letters, 1, "z")
+table.insert(letters, 3, "m")
+print(table.concat(letters, ","), ("ab"):rep(3, "-"))
+local function noisy(tag, v) io.write("[" .. tag .. "]") return v end
+print(type(noisy("t", 1), noisy("extra", 2)), ("a"):upper(noisy("u", 0)))
+for k, v in ipairs({7}, noisy("i", 0)) do print(k, v) end
