@@ -18,6 +18,18 @@ add_test(NAME errors
                  -DEXT=pas
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_errors.cmake)
 
+# Nothing a program could observe is evaluated twice
+# (coreir::shared_effects): every PL/0 sample (bench/languages has none).
+# Each example front end runs the same check over its own
+# (<front end>-sharing).
+add_test(NAME sharing
+         COMMAND ${CMAKE_COMMAND}
+                 -DBIN=$<TARGET_FILE:pl0>
+                 -DSRC=${CMAKE_SOURCE_DIR}/examples/pl0
+                 -DBENCH=${CMAKE_SOURCE_DIR}/bench/languages
+                 -DEXT=pas
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_sharing.cmake)
+
 # Not PL/0 tests: these exercise coreir/vm directly, building their Core-IR by
 # hand and supplying their own coreir_rt host, to pin properties the samples
 # cannot reach. One executable each: every test defines its own host and its

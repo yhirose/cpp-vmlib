@@ -21,3 +21,13 @@ add_test(NAME mini-python-uncaught
                 -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/uncaught
                 -DEXT=py
                 -P ${PROJECT_SOURCE_DIR}/test/run_errors.cmake)
+
+# Nothing a program could observe is evaluated twice
+# (coreir::shared_effects): every sample, uncaught case and bench program.
+add_test(NAME mini-python-sharing
+        COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:mini-python>
+                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+                -DBENCH=${PROJECT_SOURCE_DIR}/bench/languages
+                -DEXT=py
+                -P ${PROJECT_SOURCE_DIR}/test/run_sharing.cmake)

@@ -18,7 +18,7 @@ includes `peglib.h`; nothing in `vmlib.h` knows PL/0 or peglib exist.
 ## Running
 
 ```
-build/examples/pl0/pl0 [--dump-ir] [--dump-bc] PROGRAM.pas
+build/examples/pl0/pl0 [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.pas
 ```
 
 ## A worked example: captures across a call

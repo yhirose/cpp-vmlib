@@ -11,3 +11,13 @@ add_test(NAME mini-culebra-samples
                 -DMINI_CULEBRA=$<TARGET_FILE:mini-culebra>
                 -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+
+# Nothing a program could observe is evaluated twice
+# (coreir::shared_effects): every sample, uncaught case and bench program.
+add_test(NAME mini-culebra-sharing
+        COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:mini-culebra>
+                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+                -DBENCH=${PROJECT_SOURCE_DIR}/bench/languages
+                -DEXT=cul
+                -P ${PROJECT_SOURCE_DIR}/test/run_sharing.cmake)

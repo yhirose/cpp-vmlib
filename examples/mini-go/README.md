@@ -37,7 +37,7 @@ prove.
 ## Running
 
 ```
-build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] PROGRAM.go
+build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.go
 ```
 
 ## A worked example: one closure, two calls

@@ -24,3 +24,14 @@ add_test(NAME mini-js-uncaught
                 -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/uncaught
                 -DEXT=js
                 -P ${PROJECT_SOURCE_DIR}/test/run_errors.cmake)
+
+# Nothing a program could observe is evaluated twice
+# (coreir::shared_effects): every sample, uncaught case and bench program.
+add_test(NAME mini-js-sharing
+        COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:mini-js>
+                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+                -DBENCH=${PROJECT_SOURCE_DIR}/bench/languages
+                -DEXT=js
+                -DLEAD=${CMAKE_CURRENT_SOURCE_DIR}/samples/prelude.js
+                -P ${PROJECT_SOURCE_DIR}/test/run_sharing.cmake)

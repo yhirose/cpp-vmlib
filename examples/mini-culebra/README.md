@@ -26,7 +26,7 @@ captured that way.
 ## Running
 
 ```
-build/examples/mini-culebra/mini-culebra [--dump-ir] [--dump-bc] PROGRAM.cul
+build/examples/mini-culebra/mini-culebra [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.cul
 ```
 
 ## What this front end did *not* have to write
