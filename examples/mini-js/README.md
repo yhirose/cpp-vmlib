@@ -236,16 +236,19 @@ flight at once do not share them.
 
 ## `class`, without a prototype in the IR
 
-A class is a plain object holding one closure per member -- `constructor`
-under that name too, so `instance.constructor === ClassName` reads true
-the way real JavaScript's does -- built at the class declaration's own
-lexical position. That last part is load-bearing, not a style choice:
-`emit_classdecl` is what a method's free variables were resolved
-*against* (`resolve_fn`'s `is_method` flag just prepends a synthetic
-`this` to the same machinery every other function here uses), so its
-closures have to be minted from that exact spot, the way examples/mini-
-python's constructor and examples/mini-ruby's method table are built at
-their own `class`/`def` rather than wherever `new` happens to run.
+A class is a plain object whose `$methods` table holds one closure per
+member -- `constructor` under that name too -- built at the class
+declaration's own lexical position. That last part is load-bearing, not
+a style choice: `emit_classdecl` is what a method's free variables were
+resolved *against* (`resolve_fn`'s `is_method` flag just prepends a
+synthetic `this` to the same machinery every other function here uses),
+so its closures have to be minted from that exact spot, the way
+examples/mini-python's constructor and examples/mini-ruby's method table
+are built at their own `class`/`def` rather than wherever `new` happens
+to run. The table is apart from the class's own properties, so
+`ClassName.m = f`, a static in JavaScript, leaves what an instance's `m`
+calls alone, while `instance.constructor === ClassName` still reads true
+the way real JavaScript's does.
 
 `new ClassName(args)` copies every member onto a fresh instance and calls
 whichever one is named `constructor`. What it copies is not quite the raw

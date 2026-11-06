@@ -98,3 +98,13 @@ const plain = {
   inc: function () { count = count + 1; return count; },
 };
 show('plain object method', [plain.inc(), plain.inc()]);
+
+// A property set on the class is the class's own -- a static, in
+// JavaScript -- and not what its instances' methods are.
+class Greeter {
+  hello() { return 'hi'; }
+}
+const early = new Greeter();
+Greeter.hello = function () { return 'static'; };
+const late = new Greeter();
+show('static apart', [early.hello(), late.hello(), Greeter.hello()]);

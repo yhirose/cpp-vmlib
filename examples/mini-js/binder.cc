@@ -1878,8 +1878,10 @@ struct Binder {
   // function is not constructible here: without `this` there is nothing
   // for a constructor body to write into -- see README.md.
   // `class Name { constructor(...) {...} m(...) {...} }` -- a plain
-  // object holding one closure per member (`constructor` included, under
-  // that name, so `instance.constructor` answers the way real JS's does).
+  // object whose `$methods` table holds one closure per member
+  // (`constructor` included, under that name). The table is what `new`
+  // reads, apart from the class's own properties: `C.m = f` is a static
+  // in JavaScript, and leaves what an instance's `m` calls alone.
   // The closures are built *here*, at the declaration's own lexical
   // position, which is what a class needs from the capture machinery:
   // every other front end's version of this (examples/mini-python's,
@@ -1899,8 +1901,10 @@ struct Binder {
     for (const auto& [name, g] : ci.methods) {
       kvs.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
     }
-    return bind_decl(decl_of.at(a.nodes[0].get()), b.object_lit(kvs), ctx, p,
-                     false);
+    return bind_decl(
+        decl_of.at(a.nodes[0].get()),
+        b.object_lit({{b.str_literal("$methods"), b.object_lit(kvs)}}), ctx, p,
+        false);
   }
 
   // `new Foo(x).bar()`: `new` binds to the *nearest* constructor call in
@@ -1982,13 +1986,19 @@ struct Binder {
       fail(*a.nodes[0], "'" + n + "' is not a class known here");
     }
     const ClassInfo& ci = classes.at(class_by_var.at(ref_of.at(a.nodes[0].get())));
-    const NodeId cls = read_var(ref_of.at(a.nodes[0].get()), ctx, p);
+    // The class itself in a slot, for `instance.constructor`; its method
+    // table in a cell, for the wrappers below.
+    const int32_t kv = ctx.alloc_local("$cls");
+    const NodeId K = b.varref(VarKind::Local, kv);
     const int32_t ccell = ctx.next_cell++;
     const int32_t tcell = ctx.next_cell++;
     const int32_t tv = ctx.alloc_local("$this");
     const NodeId T = b.varref(VarKind::Local, tv);
     std::vector<NodeId> steps{
-        b.cell_fresh(ccell), b.assign(VarKind::Cell, ccell, cls),
+        b.assign(VarKind::Local, kv,
+                 read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
+        b.cell_fresh(ccell),
+        b.assign(VarKind::Cell, ccell, b.index(K, b.str_literal("$methods"))),
         b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
         b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
     for (const auto& [name, g] : ci.methods) {
@@ -2030,7 +2040,7 @@ struct Binder {
     }
     steps.push_back(helper(
         "$setidx",
-        {T, b.str_literal("constructor"), b.varref(VarKind::Cell, ccell)}, p));
+        {T, b.str_literal("constructor"), K}, p));
     if (ci.ctor_fn >= 0) {
       const NodeId ctorClosure = helper(
           "$index",
