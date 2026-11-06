@@ -14,6 +14,22 @@ class Holder {
   public int Echo(int x) { return x; }
 }
 
+// A field or auto property nothing initialized holds its type's default.
+class Defaults {
+  public int count;
+  public double ratio;
+  public bool on;
+  public string label;
+  public int Auto { get; set; }
+
+  public void Set(int c, double r, bool o, string l) {
+    count = c;
+    ratio = r;
+    on = o;
+    label = l;
+  }
+}
+
 class Program {
   static int Noisy(string tag, int v) {
     Console.WriteLine("evaluated " + tag);
@@ -159,5 +175,12 @@ class Program {
     Console.WriteLine(sized.Count + " " + copied.Count + " " + slots[0] +
                       " " + agesCopy.Count + " " + ages.Count);
     Console.WriteLine(new Exception().Message);
+
+    Defaults fresh = new Defaults();
+    Console.WriteLine(fresh.count + 1);
+    Console.WriteLine(fresh.ratio + 0.5);
+    Console.WriteLine(fresh.on);
+    Console.WriteLine(fresh.label == null);
+    Console.WriteLine(fresh.Auto + 2);
   }
 }

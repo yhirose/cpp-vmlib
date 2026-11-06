@@ -34,6 +34,7 @@
 
 #include "binder.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -127,13 +128,44 @@ struct ClassInfo {
   std::set<std::string> method_names;
   std::set<std::string> property_names;
   std::vector<std::pair<std::string, int32_t>> methods;  // instance
-  // A pure auto property: (name, its initializer or null). Its get_/set_
-  // accessors are built by hand at class-table time, the same way a
-  // missing constructor is -- see emit_auto_get/emit_auto_set.
-  std::vector<std::pair<std::string, const Ast*>> auto_props;
+  // A pure auto property: its name, type, and initializer or null. Its
+  // get_/set_ accessors are built by hand at class-table time, the same
+  // way a missing constructor is -- see emit_auto_get/emit_auto_set.
+  struct AutoProp {
+    std::string name;
+    const Ast* type = nullptr;
+    const Ast* init = nullptr;
+  };
+  std::vector<AutoProp> auto_props;
   const Ast* ctor = nullptr;
   int32_t ctor_fn = -1;
 };
+
+// default(T): what a field, an auto property or a static field of type T
+// holds before anything is assigned to it.
+bool is_int_type(const std::string& t) {
+  return t == "int" || t == "long" || t == "short" || t == "byte" ||
+         t == "sbyte" || t == "uint" || t == "ulong" || t == "ushort";
+}
+
+// A field declaration taken apart: `modifier* type ident fieldinit?`.
+struct FieldParts {
+  const Ast* type = nullptr;
+  const Ast* name = nullptr;
+  const Ast* init = nullptr;
+};
+FieldParts field_parts(const Ast& fd) {
+  FieldParts f;
+  for (const auto& x : fd.nodes) {
+    if (x->tag == "fieldinit"_) {
+      f.init = x->nodes[0].get();
+      break;
+    }
+    f.type = f.name;
+    f.name = x.get();
+  }
+  return f;
+}
 
 struct FnCtx : FrameLayout {
   int32_t fn = 0;
@@ -260,6 +292,7 @@ struct Binder {
   // body on either accessor) instead gets both accessors built by hand at
   // class-table time, over a hidden backing field: see emit_auto_get.
   void resolve_propdecl(const Ast& mem, int32_t parent, ClassInfo& ci) {
+    const Ast* type = nullptr;
     const Ast* id = nullptr;
     const Ast* getbody = nullptr;
     const Ast* setbody = nullptr;
@@ -267,7 +300,8 @@ struct Binder {
     bool auto_get = false;
     bool auto_set = false;
     for (const auto& c : mem.nodes) {
-      if (c->tag == "ident"_) id = c.get();
+      if (c->tag == "type"_) type = c.get();
+      else if (c->tag == "ident"_) id = c.get();
       else if (c->tag == "getbody"_) getbody = c->nodes[0].get();
       else if (c->tag == "setbody"_) setbody = c->nodes[0].get();
       else if (c->tag == "getauto"_) auto_get = true;
@@ -285,7 +319,7 @@ struct Binder {
       if (!auto_get || !auto_set) {
         fail(mem, "an auto property needs both 'get;' and 'set;' here");
       }
-      ci.auto_props.emplace_back(name, init);
+      ci.auto_props.push_back({name, type, init});
       return;
     }
     if (init != nullptr) {
@@ -451,9 +485,8 @@ struct Binder {
         if (n->tag == "fieldinit"_) resolve_expr(*n->nodes[0], f);
       }
     }
-    for (const auto& [name, init] : ci.auto_props) {
-      (void)name;
-      if (init != nullptr) resolve_expr(*init, f);
+    for (const auto& ap : ci.auto_props) {
+      if (ap.init != nullptr) resolve_expr(*ap.init, f);
     }
     if (ci.ctor != nullptr) {
       for (const auto& n : ci.ctor->nodes) {
@@ -1136,6 +1169,22 @@ struct Binder {
   // every function had to capture. One that *does* take captures is built at
   // the site that has them (RT::clos) and never reaches here; saying so
   // beats the "cannot call nil" it would otherwise be at run time.
+  NodeId default_of(const Ast* type, SrcPos p) {
+    auto b = Builder(m).at(p);
+    // The type's text is captured with the space its last identifier
+    // consumed after it.
+    std::string t = type != nullptr ? std::string(type->token) : "";
+    while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) {
+      t.pop_back();
+    }
+    if (is_int_type(t)) return b.literal(0);
+    if (t == "double" || t == "float" || t == "decimal") {
+      return b.double_literal(0.0);
+    }
+    if (t == "bool") return b.bool_literal(false);
+    return b.nil_literal();  // a reference type's null
+  }
+
   NodeId helper(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
     const auto it = rt.find(name);
@@ -2002,29 +2051,24 @@ struct Binder {
   void emit_ctor_prologue(const ClassInfo& ci, FnCtx& ctx,
                           std::vector<NodeId>& out, SrcPos p) {
     auto b = Builder(m).at(p);
+    // A field or auto property without an initializer starts at its
+    // type's default, as in C#.
     for (const Ast* fd : ci.fields) {
-      const Ast* nameNode = nullptr;
-      const Ast* initNode = nullptr;
-      for (const auto& x : fd->nodes) {
-        if (x->tag == "fieldinit"_) {
-          initNode = x->nodes[0].get();
-          break;
-        }
-        nameNode = x.get();
-      }
-      if (nameNode == nullptr) continue;
+      const FieldParts f = field_parts(*fd);
+      if (f.name == nullptr) continue;
       out.push_back(helper(
           "$setf",
-          {this_of(ctx, p), b.str_literal(std::string(nameNode->token)),
-           initNode != nullptr ? emit_expr(*initNode, ctx) : b.nil_literal()},
+          {this_of(ctx, p), b.str_literal(std::string(f.name->token)),
+           f.init != nullptr ? emit_expr(*f.init, ctx) : default_of(f.type, p)},
           p));
     }
-    for (const auto& [name, init] : ci.auto_props) {
-      out.push_back(
-          helper("$setf",
-                 {this_of(ctx, p), b.str_literal(auto_field_key(name)),
-                  init != nullptr ? emit_expr(*init, ctx) : b.nil_literal()},
-                 p));
+    for (const auto& ap : ci.auto_props) {
+      out.push_back(helper(
+          "$setf",
+          {this_of(ctx, p), b.str_literal(auto_field_key(ap.name)),
+           ap.init != nullptr ? emit_expr(*ap.init, ctx)
+                              : default_of(ap.type, p)},
+          p));
     }
     if (ci.base.empty()) return;
     const auto it = class_by_name.find(ci.base);
@@ -2198,29 +2242,22 @@ struct Binder {
         kvs.emplace_back(b.str_literal(std::string(kMethodPrefix) + name),
                          emit_closure(g, ctx, p));
       }
-      for (const auto& [name, init] : ci.auto_props) {
-        (void)init;
+      for (const auto& ap : ci.auto_props) {
         kvs.emplace_back(
-            b.str_literal(std::string(kMethodPrefix) + "get_" + name),
-            emit_auto_get(name, p));
+            b.str_literal(std::string(kMethodPrefix) + "get_" + ap.name),
+            emit_auto_get(ap.name, p));
         kvs.emplace_back(
-            b.str_literal(std::string(kMethodPrefix) + "set_" + name),
-            emit_auto_set(name, p));
+            b.str_literal(std::string(kMethodPrefix) + "set_" + ap.name),
+            emit_auto_set(ap.name, p));
       }
+      // A static field without an initializer starts at its type's
+      // default.
       for (const Ast* fd : ci.static_fields) {
-        const Ast* nameNode = nullptr;
-        const Ast* initNode = nullptr;
-        for (const auto& x : fd->nodes) {
-          if (x->tag == "fieldinit"_) {
-            initNode = x->nodes[0].get();
-            break;
-          }
-          nameNode = x.get();
-        }
-        if (nameNode == nullptr) continue;
-        kvs.emplace_back(
-            b.str_literal(std::string(nameNode->token)),
-            initNode != nullptr ? emit_expr(*initNode, ctx) : b.nil_literal());
+        const FieldParts sf = field_parts(*fd);
+        if (sf.name == nullptr) continue;
+        kvs.emplace_back(b.str_literal(std::string(sf.name->token)),
+                         sf.init != nullptr ? emit_expr(*sf.init, ctx)
+                                            : default_of(sf.type, p));
       }
       kvs.emplace_back(b.str_literal(kCtorKey),
                        emit_closure(ci.ctor_fn, ctx, p));
@@ -2239,6 +2276,7 @@ struct Binder {
       // The static's own function; its index was assigned in build().
       out.push_back(write_var(v, emit_closure(static_fn.at(v), ctx, p), ctx, p));
     }
+
     if (main_fn < 0) coreir_rt::fail("no static Main method", 0, 0);
     const int32_t main_var = static_by_name.at("Main");
     const auto [mk, mi] = rs.access(0, main_var);

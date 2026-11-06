@@ -45,3 +45,8 @@ null receiver
 evaluated capacity
 0 2 4 3 2
 Exception of type 'System.Exception' was thrown.
+1
+0.5
+False
+True
+2
