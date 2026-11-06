@@ -23,10 +23,10 @@ to be the more interesting measurement:
 | PL/0 | 27 | 542 |
 | mini-go | 53 | 1547 |
 | mini-culebra | 63 | 1719 |
-| mini-lua | 68 | 2049 |
-| mini-js | 75 | 2305 |
+| mini-lua | 69 | 2220 |
+| mini-js | 79 | 2499 |
 | mini-csharp | 81 | 2235 |
-| mini-ruby | 96 | 2433 |
+| mini-ruby | 100 | 2584 |
 | mini-python | 106 | 4614 |
 
 Eleven rules against fifty to a hundred, and a binder in the same range as

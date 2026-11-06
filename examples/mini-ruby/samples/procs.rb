@@ -6,7 +6,8 @@
 #   * A lambda is strict: a mismatch raises ArgumentError. That is an
 #     ArgCount test the lambda's own prologue makes -- and ArgCount's
 #     comment in vmlib.h says it is "Only interesting under
-#     Func::lenient_arity, where the two can differ", which is this.
+#     Func::lenient_arity or Func::rest_param, where the two can differ",
+#     which is the first of those.
 #   * And Proc#arity is FnArity, "the one fact a front end needs to check
 #     'this callback takes two arguments' before calling it".
 

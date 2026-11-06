@@ -11,11 +11,11 @@
 //
 // **ArgCount.** "How many arguments the running function was called with
 // -- the count the caller supplied, not num_params. Only interesting under
-// Func::lenient_arity, where the two can differ." Ruby's own distinction
-// between a proc (extra arguments dropped, missing ones nil) and a lambda
-// (a mismatch raises ArgumentError) is exactly lenient_arity plus an
-// ArgCount check -- and a default parameter's value is the same test,
-// once more, per parameter.
+// Func::lenient_arity or Func::rest_param, where the two can differ."
+// Ruby's own distinction between a proc (extra arguments dropped, missing
+// ones nil) and a lambda (a mismatch raises ArgumentError) is exactly
+// lenient_arity plus an ArgCount check -- and a default parameter's value
+// is the same test, once more, per parameter.
 //
 // And **`ensure` is a Defer** -- the third front end to reach that tag from
 // a third direction (culebra's `defer`, Python's `with`, and now this).
@@ -2443,9 +2443,9 @@ struct Binder {
     std::vector<NodeId> stmts;
     // A lambda is strict about its arity where a proc is not. That is
     // lenient_arity plus one ArgCount test -- the intrinsic's own comment
-    // says it is "Only interesting under Func::lenient_arity, where the
-    // two can differ", and this is the language where the difference has a
-    // name.
+    // says it is "Only interesting under Func::lenient_arity or
+    // Func::rest_param, where the two can differ", and this is the language
+    // where the first difference has a name.
     // With a `*rest`, the count is a minimum: every parameter before it.
     if (fi.strict) {
       const int64_t fixed = static_cast<int64_t>(fi.params.size()) -
