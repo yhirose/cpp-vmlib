@@ -13,3 +13,4 @@ equality: true
 identity: true
 collection: [2, 8, 18]
 closed-over class: Shifted {mut v: 105}
+init method name method 1

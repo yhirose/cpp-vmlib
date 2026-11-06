@@ -61,3 +61,13 @@ fn make_class(offset) {
 }
 let S = make_class(100)
 println("closed-over class: {S.new(5)}")
+
+# A method may be named `init` or `name`: neither is where the class keeps
+# its constructor or its own name.
+class Labeled {
+  new(x) { self.x = x }
+  init() { "init method" }
+  name() { "name method" }
+}
+let labeled = Labeled.new(1)
+println("{labeled.init()} {labeled.name()} {labeled.x}")

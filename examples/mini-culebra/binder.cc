@@ -79,8 +79,12 @@ constexpr char kClassKey[] = "\x01" "class";
 // culebra shows -- a class value prints as `{new: [function]}`, its methods
 // being no more enumerable than an Error's fields are in JavaScript.
 constexpr char kMethodPrefix[] = "\x02";
-constexpr char kInitKey[] = "\x02" "init";
-constexpr char kNameKey[] = "\x02" "name";
+// What else the class table holds -- the declared `new` the synthesized
+// constructor calls, and the class's name -- goes under a third prefix:
+// under the methods' own, a method named `init` or `name` would be the
+// same key.
+constexpr char kInitKey[] = "\x03" "init";
+constexpr char kNameKey[] = "\x03" "name";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};

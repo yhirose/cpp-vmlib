@@ -124,13 +124,13 @@ instance is an object pointing back at it; `C.new(...)` is a constructor
 this binder synthesizes:
 
 ```
-C = { "\x02init": <new>, "\x02m": <m>, "\x02drop": <drop>, "\x02name": "C" }
+C = { "\x03init": <new>, "\x02m": <m>, "\x02drop": <drop>, "\x03name": "C" }
 C["new"] = MakeClosure(<synthesized ctor>, over the cell holding C)
 
 ctor(self, args...):
   inst = { "\x01class": C }
   inst["\x01drop"] = C["\x02drop"]        ; when the class declares one
-  C["\x02init"](inst, args...)
+  C["\x03init"](inst, args...)
   return inst
 ```
 
@@ -138,7 +138,9 @@ Two prefixes, not one, and the difference matters: `"\x01" "drop"` is the
 runtime's own key, so a method table that stored its methods under the
 first prefix would make the *class itself* a resource. `0x02` also keeps
 methods out of `keys()` and out of a printed object, which is what culebra
-shows -- a class value prints as `{new: [function]}`.
+shows -- a class value prints as `{new: [function]}`. The declared `new`
+and the class's name sit under a third, `0x03`, so that a method named
+`init` or `name` is not the same key as either.
 
 The class binding is forced into a cell because its own constructor
 captures it. That is the chicken-and-egg of building the table and the
