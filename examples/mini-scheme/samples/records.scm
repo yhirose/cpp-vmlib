@@ -70,3 +70,12 @@
 (display (describe (make-point 0 0))) (newline)
 (display (describe (make-point 2 0))) (newline)
 (display (describe (make-point 99 0))) (newline)
+
+; A record displays the way guile prints one, fields in the order they
+; were declared, and a field the constructor does not take starts as #f.
+(define-record-type node (make-node val) node? (val node-val)
+  (next node-next set-node-next!))
+(define nd (make-node 1))
+(display (node-next nd)) (newline)
+(set-node-next! nd (make-node 2))
+(display nd) (newline)

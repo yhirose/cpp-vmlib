@@ -10,3 +10,5 @@ vowel other
 on the y-axis
 small x
 large x
+#f
+#<node val: 1 next: #<node val: 2 next: #f>>

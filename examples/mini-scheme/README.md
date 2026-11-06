@@ -227,7 +227,10 @@ Quietly different:
 * **A symbol is a string.** They print the same under `display`, which is
   what the samples compare, but `(eq? 'a "a")` is `#t` here and `#f` in
   Scheme, and `(symbol? "a")` would be wrong -- so `symbol?` is not in the
-  library at all rather than being wrong.
+  library at all rather than being wrong. The same is why a record's
+  string field displays without quotes: guile writes a record's fields
+  with `write`, which would quote a string and not a symbol, and here the
+  two cannot be told apart.
 * **A special form always wins over a binding of the same name.** A program
   that rebinds `if` is not in this subset.
 * **Numbers are the machine's.** An exact integer that leaves int64 wraps

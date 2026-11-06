@@ -996,6 +996,7 @@ struct Binder {
   void rt_disp() {
     RT r(*this);
     const auto [v] = r.params("v");
+    const auto [out, keys, i] = r.locals("out", "keys", "i");
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("()"))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("#t"), r.S("#f")))));
@@ -1008,6 +1009,28 @@ struct Binder {
         r.ret(r.bin(BinOp::Add,
                     r.bin(BinOp::Add, r.S("("), r.call("$listbody", {r.L(v)})),
                     r.S(")")))));
+    // A record: `#<type field: value ...>`, guile's own form, fields in
+    // the order they were declared.
+    {
+      const NodeId key = r.idx(r.L(keys), r.L(i));
+      const NodeId field =
+          r.bin(BinOp::Add, r.bin(BinOp::Add, r.S(" "), key),
+                r.bin(BinOp::Add, r.S(": "),
+                      r.call("$disp", {r.idx(r.L(v), r.idx(r.L(keys),
+                                                           r.L(i)))})));
+      const NodeId each = r.blk(
+          {r.iff(r.bin(BinOp::Ne, r.idx(r.L(keys), r.L(i)), r.S(kRecKey)),
+                 r.set(out, r.bin(BinOp::Add, r.L(out), field))),
+           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))});
+      r.add(r.iff(
+          r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRecKey))),
+          r.blk({r.set(out, r.bin(BinOp::Add, r.S("#<"),
+                                  r.idx(r.L(v), kRecKey))),
+                 r.set(keys, r.in(IntrinsicId::ObjectKeys, {r.L(v)})),
+                 r.set(i, r.I(0)),
+                 r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(keys))), each),
+                 r.ret(r.bin(BinOp::Add, r.L(out), r.S(">")))})));
+    }
     r.add(r.ret(r.S("#<procedure>")));
     r.finish("$disp");
   }
@@ -1346,11 +1369,20 @@ struct Binder {
       f.num_locals = f.num_params;
       f.local_names = ri.ctor_fields;
       f.lenient_arity = true;
+      // Every field, in the order the form declares them -- the order
+      // display shows them in -- with #f for one the constructor does not
+      // take, which is what guile's accessor and printer answer for it.
       std::vector<std::pair<NodeId, NodeId>> kvs{
           {b.str_literal(kRecKey), b.str_literal(ri.type_name)}};
-      for (size_t k = 0; k < ri.ctor_fields.size(); ++k) {
-        kvs.emplace_back(b.str_literal(ri.ctor_fields[k]),
-                         b.varref(VarKind::Local, static_cast<int32_t>(k)));
+      for (const RecordField& rf : ri.fields) {
+        const auto at = std::find(ri.ctor_fields.begin(), ri.ctor_fields.end(),
+                                  rf.name);
+        kvs.emplace_back(
+            b.str_literal(rf.name),
+            at == ri.ctor_fields.end()
+                ? b.bool_literal(false)
+                : b.varref(VarKind::Local, static_cast<int32_t>(
+                                               at - ri.ctor_fields.begin())));
       }
       f.body = b.scope(0, f.num_params, b.make_return(b.object_lit(kvs)));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
