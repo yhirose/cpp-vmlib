@@ -188,6 +188,16 @@ anything else (`ys = append(xs, v)`, an `append` in an expression) is a
 diagnostic rather than a program that would have printed something `go
 run` does not.
 
+That rules out a second header made *by* the append, not one made before
+it. A name that already shares the slice -- `ys` after `var ys []int64 =
+xs`, or the caller's slice when a function appends to its parameter --
+sees the grown length and every later write through `xs`, where Go's
+append on a full slice reallocates and leaves the other header on the old
+array. Modelling Go's header (array, length, capacity) would close that
+gap at the price of a view on every slice; copying on every append would
+close it at the price of a quadratic loop. Neither is what this front end
+is here to show, so it stays a difference.
+
 `len` answers `int64`, not Go's own `int` -- a type this front end does
 not have. That costs nothing, because the conversion real Go needs anyway
 (`int64(len(s))`, since `int` and `int64` are distinct types there) is a
