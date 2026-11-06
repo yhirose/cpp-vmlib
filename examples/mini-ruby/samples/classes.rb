@@ -123,3 +123,38 @@ begin
 rescue => e
   puts e.class
 end
+
+# A bare `super` passes the method's own parameters on as they are now --
+# a *rest spread back out, and the block -- from inside a block too. With
+# no method above to reach it is a NoMethodError, raised once super's
+# arguments have run.
+class Shape
+  def describe(name, sides = 0, *extra)
+    puts "#{name} #{sides} #{extra.inspect}"
+    yield if block_given?
+  end
+end
+class Square < Shape
+  def describe(name, sides = 4, *extra)
+    name = name + "!"
+    super
+  end
+end
+class Inside < Shape
+  def describe(name)
+    [1].each { |i| super }
+  end
+end
+Square.new.describe("sq")
+Square.new.describe("sq", 5, 6, 7) { puts "with block" }
+Inside.new.describe("in")
+class Alone
+  def go
+    super(made_arg)
+  end
+end
+begin
+  Alone.new.go
+rescue => e
+  puts e.class
+end

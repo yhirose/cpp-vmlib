@@ -520,9 +520,14 @@ struct Binder {
         resolve_block(a, fn, false);
         return;
       case "supercall"_: {
-        use_method_param(fn, 0);
-        use_method_param(fn, 1);
         const int32_t d = enclosing_def(fn);
+        // A bare `super` passes every parameter of the method on, so it
+        // reads them all, from inside a block too; `super(...)` the block
+        // and self.
+        const size_t uses =
+            a.nodes.empty() && d >= 0 ? fns[static_cast<size_t>(d)].params.size()
+                                      : 2;
+        for (size_t i = 0; i < uses; ++i) use_method_param(fn, i);
         if (d >= 0 && d != fn && fns[static_cast<size_t>(d)].cls_base >= 0) {
           rs.use(fns[static_cast<size_t>(d)].cls_base, fn);
         }
@@ -1414,13 +1419,15 @@ struct Binder {
         {"v", "cls"});
   }
 
+  // A NoMethodError: `lead` is the words before the method's name --
+  // "undefined method '", or super's "super: no superclass method '".
   void rt_nometh() {
     RT r(*this);
-    const auto [recv, name] = r.params("recv", "name");
+    const auto [lead, recv, name] = r.params("lead", "recv", "name");
     r.add(r.call("$exc",
                  {r.S("NoMethodError"),
                   r.bin(BinOp::Add,
-                        r.bin(BinOp::Add, r.S("undefined method '"), r.L(name)),
+                        r.bin(BinOp::Add, r.L(lead), r.L(name)),
                         r.bin(BinOp::Add, r.S("' for "),
                               r.call("$inspect", {r.L(recv)})))}));
     r.add(r.ret(r.Nil()));
@@ -1558,7 +1565,9 @@ struct Binder {
     // Ruby runs the arguments before it looks for the method, so they run
     // before a NoMethodError too.
     std::vector<NodeId> refused(args.begin(), args.end());
-    refused.push_back(helper("$nometh", {T, b.str_literal(name)}, p));
+    refused.push_back(helper(
+        "$nometh", {b.str_literal("undefined method '"), T, b.str_literal(name)},
+        p));
     const NodeId no_method = b.block(refused);
     return b.block(
         {b.assign(VarKind::Local, t, recv),
@@ -1900,11 +1909,39 @@ struct Binder {
           fail(a, "'super' used outside a method");
         }
         const FnInfo& fi = fns[static_cast<size_t>(d)];
-        const Args args =
-            emit_call_args(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx);
-        if (fi.cls_base < 0) return b.nil_literal();  // no explicit superclass
-        const NodeId base = read_var(fi.cls_base, ctx, p);
+        // `super` alone passes the method's own parameters on, as they are
+        // now -- a `*rest` spread back out -- and `super(...)` what it
+        // says.
+        Args args;
+        if (a.nodes.empty()) {
+          for (size_t i = 2; i < fi.params.size(); ++i) {
+            const NodeId v = read_var(fi.params[i], ctx, p);
+            if (fi.rest && i + 1 == fi.params.size()) {
+              args.spread = v;
+            } else {
+              args.fixed.push_back(v);
+            }
+          }
+        } else {
+          args = emit_call_args(a.nodes[0].get(), ctx);
+        }
         const NodeId self = read_var(fi.params[1], ctx, p);
+        // No method above this one -- none in the bases, or no base but
+        // Object -- is a NoMethodError, raised once the arguments have run.
+        const auto no_super = [&] {
+          std::vector<NodeId> run;
+          if (args.spread.valid() || !args.fixed.empty()) {
+            run.push_back(values_array(args, ctx, p));
+          }
+          if (args.block.valid()) run.push_back(args.block);
+          run.push_back(helper("$nometh",
+                               {b.str_literal("super: no superclass method '"),
+                                self, b.str_literal(fi.method_name)},
+                               p));
+          return b.block(run);
+        };
+        if (fi.cls_base < 0) return no_super();
+        const NodeId base = read_var(fi.cls_base, ctx, p);
         const NodeId blk =
             args.block.valid() ? args.block : read_var(fi.params[0], ctx, p);
         const int32_t mv = ctx.alloc_local("$super");
@@ -1919,8 +1956,7 @@ struct Binder {
              b.make_if(
                  b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                           b.str_literal("nil")),
-                 call_with(M, {blk, self}, args, p),
-                 helper("$nometh", {self, b.str_literal(fi.method_name)}, p))});
+                 call_with(M, {blk, self}, args, p), no_super())});
       }
       case "notop"_:
         return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), p),
@@ -2568,7 +2604,9 @@ struct Binder {
       fail(sfx, "'.new' only works on a class known at compile time, or as "
                 "Proc.new { ... }");
     }
-    return refuse(helper("$nometh", {recv, b.str_literal(name)}, p));
+    return refuse(helper(
+        "$nometh",
+        {b.str_literal("undefined method '"), recv, b.str_literal(name)}, p));
   }
 
   // -- One function's body -------------------------------------------------

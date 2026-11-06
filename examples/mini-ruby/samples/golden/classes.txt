@@ -23,3 +23,9 @@ made_arg runs
 1
 made_arg runs
 NoMethodError
+sq! 4 []
+sq! 5 [6, 7]
+with block
+in 0 []
+made_arg runs
+NoMethodError

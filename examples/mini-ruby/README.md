@@ -117,7 +117,9 @@ calls `initialize` through the same `$mfind` walk, so a subclass with no
 looks up the *base* of the class the calling method was declared in
 (captured once, at `resolve_def` time, not read off the instance), which
 is what makes a three-level override chain resolve correctly regardless
-of which subclass actually called it.
+of which subclass actually called it. A bare `super` passes the method's
+own parameters on, as they are when it runs -- a `*rest` spread back out
+-- so it reads them all, and a block that calls it captures them all.
 
 `samples/classes.rb` is inheritance, `super`, `attr_accessor`,
 `is_a?`/`instance_of?`, and `to_s`/`==` overrides on a plain object, all
