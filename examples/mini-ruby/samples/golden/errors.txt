@@ -9,3 +9,14 @@ rescued: deep
 ["inner saw inner", "inner ensure", "outer saw rethrown"]
 rescued: at 1
 rescued: divided by 0
+length
+ArgumentError
+wrong number of arguments (given 1, expected 0)
+ArgumentError
+wrong number of arguments (given 0, expected 1)
+join 1
+join 2
+ArgumentError
+wrong number of arguments (given 2, expected 0..1)
+no_such
+NoMethodError

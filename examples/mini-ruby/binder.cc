@@ -2358,9 +2358,6 @@ struct Binder {
       }
     }
     const std::vector<NodeId>& args = cargs.fixed;
-    const std::function<NodeId(size_t)> a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal();
-    };
     // The receiver runs once, into `$self`, and everything after reads
     // that: the method lookup, a method of the program's own, and the
     // builtin the call falls back to.
@@ -2372,7 +2369,7 @@ struct Binder {
     // any number of them, and a Proc's call, which is a call like any
     // other. Which one runs is decided when it runs (a class of the
     // program's own may define a method of the same name), so a splat
-    // into any other builtin raises then.
+    // into any other builtin raises then, once its arguments have run.
     const auto fallback = [&]() -> NodeId {
       if ((name == "push" || name == "<<") &&
           (cargs.spread.valid() || args.size() != 1)) {
@@ -2382,13 +2379,15 @@ struct Binder {
         if (name == "call") {
           return call_with(T, {b.nil_literal()}, cargs, p);
         }
-        return helper("$exc",
-                      {b.str_literal("ArgumentError"),
-                       b.str_literal("a splat argument is not supported in "
-                                     "a call to " + name + " here")},
-                      p);
+        return b.block(
+            {values_array(cargs, ctx, p),
+             helper("$exc",
+                    {b.str_literal("ArgumentError"),
+                     b.str_literal("a splat argument is not supported in "
+                                   "a call to " + name + " here")},
+                    p)});
       }
-      return emit_suffix_builtin(T, sfx, name, args, blk, a0, p);
+      return emit_suffix_builtin(T, sfx, name, cargs, blk, p);
     };
     return b.block(
         {b.assign(VarKind::Local, t, recv),
@@ -2402,69 +2401,149 @@ struct Binder {
                    call_with(M, {blk, T}, cargs, p), fallback())});
   }
 
+  // A library method, by name: what runs when the receiver's class does
+  // not define one. Each branch says how many arguments it takes and
+  // builds the call over them, one value each. Any other count is Ruby's
+  // ArgumentError, and a name this front end does not know is its
+  // NoMethodError -- either raised once every argument has run, since Ruby
+  // runs them before it looks for the method.
   NodeId emit_suffix_builtin(NodeId recv, const Ast& sfx,
-                             const std::string& name,
-                             const std::vector<NodeId>& args, NodeId blk,
-                             const std::function<NodeId(size_t)>& a0,
-                             SrcPos p) {
-    Builder b(m);
+                             const std::string& name, const Args& cargs,
+                             NodeId blk, SrcPos p) {
+    auto b = Builder(m).at(p);
+    const std::vector<NodeId>& args = cargs.fixed;
+    const size_t given = args.size();
+    // Every argument, and a `&blk` expression, run for their effects, and
+    // then `raise`.
+    const auto refuse = [&](NodeId raise) {
+      std::vector<NodeId> out(args.begin(), args.end());
+      if (cargs.block.valid()) out.push_back(cargs.block);
+      out.push_back(raise);
+      return b.block(out);
+    };
+    // `make` for min..max arguments. Ruby's own method may take more than
+    // this front end implements -- up to `ruby_max` (`first(n)`) -- and a
+    // count in between is refused as unsupported rather than as Ruby's
+    // ArgumentError, which it would not be.
+    const auto takes = [&](size_t min, size_t max, size_t ruby_max,
+                           const std::function<NodeId()>& make) -> NodeId {
+      if (given >= min && given <= max) return make();
+      if (given >= min && given <= ruby_max) {
+        return refuse(helper(
+            "$exc",
+            {b.str_literal("ArgumentError"),
+             b.str_literal(name + " with " + std::to_string(given) +
+                           (given == 1 ? " argument" : " arguments") +
+                           " is not supported here")},
+            p));
+      }
+      return refuse(helper(
+          "$argerr",
+          {b.literal(static_cast<int64_t>(given)),
+           b.str_literal(arity_spelling(min, ruby_max))},
+          p));
+    };
+    const auto none = [&](const std::function<NodeId()>& make) {
+      return takes(0, 0, 0, make);
+    };
+    const auto one = [&](const std::function<NodeId()>& make) {
+      return takes(1, 1, 1, make);
+    };
+    const size_t any = std::string::npos;
+
     if (name == "length" || name == "size") {
-      return helper("$len", {recv}, p);
+      return none([&] { return helper("$len", {recv}, p); });
     }
     if (name == "push" || name == "<<") {
-      return helper("$push", {recv, a0(0)}, p);
+      return one([&] { return helper("$push", {recv, args[0]}, p); });
     }
-    if (name == "each") return helper("$each", {recv, blk}, p);
+    if (name == "each") {
+      return none([&] { return helper("$each", {recv, blk}, p); });
+    }
     if (name == "map" || name == "collect") {
-      return helper("$map", {recv, blk}, p);
+      return none([&] { return helper("$map", {recv, blk}, p); });
     }
     if (name == "select" || name == "filter") {
-      return helper("$select", {recv, blk}, p);
+      return none([&] { return helper("$select", {recv, blk}, p); });
     }
     if (name == "inject" || name == "reduce") {
-      if (args.empty()) return helper("$inject1", {recv, blk}, p);
-      return helper("$inject", {recv, args[0], blk}, p);
+      return takes(0, 1, 2, [&] {
+        if (args.empty()) return helper("$inject1", {recv, blk}, p);
+        return helper("$inject", {recv, args[0], blk}, p);
+      });
     }
     if (name == "each_with_index") {
-      return helper("$eachwi", {recv, blk}, p);
+      return none([&] { return helper("$eachwi", {recv, blk}, p); });
     }
-    if (name == "times") return helper("$times", {recv, blk}, p);
-    if (name == "keys") return helper("$keys", {recv}, p);
-    if (name == "sort") return helper("$sort", {recv}, p);
-    if (name == "reverse") return helper("$reverse", {recv}, p);
-    if (name == "include?") return helper("$include", {recv, a0(0)}, p);
+    if (name == "times") {
+      return none([&] { return helper("$times", {recv, blk}, p); });
+    }
+    if (name == "keys") return none([&] { return helper("$keys", {recv}, p); });
+    if (name == "sort") return none([&] { return helper("$sort", {recv}, p); });
+    if (name == "reverse") {
+      return none([&] { return helper("$reverse", {recv}, p); });
+    }
+    if (name == "include?") {
+      return one([&] { return helper("$include", {recv, args[0]}, p); });
+    }
     if (name == "join") {
-      return helper("$join",
-                    {recv, args.empty() ? b.str_literal("", p) : args[0]}, p);
+      return takes(0, 1, 1, [&] {
+        return helper("$join",
+                      {recv, args.empty() ? b.str_literal("") : args[0]}, p);
+      });
     }
-    if (name == "to_a") return helper("$toa", {recv}, p);
-    if (name == "first") return helper("$first", {recv}, p);
-    if (name == "last") return helper("$last", {recv}, p);
-    if (name == "inspect") return helper("$inspect", {recv}, p);
-    if (name == "to_s") return helper("$str", {recv}, p);
+    if (name == "to_a") return none([&] { return helper("$toa", {recv}, p); });
+    if (name == "first") {
+      return takes(0, 0, 1, [&] { return helper("$first", {recv}, p); });
+    }
+    if (name == "last") {
+      return takes(0, 0, 1, [&] { return helper("$last", {recv}, p); });
+    }
+    if (name == "inspect") {
+      return none([&] { return helper("$inspect", {recv}, p); });
+    }
+    // Integer#to_s takes a base.
+    if (name == "to_s") {
+      return takes(0, 0, 1, [&] { return helper("$str", {recv}, p); });
+    }
     if (name == "message") {
-      return helper("$str", {recv}, p);
+      return none([&] { return helper("$str", {recv}, p); });
     }
-    if (name == "class") return helper("$clsname", {recv}, p);
+    if (name == "class") {
+      return none([&] { return helper("$clsname", {recv}, p); });
+    }
     if (name == "is_a?" || name == "kind_of?") {
-      return helper("$isa", {recv, a0(0)}, p);
+      return one([&] { return helper("$isa", {recv, args[0]}, p); });
     }
-    if (name == "instance_of?") return helper("$isexact", {recv, a0(0)}, p);
-    if (name == "upcase") return b.intrinsic(IntrinsicId::StrUpper, {recv}, p);
-    if (name == "downcase") return b.intrinsic(IntrinsicId::StrLower, {recv}, p);
-    if (name == "arity") return helper("$arity", {recv}, p);
+    if (name == "instance_of?") {
+      return one([&] { return helper("$isexact", {recv, args[0]}, p); });
+    }
+    // String#upcase and #downcase take options.
+    if (name == "upcase") {
+      return takes(0, 0, any, [&] {
+        return b.intrinsic(IntrinsicId::StrUpper, {recv});
+      });
+    }
+    if (name == "downcase") {
+      return takes(0, 0, any, [&] {
+        return b.intrinsic(IntrinsicId::StrLower, {recv});
+      });
+    }
+    if (name == "arity") {
+      return none([&] { return helper("$arity", {recv}, p); });
+    }
     if (name == "call") {
       // A Proc's own call passes no block, so the block slot is nil and
       // the declared parameters line up behind it.
-      std::vector<NodeId> ca{b.nil_literal(p)};
+      std::vector<NodeId> ca{b.nil_literal()};
       ca.insert(ca.end(), args.begin(), args.end());
-      return b.call_value(recv, ca, p);
+      return b.call_value(recv, ca);
     }
     if (name == "new") {
       fail(sfx, "'.new' only works on a class known at compile time, or as "
                 "Proc.new { ... }");
     }
-    return helper("$nometh", {recv, b.str_literal(name, p)}, p);
+    return refuse(helper("$nometh", {recv, b.str_literal(name)}, p));
   }
 
   // -- One function's body -------------------------------------------------

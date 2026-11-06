@@ -87,3 +87,22 @@ puts attempt { [1, 2, 3].each { |x| raise "at #{x}" } }
 
 # ZeroDivisionError is raised by this front end, not trapped by the VM.
 puts attempt { 1 / 0 }
+
+# A library method runs every argument it was given before it refuses a
+# count it does not take, as Ruby's own do; so does a call of a method
+# nothing defines, before its NoMethodError.
+def noisy(tag)
+  puts tag
+  ","
+end
+refusals = [lambda { [1].length(noisy("length")) }, lambda { [1].include? },
+            lambda { [1].join(noisy("join 1"), noisy("join 2")) },
+            lambda { 3.no_such(noisy("no_such")) }]
+refusals.each do |f|
+  begin
+    f.call
+  rescue => e
+    puts e.class
+    puts e.message if e.class.to_s == "ArgumentError"
+  end
+end

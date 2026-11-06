@@ -235,6 +235,15 @@ define a method of that name), so a splat into one raises an
 `ArgumentError` then. `p`, `print` and `raise` are matched by name, and
 refuse a splat when the program is bound.
 
+Each builtin method states how many arguments it takes, and a call with
+another count raises Ruby's `ArgumentError` -- `[1].length(2)` says
+"(given 1, expected 0)" -- once every argument has run, as Ruby runs them
+before it looks for the method; a method nothing defines raises its
+`NoMethodError` the same way. Where Ruby's own method takes more than
+this front end implements -- `first(n)`, `last(n)`, `to_s(base)`,
+`inject(init, :sym)`, `upcase` with options -- the call raises an
+`ArgumentError` saying it is not supported here.
+
 ## What is absent, and what quietly differs
 
 Absent: modules, a parameter after a splat (see Splats), keyword
