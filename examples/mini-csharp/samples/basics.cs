@@ -9,7 +9,17 @@
 using System;
 using System.Collections.Generic;
 
+class Holder {
+  public int Held { get; set; }
+  public int Echo(int x) { return x; }
+}
+
 class Program {
+  static int Noisy(string tag, int v) {
+    Console.WriteLine("evaluated " + tag);
+    return v;
+  }
+
   static int Fib(int n) {
     if (n < 2) {
       return n;
@@ -109,6 +119,20 @@ class Program {
       ages.Add("ann", 99);
     } catch (Exception e) {
       Console.WriteLine(e.Message);
+    }
+
+    // A call on null evaluates its arguments before it fails, and so does
+    // a property set: the null check is the call's own.
+    Holder none = null;
+    try {
+      none.Echo(Noisy("argument", 1));
+    } catch (Exception) {
+      Console.WriteLine("null receiver");
+    }
+    try {
+      none.Held = Noisy("value", 2);
+    } catch (Exception) {
+      Console.WriteLine("null receiver");
     }
   }
 }

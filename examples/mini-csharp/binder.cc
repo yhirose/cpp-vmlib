@@ -710,7 +710,7 @@ struct Binder {
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
-        "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$getf", "$setf",
+        "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$nullcall", "$getf", "$setf",
         "$idx", "$setidx", "$dictadd", "$len", "$iter", "$iternext",
         "$join", "$exc", "$mkexc", "$tnew", "$tsettle", "$ton", "$totask",
         "$tresolve", "$adopt", "$await", "$mainwrap",
@@ -832,17 +832,28 @@ struct Binder {
     r.finish("$mlookup");
   }
 
+  // A null receiver's method is $nullcall, which throws when it is called
+  // rather than when it is looked up: the call evaluates its arguments
+  // first, as C#'s does before its null check.
   void rt_mfind() {
     RT r(*this);
     const auto [recv, name] = r.params("recv", "name");
     method_walk(r, recv, name);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
-                r.ret(r.call("$exc", {r.S("null reference")}))));
+                r.ret(r.b.make_closure(rt.at("$nullcall"), empty_cmap))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
         "$exc", {r.bin(BinOp::Add, r.S("no such method: "), r.L(name))})));
     r.finish("$mfind");
+  }
+
+  void rt_nullcall() {
+    RT r(*this);
+    r.rest_param = true;
+    r.params("args");
+    r.add(r.ret(r.call("$exc", {r.S("null reference")})));
+    r.finish("$nullcall");
   }
 
   void rt_getf() {
@@ -1078,7 +1089,7 @@ struct Binder {
   }
 
   void emit_runtime() {
-    rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_getf();
+    rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_nullcall(); rt_getf();
     rt_setf(); rt_idx(); rt_setidx(); rt_dictadd(); rt_len(); rt_iter();
     rt_iternext(); rt_join(); rt_exc();
     rt_mkexc(); rt_tnew(); rt_tsettle(); rt_ton(); rt_totask();
