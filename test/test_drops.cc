@@ -15,8 +15,9 @@
 // cell) back into declaration order with the plain ones; the frame's dead
 // temporaries, which must not keep a scope's cycle alive; a container's
 // own order, first to last, when it is freed with drop-bearing values in
-// it; and a call's arguments, which go with the callee rather than staying
-// in the caller's registers until its statement ends.
+// it; a call's arguments, which go with the callee rather than staying
+// in the caller's registers until its statement ends; and a destructor in
+// a frame at the call-depth bound, which still gets a frame to run in.
 
 #include <cstdio>
 #include <stdexcept>
@@ -1014,6 +1015,57 @@ int main() {
       return g.b.call_value(g.b.native_ref(g.b.declare_native("zero"), g.p),
                             {g.obj("t")}, g.p);
     }, host);
+  }
+
+  // --- 19. A frame at max_call_depth that lets go of the last reference
+  //         to a resource -- an argument it took, a local of its own --
+  //         still runs the destructor, which needs one frame more than the
+  //         bound: code on a frame's way out gets headroom above it. -----
+  {
+    // funcs[2] callee(x) = 0
+    // funcs[3] deep(n, d) = n == 0 ? (callee({t}); { own = {local} }; 0)
+    //                             : deep(n - 1, d)
+    // main: deep(8, drop) under max_call_depth 10 -- main is the bottom
+    // frame, the nine deeps and the callee are the ten calls.
+    Prog g;
+    Func callee{"callee", 1, 0, NodeId{}, {"x"}, {}};
+    callee.num_params = 1;
+    callee.body = g.b.literal(0, g.p);
+    g.m.funcs.push_back(callee);
+    const auto res = [&](const char* name, NodeId d) {
+      return g.b.object_lit({{g.str("name"), g.str(name)},
+                             {g.str("\x01" "drop"), d}},
+                            g.p);
+    };
+    Func deep{"deep", 3, 0, NodeId{}, {"n", "d", "own"}, {}};
+    deep.num_params = 2;
+    const NodeId n = g.local(0);
+    const NodeId d = g.local(1);
+    deep.body = g.b.make_if(
+        g.b.binary(BinOp::Eq, n, g.b.literal(0, g.p), g.p),
+        g.b.block({g.b.call_value(g.b.make_closure(2, 0, g.p),
+                                  {res("arg", g.local(1))}, g.p),
+                   g.b.scope(2, 3,
+                             g.b.assign(VarKind::Local, 2,
+                                        res("local", g.local(1)), g.p),
+                             g.p),
+                   g.b.literal(0, g.p)},
+                  g.p),
+        g.b.call_value(g.b.make_closure(3, 0, g.p),
+                       {g.b.binary(BinOp::Sub, n, g.b.literal(1, g.p), g.p), d},
+                       g.p),
+        g.p);
+    g.m.funcs.push_back(deep);
+    g.main(g.b.block({g.bind_drop(),
+                      g.b.call_value(g.b.make_closure(3, 0, g.p),
+                                     {g.b.literal(8, g.p), g.local(0)}, g.p),
+                      g.print_str("after")},
+                     g.p),
+           {});
+    vm::RunOptions bound;
+    bound.max_call_depth = 10;
+    expect_clean(run_module(g.m, "limit", bound), "limit");
+    check_eq(joined(), "arg|local|after|", "limit output");
   }
 
   if (g_failures != 0) {

@@ -39,7 +39,8 @@ std::string joined() {
   return s;
 }
 
-std::string run_module(const coreir::Module& m, const std::string& what) {
+std::string run_module(const coreir::Module& m, const std::string& what,
+                       vm::RunOptions opts = {}) {
   g_out.clear();
   if (auto err = coreir::verify(m)) {
     std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", what.c_str(),
@@ -53,7 +54,7 @@ std::string run_module(const coreir::Module& m, const std::string& what) {
     coreir::Runtime rt;
     const vm::Program p = vm::compile(m);
     try {
-      vm::run(p, rt);
+      vm::run(p, rt, opts);
     } catch (const Failure& e) {
       failure = e.what();
     }
@@ -485,6 +486,68 @@ int main() {
     check_eq(run_module(m, "inner defer, break"), "",
              "inner defer, break: failure");
     check_eq(joined(), "inner|end|", "inner defer, break output");
+  }
+
+  // --- 12. A frame at max_call_depth still runs its defers, which need
+  //         one frame more than the bound: code on a frame's way out gets
+  //         headroom above it. A defer that runs away still fails, at the
+  //         raised bound, with the trap a handler catches. -------------
+  {
+    // funcs[1] deferred() = print("deferred")
+    // funcs[2] deep(n) = n == 0 ? { defer deferred; print("at the bound") }
+    //                           : deep(n - 1)
+    // main: try { deep(8) } catch e { print(e.message) } under
+    // max_call_depth 9 -- the nine deeps are the nine calls.
+    const auto run = [&](const char* what, NodeId (*defer_body)(Builder&),
+                         const char* want) {
+      Module m;
+      Builder b(m);
+      const SrcPos p{1, 1};
+      m.capture_maps.push_back({});
+      auto pr = [&](NodeId v) {
+        return b.intrinsic(IntrinsicId::Print, {v}, p);
+      };
+      m.funcs.push_back({});
+      m.funcs.push_back({"deferred", 0, 0, defer_body(b), {}, {}});
+      Func deep{"deep", 1, 0, NodeId{}, {"n"}, {}};
+      deep.num_params = 1;
+      const NodeId n = b.varref(VarKind::Local, 0, p);
+      deep.body = b.make_if(
+          b.binary(BinOp::Eq, n, b.literal(0, p), p),
+          b.scope(1, 1,
+                  b.block({b.make_defer(b.make_closure(1, 0, p), p),
+                           pr(b.str_literal("at the bound", p))},
+                          p),
+                  p),
+          b.call_value(b.make_closure(2, 0, p),
+                       {b.binary(BinOp::Sub, n, b.literal(1, p), p)}, p),
+          p);
+      m.funcs.push_back(deep);
+      m.funcs[0] = {
+          "main", 1, 0,
+          b.make_try(0,
+                     b.call_value(b.make_closure(2, 0, p), {b.literal(8, p)}, p),
+                     pr(b.index(b.varref(VarKind::Local, 0, p),
+                                b.str_literal("message", p), p)),
+                     p),
+          {"e"}, {}};
+      vm::RunOptions bound;
+      bound.max_call_depth = 9;
+      check_eq(run_module(m, what, bound), "", std::string(what) + ": failure");
+      check_eq(joined(), want, std::string(what) + " output");
+    };
+    run("limit: defer runs",
+        [](Builder& b) {
+          return b.intrinsic(IntrinsicId::Print,
+                             {b.str_literal("deferred", {1, 1})}, {1, 1});
+        },
+        "at the bound|deferred|");
+    // A defer that calls itself forever: funcs[1] calls funcs[1].
+    run("limit: runaway defer",
+        [](Builder& b) {
+          return b.call_value(b.make_closure(1, 0, {1, 1}), {}, {1, 1});
+        },
+        "at the bound|recursion limit exceeded|");
   }
 
   if (g_failures != 0) {

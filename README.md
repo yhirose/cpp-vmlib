@@ -678,7 +678,11 @@ unavailable.
 
 `coreir_rt_poll()` is your interrupt point (Ctrl+C, a cancellation flag), and
 `RunOptions::max_call_depth` turns a runaway call chain into a reported
-failure at the call (or coroutine resume) that would pass it.
+failure at the call (or coroutine resume) that would pass it. Code that
+runs on a frame's way out -- a destructor, a defer -- gets 64 frames of
+headroom above it, so a frame that reached the bound without passing it
+still runs them; exit code that itself runs away fails at the raised
+bound.
 
 ## Building
 

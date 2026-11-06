@@ -4206,7 +4206,9 @@ struct RunOptions {
   // allows no calls, and a negative value counts as 0. A resumed
   // coroutine's frames count as they come back, so a runaway program fails
   // cleanly at the call or resume that would pass the bound, rather than
-  // growing the heap until the allocator gives out.
+  // growing the heap until the allocator gives out. A destructor or a defer
+  // runs with a little headroom above it (Exec::ExitHeadroom), since the
+  // frame it runs on the way out of may sit right at the bound.
   int max_call_depth = 10000;
   // Whether the entry frame's own values run their drop hooks when the
   // program ends -- at its Ret, or as an uncaught throw unwinds past it.
@@ -7010,6 +7012,36 @@ struct Exec {
   void check_depth(size_t n, SrcPos pos) {
     if (frames.size() + n > max_frames) depth_exceeded(pos);
   }
+
+  // Code that runs on a frame's way out -- a destructor (drop_hook), a defer
+  // (run_defers_now) -- needs a frame of its own, and the frame it is
+  // leaving may sit right at the bound: a program that reached
+  // max_call_depth without passing it would otherwise lose the destructor,
+  // or fail its scope's exit with the defer unrun. So that code runs with
+  // kExitHeadroom frames above the bound, the room Lua keeps for its error
+  // handlers and CPython for handling a RecursionError. Raised once, not
+  // per nested level, so exit code that itself runs away still fails, at
+  // the raised bound; check_depth, on every call's path, is untouched.
+  static constexpr size_t kExitHeadroom = 64;
+  struct ExitHeadroom {
+    Exec& e;
+    const bool raised;
+    explicit ExitHeadroom(Exec& x) : e(x), raised(!x.in_exit_code) {
+      if (raised) {
+        e.max_frames += kExitHeadroom;
+        e.in_exit_code = true;
+      }
+    }
+    ~ExitHeadroom() {
+      if (raised) {
+        e.max_frames -= kExitHeadroom;
+        e.in_exit_code = false;
+      }
+    }
+    ExitHeadroom(const ExitHeadroom&) = delete;
+    ExitHeadroom& operator=(const ExitHeadroom&) = delete;
+  };
+  bool in_exit_code = false;  // an ExitHeadroom is in force
   [[noreturn]] void depth_exceeded(SrcPos pos) {
     raise_trap("recursion limit exceeded", pos);
   }
@@ -7559,6 +7591,7 @@ struct Exec {
   // of the same mark run, and the last of them to throw is what leaves --
   // replacing whatever was unwinding. culebra's rule, and Go's.
   void run_defers_now(Frame& f, size_t mark, SrcPos pos) {
+    ExitHeadroom room(*this);
     std::optional<Raise> thrown;
     while (f.defers.size() > mark) {
       Value d = std::move(f.defers.back());
@@ -7658,6 +7691,7 @@ struct Exec {
     if (!dv || !dv->is_callable()) return;
     Value closure = *dv;
     Value arg = Value::make_ref(h);
+    ExitHeadroom room(*self);
     const size_t floor = self->frames.size();
     try {
       self->push_closure(closure, &arg, 1, -1, self->running_pos());
