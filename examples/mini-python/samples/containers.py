@@ -64,3 +64,25 @@ xs += (3,)
 print(same, xs is same)
 xs = xs + [4]
 print(same, xs is same)
+
+# A builtin method's arguments run once, in source order, whatever order
+# it reads them in, and one it does not take is a TypeError once they
+# have run; a method of the program's own by the same name is handed
+# them as any call is, keywords and all.
+def arg(tag, v):
+    print("arg", tag)
+    return v
+
+ys = [3, 1, 2]
+ys.sort(reverse=arg("reverse", True), key=arg("key", None))
+print(ys, "xxaxx".strip(arg("chars", "x")), "--a--".rstrip("-"))
+try:
+    ys.append(arg("first", 1), arg("second", 2))
+except TypeError:
+    print("TypeError")
+
+class Sorter:
+    def sort(self, key=None, reverse=False):
+        return (key, reverse)
+
+print(Sorter().sort(key=arg("own key", len), reverse=True)[1])

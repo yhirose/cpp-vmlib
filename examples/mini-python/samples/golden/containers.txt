@@ -16,3 +16,12 @@ int str float 3
 5 4 True
 [1, 2, 3] True
 [1, 2, 3] False
+arg reverse
+arg key
+arg chars
+[3, 2, 1] a --a
+arg first
+arg second
+TypeError
+arg own key
+True

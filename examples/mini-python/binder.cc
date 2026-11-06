@@ -30,8 +30,10 @@
 
 #include "binder.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1827,7 +1829,8 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "string"),
         r.blk(
-            {r.set(s, r.call("$strip", {r.L(v), r.I(0)})), r.set(i, r.I(0)),
+            {r.set(s, r.call("$strip", {r.L(v), r.I(0), r.Nil()})),
+             r.set(i, r.I(0)),
              r.set(neg, r.Bo(false)),
              r.iff(r.bin(BinOp::Gt, r.len(r.L(s)), r.I(0)),
                    r.blk({r.iff(r.bin(BinOp::Eq,
@@ -2550,24 +2553,32 @@ struct Binder {
     r.finish("$split");
   }
 
-  void rt_strip() {  // mode 0 both, 1 left, 2 right
+  // mode 0 both, 1 left, 2 right; `chars` the characters to strip, or
+  // None for whitespace.
+  void rt_strip() {
     RT r(*this);
-    const auto [s, mode] = r.params("s", "mode");
+    const auto [s, mode, chars] = r.params("s", "mode", "chars");
     const auto [i, j] = r.locals("i", "j");
     const auto ch = [&](NodeId i) {
       return r.in(IntrinsicId::StrSlice,
                   {r.L(s), i, r.bin(BinOp::Add, i, r.I(1))});
     };
+    const auto strips = [&](NodeId c) {
+      return r.iff(r.is(r.typ(chars), "nil"), r.call("$isspace", {c}),
+                   r.call("$in", {c, r.L(chars)}));
+    };
+    r.add(r.iff(r.both(r.isnt(r.typ(chars), "nil"),
+                       r.isnt(r.typ(chars), "string")),
+                r.call("$exc", {r.S("TypeError"),
+                                r.S("strip arg must be None or str")})));
     r.add(r.set(i, r.I(0)));
     r.add(r.set(j, r.len(r.L(s))));
     r.add(r.iff(r.bin(BinOp::Ne, r.L(mode), r.I(2)),
-                r.wh(r.both(r.bin(BinOp::Lt, r.L(i), r.L(j)),
-                            r.call("$isspace", {ch(r.L(i))})),
+                r.wh(r.both(r.bin(BinOp::Lt, r.L(i), r.L(j)), strips(ch(r.L(i)))),
                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))))));
     r.add(r.iff(r.bin(BinOp::Ne, r.L(mode), r.I(1)),
                 r.wh(r.both(r.bin(BinOp::Gt, r.L(j), r.L(i)),
-                            r.call("$isspace",
-                                   {ch(r.bin(BinOp::Sub, r.L(j), r.I(1)))})),
+                            strips(ch(r.bin(BinOp::Sub, r.L(j), r.I(1))))),
                      r.set(j, r.bin(BinOp::Sub, r.L(j), r.I(1))))));
     r.add(r.ret(r.in(IntrinsicId::StrSlice, {r.L(s), r.L(i), r.L(j)})));
     r.finish("$strip");
@@ -3035,6 +3046,159 @@ struct Binder {
     std::vector<NodeId> items;
     for (const auto& c : es->nodes) items.push_back(emit_expr(*c, ctx));
     return helper("$tuple", {b.array_lit(items)}, p);
+  }
+
+  // -- A builtin's arguments ----------------------------------------------
+  //
+  // A builtin is emitted inline, by name, rather than reached through the
+  // calling convention, so its arguments are emitted here: each once, in
+  // source order -- which, with no `*` or `**` among them (refused when
+  // the program is bound), is the positional ones and then the keywords.
+  struct Given {
+    std::vector<NodeId> pos;
+    std::vector<std::pair<std::string, NodeId>> kw;
+  };
+  Given emit_given(const Ast* args, FnCtx& ctx) {
+    Given g;
+    if (args == nullptr || args->tag != "args"_) return g;
+    for (const auto& c : args->nodes) {
+      if (c->tag == "splat"_ || c->tag == "kwsplat"_) {
+        fail(*c, "a builtin takes no * or ** argument here");
+      }
+      if (c->tag == "kwarg"_) {
+        g.kw.emplace_back(std::string(c->nodes[0]->token),
+                          emit_expr(*c->nodes[1], ctx));
+      } else {
+        g.pos.push_back(emit_expr(*c, ctx));
+      }
+    }
+    return g;
+  }
+
+  // What a builtin takes, and how CPython words a count it refuses -- which
+  // depends on how the builtin parses its arguments, not on what it is:
+  //   One     "len() takes exactly one argument (2 given)"
+  //   NoArgs  "str.upper() takes no arguments (1 given)"
+  //   Clinic  "pop expected at most 1 argument, got 2"
+  //   Old     "split() takes at most 2 arguments (3 given)"
+  // `min`..`max` positional arguments are what this front end implements;
+  // `py_max` is CPython's own top (npos: any number), and a count between
+  // the two is refused as unsupported rather than as Python's TypeError,
+  // which it would not be. `kw` names the keywords taken, in the order
+  // `make` wants them; `py_kw` any more that CPython takes, `py_any_kw`
+  // that it takes any at all. `refused` replaces the wording outright for
+  // the few builtins with a sentence of their own.
+  enum class Shape { One, NoArgs, Clinic, Old };
+  struct Takes {
+    size_t min = 0;
+    size_t max = 0;
+    size_t py_max = 0;
+    Shape shape = Shape::Clinic;
+    std::vector<std::string> kw = {};
+    std::vector<std::string> py_kw = {};
+    bool py_any_kw = false;
+    std::string refused = {};
+    std::string kw_owner = {};  // the name a keyword error gives, if not its own
+  };
+
+  static std::string plural(size_t n, const std::string& word) {
+    return std::to_string(n) + " " + word + (n == 1 ? "" : "s");
+  }
+
+  // `make` over a builtin's arguments, when it takes them: the positional
+  // ones as given, then one entry per keyword `t.kw` names -- invalid where
+  // the call did not pass it. Every argument runs once, in source order,
+  // whatever order `make` reads them in: when the keywords came in another
+  // order, they all go into fresh temporaries first. A count or a keyword
+  // the builtin refuses runs them all and raises CPython's TypeError, and
+  // one CPython takes but this front end does not implement raises
+  // NotImplementedError. `qual` is CPython's name for it, `list.append` or
+  // `len`.
+  NodeId takes(const Given& g, const Takes& t, const std::string& qual,
+               FnCtx& ctx, SrcPos p,
+               const std::function<NodeId(const std::vector<NodeId>&,
+                                          const std::vector<NodeId>&)>& make) {
+    auto b = Builder(m).at(p);
+    const std::string name = qual.substr(qual.rfind('.') + 1);
+    const auto refuse = [&](const std::string& kind, const std::string& msg) {
+      std::vector<NodeId> run(g.pos);
+      for (const auto& [k, v] : g.kw) run.push_back(v);
+      run.push_back(
+          helper("$exc", {b.str_literal(kind), b.str_literal(msg)}, p));
+      return b.block(run);
+    };
+    const auto has = [](const std::vector<std::string>& v, const std::string& k) {
+      return std::find(v.begin(), v.end(), k) != v.end();
+    };
+    for (const auto& [k, v] : g.kw) {
+      if (has(t.kw, k)) continue;
+      if (t.py_any_kw || has(t.py_kw, k)) {
+        return refuse("NotImplementedError",
+                      name + "() with the keyword '" + k +
+                          "' is not supported here");
+      }
+      if (t.kw.empty() && t.py_kw.empty()) {
+        return refuse("TypeError", qual + "() takes no keyword arguments");
+      }
+      return refuse("TypeError",
+                    "'" + k + "' is an invalid keyword argument for " +
+                        (t.kw_owner.empty() ? name : t.kw_owner) + "()");
+    }
+    const size_t n = g.pos.size();
+    if (n < t.min || n > t.py_max) {
+      if (!t.refused.empty()) return refuse("TypeError", t.refused);
+      if (t.max == 0 && t.py_max == 0 && !t.kw.empty()) {
+        return refuse("TypeError", name + "() takes no positional arguments");
+      }
+      const bool over = n > t.py_max;
+      const size_t lim = over ? t.py_max : t.min;
+      std::string msg;
+      switch (t.shape) {
+        case Shape::One:
+          msg = qual + "() takes exactly one argument (" + std::to_string(n) +
+                " given)";
+          break;
+        case Shape::NoArgs:
+          msg = qual + "() takes no arguments (" + std::to_string(n) +
+                " given)";
+          break;
+        case Shape::Clinic:
+          msg = name + " expected " +
+                (t.min == t.py_max ? "" : over ? "at most " : "at least ") +
+                plural(lim, "argument") + ", got " + std::to_string(n);
+          break;
+        case Shape::Old:
+          msg = name + "() takes " + (over ? "at most " : "at least ") +
+                plural(lim, "argument") + " (" + std::to_string(n) + " given)";
+          break;
+      }
+      return refuse("TypeError", msg);
+    }
+    if (n > t.max) {
+      return refuse("NotImplementedError",
+                    name + "() with " + plural(n, "argument") +
+                        " is not supported here");
+    }
+    // Where each keyword goes, and whether they came in that order.
+    std::vector<NodeId> kwv(t.kw.size());
+    std::vector<size_t> at;
+    for (const auto& [k, v] : g.kw) {
+      const size_t i = static_cast<size_t>(
+          std::find(t.kw.begin(), t.kw.end(), k) - t.kw.begin());
+      kwv[i] = v;
+      at.push_back(i);
+    }
+    if (std::is_sorted(at.begin(), at.end())) return make(g.pos, kwv);
+    std::vector<NodeId> pre;
+    std::vector<NodeId> pos;
+    const auto spill = [&](NodeId v) {
+      const int32_t s = ctx.alloc_fresh_local("$arg");
+      pre.push_back(b.assign(VarKind::Local, s, v));
+      return b.varref(VarKind::Local, s);
+    };
+    for (const NodeId v : g.pos) pos.push_back(spill(v));
+    for (size_t j = 0; j < g.kw.size(); ++j) kwv[at[j]] = spill(g.kw[j].second);
+    return b.sequence(pre, make(pos, kwv));
   }
 
   // The positional-only path, for the builtins -- which are emitted inline
@@ -4044,96 +4208,136 @@ struct Binder {
            emit_pycall(helper("$getattr", {T, b.str_literal(name)}, p), argnode,
                        ctx, {T}, p)});
     }
-    // `sort` takes key= and reverse=, exactly as `sorted` does.
-    NodeId sortkey = b.nil_literal();
-    NodeId sortrev = b.bool_literal(false);
-    std::vector<NodeId> args;
-    if (name == "sort" && argnode != nullptr) {
-      for (const auto& c : argnode->nodes) {
-        if (c->tag != "kwarg"_) {
-          fail(*c, "sort() takes no positional arguments here");
-        }
-        const std::string kn(c->nodes[0]->token);
-        if (kn == "key") {
-          sortkey = emit_expr(*c->nodes[1], ctx);
-        } else if (kn == "reverse") {
-          sortrev = emit_expr(*c->nodes[1], ctx);
-        } else {
-          fail(*c, "sort() takes key= and reverse= here");
-        }
-      }
-    } else if (name != "sort") {
-      args = emit_args(argnode, ctx);
-    }
-    const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal();
-    };
-    const auto got = [&](size_t k) { return b.bool_literal(k < args.size()); };
-    std::vector<NodeId> call_args{T};
-    call_args.insert(call_args.end(), args.begin(), args.end());
+    // The arguments run once, in source order, whichever method takes them.
+    const Given g = emit_given(argnode, ctx);
+    // A method of the program's own by this name takes them as any call
+    // does, keywords and all.
+    std::vector<NodeId> front{T};
+    front.insert(front.end(), g.pos.begin(), g.pos.end());
+    std::vector<std::pair<NodeId, NodeId>> kvs;
+    for (const auto& [k, v] : g.kw) kvs.emplace_back(b.str_literal(k), v);
     const NodeId user =
         b.call_value(helper("$getattr", {T, b.str_literal(name)}, p),
-                     {b.array_lit(call_args), b.nil_literal()});
+                     {b.array_lit(front),
+                      kvs.empty() ? b.nil_literal() : b.object_lit(kvs)});
 
+    // Each builtin by this name, on the type that has it: what it takes,
+    // and the call over what it was given (`pos`, then `kw` by `Takes::kw`).
+    using Args = const std::vector<NodeId>&;
     std::vector<std::pair<const char*, NodeId>> cands;
-    const auto add = [&](const char* want, NodeId impl) {
-      cands.emplace_back(want, impl);
+    const auto add = [&](const char* want, const char* tname, const Takes& t,
+                         const std::function<NodeId(Args, Args)>& make) {
+      cands.emplace_back(
+          want, takes(g, t, std::string(tname) + "." + name, ctx, p, make));
     };
     const auto h = [&](const char* n, std::vector<NodeId> as) {
       return helper(n, as, p);
     };
+    const auto opt = [&](Args v, size_t k, NodeId dflt) {
+      return k < v.size() && v[k].valid() ? v[k] : dflt;
+    };
+    const auto given = [&](Args v, size_t k) {
+      return b.bool_literal(k < v.size() && v[k].valid());
+    };
+    const Takes one{1, 1, 1, Shape::One};
+    const Takes noargs{0, 0, 0, Shape::NoArgs};
+    const auto clinic = [](size_t lo, size_t hi, size_t py_hi) {
+      return Takes{lo, hi, py_hi, Shape::Clinic};
+    };
+    const auto old = [](size_t lo, size_t hi, size_t py_hi) {
+      return Takes{lo, hi, py_hi, Shape::Old};
+    };
     if (name == "append") {
-      add("array", b.intrinsic(IntrinsicId::ArrayPush, {T, a0(0)}));
+      add("array", "list", one, [&](Args a, Args) {
+        return b.intrinsic(IntrinsicId::ArrayPush, {T, a[0]});
+      });
     } else if (name == "extend") {
-      add("array", h("$aext", {T, a0(0)}));
+      add("array", "list", one, [&](Args a, Args) { return h("$aext", {T, a[0]}); });
     } else if (name == "pop") {
-      add("array", h("$apop", {T, a0(0), got(0)}));
-      add("map", h("$dpop", {T, a0(0), a0(1), got(1)}));
+      add("array", "list", clinic(0, 1, 1), [&](Args a, Args) {
+        return h("$apop", {T, opt(a, 0, b.nil_literal()), given(a, 0)});
+      });
+      add("map", "dict", clinic(1, 2, 2), [&](Args a, Args) {
+        return h("$dpop", {T, a[0], opt(a, 1, b.nil_literal()), given(a, 1)});
+      });
     } else if (name == "insert") {
-      add("array", h("$ainsert", {T, a0(0), a0(1)}));
+      add("array", "list", clinic(2, 2, 2),
+          [&](Args a, Args) { return h("$ainsert", {T, a[0], a[1]}); });
     } else if (name == "remove") {
-      add("array", h("$aremove", {T, a0(0)}));
+      add("array", "list", one,
+          [&](Args a, Args) { return h("$aremove", {T, a[0]}); });
     } else if (name == "index") {
-      add("array", h("$aindex", {T, a0(0)}));
+      add("array", "list", clinic(1, 1, 3),
+          [&](Args a, Args) { return h("$aindex", {T, a[0]}); });
     } else if (name == "count") {
-      add("array", h("$acount", {T, a0(0)}));
-      add("string", h("$scount", {T, a0(0)}));
+      add("array", "list", one,
+          [&](Args a, Args) { return h("$acount", {T, a[0]}); });
+      add("string", "str", old(1, 1, 3),
+          [&](Args a, Args) { return h("$scount", {T, a[0]}); });
     } else if (name == "reverse") {
-      add("array", h("$areverse", {T}));
+      add("array", "list", noargs,
+          [&](Args, Args) { return h("$areverse", {T}); });
     } else if (name == "sort") {
-      add("array", h("$asort", {T, sortkey, sortrev}));
+      Takes t{0, 0, 0, Shape::Clinic, {"key", "reverse"}};
+      add("array", "list", t, [&](Args, Args kw) {
+        return h("$asort", {T, opt(kw, 0, b.nil_literal()),
+                            opt(kw, 1, b.bool_literal(false))});
+      });
     } else if (name == "keys") {
-      add("map", b.intrinsic(IntrinsicId::ObjectKeys, {T}));
+      add("map", "dict", noargs, [&](Args, Args) {
+        return b.intrinsic(IntrinsicId::ObjectKeys, {T});
+      });
     } else if (name == "items") {
-      add("map", h("$items", {T}));
+      add("map", "dict", noargs, [&](Args, Args) { return h("$items", {T}); });
     } else if (name == "values") {
-      add("map", h("$values", {T}));
+      add("map", "dict", noargs, [&](Args, Args) { return h("$values", {T}); });
     } else if (name == "get") {
-      add("map", h("$dget", {T, a0(0), a0(1)}));
+      add("map", "dict", clinic(1, 2, 2), [&](Args a, Args) {
+        return h("$dget", {T, a[0], opt(a, 1, b.nil_literal())});
+      });
     } else if (name == "update") {
-      add("map", h("$kwmerge", {T, a0(0)}));
+      Takes t = clinic(0, 1, 1);
+      t.py_any_kw = true;
+      add("map", "dict", t, [&](Args a, Args) {
+        return h("$kwmerge", {T, opt(a, 0, b.nil_literal())});
+      });
     } else if (name == "split") {
-      add("string", h("$split", {T, a0(0), got(0)}));
-    } else if (name == "strip") {
-      add("string", h("$strip", {T, b.literal(0)}));
-    } else if (name == "lstrip") {
-      add("string", h("$strip", {T, b.literal(1)}));
-    } else if (name == "rstrip") {
-      add("string", h("$strip", {T, b.literal(2)}));
+      // `sep` by position or by name; `maxsplit` is not implemented.
+      Takes t = old(0, 1, 2);
+      t.kw = {"sep"};
+      t.py_kw = {"maxsplit"};
+      add("string", "str", t, [&](Args a, Args kw) {
+        const NodeId sep = a.empty() ? opt(kw, 0, b.nil_literal()) : a[0];
+        return h("$split",
+                 {T, sep, b.bool_literal(!a.empty() || kw[0].valid())});
+      });
+    } else if (name == "strip" || name == "lstrip" || name == "rstrip") {
+      const int64_t mode = name == "strip" ? 0 : name == "lstrip" ? 1 : 2;
+      add("string", "str", clinic(0, 1, 1), [&](Args a, Args) {
+        return h("$strip", {T, b.literal(mode), opt(a, 0, b.nil_literal())});
+      });
     } else if (name == "replace") {
-      add("string", h("$replace", {T, a0(0), a0(1)}));
+      add("string", "str", clinic(2, 2, 3),
+          [&](Args a, Args) { return h("$replace", {T, a[0], a[1]}); });
     } else if (name == "find") {
-      add("string", h("$find", {T, a0(0)}));
+      add("string", "str", old(1, 1, 3),
+          [&](Args a, Args) { return h("$find", {T, a[0]}); });
     } else if (name == "startswith") {
-      add("string", h("$startswith", {T, a0(0)}));
+      add("string", "str", old(1, 1, 3),
+          [&](Args a, Args) { return h("$startswith", {T, a[0]}); });
     } else if (name == "endswith") {
-      add("string", h("$endswith", {T, a0(0)}));
+      add("string", "str", old(1, 1, 3),
+          [&](Args a, Args) { return h("$endswith", {T, a[0]}); });
     } else if (name == "upper") {
-      add("string", b.intrinsic(IntrinsicId::StrUpper, {T}));
+      add("string", "str", noargs, [&](Args, Args) {
+        return b.intrinsic(IntrinsicId::StrUpper, {T});
+      });
     } else if (name == "lower") {
-      add("string", b.intrinsic(IntrinsicId::StrLower, {T}));
+      add("string", "str", noargs, [&](Args, Args) {
+        return b.intrinsic(IntrinsicId::StrLower, {T});
+      });
     } else {  // join
-      add("string", h("$join", {T, a0(0)}));
+      add("string", "str", one, [&](Args a, Args) { return h("$join", {T, a[0]}); });
     }
     NodeId cur = user;
     for (size_t k = cands.size(); k-- > 0;) {
