@@ -22,6 +22,7 @@ Ruby's own distinction between its two kinds of callable is exactly
 |---|---|---|
 | a proc | extra arguments dropped, missing ones nil | `Func::lenient_arity` |
 | a lambda | a mismatch raises `ArgumentError` | the same flag, plus `if ArgCount != num_params: raise` in the prologue |
+| a method (`def`) | the same, with defaults optional and a `*rest` unbounded | the same test, as a range: required <= ArgCount <= num_params, checked before any default runs |
 
 `samples/procs.rb` is that table, run against `ruby`.
 

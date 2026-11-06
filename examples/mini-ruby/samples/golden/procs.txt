@@ -21,3 +21,7 @@ raised
 1
 2
 1
+raised
+raised
+raised
+[1, 2]

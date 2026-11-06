@@ -123,6 +123,9 @@ struct FnInfo {
   // enclosing class's own base-table binding (what `super` looks up on),
   // and `method_name` is what it looks for there.
   bool is_method = false;
+  // Any `def`, top-level or in a class: Ruby checks a method's argument
+  // count, the way it checks a lambda's.
+  bool is_def = false;
   int32_t cls_base = -1;
   std::string method_name;
 };
@@ -243,6 +246,7 @@ struct Binder {
     // moving every FnInfo, this one included.
     const auto fi = [&]() -> FnInfo& { return fns[static_cast<size_t>(f)]; };
     fi().body = &body;
+    fi().is_def = true;
     fn_of[&node] = f;
     push_scope(false);
     const int32_t blk = declare_param("__block", f);
@@ -2435,6 +2439,36 @@ struct Binder {
       }
     }
     const int32_t nparams = ctx.mark();
+    // A lambda and a method are strict about their arity where a proc is
+    // not. That is lenient_arity plus an ArgCount test -- the intrinsic's
+    // own comment says it is "Only interesting under Func::lenient_arity
+    // or Func::rest_param, where the two can differ", and this is the
+    // language where the first difference has a name. The parameters
+    // before the first default are required, the defaults are optional up
+    // to the last parameter, and a `*rest` lifts the top. Checked before
+    // any default runs, as Ruby checks it.
+    if (fi.strict || fi.is_def) {
+      const size_t total = fi.params.size() - (fi.rest ? 1 : 0);
+      size_t required = total;
+      for (size_t i = 0; i < total && i < fi.defaults.size(); ++i) {
+        if (fi.defaults[i] != nullptr) {
+          required = i;
+          break;
+        }
+      }
+      const auto check = [&](BinOp op, size_t n) {
+        pre.push_back(b.make_if(
+            b.binary(op, b.intrinsic(IntrinsicId::ArgCount, {}),
+                     b.literal(static_cast<int64_t>(n))),
+            helper("$argerr", {}, p), NodeId{}));
+      };
+      if (!fi.rest && required == total) {
+        check(BinOp::Ne, total);
+      } else {
+        check(BinOp::Lt, required);
+        if (!fi.rest) check(BinOp::Gt, total);
+      }
+    }
     // A default is computed in the method's own scope, after its earlier
     // parameters, so it may read them. Every call already supplies the
     // block as argument 0, so ArgCount lines up with a parameter's
@@ -2457,21 +2491,6 @@ struct Binder {
     }
 
     std::vector<NodeId> stmts;
-    // A lambda is strict about its arity where a proc is not. That is
-    // lenient_arity plus one ArgCount test -- the intrinsic's own comment
-    // says it is "Only interesting under Func::lenient_arity or
-    // Func::rest_param, where the two can differ", and this is the language
-    // where the first difference has a name.
-    // With a `*rest`, the count is a minimum: every parameter before it.
-    if (fi.strict) {
-      const int64_t fixed = static_cast<int64_t>(fi.params.size()) -
-                            (fi.rest ? 1 : 0);
-      stmts.push_back(
-          b.make_if(b.binary(fi.rest ? BinOp::Lt : BinOp::Ne,
-                             b.intrinsic(IntrinsicId::ArgCount, {}),
-                             b.literal(fixed)),
-                    helper("$argerr", {}, p), NodeId{}));
-    }
     const NodeId body = emit_body(*fi.body, ctx);
 
     std::vector<NodeId> head;

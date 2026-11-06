@@ -80,3 +80,21 @@ c2 = make_counter
 puts c1.call
 puts c1.call
 puts c2.call
+
+# A method checks its argument count the way a lambda does -- defaults
+# optional, and before any default runs.
+def two_args(a, b)
+  [a, b]
+end
+def with_default(a, b = 2)
+  [a, b]
+end
+calls = [lambda { two_args(1) }, lambda { with_default },
+         lambda { with_default(1, 2, 3) }, lambda { p with_default(1) }]
+calls.each do |f|
+  begin
+    f.call
+  rescue => e
+    puts "raised"
+  end
+end
