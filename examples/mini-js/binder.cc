@@ -1229,7 +1229,7 @@ struct Binder {
   // A value used as a condition. A comparison already produced a bool, and
   // JavaScript's ToBoolean is the identity on those, so the call is
   // skipped there -- which covers `i < n`, the condition most loops have.
-  NodeId truthy(NodeId v, FnCtx& ctx, SrcPos p) {
+  NodeId truthy(NodeId v, SrcPos p) {
     const Node& n = m.at(v);
     if (n.tag == Tag::Binary && is_comparison(static_cast<BinOp>(n.op))) {
       return v;
@@ -1239,7 +1239,6 @@ struct Binder {
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
   }
 
@@ -1442,14 +1441,14 @@ struct Binder {
         return bind_decl(v, value, ctx, p, false);
       }
       case "ifstmt"_: {
-        const NodeId c = truthy(emit_expr(*a.nodes[0], ctx), ctx, p);
+        const NodeId c = truthy(emit_expr(*a.nodes[0], ctx), p);
         const NodeId t = emit_body(*a.nodes[1], ctx);
         NodeId e;
         if (a.nodes.size() > 2) e = emit_body(*a.nodes[2], ctx);
         return b.make_if(c, t, e);
       }
       case "whilestmt"_: {
-        const NodeId c = truthy(emit_expr(*a.nodes[0], ctx), ctx, p);
+        const NodeId c = truthy(emit_expr(*a.nodes[0], ctx), p);
         return b.make_while(c, emit_body(*a.nodes[1], ctx));
       }
       case "forstmt"_:
@@ -1555,7 +1554,7 @@ struct Binder {
         b.varref(VarKind::Local, first),
         b.assign(VarKind::Local, first, b.bool_literal(false)), b.block(step)));
     if (!a.nodes[1]->nodes.empty()) {
-      const NodeId c = truthy(emit_expr(*a.nodes[1]->nodes[0], ctx), ctx, p);
+      const NodeId c = truthy(emit_expr(*a.nodes[1]->nodes[0], ctx), p);
       loop.push_back(b.make_if(b.binary(BinOp::Eq, c, b.bool_literal(false)),
                                b.make_break(), NodeId{}));
     }
@@ -1676,7 +1675,7 @@ struct Binder {
                                                : b.nil_literal());
       }
       case "notexpr"_:
-        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
+        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), p),
                         b.bool_literal(false));
       case "negexpr"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
@@ -1691,7 +1690,7 @@ struct Binder {
         return helper("$await", {emit_expr(*a.nodes[0], ctx)}, p);
       }
       case "cond"_:
-        return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
+        return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), p),
                          emit_expr(*a.nodes[1], ctx),
                          emit_expr(*a.nodes[2], ctx));
       // `a || b` answers one of its operands, not a bool, so the left one
@@ -1705,7 +1704,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
           const NodeId keep = b.varref(VarKind::Local, t);
           acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, ctx, p), is_or ? keep : rhs,
+                         b.make_if(truthy(keep, p), is_or ? keep : rhs,
                                    is_or ? rhs : keep)});
         }
         return acc;

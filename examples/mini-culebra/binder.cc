@@ -91,13 +91,6 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-const Ast* find_child(const Ast& a, std::string_view name) {
-  for (const auto& n : a.nodes) {
-    if (n->name == name) return n.get();
-  }
-  return nullptr;
-}
-
 std::string unescape(const std::string& tok) {
   std::string out;
   for (size_t i = 0; i < tok.size(); ++i) {
@@ -854,7 +847,6 @@ struct Binder {
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
   }
 

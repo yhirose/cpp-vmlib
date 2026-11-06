@@ -1059,7 +1059,6 @@ struct Binder {
   // ==== Pass B: emit ======================================================
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
   }
 
@@ -1077,7 +1076,7 @@ struct Binder {
     return b.assign(k, i, value);
   }
 
-  NodeId truthy(NodeId v, FnCtx& ctx, SrcPos p) {
+  NodeId truthy(NodeId v, SrcPos p) {
     return helper("$true", {v}, p);
   }
 
@@ -1174,12 +1173,12 @@ struct Binder {
     if (h == "begin") return emit_seq(a, 1, ctx, p);
     if (h == "if") {
       return b.make_if(
-          truthy(emit_form(*a.nodes[1], ctx), ctx, p),
+          truthy(emit_form(*a.nodes[1], ctx), p),
           emit_form(*a.nodes[2], ctx),
           a.nodes.size() > 3 ? emit_form(*a.nodes[3], ctx) : b.nil_literal());
     }
     if (h == "when" || h == "unless") {
-      const NodeId c = truthy(emit_form(*a.nodes[1], ctx), ctx, p);
+      const NodeId c = truthy(emit_form(*a.nodes[1], ctx), p);
       const NodeId body = emit_seq(a, 2, ctx, p);
       if (h == "when") return b.make_if(c, body, b.nil_literal());
       return b.make_if(c, b.nil_literal(), body);
@@ -1425,7 +1424,7 @@ struct Binder {
     const Ast& clause = *a.nodes[i];
     if (head_of(clause) == "else") return emit_seq(clause, 1, ctx, p);
     if (clause.nodes.size() > 1) {
-      const NodeId c = truthy(emit_form(*clause.nodes[0], ctx), ctx, p);
+      const NodeId c = truthy(emit_form(*clause.nodes[0], ctx), p);
       return b.make_if(c, emit_seq(clause, 1, ctx, p),
                        emit_cond(a, i + 1, ctx));
     }
@@ -1436,7 +1435,7 @@ struct Binder {
     const NodeId T = b.varref(VarKind::Local, t);
     const NodeId test = emit_form(*clause.nodes[0], ctx);
     return b.block({b.assign(VarKind::Local, t, test),
-                    b.make_if(truthy(T, ctx, p), T, emit_cond(a, i + 1, ctx))});
+                    b.make_if(truthy(T, p), T, emit_cond(a, i + 1, ctx))});
   }
 
   // `and` and `or` answer one of their operands, not a boolean.
@@ -1450,7 +1449,7 @@ struct Binder {
       const NodeId rhs = emit_form(*a.nodes[i], ctx);
       const NodeId keep = b.varref(VarKind::Local, t);
       acc = b.block({b.assign(VarKind::Local, t, acc),
-                     b.make_if(truthy(keep, ctx, p), is_and ? rhs : keep,
+                     b.make_if(truthy(keep, p), is_and ? rhs : keep,
                                is_and ? keep : rhs)});
     }
     return acc;

@@ -1473,7 +1473,6 @@ struct Binder {
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
   }
 
@@ -1485,7 +1484,7 @@ struct Binder {
     return rs.write(m, ctx.fn, v, value, p);
   }
 
-  NodeId truthy(NodeId v, FnCtx& ctx, SrcPos p) {
+  NodeId truthy(NodeId v, SrcPos p) {
     return helper("$truthy", {v}, p);
   }
 
@@ -1658,7 +1657,7 @@ struct Binder {
         return emit_if(a, a.tag == "unlessstmt"_, ctx);
       case "whilestmt"_:
       case "untilstmt"_: {
-        NodeId c = truthy(emit_expr(*a.nodes[0], ctx), ctx, p);
+        NodeId c = truthy(emit_expr(*a.nodes[0], ctx), p);
         if (a.tag == "untilstmt"_) {
           c = b.binary(BinOp::Eq, c, b.bool_literal(false));
         }
@@ -1666,7 +1665,7 @@ struct Binder {
       }
       case "modstmt"_: {
         const Ast& mod = *a.nodes[1];
-        NodeId cond = truthy(emit_expr(*mod.nodes[0], ctx), ctx, p);
+        NodeId cond = truthy(emit_expr(*mod.nodes[0], ctx), p);
         if (mod.tag == "unlessmod"_ || mod.tag == "untilmod"_) {
           cond = b.binary(BinOp::Eq, cond, b.bool_literal(false));
         }
@@ -1689,7 +1688,7 @@ struct Binder {
   NodeId emit_if(const Ast& a, bool negate, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
-    NodeId cond = truthy(emit_expr(*a.nodes[0], ctx), ctx, p);
+    NodeId cond = truthy(emit_expr(*a.nodes[0], ctx), p);
     if (negate) cond = b.binary(BinOp::Eq, cond, b.bool_literal(false));
     NodeId chain;
     const Ast* elsepart = nullptr;
@@ -1705,7 +1704,7 @@ struct Binder {
                                 : b.nil_literal();
     for (size_t k = elsifs.size(); k-- > 0;) {
       const Ast& e = *elsifs[k];
-      chain = b.make_if(truthy(emit_expr(*e.nodes[0], ctx), ctx, p),
+      chain = b.make_if(truthy(emit_expr(*e.nodes[0], ctx), p),
                         emit_body(*e.nodes[1], ctx), chain);
     }
     return b.make_if(cond, emit_body(*a.nodes[1], ctx), chain);
@@ -1865,7 +1864,7 @@ struct Binder {
         // see README.md.
         return b.str_literal(std::string(a.token));
       case "ternary"_:
-        return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
+        return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), p),
                          emit_expr(*a.nodes[1], ctx),
                          emit_expr(*a.nodes[2], ctx));
       case "supercall"_: {
@@ -1897,7 +1896,7 @@ struct Binder {
                  helper("$nometh", {self, b.str_literal(fi.method_name)}, p))});
       }
       case "notop"_:
-        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), ctx, p),
+        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), p),
                         b.bool_literal(false));
       case "negexp"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
@@ -1931,7 +1930,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
           const NodeId keep = b.varref(VarKind::Local, t);
           acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, ctx, p), is_or ? keep : rhs,
+                         b.make_if(truthy(keep, p), is_or ? keep : rhs,
                                    is_or ? rhs : keep)});
         }
         return acc;
@@ -2373,7 +2372,7 @@ struct Binder {
                                      "a call to " + name + " here")},
                       p);
       }
-      return emit_suffix_builtin(T, sfx, name, args, blk, a0, ctx, p);
+      return emit_suffix_builtin(T, sfx, name, args, blk, a0, p);
     };
     return b.block(
         {b.assign(VarKind::Local, t, recv),
@@ -2391,7 +2390,7 @@ struct Binder {
                              const std::string& name,
                              const std::vector<NodeId>& args, NodeId blk,
                              const std::function<NodeId(size_t)>& a0,
-                             FnCtx& ctx, SrcPos p) {
+                             SrcPos p) {
     Builder b(m);
     if (name == "length" || name == "size") {
       return helper("$len", {recv}, p);

@@ -1072,7 +1072,7 @@ struct Binder {
   // Go's `main` a goroutine.
   void rt_mainwrap() {
     RT r(*this);
-    const auto [_] = r.params("_");
+    r.param("_");
     r.add(r.b.call_value(r.P(0), {r.Nil()}));
     r.finish("$mainwrap", 0, 1);
   }
@@ -1112,7 +1112,6 @@ struct Binder {
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     return rs.closure(m, ctx.fn, g, p);
   }
 
