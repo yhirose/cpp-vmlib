@@ -223,8 +223,10 @@ Quietly different:
 
 * **A newline is whitespace here, not a statement separator.** culebra's
   grammar threads `_sp_`/`_nl_` through every rule so that `a\n-b` is two
-  statements; this one does not, so it accepts programs culebra rejects.
-  The oracle is what makes that safe: a disagreement about where a
+  statements; this one does not, so it accepts programs culebra rejects,
+  and reads a line that begins with `(` or `[` as a call or an index of
+  the line before -- write `;` between them, which does end a statement
+  here. The oracle is what makes that safe: a disagreement about where a
   statement ends becomes a failing diff.
 * **Immutability is not enforced.** culebra rejects `p.x = 1` on a property
   the literal did not declare `mut`, and rejects assigning to a `let`

@@ -60,11 +60,13 @@
 namespace mini_culebra {
 
 inline constexpr const char* kGrammar = R"GRAMMAR(
-  program    <- _ stmt* !.                                  { no_ast_opt }
+  program    <- _ (';' _)* stmt* !.                         { no_ast_opt }
 
-  stmt       <- fndecl / classdecl / vardecl / deferstmt / returnstmt
+  # `;` ends a statement, so `f(); [1]` is two of them rather than an
+  # index into f's result.
+  stmt       <- (fndecl / classdecl / vardecl / deferstmt / returnstmt
               / throwstmt / yieldfrom / yieldstmt / breakstmt / contstmt
-              / whilestmt / forstmt / block / exprstmt
+              / whilestmt / forstmt / block / exprstmt) (';' _)*
 
   fndecl     <- 'fn' __ ident params block
   params     <- '(' _ (ident (',' _ ident)*)? ','? _ ')' _   { no_ast_opt }
@@ -74,7 +76,7 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   vardecl    <- varkw ident '=' ![=] _ expr
   varkw      <- < 'let' / 'mut' > ![a-zA-Z0-9_] _
 
-  block      <- '{' _ stmt* '}' _                            { no_ast_opt }
+  block      <- '{' _ (';' _)* stmt* '}' _                   { no_ast_opt }
   deferstmt  <- 'defer' _ block                              { no_ast_opt }
   returnstmt <- 'return' ![a-zA-Z0-9_] _ expr?               { no_ast_opt }
   throwstmt  <- 'throw' ![a-zA-Z0-9_] _ expr                 { no_ast_opt }
@@ -138,7 +140,7 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   itext      <- < (!["{\\] . / '\\' .)+ >
   ident      <- < [a-zA-Z_] [a-zA-Z0-9_]* > _
 
-  ~_         <- ([ \t\r\n;] / '#' [^\n]*)*
+  ~_         <- ([ \t\r\n] / '#' [^\n]*)*
   ~__        <- ![a-zA-Z0-9_] _
 )GRAMMAR";
 

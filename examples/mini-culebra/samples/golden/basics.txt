@@ -13,3 +13,5 @@ types: Long Float String Nil
 types: Bool Array Object
 while: 5 15
 body value: 2
+listed
+[2]

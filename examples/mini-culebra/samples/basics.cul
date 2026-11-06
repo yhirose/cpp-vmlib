@@ -37,3 +37,8 @@ println("while: {i} {total}")
 # declares dies at the scope's exit or at the call site. See drops.cul.
 fn last_binding() { let a = 1; let b = a + 1 }
 println("body value: {last_binding()}")
+
+# `;` ends a statement, so the `[2]` here is an array of its own rather
+# than an index into what println answered.
+fn listed() { println("listed"); [2] }
+println(listed())
