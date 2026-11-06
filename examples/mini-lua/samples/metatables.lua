@@ -59,3 +59,17 @@ for i = 1, 3 do ps[i] = Point.new(i, i) end
 local norms = {}
 for i, one in ipairs(ps) do norms[i] = one:norm2() end
 print(table.concat(norms, " "))
+
+-- __call is looked up once the arguments have run, as Lua does, so an
+-- argument that replaces it is seen; and a method can be a callable table.
+local cmt = {__call = function(self, x) return "old " .. x end}
+local callable = setmetatable({}, cmt)
+local function swap(x)
+  cmt.__call = function(self, y) return "new " .. y end
+  return x
+end
+print(callable(swap(1)))
+local holder = {twice = setmetatable({}, {
+  __call = function(self, me, x) return x * 2 end
+})}
+print(holder:twice(21))

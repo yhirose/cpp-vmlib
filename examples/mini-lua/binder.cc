@@ -377,7 +377,7 @@ struct Binder {
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$setmt",  "$getmt", "$spread", "$error",
         "$mt", "$mm", "$add", "$subm", "$mulm",
-        "$select", "$pack", "$unpack", "$insertat",
+        "$select", "$pack", "$unpack", "$insertat", "$calltable",
     };
     return names;
   }
@@ -812,6 +812,20 @@ struct Binder {
     r.finish("$concat");
   }
 
+  // Calling a table: its __call metamethod, with the table in front of
+  // the arguments -- which have run by now, and arrive as one array. A
+  // table without one is called anyway, for the executor's own error.
+  void rt_calltable() {
+    RT r(*this);
+    const auto [t, args] = r.params("t", "args");
+    const auto [mm] = r.locals("mm");
+    r.add(r.set(mm, r.call("$mm", {r.L(t), r.S("__call")})));
+    r.add(r.iff(r.is(r.typ(mm), "nil"),
+                r.ret(r.b.call_spread(r.L(t), {}, r.L(args)))));
+    r.add(r.ret(r.b.call_spread(r.L(mm), {r.L(t)}, r.L(args))));
+    r.finish("$calltable");
+  }
+
   // table.insert(t, pos, v): every element from pos up moves one place,
   // through $get/$set as lua5.4's own moves go through the metamethods,
   // and v goes in the gap. A pos outside 1..#t+1 is the error Lua raises.
@@ -954,7 +968,7 @@ struct Binder {
     rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
-    rt_insert(); rt_insertat(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
+    rt_insert(); rt_insertat(); rt_calltable(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
     rt_mt(); rt_mm();
     rt_select(); rt_pack(); rt_unpack();
     rt_arith("$add", BinOp::Add, "__add");
@@ -1328,32 +1342,7 @@ struct Binder {
         case "callsfx"_: {
           const Values args =
               emit_args(sfx.nodes.empty() ? nullptr : sfx.nodes[0].get(), ctx);
-          const int32_t fv = ctx.alloc_local("$fn");
-          const NodeId F = b.varref(VarKind::Local, fv, p);
-          const int32_t mv = ctx.alloc_local("$callmm");
-          const NodeId M = b.varref(VarKind::Local, mv, p);
-          cur = {b.block(
-                     {b.assign(VarKind::Local, fv, recv, p),
-                      b.make_if(
-                          b.binary(BinOp::Eq,
-                                   b.intrinsic(IntrinsicId::TypeOf, {F}, p),
-                                   b.str_literal("map", p), p),
-                          b.block(
-                              {b.assign(VarKind::Local, mv,
-                                       helper("$mm",
-                                              {F, b.str_literal("__call", p)},
-                                              p),
-                                       p),
-                               b.make_if(b.binary(BinOp::Ne,
-                                                  b.intrinsic(IntrinsicId::TypeOf,
-                                                              {M}, p),
-                                                  b.str_literal("nil", p), p),
-                                         call_with(M, {F}, args, p),
-                                         call_with(F, {}, args, p), p)},
-                              p),
-                          call_with(F, {}, args, p), p)},
-                     p),
-                 true};
+          cur = {call_any(recv, {}, args, ctx, p), true};
           break;
         }
         default: {  // methodsfx
@@ -1380,9 +1369,9 @@ struct Binder {
           const int32_t t = ctx.alloc_local("$self");
           const NodeId T = b.varref(VarKind::Local, t, p);
           cur = {b.block({b.assign(VarKind::Local, t, recv, p),
-                          call_with(helper("$get",
-                                           {T, b.str_literal(name, p)}, p),
-                                    {T}, args, p)},
+                          call_any(helper("$get",
+                                          {T, b.str_literal(name, p)}, p),
+                                   {T}, args, ctx, p)},
                          p),
                  true};
           break;
@@ -1390,6 +1379,29 @@ struct Binder {
       }
     }
     return cur;
+  }
+
+  // A call of whatever `callee` turns out to be, with `before` ahead of
+  // the arguments (a method's self): a function directly, or a table
+  // through $calltable, which looks its __call up only after the
+  // arguments have run -- as Lua does, so an argument that changes it is
+  // seen. That path collects the arguments into an array; a plain call
+  // never takes it, and `$fn` is read on both before any argument runs.
+  NodeId call_any(NodeId callee, std::vector<NodeId> before,
+                  const Values& args, FnCtx& ctx, SrcPos p) {
+    Builder b(m);
+    const int32_t fv = ctx.alloc_local("$fn");
+    const NodeId F = b.varref(VarKind::Local, fv, p);
+    Values all{before, args.rest};
+    all.firsts.insert(all.firsts.end(), args.firsts.begin(),
+                      args.firsts.end());
+    return b.block(
+        {b.assign(VarKind::Local, fv, callee, p),
+         b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {F}, p),
+                            b.str_literal("map", p), p),
+                   helper("$calltable", {F, values_array(all, p)}, p),
+                   call_with(F, before, args, p), p)},
+        p);
   }
 
   // The standard library, in the shapes this front end knows. A library
