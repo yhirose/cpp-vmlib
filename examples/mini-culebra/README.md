@@ -166,6 +166,13 @@ This binder emitted the `Assign` alone at first, which is a statement -- so
 the function returned nil and `c` dropped one line early. `samples/drops.cul`
 has both shapes, one ending in a binding and one ending in `nil`.
 
+An assignment is the same kind of expression, worth what it stored, and
+runs in culebra's order: the value first, then the target (receiver, then
+key), then for `+=` and the rest the present value read through it, then
+the store. A binding or assignment whose value nothing reads -- any
+statement but a block's last, and a loop body's last -- is the store
+alone, so a loop pays nothing for the value.
+
 ## The standard library is host functions
 
 `println`, `print`, `type_of`, `.size()`, `.push()`, `.pop()`, `.keys()`

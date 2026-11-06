@@ -42,3 +42,17 @@ println("body value: {last_binding()}")
 # than an index into what println answered.
 fn listed() { println("listed"); [2] }
 println(listed())
+
+# An assignment runs its value first, then its target -- receiver, then
+# key -- and a compound one reads the target after the value has run.
+# It is an expression, worth what it stored.
+mut order = []
+fn tag(t, v) { order.push(t); v }
+let cells = [1, 2, 3]
+tag('recv', cells)[tag('key', 1)] += tag('value', 10)
+println("{order} {cells}")
+mut n = 1
+fn bump() { n = 100; 1 }
+n += bump()
+fn assigned() { n = 7 }
+println("{n} {assigned()}")

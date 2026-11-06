@@ -15,3 +15,5 @@ while: 5 15
 body value: 2
 listed
 [2]
+['value', 'recv', 'key'] [1, 12, 3]
+101 7

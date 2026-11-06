@@ -889,7 +889,10 @@ struct Binder {
     return out;
   }
 
-  NodeId emit_block(const Ast& block, FnCtx& ctx, bool entry = false) {
+  // `value` says whether anything reads the block's value -- its last
+  // statement's -- which a loop's body, for one, never does.
+  NodeId emit_block(const Ast& block, FnCtx& ctx, bool entry = false,
+                    bool value = true) {
     const SrcPos p = pos_of(block);
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
@@ -903,7 +906,10 @@ struct Binder {
       const auto c = cells.find(v);
       if (c != cells.end()) out.push_back(b.cell_fresh(c->second));
     }
-    for (const auto& s : block.nodes) out.push_back(emit_stmt(*s, ctx));
+    for (size_t k = 0; k < block.nodes.size(); ++k) {
+      const bool last = k + 1 == block.nodes.size();
+      out.push_back(emit_stmt(*block.nodes[k], ctx, value && last));
+    }
 
     const int32_t end = ctx.release(mark);
     // funcs[0] runs under entry_frame_drops = false, and culebra's rule for
@@ -931,7 +937,10 @@ struct Binder {
   }
 
   // -- Statements ---------------------------------------------------------
-  NodeId emit_stmt(const Ast& a, FnCtx& ctx) {
+  // `value` says whether anything reads the statement's value: only a
+  // block's last statement has one that might be read, and a binding or an
+  // assignment that nothing reads is the store alone.
+  NodeId emit_stmt(const Ast& a, FnCtx& ctx, bool value = true) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
@@ -949,12 +958,12 @@ struct Binder {
         // the difference, and without this the last declared resource drops
         // one line early.
         const int32_t v = decl_of.at(a.nodes[1].get());
-        return b.block(
-            {bind_decl(v, emit_expr(*a.nodes[2], ctx), ctx, p, false),
-             read_var(v, ctx, p)});
+        const NodeId bind =
+            bind_decl(v, emit_expr(*a.nodes[2], ctx), ctx, p, false);
+        return value ? b.block({bind, read_var(v, ctx, p)}) : bind;
       }
       case "block"_:
-        return emit_block(a, ctx);
+        return emit_block(a, ctx, false, value);
       case "deferstmt"_:
         return b.make_defer(emit_closure(fn_of.at(&a), ctx, p));
       case "returnstmt"_:
@@ -972,10 +981,13 @@ struct Binder {
         return b.make_continue();
       case "whilestmt"_:
         return b.make_while(emit_expr(*a.nodes[0], ctx),
-                            emit_block(*a.nodes[1], ctx));
+                            emit_block(*a.nodes[1], ctx, false, false));
       case "forstmt"_:
         return emit_for(a, ctx);
       case "exprstmt"_:
+        if (a.nodes[0]->tag == "assign"_) {
+          return emit_assign(*a.nodes[0], ctx, value);
+        }
         return emit_expr(*a.nodes[0], ctx);
       default:
         fail(a, "cannot execute " + a.name);
@@ -1029,7 +1041,7 @@ struct Binder {
     if (c != cells.end()) elem.push_back(b.cell_fresh(c->second));
     elem.push_back(
         bind_decl(v, b.index(S, b.str_literal("value")), ctx, p, false));
-    elem.push_back(emit_block(*a.nodes[2], ctx));
+    elem.push_back(emit_block(*a.nodes[2], ctx, false, false));
     const int32_t eend = ctx.release(emark);
     const NodeId elem_scope =
         eend > emark
@@ -1288,7 +1300,7 @@ struct Binder {
         return acc;
       }
       case "assign"_:
-        return emit_assign(a, ctx);
+        return emit_assign(a, ctx, true);
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
       case "arraylit"_: {
@@ -1402,15 +1414,19 @@ struct Binder {
     return cur;
   }
 
-  NodeId emit_assign(const Ast& a, FnCtx& ctx) {
+  // An assignment in culebra's order (docs/language.md, "Evaluation
+  // order"): the value first; then the target -- its receiver, then its
+  // key -- once; then, for a compound, the present value read through that
+  // target; then the store. The assignment is an expression, worth what it
+  // stored -- a block that ends in one answers it -- and `as_value` says
+  // whether anything reads that.
+  NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const std::string op(a.nodes[1]->token);
     const Ast& target = *a.nodes[0];
     const Ast& rhs = *a.nodes[2];
-
-    const auto combine = [&](NodeId cur) -> NodeId {
-      const NodeId v = emit_expr(rhs, ctx);
+    const auto apply = [&](NodeId cur, NodeId v) -> NodeId {
       if (op == "=") return v;
       const BinOp o = op == "+="   ? BinOp::Add
                       : op == "-=" ? BinOp::Sub
@@ -1429,7 +1445,20 @@ struct Binder {
                          rs.vars[static_cast<size_t>(v)].name +
                          "': it is not mut");
       }
-      return write_var(v, combine(read_var(v, ctx, p)), ctx, p);
+      std::vector<NodeId> out;
+      if (op == "=") {
+        out.push_back(write_var(v, emit_expr(rhs, ctx), ctx, p));
+      } else {
+        // The value runs before the variable is read: `x += f()` adds to
+        // what f left in x.
+        const int32_t tv = ctx.alloc_local("$val");
+        out.push_back(b.assign(VarKind::Local, tv, emit_expr(rhs, ctx)));
+        out.push_back(write_var(
+            v, apply(read_var(v, ctx, p), b.varref(VarKind::Local, tv)), ctx,
+            p));
+      }
+      if (as_value) out.push_back(read_var(v, ctx, p));
+      return out.size() == 1 ? out[0] : b.block(out);
     }
     if (target.tag != "postfix"_ || target.nodes.size() < 2) {
       fail(target, "cannot assign to this expression");
@@ -1440,21 +1469,25 @@ struct Binder {
     if (!member && last.tag != "indexsfx"_) {
       fail(last, "cannot assign to this expression");
     }
-    // The temporaries are claimed before the key is emitted: the key runs
-    // after `$recv` is written, so a scope inside it (a method call, a
-    // block) must not hand that slot out again.
+    // The temporaries are claimed before anything is emitted: each is set
+    // before the expressions after it run, and a scope inside one of those
+    // (a method call, a block) must not hand its slot out again.
+    const int32_t tv = ctx.alloc_local("$val");
     const int32_t tr = ctx.alloc_local("$recv");
     const int32_t tk = ctx.alloc_local("$key");
-    const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
-                              : emit_expr(*last.nodes[0], ctx);
-    const NodeId recv = emit_postfix(target, limit - 1, ctx);
+    const NodeId V = b.varref(VarKind::Local, tv);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const NodeId cur = op == "=" ? b.nil_literal()
-                                 : helper(member ? "$mem" : "$idx", {R, K}, p);
+    const NodeId value = emit_expr(rhs, ctx);
+    const NodeId recv = emit_postfix(target, limit - 1, ctx);
+    const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
+                              : emit_expr(*last.nodes[0], ctx);
+    const NodeId cur =
+        op == "=" ? NodeId{} : helper(member ? "$mem" : "$idx", {R, K}, p);
     return b.block(
-        {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         helper(member ? "$setmem" : "$setidx", {R, K, combine(cur)}, p)});
+        {b.assign(VarKind::Local, tv, value), b.assign(VarKind::Local, tr, recv),
+         b.assign(VarKind::Local, tk, key),
+         helper(member ? "$setmem" : "$setidx", {R, K, apply(cur, V)}, p)});
   }
 
   // -- One function's body -------------------------------------------------
