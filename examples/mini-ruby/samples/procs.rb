@@ -98,3 +98,18 @@ calls.each do |f|
     puts "raised"
   end
 end
+
+# An argument count a method or a lambda refuses is an ArgumentError in
+# Ruby's own words: what it was given, and what it takes.
+def takes_one(a); end
+def takes_some(a, b = 1); end
+def takes_more(a, *r); end
+refused = [lambda { takes_one }, lambda { takes_some(1, 2, 3) },
+           lambda { takes_more }, lambda { lambda { |x| x }.call(1, 2) }]
+refused.each do |f|
+  begin
+    f.call
+  rescue => e
+    puts e.message
+  end
+end

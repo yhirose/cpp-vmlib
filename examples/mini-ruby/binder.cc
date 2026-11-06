@@ -131,6 +131,14 @@ struct FnInfo {
   std::string method_name;
 };
 
+// What an ArgumentError says a method takes, in Ruby's spelling: "1" for
+// exactly one, "1..2" for a range, "1+" with no top (npos, a `*rest`).
+std::string arity_spelling(size_t min, size_t max) {
+  if (max == std::string::npos) return std::to_string(min) + "+";
+  if (min == max) return std::to_string(min);
+  return std::to_string(min) + ".." + std::to_string(max);
+}
+
 // A class declaration binds a name to a table object (its own methods,
 // its base's table, and its name); `base_var` is that same binding on the
 // base, resolved once and reused everywhere a subclass needs it.
@@ -1232,12 +1240,20 @@ struct Binder {
     r.finish("$exc");
   }
 
+  // Ruby's own words for an argument count a method or lambda refuses:
+  // how many it was given, and what it takes -- "1", "1..2", or "1+" with
+  // a `*rest` (see arity_spelling).
   void rt_argerr() {
     RT r(*this);
-
-    r.add(r.b.make_throw(
-        r.call("$mkexc", {r.S("ArgumentError"), r.S("wrong number of "
-                                                    "arguments")})));
+    const auto [given, expected] = r.params("given", "expected");
+    r.add(r.b.make_throw(r.call(
+        "$mkexc",
+        {r.S("ArgumentError"),
+         r.bin(BinOp::Add,
+               r.bin(BinOp::Add, r.S("wrong number of arguments (given "),
+                     r.in(IntrinsicId::ToStr, {r.L(given)})),
+               r.bin(BinOp::Add, r.S(", expected "),
+                     r.bin(BinOp::Add, r.L(expected), r.S(")"))))})));
     r.finish("$argerr");
   }
 
@@ -2498,11 +2514,19 @@ struct Binder {
           break;
         }
       }
+      // The block, and a method's `self`, are arguments the IR counts and
+      // Ruby does not.
+      const size_t implicit = fi.is_method ? 2 : 1;
+      const std::string expected = arity_spelling(
+          required - implicit, fi.rest ? std::string::npos : total - implicit);
       const auto check = [&](BinOp op, size_t n) {
+        const NodeId given =
+            b.binary(BinOp::Sub, b.intrinsic(IntrinsicId::ArgCount, {}),
+                     b.literal(static_cast<int64_t>(implicit)));
         pre.push_back(b.make_if(
             b.binary(op, b.intrinsic(IntrinsicId::ArgCount, {}),
                      b.literal(static_cast<int64_t>(n))),
-            helper("$argerr", {}, p), NodeId{}));
+            helper("$argerr", {given, b.str_literal(expected)}, p), NodeId{}));
       };
       if (!fi.rest && required == total) {
         check(BinOp::Ne, total);
