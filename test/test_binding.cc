@@ -284,6 +284,27 @@ int main() {
     }
   }
 
+  // --- 4b. A fresh slot is one no closed scope handed back. ---------------
+  // An expression emitted first holds a scope that claims slot 1 and gives
+  // it back; a temporary claimed next, but written before that expression
+  // runs, must not be slot 1, or the scope would overwrite it. alloc_local
+  // would answer 1; alloc_fresh_local answers 2, and claims after it go on
+  // from there.
+  {
+    FrameLayout f;
+    f.alloc_local("keeps");
+    const int32_t m = f.mark();
+    f.alloc_local("inner");
+    f.release(m);
+    const int32_t t = f.alloc_fresh_local("tmp");
+    const int32_t after = f.alloc_local("after");
+    if (t != 2 || after != 3 || f.high_local != 4) {
+      std::fprintf(stderr, "FAIL: fresh slot: t=%d after=%d high=%d\n", t,
+                   after, f.high_local);
+      ++g_failures;
+    }
+  }
+
   // --- 5. FuncWriter: named slots, and a body that runs. ------------------
   // `sum(n)`: the loop a helper library is full of. Written with named
   // slots, so the frame's shape is stated once and finish() derives the

@@ -52,6 +52,10 @@ print(watched.a, watched.b)
 local function noisy(tag, v) io.write("[" .. tag .. "]") return v end
 local raw = {}
 print(rawset(noisy("t", raw), "a", 1) == raw, raw.a)
+local function guarded_set()
+  return rawset(raw, "b", (pcall(function() return 1 end)))
+end
+print(guarded_set() == raw, raw.b)
 
 -- The real generic-for protocol: a stateless iterator function.
 local function range(limit, i)

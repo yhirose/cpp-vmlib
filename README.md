@@ -173,7 +173,9 @@ after the fact, and `mark`/`rollback` for a prelude bound once with program
 after program compiled on top of it. `FrameLayout` is the slot
 bookkeeping that goes with it: `alloc_local` for the names, `mark`/
 `release` so sibling blocks reuse slots and a frame's width is the deepest
-nesting rather than the total number of declarations.
+nesting rather than the total number of declarations, and
+`alloc_fresh_local` for a temporary written before expressions emitted
+earlier run -- a released slot could be one of their scopes' own.
 
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a

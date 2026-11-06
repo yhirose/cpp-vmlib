@@ -1243,7 +1243,9 @@ struct Binder {
       std::vector<NodeId> out;
       std::vector<NodeId> vals;
       for (const NodeId v : args) {
-        const int32_t t = ctx.alloc_local("$cmp");
+        // Fresh: an operand after this one may hold a scope (call/cc's)
+        // that claimed and gave back a slot, and runs after this is set.
+        const int32_t t = ctx.alloc_fresh_local("$cmp");
         out.push_back(b.assign(VarKind::Local, t, v));
         vals.push_back(b.varref(VarKind::Local, t));
       }

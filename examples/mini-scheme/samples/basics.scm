@@ -63,3 +63,7 @@
 (display (< 1 (noisy 2) 3)) (newline)
 (display (< 3 (noisy 1) (noisy 2))) (newline)
 (display (cond ((noisy 5)) (else 'no))) (newline)
+; A later operand that holds a scope of its own (call/cc's) leaves the
+; earlier ones' temporaries alone.
+(define (cc-chain) (< 0 (call/cc (lambda (k) (k 5))) 10))
+(display (cc-chain)) (newline)

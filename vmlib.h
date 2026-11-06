@@ -2837,6 +2837,18 @@ struct FrameLayout {
     return end;
   }
 
+  // A slot above every slot this frame has used, so one no closed scope
+  // handed back. What a temporary needs when it is written and then has to
+  // outlive expressions emitted *before* it was claimed: alloc_local would
+  // reuse a slot a scope inside one of them released, that scope would
+  // write the slot while it runs and clear it on the way out, and the
+  // temporary would be gone. Claiming the temporary before emitting those
+  // expressions avoids the question, where a binder's order allows it.
+  int32_t alloc_fresh_local(const std::string& name) {
+    next_local = high_local;
+    return alloc_local(name);
+  }
+
   // The name table Func::local_names wants: exactly high_local long, which
   // is what verify() checks it against.
   std::vector<std::string> names() const {

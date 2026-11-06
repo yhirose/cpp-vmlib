@@ -1414,7 +1414,9 @@ struct Binder {
       if (g == "rawset") {
         // The table is both where the store goes and the answer, so it is
         // kept in a temporary rather than evaluated twice.
-        const int32_t t = ctx.alloc_local("$rawset");
+        // Fresh: the key and value run after it is set, and a scope of
+        // theirs (a pcall's) may have claimed and given back a slot.
+        const int32_t t = ctx.alloc_fresh_local("$rawset");
         const NodeId T = b.varref(VarKind::Local, t, p);
         return {b.block({b.assign(VarKind::Local, t, a0(0), p),
                          b.set_index(T, helper("$key", {a0(1)}, p), a0(2), p),
