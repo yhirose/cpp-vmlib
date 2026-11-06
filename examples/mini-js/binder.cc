@@ -1330,16 +1330,57 @@ struct Binder {
 
   // A builtin's arguments, one value each: the shapes this front end
   // matches by name read them by position, so a spread has nowhere to go.
-  std::vector<NodeId> emit_args(const Ast& args, FnCtx& ctx) {
-    std::vector<NodeId> out;
-    out.reserve(args.nodes.size());
+  // `lead` goes in front -- a method's receiver, which runs first.
+  struct BuiltinArgs {
+    std::vector<NodeId> args;  // the lead, then the arguments
+    std::vector<NodeId> pre;   // to run before the call (spill_surplus)
+  };
+  BuiltinArgs emit_args(const Ast& args, size_t reads, FnCtx& ctx,
+                        NodeId lead = NodeId{}) {
+    BuiltinArgs out;
+    if (lead.valid()) out.args.push_back(lead);
     for (const auto& c : args.nodes) {
       if (c->tag == "spread"_) {
         fail(*c, "a spread argument is not supported in this call here");
       }
-      out.push_back(emit_expr(*c, ctx));
+      out.args.push_back(emit_expr(*c, ctx));
     }
+    out.pre = spill_surplus(out.args, reads + (lead.valid() ? 1 : 0), ctx,
+                            pos_of(args));
     return out;
+  }
+
+  // JavaScript evaluates every argument of a call, whether the function
+  // reads it or not. When there are more than `reads`, all of them run
+  // first, in order -- the ones read into temporaries that stand in for
+  // them, the rest for their effects alone -- so `String(1, f())` still
+  // calls f, after the 1 and before String. Answers those statements; none
+  // when nothing is left over, and the call compiles as it did. Fresh
+  // slots: a later argument runs after one is set, and may hold a scope.
+  std::vector<NodeId> spill_surplus(std::vector<NodeId>& args, size_t reads,
+                                    FnCtx& ctx, SrcPos p) {
+    std::vector<NodeId> pre;
+    if (args.size() <= reads) return pre;
+    auto b = Builder(m).at(p);
+    for (size_t k = 0; k < args.size(); ++k) {
+      if (k >= reads) {
+        pre.push_back(args[k]);
+        continue;
+      }
+      const int32_t t = ctx.alloc_fresh_local("$arg");
+      pre.push_back(b.assign(VarKind::Local, t, args[k]));
+      args[k] = b.varref(VarKind::Local, t);
+    }
+    args.resize(reads);
+    return pre;
+  }
+
+  // `n`, with `pre` run before it.
+  NodeId run_first(std::vector<NodeId> pre, NodeId n, SrcPos p) {
+    if (pre.empty()) return n;
+    pre.push_back(n);
+    auto b = Builder(m).at(p);
+    return b.block(pre);
   }
 
   static bool has_spread(const Ast& list) {
@@ -1855,38 +1896,52 @@ struct Binder {
       return apply_suffixes(built, a, 2, a.nodes.size(), ctx);
     };
     if (n == "Map") {
-      return chain(b.object_lit(
-          {{b.str_literal("$map"), b.intrinsic(IntrinsicId::MapNew, {})}}));
+      const BuiltinArgs xs = emit_args(arglist, 0, ctx);
+      return chain(run_first(
+          xs.pre,
+          b.object_lit(
+              {{b.str_literal("$map"), b.intrinsic(IntrinsicId::MapNew, {})}}),
+          p));
     }
     if (n == "Set") {
-      return chain(b.object_lit(
-          {{b.str_literal("$set"), b.intrinsic(IntrinsicId::MapNew, {})}}));
+      const BuiltinArgs xs = emit_args(arglist, 0, ctx);
+      return chain(run_first(
+          xs.pre,
+          b.object_lit(
+              {{b.str_literal("$set"), b.intrinsic(IntrinsicId::MapNew, {})}}),
+          p));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
     // over a cell of *this* frame holding the promise, which is the one
     // place a `new` needs storage of its own. CellFresh gives a `new
     // Promise` inside a loop its own cell per iteration.
     if (n == "Promise") {
-      const std::vector<NodeId> args = emit_args(arglist, ctx);
+      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
+      const std::vector<NodeId>& args = xs.args;
       const int32_t c = ctx.next_cell++;
       const std::vector<CaptureSrc> cs{{VarKind::Cell, c}};
       const int32_t cm1 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
       const int32_t cm2 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
-      return chain(b.block(
-          {b.cell_fresh(c), b.assign(VarKind::Cell, c, helper("$pnew", {}, p)),
-           b.call_value(arg_or_nil(args, 0, p),
-                        {b.make_closure(rt.at("$presolve1"), cm1),
-                         b.make_closure(rt.at("$preject1"), cm2)}),
-           b.varref(VarKind::Cell, c)}));
+      return chain(run_first(
+          xs.pre,
+          b.block({b.cell_fresh(c),
+                   b.assign(VarKind::Cell, c, helper("$pnew", {}, p)),
+                   b.call_value(arg_or_nil(args, 0, p),
+                                {b.make_closure(rt.at("$presolve1"), cm1),
+                                 b.make_closure(rt.at("$preject1"), cm2)}),
+                   b.varref(VarKind::Cell, c)}),
+          p));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
-      const std::vector<NodeId> args = emit_args(arglist, ctx);
-      return chain(
+      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
+      return chain(run_first(
+          xs.pre,
           b.object_lit({{b.str_literal("name"), b.str_literal(n)},
                         {b.str_literal("message"),
-                         helper("$str", {arg_or_nil(args, 0, p)}, p)}}));
+                         helper("$str", {arg_or_nil(xs.args, 0, p)}, p)}}),
+          p));
     }
     // `new SomeClass(...)`: not a builtin, so it has to be a class -- and
     // one this call site can see statically, because binding `this` needs
@@ -1959,6 +2014,10 @@ struct Binder {
           {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
       steps.push_back(
           call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p));
+    } else if (!arglist.nodes.empty()) {
+      // No constructor to take them, but the arguments are a call's, and
+      // run all the same -- a spread among them refused as anywhere else.
+      steps.push_back(emit_items(arglist, 0, ctx, true));
     }
     steps.push_back(T);
     return chain(b.block(steps));
@@ -2039,8 +2098,9 @@ struct Binder {
       const Ast* c = call_at(1);
       if (c == nullptr) fail(prim, "String must be called here");
       i = 2;
-      const std::vector<NodeId> args = emit_args(*c->nodes[0], ctx);
-      return helper("$str", {arg_or_nil(args, 0, p)}, p);
+      const BuiltinArgs xs = emit_args(*c->nodes[0], 1, ctx);
+      return run_first(xs.pre, helper("$str", {arg_or_nil(xs.args, 0, p)}, p),
+                       p);
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
@@ -2053,7 +2113,12 @@ struct Binder {
           p);
     }
     if (!mem.empty() && c != nullptr) {
-      const std::vector<NodeId> args = emit_args(*c->nodes[0], ctx);
+      // console.log reads every argument; the rest read one.
+      const BuiltinArgs xs = emit_args(
+          *c->nodes[0],
+          g == "console" && mem == "log" ? std::string::npos : 1, ctx);
+      const std::vector<NodeId>& args = xs.args;
+      const auto done = [&](NodeId n) { return run_first(xs.pre, n, p); };
       i = 3;
       // console.log(a, b): JavaScript joins its arguments with a space,
       // and this subset's samples hand it a string the program built
@@ -2069,20 +2134,20 @@ struct Binder {
         return b.intrinsic(IntrinsicId::Print, {msg}, p);
       }
       if (g == "Object" && mem == "keys") {
-        return b.intrinsic(IntrinsicId::ObjectKeys,
-                           {arg_or_nil(args, 0, p)}, p);
+        return done(b.intrinsic(IntrinsicId::ObjectKeys,
+                                {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Promise" && mem == "resolve") {
-        return helper("$topromise", {arg_or_nil(args, 0, p)}, p);
+        return done(helper("$topromise", {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Promise" && mem == "reject") {
-        return helper("$prejected", {arg_or_nil(args, 0, p)}, p);
+        return done(helper("$prejected", {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Array" && mem == "isArray") {
-        return b.binary(BinOp::Eq,
-                        b.intrinsic(IntrinsicId::TypeOf,
-                                    {arg_or_nil(args, 0, p)}, p),
-                        b.str_literal("array", p), p);
+        return done(b.binary(BinOp::Eq,
+                             b.intrinsic(IntrinsicId::TypeOf,
+                                         {arg_or_nil(args, 0, p)}, p),
+                             b.str_literal("array", p), p));
       }
     }
     fail(prim, "'" + g + "' is not supported in this shape here");
@@ -2098,57 +2163,79 @@ struct Binder {
     const SrcPos p = pos_of(at);
     auto b = Builder(m).at(p);
     const Ast& arglist = *call.nodes[0];
-    // A builtin reads its arguments one value each, emitted the first time
-    // it asks; a method of the program's own never asks, and takes them
-    // the way any call does.
-    std::optional<std::vector<NodeId>> args_;
-    const auto args = [&]() -> const std::vector<NodeId>& {
-      if (!args_) args_ = emit_args(arglist, ctx);
-      return *args_;
+    // A builtin reads its receiver and then `reads` arguments, one value
+    // each; any argument past those still runs (spill_surplus), after the
+    // receiver as JavaScript orders them. A method of the program's own
+    // takes its arguments the way any call does.
+    const auto builtin = [&](size_t reads, const auto& make) {
+      const BuiltinArgs xs = emit_args(arglist, reads, ctx, recv);
+      const auto at = [&](size_t k) { return arg_or_nil(xs.args, k + 1, p); };
+      return run_first(xs.pre, make(xs.args[0], at), p);
     };
-    const auto a0 = [&] { return arg_or_nil(args(), 0, p); };
-    const auto a1 = [&] { return arg_or_nil(args(), 1, p); };
 
     // push takes any number of values, and a spread among them.
     if (name == "push") {
       if (arglist.nodes.size() == 1 && !has_spread(arglist)) {
-        return helper("$push", {recv, a0()}, p);
+        return helper("$push", {recv, emit_expr(*arglist.nodes[0], ctx)}, p);
       }
       return helper("$pushall", {recv, emit_items(arglist, 0, ctx, false)},
                     p);
     }
-    if (name == "pop") return b.intrinsic(IntrinsicId::ArrayPop, {recv});
-    if (name == "slice") return helper("$slice", {recv, a0(), a1()}, p);
+    if (name == "pop") {
+      return builtin(0, [&](NodeId r, auto) {
+        return b.intrinsic(IntrinsicId::ArrayPop, {r});
+      });
+    }
+    if (name == "slice") {
+      return builtin(2, [&](NodeId r, auto at) {
+        return helper("$slice", {r, at(0), at(1)}, p);
+      });
+    }
     if (name == "join") {
-      return helper("$join",
-                    {recv, args().empty() ? b.str_literal(",") : args()[0]},
-                    p);
+      return builtin(1, [&](NodeId r, auto at) {
+        return helper("$join",
+                      {r, arglist.nodes.empty() ? b.str_literal(",") : at(0)},
+                      p);
+      });
     }
     // The generator protocol is GenResume/GenReturn/GenThrow, whose
     // {value, done} answer already is what `g.next()` evaluates to in
     // JavaScript -- no translation, which is the point.
-    if (name == "next") {
-      return b.intrinsic(IntrinsicId::GenResume, {recv, a0()});
-    }
-    if (name == "return") {
-      return b.intrinsic(IntrinsicId::GenReturn, {recv, a0()});
-    }
-    if (name == "throw") {
-      return b.intrinsic(IntrinsicId::GenThrow, {recv, a0()});
+    if (name == "next" || name == "return" || name == "throw") {
+      const IntrinsicId id = name == "next"     ? IntrinsicId::GenResume
+                             : name == "return" ? IntrinsicId::GenReturn
+                                                : IntrinsicId::GenThrow;
+      return builtin(1, [&](NodeId r, auto at) {
+        return b.intrinsic(id, {r, at(0)});
+      });
     }
     // A Promise's two combinators. Everything they do -- adopting a
     // returned promise, passing a rejection through a handler-less link,
     // turning a handler's throw into the next rejection -- is $then/$react,
     // written in IR above.
-    if (name == "then") return helper("$then", {recv, a0(), a1()}, p);
-    if (name == "catch") {
-      return helper("$then", {recv, b.nil_literal(), a0()}, p);
+    if (name == "then") {
+      return builtin(2, [&](NodeId r, auto at) {
+        return helper("$then", {r, at(0), at(1)}, p);
+      });
     }
-    if (name == "get") return helper("$mget", {recv, a0()}, p);
-    if (name == "set") return helper("$mset", {recv, a0(), a1()}, p);
-    if (name == "has") return helper("$mhas", {recv, a0()}, p);
-    if (name == "delete") return helper("$mdel", {recv, a0()}, p);
-    if (name == "add") return helper("$sadd", {recv, a0()}, p);
+    if (name == "catch") {
+      return builtin(1, [&](NodeId r, auto at) {
+        return helper("$then", {r, b.nil_literal(), at(0)}, p);
+      });
+    }
+    if (name == "set") {
+      return builtin(2, [&](NodeId r, auto at) {
+        return helper("$mset", {r, at(0), at(1)}, p);
+      });
+    }
+    for (const auto& [js, helper_name] :
+         {std::pair{"get", "$mget"}, std::pair{"has", "$mhas"},
+          std::pair{"delete", "$mdel"}, std::pair{"add", "$sadd"}}) {
+      if (name != js) continue;
+      return builtin(1, [&](NodeId r, auto at) {
+        return helper(helper_name, {r, at(0)}, p);
+      });
+    }
 
     return call_with(helper("$index", {recv, b.str_literal(name)}, p), {},
                      emit_call_args(arglist, ctx), p);

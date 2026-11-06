@@ -55,3 +55,13 @@ show('break/continue', pairs);
 
 const obj = { greet: (who) => 'hi ' + who };
 show('function property', obj.greet('there'));
+
+// Every argument of a call runs, whether the callee reads it or not.
+const argsSeen = [];
+const note = (tag, v) => { argsSeen.push(tag); return v; };
+String(note('a', 1), note('b', 2));
+[1, 2, 3].slice(note('c', 1), note('d', 2), note('e', 3));
+class Plain { m() { return 1; } }
+new Plain(note('f', 0));
+new Error(note('g', 'x'), note('h', 0));
+console.log(fmt(argsSeen));
