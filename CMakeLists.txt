@@ -18,6 +18,16 @@ endif()
 add_library(vmlib INTERFACE)
 target_include_directories(vmlib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# -Wall -Wextra -Werror for the code this repository owns and builds: each
+# example front end, and test_verify, which holds vmlib.h itself to it. Not
+# a property of vmlib -- an INTERFACE target's options would land in every
+# host's build -- and not of peglib.h, which the front ends include as a
+# system header: a warning there is upstream's to fix.
+add_library(vmlib_warnings INTERFACE)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(vmlib_warnings INTERFACE -Wall -Wextra -Werror)
+endif()
+
 option(VMLIB_BUILD_TESTS "Build cpp-vmlib tests" ON)
 option(VMLIB_BUILD_EXAMPLES "Build the example front ends" OFF)
 option(VMLIB_BUILD_BENCH "Build the benchmark harness" ON)

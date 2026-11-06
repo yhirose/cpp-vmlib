@@ -3,9 +3,9 @@
 # the parser (layout.h), because Python's block structure is its
 # indentation and a PEG has no state to count columns with.
 add_executable(mini-python main.cc binder.cc)
-target_include_directories(mini-python PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                                       ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-python PRIVATE vmlib)
+target_include_directories(mini-python PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mini-python SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
+target_link_libraries(mini-python PRIVATE vmlib vmlib_warnings)
 
 add_test(NAME mini-python-samples
         COMMAND ${CMAKE_COMMAND}

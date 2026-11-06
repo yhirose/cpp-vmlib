@@ -2,9 +2,9 @@
 # vendored peglib.h, like mini-go and mini-js -- four grammars, one parser
 # library.
 add_executable(mini-culebra main.cc binder.cc)
-target_include_directories(mini-culebra PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                                        ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-culebra PRIVATE vmlib)
+target_include_directories(mini-culebra PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mini-culebra SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
+target_link_libraries(mini-culebra PRIVATE vmlib vmlib_warnings)
 
 add_test(NAME mini-culebra-samples
         COMMAND ${CMAKE_COMMAND}

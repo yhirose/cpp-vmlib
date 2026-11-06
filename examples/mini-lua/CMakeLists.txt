@@ -1,9 +1,9 @@
 # The fifth front end, and the fourth to need a PEG -- all four share
 # examples/pl0's vendored peglib.h.
 add_executable(mini-lua main.cc binder.cc)
-target_include_directories(mini-lua PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-                                    ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-lua PRIVATE vmlib)
+target_include_directories(mini-lua PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mini-lua SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
+target_link_libraries(mini-lua PRIVATE vmlib vmlib_warnings)
 
 add_test(NAME mini-lua-samples
         COMMAND ${CMAKE_COMMAND}
