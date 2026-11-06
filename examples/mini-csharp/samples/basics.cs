@@ -147,5 +147,17 @@ class Program {
     Console.WriteLine(slots[0] = 4);
     int chained = assigned = 6;
     Console.WriteLine(assigned + chained);
+
+    // The library's constructors take their arguments: a capacity, or a
+    // collection to copy, and an exception made without a message has
+    // .NET's own.
+    List<int> sized = new List<int>(Noisy("capacity", 4));
+    List<int> copied = new List<int>(slots) { 8 };
+    copied[0] = 1;
+    Dictionary<string, int> agesCopy = new Dictionary<string, int>(ages);
+    agesCopy["cy"] = 7;
+    Console.WriteLine(sized.Count + " " + copied.Count + " " + slots[0] +
+                      " " + agesCopy.Count + " " + ages.Count);
+    Console.WriteLine(new Exception().Message);
   }
 }

@@ -712,7 +712,7 @@ struct Binder {
     static const std::vector<std::string> names = {
         "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$nullcall", "$getf", "$setf",
         "$idx", "$setidx", "$dictadd", "$len", "$iter", "$iternext",
-        "$join", "$exc", "$mkexc", "$tnew", "$tsettle", "$ton", "$totask",
+        "$join", "$exc", "$mkexc", "$newlist", "$newdict", "$tnew", "$tsettle", "$ton", "$totask",
         "$tresolve", "$adopt", "$await", "$mainwrap",
     };
     return names;
@@ -974,6 +974,39 @@ struct Binder {
     r.finish("$join");
   }
 
+  // new List<T>(x) and new Dictionary<K, V>(x): a capacity, which sizes
+  // nothing here, or a collection to copy. Anything else is not a
+  // constructor this subset has.
+  void rt_newlist() {
+    RT r(*this);
+    const auto [a] = r.params("a");
+    r.add(r.iff(r.is(r.typ(a), "int"), r.ret(r.arr({}))));
+    r.add(r.iff(r.is(r.typ(a), "array"),
+                r.ret(r.in(IntrinsicId::ArraySlice,
+                           {r.L(a), r.I(0), r.len(r.L(a))}))));
+    r.add(r.ret(r.call("$exc", {r.S("this List constructor is not supported here")})));
+    r.finish("$newlist");
+  }
+
+  void rt_newdict() {
+    RT r(*this);
+    const auto [a] = r.params("a");
+    const auto [d, ks, i, k] = r.locals("d", "ks", "i", "k");
+    r.add(r.set(d, r.in(IntrinsicId::MapNew, {})));
+    r.add(r.iff(r.is(r.typ(a), "int"), r.ret(r.L(d))));
+    r.add(r.iff(r.isnt(r.typ(a), "map"),
+                r.ret(r.call("$exc", {r.S("this Dictionary constructor is not "
+                                          "supported here")}))));
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+               r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
+                      r.sidx(r.L(d), r.L(k), r.idx(r.L(a), r.L(k))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.L(d)));
+    r.finish("$newdict");
+  }
+
   void rt_mkexc() {
     RT r(*this);
     const auto [msg] = r.params("msg");
@@ -1092,7 +1125,7 @@ struct Binder {
     rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_nullcall(); rt_getf();
     rt_setf(); rt_idx(); rt_setidx(); rt_dictadd(); rt_len(); rt_iter();
     rt_iternext(); rt_join(); rt_exc();
-    rt_mkexc(); rt_tnew(); rt_tsettle(); rt_ton(); rt_totask();
+    rt_mkexc(); rt_newlist(); rt_newdict(); rt_tnew(); rt_tsettle(); rt_ton(); rt_totask();
     rt_tresolve(); rt_adopt(); rt_await(); rt_mainwrap();
   }
 
@@ -1539,18 +1572,49 @@ struct Binder {
         }
       }
     }
+    // The library's constructors take what C#'s do -- a capacity, which
+    // sizes nothing here, or a collection to copy -- and a collection
+    // initializer adds after it.
+    if ((base == "List" || base == "Dictionary") && args.size() > 1) {
+      fail(a, "this " + base + " constructor is not supported here");
+    }
     if (base == "List") {
       std::vector<NodeId> items;
       if (init != nullptr) {
         for (const auto& c : init->nodes) items.push_back(emit_expr(*c, ctx));
       }
-      return b.array_lit(items);
+      if (args.empty()) return b.array_lit(items);
+      const int32_t t = ctx.alloc_local("$list");
+      const NodeId T = b.varref(VarKind::Local, t);
+      std::vector<NodeId> out{
+          b.assign(VarKind::Local, t, helper("$newlist", {args[0]}, p))};
+      for (const NodeId v : items) {
+        out.push_back(b.intrinsic(IntrinsicId::ArrayPush, {T, v}));
+      }
+      out.push_back(T);
+      return b.block(out);
     }
     if (base == "Dictionary") {
-      return b.intrinsic(IntrinsicId::MapNew, {});
+      if (args.empty()) return b.intrinsic(IntrinsicId::MapNew, {});
+      return helper("$newdict", {args[0]}, p);
     }
+    // new Exception(), (message) or (message, inner): .NET's own words
+    // without a message, and the inner exception, which this subset does
+    // not keep, still runs.
     if (base == "Exception") {
-      return helper("$mkexc", {args.empty() ? b.str_literal("") : args[0]}, p);
+      const NodeId made = helper(
+          "$mkexc",
+          {args.empty()
+               ? b.str_literal("Exception of type 'System.Exception' was thrown.")
+               : args[0]},
+          p);
+      if (args.size() < 2) return made;
+      std::vector<NodeId> rest(args.begin() + 1, args.end());
+      const int32_t t = ctx.alloc_local("$exc");
+      std::vector<NodeId> out{b.assign(VarKind::Local, t, made)};
+      out.insert(out.end(), rest.begin(), rest.end());
+      out.push_back(b.varref(VarKind::Local, t));
+      return b.block(out);
     }
     const auto it = class_by_name.find(base);
     if (it == class_by_name.end()) fail(a, "unknown type '" + base + "'");
