@@ -666,10 +666,9 @@ struct Binder {
   void rt_add() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const NodeId cat = r.ret(
-        r.bin(BinOp::Add, r.call("$str", {r.L(a)}), r.call("$str", {r.L(b)})));
-    r.add(r.iff(r.is(r.typ(a), "string"), cat));
-    r.add(r.iff(r.is(r.typ(b), "string"), cat));
+    r.add(r.iff(r.either(r.is(r.typ(a), "string"), r.is(r.typ(b), "string")),
+                r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),
+                            r.call("$str", {r.L(b)})))));
     r.add(r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))));
     r.finish("$add");
   }
@@ -858,10 +857,8 @@ struct Binder {
     const auto [mm, ks, out, i, k] = r.locals("mm", "ks", "out", "i", "k");
     r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
-    const NodeId over =
-        r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}));
-    r.add(r.iff(r.is(r.typ(v), "array"), over));
-    r.add(r.iff(r.is(r.typ(v), "string"), over));
+    r.add(r.iff(r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "string")),
+                r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}))));
     r.add(r.iff(
         r.is(r.typ(v), "object"),
         r.blk({

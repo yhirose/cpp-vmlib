@@ -4810,8 +4810,6 @@ struct Binder {
       ++pos;
     }
     const NodeId all_names = b.array_lit(names);
-    const NodeId req_names = b.array_lit(reqname);
-    const NodeId req_idx = b.array_lit(reqidx);
 
     int32_t at = 0;
     bool kwonly = false;
@@ -4848,7 +4846,7 @@ struct Binder {
                 ? read_var(pi.def_var, ctx, p)
                 : helper("$missing",
                          {b.str_literal(fi.name), b.str_literal("positional"),
-                          req_names, req_idx, A, K},
+                          b.array_lit(reqname), b.array_lit(reqidx), A, K},
                          p);
         value = b.make_if(
             b.binary(BinOp::Gt, alen(), b.literal(at)),
