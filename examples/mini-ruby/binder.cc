@@ -238,21 +238,24 @@ struct Binder {
                       int32_t parent, const std::string& name,
                       bool is_method = false, int32_t cls_base = -1) {
     const int32_t f = new_fn(parent, name);
-    FnInfo& fi = fns[static_cast<size_t>(f)];
-    fi.body = &body;
+    // An accessor rather than a reference: a default can hold a block,
+    // which is a function of its own, and resolving it grows `fns` --
+    // moving every FnInfo, this one included.
+    const auto fi = [&]() -> FnInfo& { return fns[static_cast<size_t>(f)]; };
+    fi().body = &body;
     fn_of[&node] = f;
     push_scope(false);
     const int32_t blk = declare_param("__block", f);
-    fi.params.push_back(blk);
-    fi.defaults.push_back(nullptr);
+    fi().params.push_back(blk);
+    fi().defaults.push_back(nullptr);
     if (is_method) {
-      fi.is_method = true;
-      fi.cls_base = cls_base;
-      fi.method_name = name;
+      fi().is_method = true;
+      fi().cls_base = cls_base;
+      fi().method_name = name;
       if (cls_base >= 0) rs.use(cls_base, f);
       const int32_t selfv = declare_param("self", f);
-      fi.params.push_back(selfv);
-      fi.defaults.push_back(nullptr);
+      fi().params.push_back(selfv);
+      fi().defaults.push_back(nullptr);
     }
     for (const auto& p : params.nodes) {
       if (p->tag == "blockparam"_) {
@@ -262,18 +265,20 @@ struct Binder {
         decl_of[p->nodes[0].get()] = blk;
         continue;
       }
-      if (fi.rest) fail(*p, "a parameter after a splat is not supported here");
-      fi.rest = p->tag == "splatparam"_;
+      if (fi().rest) {
+        fail(*p, "a parameter after a splat is not supported here");
+      }
+      fi().rest = p->tag == "splatparam"_;
       const bool has_default = p->tag == "defparam"_;
-      const Ast& id = has_default || fi.rest ? *p->nodes[0] : *p;
+      const Ast& id = has_default || fi().rest ? *p->nodes[0] : *p;
       const int32_t v = declare_param(std::string(id.token), f);
       decl_of[&id] = v;
-      fi.params.push_back(v);
+      fi().params.push_back(v);
       if (has_default) {
         resolve_expr(*p->nodes[1], f);
-        fi.defaults.push_back(p->nodes[1].get());
+        fi().defaults.push_back(p->nodes[1].get());
       } else {
-        fi.defaults.push_back(nullptr);
+        fi().defaults.push_back(nullptr);
       }
     }
     bind_names(body, f);

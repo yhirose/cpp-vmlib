@@ -2,6 +2,14 @@
 # default parameters -- the rest of Ruby's everyday control flow and
 # calling convention.
 
+# A default that is a block. The block is a function of its own, made
+# while the method's parameters are being read -- the first method here,
+# so that the table of functions is still small enough to have to grow.
+def pick(first = proc { 1 }, second = proc { 2 })
+  [first.call, second.call]
+end
+puts pick.inspect
+
 def describe(n)
   case n
   when 0
