@@ -68,3 +68,16 @@ puts [1, 2, 3].inspect, ({"a" => 1}).inspect, nil.inspect, "s".inspect
 p 1, "s", nil, true, [1, "a"]
 print "no", "newline"
 puts
+
+# p answers what it printed -- nil, the one value, or an array of them --
+# and, like a builtin method's receiver, each runs once.
+def noisy(v)
+  puts "noisy #{v}"
+  v
+end
+x = p(noisy(5))
+puts x
+y = p noisy(1), noisy(2)
+puts y.inspect
+puts noisy([3, 1, 2]).sort.inspect
+puts noisy("abc").length

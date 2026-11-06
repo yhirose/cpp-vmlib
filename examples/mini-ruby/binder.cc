@@ -2126,15 +2126,28 @@ struct Binder {
       }
       return native("write", {acc}, p);
     }
+    // p prints each argument and answers it -- nil for none, the array of
+    // them for several -- so each runs once, into a temporary that both
+    // the printing and the answer read.
     if (name == "p") {
-      NodeId acc = b.str_literal("");
+      std::vector<NodeId> out;
+      std::vector<NodeId> vals;
       for (const NodeId v : args) {
+        const int32_t t = ctx.alloc_local("$p");
+        out.push_back(b.assign(VarKind::Local, t, v));
+        vals.push_back(b.varref(VarKind::Local, t));
+      }
+      NodeId acc = b.str_literal("");
+      for (const NodeId v : vals) {
         acc = b.binary(BinOp::Add, acc,
                        b.binary(BinOp::Add, helper("$inspect", {v}, p),
                                 b.str_literal("\n")));
       }
-      return b.block({native("write", {acc}, p),
-                      args.empty() ? b.nil_literal() : args[0]});
+      out.push_back(native("write", {acc}, p));
+      out.push_back(vals.empty()       ? b.nil_literal()
+                    : vals.size() == 1 ? vals[0]
+                                       : b.array_lit(vals));
+      return b.block(out);
     }
     // raise
     if (args.empty()) {
@@ -2286,6 +2299,13 @@ struct Binder {
     const std::function<NodeId(size_t)> a0 = [&](size_t k) {
       return k < args.size() ? args[k] : b.nil_literal();
     };
+    // The receiver runs once, into `$self`, and everything after reads
+    // that: the method lookup, a method of the program's own, and the
+    // builtin the call falls back to.
+    const int32_t t = ctx.alloc_local("$self");
+    const int32_t mv = ctx.alloc_local("$m");
+    const NodeId T = b.varref(VarKind::Local, t);
+    const NodeId M = b.varref(VarKind::Local, mv);
     // A builtin reads one value per argument -- except push, which takes
     // any number of them, and a Proc's call, which is a call like any
     // other. Which one runs is decided when it runs (a class of the
@@ -2294,11 +2314,11 @@ struct Binder {
     const auto fallback = [&]() -> NodeId {
       if ((name == "push" || name == "<<") &&
           (cargs.spread.valid() || args.size() != 1)) {
-        return helper("$pushall", {recv, values_array(cargs, ctx, p)}, p);
+        return helper("$pushall", {T, values_array(cargs, ctx, p)}, p);
       }
       if (cargs.spread.valid()) {
         if (name == "call") {
-          return call_with(recv, {b.nil_literal()}, cargs, p);
+          return call_with(T, {b.nil_literal()}, cargs, p);
         }
         return helper("$exc",
                       {b.str_literal("ArgumentError"),
@@ -2306,12 +2326,8 @@ struct Binder {
                                      "a call to " + name + " here")},
                       p);
       }
-      return emit_suffix_builtin(recv, sfx, name, args, blk, a0, ctx, p);
+      return emit_suffix_builtin(T, sfx, name, args, blk, a0, ctx, p);
     };
-    const int32_t t = ctx.alloc_local("$self");
-    const int32_t mv = ctx.alloc_local("$m");
-    const NodeId T = b.varref(VarKind::Local, t);
-    const NodeId M = b.varref(VarKind::Local, mv);
     return b.block(
         {b.assign(VarKind::Local, t, recv),
          b.assign(VarKind::Local, mv,

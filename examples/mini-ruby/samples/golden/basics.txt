@@ -53,3 +53,15 @@ nil
 true
 [1, "a"]
 nonewline
+noisy 5
+5
+5
+noisy 1
+noisy 2
+1
+2
+[1, 2]
+noisy [3, 1, 2]
+[1, 2, 3]
+noisy abc
+3
