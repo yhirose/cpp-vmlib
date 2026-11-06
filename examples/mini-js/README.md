@@ -358,7 +358,9 @@ Quietly different, and therefore worth knowing:
 * **Arithmetic on non-numbers traps instead of producing `NaN`.** `'a' * 2`
   is a run failure here and `NaN` in JavaScript; the coercion ladder again.
   `+` is the exception, because string concatenation is not coercion so
-  much as the operator's other meaning.
+  much as the operator's other meaning. Comparing across types traps the
+  same way: `1 < 2 < 3` compares `true` with `3`, which JavaScript turns
+  into `1 < 3`.
 * **A plain function inside a method sees the method's `this`.** It
   resolves outward like an arrow's, where JavaScript would rebind it by
   how the function is called -- `function f() { return this.x }` called
