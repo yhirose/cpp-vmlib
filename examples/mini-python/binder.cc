@@ -210,6 +210,7 @@ struct FnInfo {
 struct FnCtx : FrameLayout {
   int32_t fn = 0;
   int32_t next_cell = 0;
+  int32_t args_slot = -1;  // `$a`, the positional arguments' array
 };
 
 struct Binder {
@@ -658,7 +659,11 @@ struct Binder {
   // A comprehension is a function, exactly as in CPython -- which is the
   // reason its target does not leak into the enclosing scope, and the
   // reason the generator form can be lazy without anything else changing.
+  // Its first `for`'s iterable is CPython's exception: evaluated where the
+  // comprehension stands, in that scope, and handed to the function as an
+  // iterator -- so `(x for x in f())` calls f when the generator is made.
   void resolve_comp(const Ast& a, int32_t fn) {
+    resolve_expr(*first_for(a).nodes[1], fn);
     const int32_t f = new_fn(fn, "<comp>");
     fns[static_cast<size_t>(f)].body = &a;
     fns[static_cast<size_t>(f)].is_generator =
@@ -673,7 +678,7 @@ struct Binder {
     }
     for (const auto& c : a.nodes) {
       if (c->tag == "compfor"_) {
-        resolve_expr(*c->nodes[1], f);
+        if (c.get() != &first_for(a)) resolve_expr(*c->nodes[1], f);
       } else if (c->tag == "compif"_) {
         resolve_expr(*c->nodes[0], f);
       } else {
@@ -681,6 +686,13 @@ struct Binder {
       }
     }
     rs.pop_scope();
+  }
+
+  static const Ast& first_for(const Ast& comp) {
+    for (const auto& c : comp.nodes) {
+      if (c->tag == "compfor"_) return *c;
+    }
+    fail(comp, "a comprehension needs a `for`");
   }
 
   // ==== The runtime this front end writes in its own IR ====================
@@ -3705,8 +3717,13 @@ struct Binder {
       case "dictcomp"_:
       case "gencomp"_:
       case "bargen"_:
-        return b.call_value(emit_closure(fn_of.at(&a), ctx, p),
-                            {b.array_lit({}), b.nil_literal()});
+        // The first iterable, as an iterator, is the one argument (see
+        // resolve_comp).
+        return b.call_value(
+            emit_closure(fn_of.at(&a), ctx, p),
+            {b.array_lit({helper(
+                 "$iter", {emit_expr(*first_for(a).nodes[1], ctx)}, p)}),
+             b.nil_literal()});
       case "tuplelit"_: {
         std::vector<NodeId> items;
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
@@ -4290,7 +4307,14 @@ struct Binder {
     // that turns them back into the parameters the source declared.
     const int32_t sa = ctx.alloc_local("$a");
     const int32_t sk = ctx.alloc_local("$k");
-    emit_prologue(fi, rf, ctx, pre, sa, sk, p);
+    ctx.args_slot = sa;
+    // A comprehension's function is called by its own expression alone,
+    // with its first iterator as the one argument (resolve_comp), so there
+    // is nothing for a prologue to check or unpack.
+    const bool comp = fi.body != nullptr &&
+                      (fi.body->tag == "listcomp"_ || fi.body->tag == "dictcomp"_ ||
+                       fi.body->tag == "gencomp"_ || fi.body->tag == "bargen"_);
+    if (!comp) emit_prologue(fi, rf, ctx, pre, sa, sk, p);
     // Every other binding of this function gets a slot up front too, since
     // its scope is the whole body whatever block it was assigned in.
     for (size_t v = 0; v < rs.vars.size(); ++v) {
@@ -4303,8 +4327,7 @@ struct Binder {
     NodeId body;
     if (fi.body->tag == "program"_ || fi.body->tag == "block"_) {
       body = emit_block(*fi.body, ctx);
-    } else if (fi.body->tag == "listcomp"_ || fi.body->tag == "dictcomp"_ ||
-               fi.body->tag == "gencomp"_ || fi.body->tag == "bargen"_) {
+    } else if (comp) {
       body = emit_comp(*fi.body, ctx, p);
     } else {
       body = b.make_return(emit_expr(*fi.body, ctx));  // a lambda
@@ -4466,7 +4489,12 @@ struct Binder {
                           inner, NodeId{});
         continue;
       }
-      inner = emit_comp_for(c, inner, ctx, p);
+      // The first `for` walks the iterator it was handed.
+      const NodeId given =
+          &c == &first_for(a)
+              ? b.index(b.varref(VarKind::Local, ctx.args_slot), b.literal(0))
+              : NodeId{};
+      inner = emit_comp_for(c, inner, given, ctx, p);
     }
     std::vector<NodeId> out;
     if (!gen) {
@@ -4479,7 +4507,9 @@ struct Binder {
     return b.block(out);
   }
 
-  NodeId emit_comp_for(const Ast& c, NodeId inner, FnCtx& ctx, SrcPos p) {
+  // `given` is the iterator to walk, when the caller already made it.
+  NodeId emit_comp_for(const Ast& c, NodeId inner, NodeId given, FnCtx& ctx,
+                       SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
@@ -4507,8 +4537,10 @@ struct Binder {
       }
     }
     loop.push_back(inner);
-    return b.block({b.assign(VarKind::Local, it,
-                             helper("$iter", {emit_expr(*c.nodes[1], ctx)}, p)),
+    const NodeId iter = given.valid()
+                            ? given
+                            : helper("$iter", {emit_expr(*c.nodes[1], ctx)}, p);
+    return b.block({b.assign(VarKind::Local, it, iter),
                     b.make_while(b.bool_literal(true), b.block(loop))});
   }
 

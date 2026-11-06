@@ -80,3 +80,15 @@ for v in (note2(x) for x in xs):
     if v > 2:
         break
 print(trace2)
+
+# The first `for`'s iterable is evaluated where the comprehension stands,
+# in that scope: a generator expression runs it when the generator is
+# made, and `[x for x in x]` walks the outer x.
+def source(tag, v):
+    print("source", tag)
+    return v
+lazy = (n * 2 for n in source("gen", [1, 2]) if source("cond", True))
+print("made")
+print(next(lazy))
+x = [1, 2]
+print([x * 10 for x in x])

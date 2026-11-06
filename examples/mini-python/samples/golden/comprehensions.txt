@@ -26,3 +26,8 @@ nothing yet: []
 3
 [4, 5]
 [1, 2, 3]
+source gen
+made
+source cond
+2
+[10, 20]
