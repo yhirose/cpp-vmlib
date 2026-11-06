@@ -62,3 +62,7 @@
 ; every one of them is an ordinary function in the module.
 (display (map car '((1 a) (2 b)))) (newline)
 (display (procedure? car)) (display " ") (display (procedure? 1)) (newline)
+
+; let* binds one name after another, so binding a name again makes a new
+; variable: a closure made between the two keeps the first.
+(display (let* ((x 1) (g (lambda () x)) (x 5)) (list (g) x))) (newline)

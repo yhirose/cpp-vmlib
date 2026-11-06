@@ -484,11 +484,15 @@ struct Binder {
         if (bpair->nodes.size() > 1) resolve_form(*bpair->nodes[1], fn);
       }
     } else if (kind == "let*") {
+      // Each binding opens a scope of its own around the rest, so a name
+      // bound twice is two variables: an initializer between the two saw
+      // the first, and a closure made there keeps it. (`declare` would
+      // reuse the first, which is what a second internal define means.)
       rs.push_scope();
       for (const auto& bpair : binds.nodes) {
         if (bpair->nodes.size() > 1) resolve_form(*bpair->nodes[1], fn);
         const Ast& p = *bpair->nodes[0];
-        decl_of[&p] = declare(std::string(p.token), fn);
+        decl_of[&p] = rs.declare(std::string(p.token), fn);
       }
     } else {
       for (const auto& bpair : binds.nodes) {
