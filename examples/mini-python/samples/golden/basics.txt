@@ -19,3 +19,7 @@ yes no
 noisy -5
 noisy 4
 5 4
+noisy 2
+noisy 3
+noisy 0
+False False

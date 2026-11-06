@@ -3747,16 +3747,17 @@ struct Binder {
       // Comparisons *chain*: `a < b <= c` means `a < b and b <= c` with
       // `b` evaluated once, which no left fold can express -- the fold
       // would compare a bool with c. Each operand lands in a slot, and
-      // each link after the first is guarded by the one before it, so the
-      // short-circuit is Python's too.
+      // each operand after the second runs only once the link before it
+      // held, so `1 > 2 < f()` never calls f: the short-circuit is
+      // Python's too.
       case "cmpexp"_: {
         const size_t links = (a.nodes.size() - 1) / 2;
         std::vector<int32_t> slots;
-        std::vector<NodeId> pre;
+        std::vector<NodeId> sets;
         for (size_t k = 0; k < a.nodes.size(); k += 2) {
           const int32_t t = ctx.alloc_local("$cmp");
           slots.push_back(t);
-          pre.push_back(
+          sets.push_back(
               b.assign(VarKind::Local, t, emit_expr(*a.nodes[k], ctx)));
         }
         const auto link = [&](size_t k) {
@@ -3794,12 +3795,14 @@ struct Binder {
           return b.at(op_p).binary(o, helper("$cmp", {lhs, rhs}, op_p),
                                    b.literal(0));
         };
+        // Link k compares operands k and k+1; operand k+1 is set just
+        // before it, except the first two, which run before anything.
         NodeId chain = link(links - 1);
         for (size_t k = links - 1; k-- > 0;) {
-          chain = b.make_if(link(k), chain, b.bool_literal(false));
+          chain = b.make_if(link(k), b.block({sets[k + 2], chain}),
+                            b.bool_literal(false));
         }
-        pre.push_back(chain);
-        return b.block(pre);
+        return b.block({sets[0], sets[1], chain});
       }
       case "addexp"_:
       case "mulexp"_: {

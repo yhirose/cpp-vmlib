@@ -59,3 +59,7 @@ def noisy(v):
     return v
 
 print(abs(noisy(-5)), abs(noisy(4)))
+
+# A chained comparison runs an operand only once the link before it has
+# held, so `1 > 2 < noisy(3)` never calls noisy.
+print(1 > 2 < noisy(3), 1 < noisy(2) < noisy(3) < noisy(0) < noisy(9))
