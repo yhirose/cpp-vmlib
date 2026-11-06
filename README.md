@@ -189,9 +189,10 @@ whose subtree the program could observe running, which one run of a
 function body evaluates twice, and the innermost node that does it. Of the
 control flow it follows only `If` and `Switch`, which run one arm, so a
 node under both arms of one `If` is fine and two runs a `return` keeps
-apart are still two -- test both conditions in one `If` instead. Every
-front end here takes `--check-sharing` to print them, and its tests ask it
-of every program it ships.
+apart are still two -- build that node once for each place instead, which
+compiles to the very code the sharing did. Every front end here takes
+`--check-sharing` to print them, and its tests ask it of every program it
+ships.
 
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
