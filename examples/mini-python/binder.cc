@@ -690,7 +690,7 @@ struct Binder {
         // The bignum recipe, and the promotion rule around it.
         "$isbig", "$abs", "$tolimbs", "$mkbig", "$biglimbs", "$bigsign",
         "$ucmp", "$uadd", "$usub", "$umul", "$bigadd", "$bigmul", "$bstr",
-        "$tofloat", "$neg",
+        "$tofloat", "$neg", "$pyabs",
         // Arithmetic and comparison, dispatching on what the operands are.
         "$add", "$sub", "$mul", "$fdiv", "$idiv", "$mod", "$pow", "$cmp",
         "$eq", "$truthy",
@@ -1035,6 +1035,19 @@ struct Binder {
              {kSignKey, r.b.unary(UnOp::Neg, r.idx(r.L(v), kSignKey))}}))));
     r.add(r.ret(r.b.unary(UnOp::Neg, r.L(v))));
     r.finish("$neg");
+  }
+
+  // Python's abs, for every number this subset has. Both `abs(x)` and abs
+  // as a value come here, so the argument is a parameter -- evaluated
+  // once, by the call -- rather than an expression the test and the
+  // answer would each run.
+  void rt_pyabs() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.bin(BinOp::Lt, r.call("$cmp", {r.L(v), r.I(0)}), r.I(0)),
+                r.ret(r.call("$neg", {r.L(v)}))));
+    r.add(r.ret(r.L(v)));
+    r.finish("$pyabs");
   }
 
   // -- Arithmetic, dispatching on what the operands turn out to be --------
@@ -2924,7 +2937,7 @@ struct Binder {
     rt_intfail();
     rt_isbig(); rt_abs(); rt_tolimbs(); rt_mkbig(); rt_biglimbs();
     rt_bigsign(); rt_ucmp(); rt_uadd(); rt_usub(); rt_umul(); rt_bigadd();
-    rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg();
+    rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
     rt_add(); rt_sub(); rt_mul(); rt_fdiv(); rt_idiv(); rt_mod(); rt_pow();
     rt_cmp(); rt_eq(); rt_truthy();
     rt_fstr(); rt_str(); rt_repr(); rt_liststr(); rt_dictstr();
@@ -4146,12 +4159,7 @@ struct Binder {
     if (g == "float") return helper("$tofloat", {a0(0)}, p);
     if (g == "list") return helper("$tolist", {a0(0)}, p);
     if (g == "bool") return helper("$truthy", {a0(0)}, p);
-    if (g == "abs") {
-      return b.make_if(
-          b.binary(BinOp::Lt, helper("$cmp", {a0(0), b.literal(0, p)}, p),
-                   b.literal(0, p), p),
-          helper("$neg", {a0(0)}, p), a0(0), p);
-    }
+    if (g == "abs") return helper("$pyabs", {a0(0)}, p);
     if (g == "type") return helper("$type", {a0(0)}, p);
     if (g == "repr") return helper("$repr", {a0(0)}, p);
     if (g == "next") {
@@ -4229,13 +4237,7 @@ struct Binder {
       body = b.call_value(b.make_closure(rt.at("$tuple"), empty_cmap, p),
                           {rtc("$tolist")}, p);
     } else {  // abs
-      body = b.make_if(
-          b.binary(BinOp::Lt,
-                   b.call_value(b.make_closure(rt.at("$cmp"), empty_cmap, p),
-                                {arg, b.literal(0, p)}, p),
-                   b.literal(0, p), p),
-          b.call_value(b.make_closure(rt.at("$neg"), empty_cmap, p), {arg}, p),
-          arg, p);
+      body = rtc("$pyabs");
     }
     Func f;
     f.name = g;

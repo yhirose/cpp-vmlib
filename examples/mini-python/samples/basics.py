@@ -52,3 +52,10 @@ for k in range(1, 6):
 print(total)
 
 print(list(range(4)), list(range(2, 6)), list(range(6, 0, -2)))
+
+# abs evaluates its argument once, whether or not it negates it.
+def noisy(v):
+    print("noisy", v)
+    return v
+
+print(abs(noisy(-5)), abs(noisy(4)))
