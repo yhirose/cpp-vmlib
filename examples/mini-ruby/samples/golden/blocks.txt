@@ -20,3 +20,5 @@ relayed
 60
 false
 true
+["given 1", "replaced 2", true]
+[true, 7]

@@ -107,3 +107,20 @@ def any_block?
   [1].map { |x| block_given? }.first
 end
 puts any_block?, any_block? { 1 }
+
+# A `&blk` parameter is a variable of the method's own, holding the block
+# it was passed: assigning it, here or from a closure, leaves what
+# `yield` calls alone.
+def rebinds(&blk)
+  blk = lambda { |x| "replaced #{x}" }
+  y = yield 1
+  [y, blk.call(2), block_given?]
+end
+p rebinds { |x| "given #{x}" }
+def clears(&blk)
+  wipe = lambda { blk = nil }
+  wipe.call
+  y = yield
+  [blk == nil, y]
+end
+p clears { 7 }

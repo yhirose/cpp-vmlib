@@ -28,7 +28,8 @@
 //   * `yield a` is a call of parameter 0 -- the method's, from inside a
 //     block too, which captures it the way it captures `self`;
 //   * `block_given?` is parameter 0 not being nil;
-//   * `&blk` names parameter 0 rather than declaring a new one;
+//   * `&blk` is a local set from parameter 0 on entry, so assigning it
+//     leaves what `yield` calls alone;
 //   * `Proc#arity` is FnArity minus one;
 //   * and a lambda's ArgCount check compares against num_params, both of
 //     which count it, so the one cancels the other.
@@ -127,6 +128,9 @@ struct FnInfo {
   // Any `def`, top-level or in a class: Ruby checks a method's argument
   // count, the way it checks a lambda's.
   bool is_def = false;
+  // A `&blk` parameter: a local of the method's, set from the block on
+  // entry. -1 without one.
+  int32_t blk_var = -1;
   int32_t cls_base = -1;
   std::string method_name;
 };
@@ -272,10 +276,12 @@ struct Binder {
     }
     for (const auto& p : params.nodes) {
       if (p->tag == "blockparam"_) {
-        // `&blk` names the block this method was passed, which is already
-        // parameter 0 -- so it is an alias, not a new parameter.
-        rs.alias(std::string(p->nodes[0]->token), blk);
-        decl_of[p->nodes[0].get()] = blk;
+        // `&blk` holds the block this method was passed, which is already
+        // parameter 0 -- in a variable of its own, so that assigning it
+        // does not change what `yield` calls.
+        const int32_t bv = rs.declare(std::string(p->nodes[0]->token), f);
+        fi().blk_var = bv;
+        decl_of[p->nodes[0].get()] = bv;
         continue;
       }
       if (fi().rest) {
@@ -2638,7 +2644,6 @@ struct Binder {
     // After the freshes above, which would otherwise reset it, and before
     // the prologue below, which may call a helper itself.
     for (const int32_t v : fi.params) {
-      if (rs.vars[static_cast<size_t>(v)].slot >= 0) continue;  // &blk aliases
       const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
       rs.vars[static_cast<size_t>(v)].slot = s;
       const auto it = rf.cell_index.find(v);
@@ -2705,6 +2710,9 @@ struct Binder {
       if (rs.vars[v].slot >= 0) continue;
       if (rf.cell_index.count(static_cast<int32_t>(v))) continue;
       rs.vars[v].slot = ctx.alloc_local(rs.vars[v].name);
+    }
+    if (fi.blk_var >= 0) {
+      pre.push_back(write_var(fi.blk_var, read_var(fi.params[0], ctx, p), ctx, p));
     }
 
     std::vector<NodeId> stmts;
