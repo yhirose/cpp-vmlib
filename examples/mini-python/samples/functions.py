@@ -118,3 +118,16 @@ try:
     strict(1, 2, c=3)
 except TypeError as e:
     print("TypeError:", e)
+
+# `*rest` is a tuple, and a parameter after it is keyword-only: only a
+# keyword or its default reaches it, and a missing one is a TypeError
+# naming it as such.
+def tagged(first, *rest, sep="-", end):
+    return (first, rest, sep, end)
+
+print(tagged(1, 2, 3, end="!"), type(tagged(1, end=0)[1]).__name__)
+print(tagged(1, sep="+", end="."))
+try:
+    tagged(1, 2)
+except TypeError as e:
+    print("TypeError:", e)

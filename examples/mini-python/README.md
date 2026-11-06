@@ -78,8 +78,9 @@ So every Python function takes exactly two IR arguments, always -- the
 positional array and the keyword object, nil when the call had no keywords
 -- and a prologue turns them back into what the source declared: a
 positional argument by position, then by name, then its default; `*rest`
-takes what those did not; `**kwargs` takes what no parameter's name
-claimed; and a call missing a required argument, with too many positional
+takes what those did not, as a tuple; a parameter after it is
+keyword-only, reached by name or its default alone; `**kwargs` takes what
+no parameter's name claimed; and a call missing a required argument, with too many positional
 arguments, or with an unclaimed keyword raises the exact `TypeError`
 CPython does, by name and by count,
 because the executor's own arity check knows neither. It is the same trade
@@ -318,10 +319,8 @@ Python's does), width, precision, and that an unsupported spec is a
 
 ## What is absent, and what quietly differs
 
-Absent: sets, imports, `*args`/`**kwargs` mixed with a trailing keyword
-default the caller can still shadow (a shape the grammar allows but the
-runtime does not special-case beyond what is documented above), the
-numeric tower beyond `int`/`float`/the bignum, multiple inheritance,
+Absent: sets, imports, a bare `*` marking the keyword-only parameters
+without a `*rest`, the numeric tower beyond `int`/`float`/the bignum, multiple inheritance,
 properties, `@staticmethod`/`@classmethod` recognized specially (a
 decorated method is refused outright -- see below), string formatting
 beyond `{}`'s fill/align/width/`.Nf`, and generator `send`/`throw`/`close`

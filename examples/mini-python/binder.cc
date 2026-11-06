@@ -2009,10 +2009,12 @@ struct Binder {
   // message is output like any other. Neither is something the executor
   // could have raised: its arity check knows a count, and these know which
   // parameter, by name, and whether it had a default.
+  // `what` is "positional" or "keyword-only", and a keyword-only
+  // parameter's position is -1: no positional argument reaches it.
   void rt_missing() {
     RT r(*this);
-    const auto [fn, names, idxs, a, k] =
-        r.params("fn", "names", "idxs", "a", "k");
+    const auto [fn, what, names, idxs, a, k] =
+        r.params("fn", "what", "names", "idxs", "a", "k");
     const auto [miss, i, n, c, s] = r.locals("miss", "i", "n", "c", "s");
     // Every required parameter no positional and no keyword answered.
     r.add(r.set(miss, r.arr({})));
@@ -2020,8 +2022,11 @@ struct Binder {
     r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(names))),
                r.blk({r.set(n, r.idx(r.L(names), r.L(i))),
                       r.iff(r.bin(BinOp::Eq,
-                                  r.either(r.bin(BinOp::Gt, r.len(r.L(a)),
-                                                 r.idx(r.L(idxs), r.L(i))),
+                                  r.either(r.both(r.bin(BinOp::Ge,
+                                                        r.idx(r.L(idxs), r.L(i)),
+                                                        r.I(0)),
+                                                  r.bin(BinOp::Gt, r.len(r.L(a)),
+                                                        r.idx(r.L(idxs), r.L(i)))),
                                            r.call("$kwhas", {r.L(k), r.L(n)})),
                                   r.Bo(false)),
                             r.push(r.L(miss),
@@ -2054,9 +2059,10 @@ struct Binder {
          r.bin(BinOp::Add, r.bin(BinOp::Add, r.L(fn), r.S("() missing ")),
                r.bin(BinOp::Add, r.call("$str", {r.L(c)}),
                      r.bin(BinOp::Add,
-                           r.iff(r.bin(BinOp::Eq, r.L(c), r.I(1)),
-                                 r.S(" required positional argument: "),
-                                 r.S(" required positional arguments: ")),
+                           r.bin(BinOp::Add,
+                                 r.bin(BinOp::Add, r.S(" required "), r.L(what)),
+                                 r.iff(r.bin(BinOp::Eq, r.L(c), r.I(1)),
+                                       r.S(" argument: "), r.S(" arguments: "))),
                            r.L(s))))}));
     r.finish("$missing");
   }
@@ -4379,9 +4385,11 @@ struct Binder {
     // Two passes over the parameters, because Python's "missing" message
     // names *every* argument that did not arrive, so the first fallback to
     // be emitted already needs the last parameter's name.
-    std::vector<NodeId> names;    // every declared positional, in order
-    std::vector<NodeId> reqname;  // and the subset with no default,
+    // A parameter after `*rest` is keyword-only: no position reaches it.
+    std::vector<NodeId> names;    // every name a keyword may pass, in order
+    std::vector<NodeId> reqname;  // the positional ones with no default,
     std::vector<NodeId> reqidx;   // with the position each one wanted
+    std::vector<NodeId> kwreqname;  // the keyword-only ones with none
     int32_t pos = 0;
     int32_t required = 0;
     bool has_rest = false;
@@ -4396,6 +4404,12 @@ struct Binder {
         continue;
       }
       names.push_back(b.str_literal(pi.name));
+      if (has_rest) {
+        if (pi.kind != ParamInfo::Default) {
+          kwreqname.push_back(b.str_literal(pi.name));
+        }
+        continue;
+      }
       if (pi.kind != ParamInfo::Default) {
         reqname.push_back(b.str_literal(pi.name));
         reqidx.push_back(b.literal(pos));
@@ -4408,12 +4422,30 @@ struct Binder {
     const NodeId req_idx = b.array_lit(reqidx);
 
     int32_t at = 0;
+    bool kwonly = false;
     for (const ParamInfo& pi : fi.params) {
       NodeId value;
       if (pi.kind == ParamInfo::Rest) {
-        value = helper("$rest", {A, b.literal(pos)}, p);
+        // A tuple, as Python's `*args` is.
+        value = helper("$tuple", {helper("$rest", {A, b.literal(pos)}, p)}, p);
+        kwonly = true;
       } else if (pi.kind == ParamInfo::KwRest) {
         value = helper("$kwrest", {K, all_names}, p);
+      } else if (kwonly) {
+        // By name, then the default, and a TypeError naming every
+        // keyword-only parameter that neither answered.
+        const NodeId fallback =
+            pi.kind == ParamInfo::Default
+                ? read_var(pi.def_var, ctx, p)
+                : helper("$missing",
+                         {b.str_literal(fi.name), b.str_literal("keyword-only"),
+                          b.array_lit(kwreqname),
+                          b.array_lit(std::vector<NodeId>(kwreqname.size(),
+                                                          b.literal(-1))),
+                          A, K},
+                         p);
+        value = b.make_if(helper("$kwhas", {K, b.str_literal(pi.name)}, p),
+                          b.index(K, b.str_literal(pi.name)), fallback);
       } else {
         // Positional, then by name, then the default -- and a TypeError
         // when none of the three answered.
@@ -4423,7 +4455,9 @@ struct Binder {
             pi.kind == ParamInfo::Default
                 ? read_var(pi.def_var, ctx, p)
                 : helper("$missing",
-                         {b.str_literal(fi.name), req_names, req_idx, A, K}, p);
+                         {b.str_literal(fi.name), b.str_literal("positional"),
+                          req_names, req_idx, A, K},
+                         p);
         value = b.make_if(
             b.binary(BinOp::Gt, alen(), b.literal(at)),
             b.index(A, b.literal(at)),
