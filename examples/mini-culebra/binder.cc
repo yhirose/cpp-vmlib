@@ -1346,10 +1346,14 @@ struct Binder {
       const SrcPos gp = pos_of(prim);
       ++i;
       if (g == "println" || g == "print") {
-        cur = native(g,
-                     {args.empty() ? b.str_literal("", gp)
-                                   : helper("$disp", {args[0]}, gp)},
-                     gp);
+        // Every argument is displayed and handed on, so a count the native
+        // does not take is the executor's arity trap once they have all
+        // run. `println()` alone is an empty line, as in culebra; `print()`
+        // takes its one argument.
+        std::vector<NodeId> shown;
+        for (const NodeId v : args) shown.push_back(helper("$disp", {v}, gp));
+        if (shown.empty() && g == "println") shown.push_back(b.str_literal("", gp));
+        cur = native(g, shown, gp);
       } else {
         cur = native(g, args, gp);
       }

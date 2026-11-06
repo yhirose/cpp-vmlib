@@ -56,3 +56,8 @@ fn bump() { n = 100; 1 }
 n += bump()
 fn assigned() { n = 7 }
 println("{n} {assigned()}")
+
+# println takes one value, and a call with more runs them all before it
+# fails.
+fn shown() { println("shown runs"); 2 }
+try { println('one', shown()) } catch e { println("refused") }
