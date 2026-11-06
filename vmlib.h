@@ -6892,6 +6892,8 @@ struct Exec {
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
   std::string (*describe)(const Value&);  // RunOptions::describe
+  // max_frames as configured: an ExitHeadroom raises max_frames from it.
+  const size_t depth_bound = max_frames;
 
   // Declared before `frames`, so it outlives them: a frame returning to the
   // pool during teardown must find the pool still there.
@@ -7025,23 +7027,14 @@ struct Exec {
   static constexpr size_t kExitHeadroom = 64;
   struct ExitHeadroom {
     Exec& e;
-    const bool raised;
-    explicit ExitHeadroom(Exec& x) : e(x), raised(!x.in_exit_code) {
-      if (raised) {
-        e.max_frames += kExitHeadroom;
-        e.in_exit_code = true;
-      }
+    const size_t saved;
+    explicit ExitHeadroom(Exec& x) : e(x), saved(x.max_frames) {
+      e.max_frames = e.depth_bound + kExitHeadroom;
     }
-    ~ExitHeadroom() {
-      if (raised) {
-        e.max_frames -= kExitHeadroom;
-        e.in_exit_code = false;
-      }
-    }
+    ~ExitHeadroom() { e.max_frames = saved; }
     ExitHeadroom(const ExitHeadroom&) = delete;
     ExitHeadroom& operator=(const ExitHeadroom&) = delete;
   };
-  bool in_exit_code = false;  // an ExitHeadroom is in force
   [[noreturn]] void depth_exceeded(SrcPos pos) {
     raise_trap("recursion limit exceeded", pos);
   }
@@ -7277,11 +7270,7 @@ struct Exec {
     std::vector<Value> items;
     if (argc > from) items.reserve(static_cast<size_t>(argc - from));
     for (int32_t i = from; i < argc; ++i) {
-      if constexpr (std::is_const_v<Arg>) {
-        items.push_back(args[i]);
-      } else {
-        items.push_back(std::move(args[i]));
-      }
+      items.push_back(std::forward<Arg>(args[i]));
     }
     return Value::make_array(std::move(items));
   }
@@ -7301,11 +7290,7 @@ struct Exec {
   static void fill_params(const Chunk& ch, Arg* args, TakenArgs&& t,
                           std::vector<Value>& locals) {
     for (int32_t i = 0; i < t.fixed; ++i) {
-      if constexpr (std::is_const_v<Arg>) {
-        locals[static_cast<size_t>(i)] = args[i];
-      } else {
-        locals[static_cast<size_t>(i)] = std::move(args[i]);
-      }
+      locals[static_cast<size_t>(i)] = std::forward<Arg>(args[i]);
     }
     const int32_t fixed = ch.fixed_params();
     for (int32_t i = t.fixed; i < fixed; ++i) {
@@ -7351,7 +7336,7 @@ struct Exec {
   // the one every call loop runs.
   VMLIB_NOINLINE static void release_args(Value* args, int32_t from,
                                           int32_t argc) {
-    for (int32_t i = from; i < argc; ++i) args[i] = Value();
+    for (int32_t i = from; i < argc; ++i) coreir::detail::release_one(args[i]);
   }
   VMLIB_NOINLINE void call_native_taking(const NativeObj* n, Value* args,
                                          int32_t argc, int32_t ret_reg,
@@ -7636,9 +7621,7 @@ struct Exec {
   // register is scratch the next write covers, so clearing those too was a
   // Value assignment -- refcount branch and all -- for nothing.
   static void clear_refs(Frame& f, size_t first, size_t end) {
-    for (size_t i = first; i < end; ++i) {
-      if (f.regs[i].is_heap()) f.regs[i] = Value();
-    }
+    for (size_t i = first; i < end; ++i) coreir::detail::release_one(f.regs[i]);
   }
 
   void release_range(Frame& f, int32_t first, int32_t end) {
