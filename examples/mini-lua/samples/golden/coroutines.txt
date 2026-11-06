@@ -10,3 +10,5 @@ true	from level 3
 true	finished
 x1/y1 x2/y2 xdone/ydone
 thread	dead	dead
+false	coroutines.lua:68: boom
+false	cannot resume dead coroutine

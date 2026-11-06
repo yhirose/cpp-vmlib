@@ -785,9 +785,9 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [r_] = r.locals("r");
     r.add(r.set(r_, r.call("$resume", {r.P(0), r.L(v)})));
+    // A failed resume answers {false, err}; wrap raises the err itself.
     r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(r_), r.I(0)), r.Bo(false)),
-                r.b.make_throw(r.call(
-                    "$one", {r.call("$append", {r.arr({}), r.L(r_)})}))));
+                r.b.make_throw(r.idx(r.L(r_), r.I(1)))));
     r.add(r.ret(
         r.in(IntrinsicId::ArraySlice, {r.L(r_), r.I(1), r.len(r.L(r_))})));
     r.finish("$wrapped", 0, 1);

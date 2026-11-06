@@ -62,3 +62,11 @@ end
 print(table.concat(log, " "))
 
 print(type(co), coroutine.status(x), coroutine.status(y))
+
+-- A wrapped coroutine that fails raises its error, and one that has
+-- finished raises the dead-coroutine error.
+local failing = coroutine.wrap(function() error("boom") end)
+print(pcall(failing))
+local done = coroutine.wrap(function() return 1 end)
+done()
+print(pcall(done))
