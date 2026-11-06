@@ -13,8 +13,10 @@
 // collector; and a destructor runs at most once, resurrection included.
 // Then a scope's explicit release list, which puts a captured local (a
 // cell) back into declaration order with the plain ones; the frame's dead
-// temporaries, which must not keep a scope's cycle alive; and a container's
-// own order, first to last, when it is freed with drop-bearing values in it.
+// temporaries, which must not keep a scope's cycle alive; a container's
+// own order, first to last, when it is freed with drop-bearing values in
+// it; and a call's arguments, which go with the callee rather than staying
+// in the caller's registers until its statement ends.
 
 #include <cstdio>
 #include <stdexcept>
@@ -163,6 +165,13 @@ void coreir_rt_out_raw(const char* bytes, int64_t len) {
   g_out.emplace_back(bytes, static_cast<size_t>(len));
 }
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
+
+// A host function taking one argument and answering 0: it only borrows
+// what it is handed.
+bool native_zero(coreir::NativeCall& c) {
+  c.result = coreir::Value::make_int(0);
+  return true;
+}
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
   throw Failure(msg);
@@ -954,6 +963,57 @@ int main() {
       }
       return g.b.block(body, g.p);
     });
+  }
+
+  // --- 18. A call's argument nothing else holds dies when the call
+  //         returns, not when the caller's statement ends: the callee took
+  //         it out of the caller's registers -- a fixed param, a rest
+  //         param, a spread call's fixed argument -- or the call released
+  //         it, an extra a lenient callee does not take or a native's,
+  //         borrowed while it ran. So print(f(<t>)) prints t first. -------
+  {
+    // funcs[2] zero(x) = 0; funcs[3] rest(...xs) = 0; funcs[4] none() = 0,
+    // lenient
+    const auto run = [&](const char* what, auto call, vm::RunOptions opts) {
+      Prog g;
+      Func zero{"zero", 1, 0, NodeId{}, {"x"}, {}};
+      zero.num_params = 1;
+      zero.body = g.b.literal(0, g.p);
+      g.m.funcs.push_back(zero);
+      Func rest{"rest", 1, 0, NodeId{}, {"xs"}, {}};
+      rest.num_params = 1;
+      rest.rest_param = true;
+      rest.body = g.b.literal(0, g.p);
+      g.m.funcs.push_back(rest);
+      Func none{"none", 0, 0, NodeId{}, {}, {}};
+      none.lenient_arity = true;
+      none.body = g.b.literal(0, g.p);
+      g.m.funcs.push_back(none);
+      g.main(g.b.block({g.bind_drop(), g.print(call(g)), g.print_str("after")},
+                       g.p),
+             {});
+      expect_clean(run_module(g.m, what, opts), what);
+      check_eq(joined(), "t|0|after|", std::string(what) + " output");
+    };
+    run("args: fixed param", [](Prog& g) {
+      return g.b.call_value(g.b.make_closure(2, 0, g.p), {g.obj("t")}, g.p);
+    }, {});
+    run("args: rest param", [](Prog& g) {
+      return g.b.call_value(g.b.make_closure(3, 0, g.p), {g.obj("t")}, g.p);
+    }, {});
+    run("args: lenient extra", [](Prog& g) {
+      return g.b.call_value(g.b.make_closure(4, 0, g.p), {g.obj("t")}, g.p);
+    }, {});
+    run("args: spread call", [](Prog& g) {
+      return g.b.call_spread(g.b.make_closure(2, 0, g.p), {g.obj("t")},
+                             g.b.array_lit({}, g.p), g.p);
+    }, {});
+    vm::RunOptions host;
+    host.natives = {{"zero", 1, &native_zero, nullptr}};
+    run("args: native", [](Prog& g) {
+      return g.b.call_value(g.b.native_ref(g.b.declare_native("zero"), g.p),
+                            {g.obj("t")}, g.p);
+    }, host);
   }
 
   if (g_failures != 0) {

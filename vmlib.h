@@ -7218,8 +7218,8 @@ struct Exec {
   // array is the one allocation on the way into an activation, and it
   // happens here, before anything about the caller's frame has changed --
   // an allocation can run a destructor, and a destructor is program code.
-  TakenArgs take_args(const Chunk& ch, const Value* args, int32_t argc,
-                      SrcPos pos) {
+  template <class Arg>
+  TakenArgs take_args(const Chunk& ch, Arg* args, int32_t argc, SrcPos pos) {
     const int32_t fixed = ch.fixed_params();
     const bool fits = ch.rest_param ? argc >= fixed : argc == fixed;
     if (!fits && !ch.lenient_arity) arity_mismatch(ch, argc, pos);
@@ -7239,11 +7239,18 @@ struct Exec {
                    " argument(s), given " + std::to_string(argc),
                pos);
   }
-  VMLIB_NOINLINE static Value rest_array(const Value* args, int32_t from,
+  template <class Arg>
+  VMLIB_NOINLINE static Value rest_array(Arg* args, int32_t from,
                                          int32_t argc) {
     std::vector<Value> items;
     if (argc > from) items.reserve(static_cast<size_t>(argc - from));
-    for (int32_t i = from; i < argc; ++i) items.push_back(args[i]);
+    for (int32_t i = from; i < argc; ++i) {
+      if constexpr (std::is_const_v<Arg>) {
+        items.push_back(args[i]);
+      } else {
+        items.push_back(std::move(args[i]));
+      }
+    }
     return Value::make_array(std::move(items));
   }
 
@@ -7254,9 +7261,10 @@ struct Exec {
   // the chunk's num_locals. Nothing here traps or allocates, so it is safe
   // on a frame halfway through being replaced.
   //
-  // A call copies its arguments out of the caller's registers (Arg is
-  // const Value); Op::TailCall moves them out of its own argument window
-  // (Arg is Value), so a call loop pays no refcount traffic for them.
+  // A call that borrows its arguments copies them (Arg is const Value); a
+  // call instruction moves them out of its own argument window (Arg is
+  // Value -- see push_closure_taking), so a call pays no refcount traffic
+  // for them and the window holds nothing once the callee has them.
   template <class Arg>
   static void fill_params(const Chunk& ch, Arg* args, TakenArgs&& t,
                           std::vector<Value>& locals) {
@@ -7279,10 +7287,57 @@ struct Exec {
   // and the two share take_args and fill_params above. The callee gets
   // the closure's cells, which are shared rather than pointed at, so
   // nothing here depends on the caller still being alive.
+  //
+  // push_closure borrows `args`, which stay the caller's: a native calling
+  // back into the program, the drop hook, a coroutine's first resume.
+  // push_closure_taking is a call instruction's, whose register window
+  // the caller is done with once the call starts: the arguments move into
+  // the callee and the window is left empty, so an argument nothing else
+  // holds lives as long as the callee keeps it -- a temporary receiver dies
+  // when its method returns, as it would in a language that pops its
+  // operands, not when the caller's statement ends and clears its
+  // registers.
   void push_closure(const Value& callee, const Value* args, int32_t argc,
                     int32_t ret_reg, SrcPos pos) {
+    enter_callee(callee, args, argc, ret_reg, pos);
+  }
+  // Out of line on purpose: inlined into dispatch, a frame push is enough
+  // code to cost the whole loop -- every instruction, not just calls -- a
+  // few percent in bench/.
+  VMLIB_NOINLINE void push_closure_taking(const Value& callee, Value* args,
+                                          int32_t argc, int32_t ret_reg,
+                                          SrcPos pos) {
+    enter_callee(callee, args, argc, ret_reg, pos);
+  }
+
+  // A taken window's arguments the callee did not take: a native's, which
+  // it only borrowed while it ran, and the extras a lenient callee
+  // without a rest param leaves over. Released at a point where the
+  // caller has moved on and nothing has been pushed, so a destructor they
+  // run is the caller's, as at the end of a statement. Out of line: both
+  // are off the path a closure call with the right count takes, which is
+  // the one every call loop runs.
+  VMLIB_NOINLINE static void release_args(Value* args, int32_t from,
+                                          int32_t argc) {
+    for (int32_t i = from; i < argc; ++i) args[i] = Value();
+  }
+  VMLIB_NOINLINE void call_native_taking(const NativeObj* n, Value* args,
+                                         int32_t argc, int32_t ret_reg,
+                                         SrcPos pos) {
+    call_native(n, args, argc, ret_reg, pos);
+    release_args(args, 0, argc);
+  }
+
+  template <class Arg>
+  void enter_callee(const Value& callee, Arg* args, int32_t argc,
+                    int32_t ret_reg, SrcPos pos) {
+    constexpr bool taking = !std::is_const_v<Arg>;
     if (callee.is_native()) {
-      call_native(callee.as_native(), args, argc, ret_reg, pos);
+      if constexpr (taking) {
+        call_native_taking(callee.as_native(), args, argc, ret_reg, pos);
+      } else {
+        call_native(callee.as_native(), args, argc, ret_reg, pos);
+      }
       return;
     }
     if (!callee.is_func()) {
@@ -7291,6 +7346,11 @@ struct Exec {
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
     TakenArgs taken = take_args(ch, args, argc, pos);
+    if constexpr (taking) {
+      if (taken.fixed < argc && !ch.rest_param) {
+        release_args(args, taken.fixed, argc);
+      }
+    }
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.
@@ -7745,7 +7805,7 @@ struct Exec {
   // reads its arguments for its whole run, and even a closure's take_args
   // can run a destructor before it has read them all -- either can change
   // the array, and pushing onto it can move every element.
-  std::vector<Value> spread_args(const Frame& f, const Insn& in) {
+  std::vector<Value> spread_args(Frame& f, const Insn& in) {
     const Value& s = f.regs[static_cast<size_t>(in.c + in.d)];
     if (!s.is_array()) {
       fail(f, std::string("cannot spread ") + type_name(s.tag()));
@@ -7757,8 +7817,11 @@ struct Exec {
     }
     std::vector<Value> args;
     args.reserve(static_cast<size_t>(in.d) + items.size());
-    args.insert(args.end(), f.regs.begin() + in.c,
-                f.regs.begin() + in.c + in.d);
+    // The fixed arguments move out of the instruction's window, as a
+    // CallValue's do; the spread array's items are copied, since the array
+    // may be held elsewhere.
+    args.insert(args.end(), std::make_move_iterator(f.regs.begin() + in.c),
+                std::make_move_iterator(f.regs.begin() + in.c + in.d));
     args.insert(args.end(), items.begin(), items.end());
     return args;
   }
@@ -7770,8 +7833,8 @@ struct Exec {
     const Value callee = f.regs[in.b];
     std::vector<Value> args = spread_args(f, in);
     ++f.pc;
-    push_closure(callee, args.data(), static_cast<int32_t>(args.size()), in.a,
-                 pos);
+    push_closure_taking(callee, args.data(), static_cast<int32_t>(args.size()),
+                        in.a, pos);
   }
 
   // A TailCallSpread: a TailCall over the arguments spread_args laid out.
@@ -7801,7 +7864,7 @@ struct Exec {
              .is_generator;
     if (!replace) {
       ++f.pc;
-      push_closure(callee, args, argc, in.a, pos);
+      push_closure_taking(callee, args, argc, in.a, pos);
       return;
     }
     const ClosureObj* c = callee.as_closure();
@@ -8575,7 +8638,7 @@ struct Exec {
           // callee that never returns never reads it.
           const Value callee = f.regs[in.b];
           ++f.pc;
-          push_closure(callee, f.regs.data() + in.c, in.d, in.a, pos);
+          push_closure_taking(callee, f.regs.data() + in.c, in.d, in.a, pos);
           continue;
         }
         case Op::TailCall: {

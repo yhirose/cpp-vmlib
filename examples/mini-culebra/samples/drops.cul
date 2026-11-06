@@ -143,6 +143,20 @@ fn run_escapes() {
 run_escapes()
 println("dropped with its holder: {log.size()}")
 
+# A temporary dies when the last thing holding it is done with it: a
+# receiver when its method returns, before println prints the answer.
+class Tagged {
+  new(id) { self.id = id }
+  name() { "tagged {self.id}" }
+  drop() { println("  drop {self.id}") }
+}
+fn temporaries() {
+  println(Tagged.new('t').name())
+  println('after the call')
+}
+println('a temporary receiver:')
+temporaries()
+
 # A top-level binding lives to the end of the program and is released
 # without its destructor -- culebra's rule, and the reason this front end
 # runs with RunOptions::entry_frame_drops off and a [0, 0) Scope on the

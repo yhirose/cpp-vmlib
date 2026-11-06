@@ -855,7 +855,12 @@ returning `false` -- every path on which the executor calls back into
 program code is one a reader can name. The order is named too: a freed
 array, object or map releases what it held first to last, and a frame
 last to first, rather than in whatever order the C++ standard library's
-vector destroys its elements (libstdc++ and libc++ disagree).
+vector destroys its elements (libstdc++ and libc++ disagree). A call's
+arguments move into the callee rather than staying in the caller's
+registers, so one nothing else holds dies when the callee is done with it
+-- a temporary receiver's destructor runs when its method returns, before
+the rest of the expression it stood in, not when the caller's statement
+ends.
 
 **A trap is a value.** The executor's own failures raise a `{message,
 line, col}` object a handler can read, and the object remembers that it

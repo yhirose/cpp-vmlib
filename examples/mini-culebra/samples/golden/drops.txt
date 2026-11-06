@@ -40,5 +40,9 @@ object literal:
 cycle dropped at the owning scope's exit: 2
   still held: 2
 dropped with its holder: 3
+a temporary receiver:
+  drop t
+tagged t
+after the call
 end of program
 top-level defer
