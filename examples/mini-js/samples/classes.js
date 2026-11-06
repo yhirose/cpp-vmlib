@@ -108,3 +108,12 @@ const early = new Greeter();
 Greeter.hello = function () { return 'static'; };
 const late = new Greeter();
 show('static apart', [early.hello(), late.hello(), Greeter.hello()]);
+
+// A constructor that returns an object makes that the result of `new`;
+// one that returns anything else still gives the instance.
+class Swap {
+  constructor(v) { this.mine = true; return v; }
+}
+show('constructor result', [new Swap({ other: 1 }).other,
+                            new Swap([7]).length, new Swap(5).mine,
+                            new Swap('s').mine, new Swap().mine]);

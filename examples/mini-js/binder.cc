@@ -490,7 +490,7 @@ struct Binder {
         "$join",   "$add",     "$index",   "$setidx",   "$slice",
         "$push",   "$iter",    "$iternext", "$throwtype", "$minner",
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
-        "$mfill",  "$sfill",
+        "$mfill",  "$sfill",   "$newresult",
         "$pnew",   "$ispromise", "$psettle", "$pon",    "$topromise",
         "$presolve", "$adopt", "$then",    "$react",    "$presolve1",
         "$preject1", "$await",   "$prejected", "$arrayof", "$pushall",
@@ -989,6 +989,19 @@ struct Binder {
     r.finish(name);
   }
 
+  // What `new` evaluates to, ES2023 10.2.2 [[Construct]]: what the
+  // constructor returned when that is an object -- anything but a
+  // primitive -- and otherwise the instance it was handed.
+  void rt_newresult() {
+    RT r(*this);
+    const auto [v, self] = r.params("v", "self");
+    for (const char* prim : {"nil", "bool", "int", "double", "string"}) {
+      r.add(r.iff(r.is(r.typ(v), prim), r.ret(r.L(self))));
+    }
+    r.add(r.ret(r.L(v)));
+    r.finish("$newresult");
+  }
+
   void rt_sadd() {
     RT r(*this);
     const auto [o, v] = r.params("o", "v");
@@ -1215,6 +1228,7 @@ struct Binder {
     rt_sadd();
     rt_fill("$mfill", true);
     rt_fill("$sfill", false);
+    rt_newresult();
     rt_pnew();
     rt_ispromise();
     rt_psettle();
@@ -2045,9 +2059,13 @@ struct Binder {
       const NodeId ctorClosure = helper(
           "$index",
           {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
-      steps.push_back(
-          call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p));
-    } else if (!arglist.nodes.empty()) {
+      steps.push_back(helper(
+          "$newresult",
+          {call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p), T},
+          p));
+      return chain(b.block(steps));
+    }
+    if (!arglist.nodes.empty()) {
       // No constructor to take them, but the arguments are a call's, and
       // run all the same -- a spread among them refused as anywhere else.
       steps.push_back(emit_items(arglist, 0, ctx, true));
