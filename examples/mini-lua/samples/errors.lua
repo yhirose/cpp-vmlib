@@ -44,3 +44,10 @@ print(ok3, msg3:sub(-25))
 -- the program.
 local co = coroutine.create(function() error("in coroutine") end)
 print(pcall(function() return coroutine.resume(co) end))
+
+-- pcall's arguments run before the protected call, so an error in one
+-- belongs to the caller; and a trap the executor raises comes back as a
+-- string, as Lua's errors do.
+print(pcall(function() return pcall(print, (error("in an argument"))) end))
+local ok, e = pcall(function() return {} < 1 end)
+print(ok, type(e))

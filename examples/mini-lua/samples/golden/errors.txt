@@ -7,3 +7,5 @@ false	errors.lua:32: re: errors.lua:31: first
 true	7
 false	arithmetic on a nil value
 true	false	errors.lua:45: in coroutine
+false	errors.lua:51: in an argument
+false	string

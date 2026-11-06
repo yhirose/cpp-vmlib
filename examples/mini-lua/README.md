@@ -227,7 +227,11 @@ the value of the `TryCatch` is the arm that ran.
 default error level, which is why the binder is told the script's path.
 Anything else is raised unchanged, so a table can carry structured detail.
 A trap the executor raises itself -- `{} < 1` -- is caught by the same
-`pcall`, since `TryCatch` lands both.
+`pcall`, since `TryCatch` lands both, as its `{message, line, col}`
+object; pcall hands it back as Lua would, a string with the chunk and line
+in front. The function and its arguments are evaluated before the
+`TryCatch`, so an error while computing an argument is the caller's own,
+not the call's.
 
 ## What is absent, and what quietly differs
 
@@ -238,6 +242,13 @@ metamethods (`__lt`/`__le`/`__concat`/`__len`/`__unm`/`__div`/`__mod`/
 `__pow`).
 
 Quietly different:
+
+* **A runtime error's words are the executor's, or a helper's.** A trap
+  caught by `pcall` reads `chunk:line: cannot call bool` where Lua says
+  `attempt to call a boolean value`, and an error a library helper raises
+  (`bad argument #1 to 'select' ...`) has Lua's words but no `chunk:line:`
+  in front; nothing names the variable involved, the way Lua's
+  `(local 'x')` does.
 
 * **`#` on a table with a hole may pick a different border.** Lua says any
   border is valid; this front end walks from 1 and Lua uses its array

@@ -1587,30 +1587,59 @@ struct Binder {
   NodeId emit_pcall(const Values& args, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
-    const int32_t exc = ctx.alloc_local("$exc");
-    NodeId call;
+    // f and its arguments run first, outside the protection: an error in
+    // an argument is the caller's own, not the call's, as in Lua. f is
+    // set before the arguments run and read after them, so its slot is a
+    // fresh one (FrameLayout::alloc_fresh_local).
+    const int32_t fv = ctx.alloc_fresh_local("$pf");
+    const int32_t av = ctx.alloc_local("$pargs");
+    const NodeId F = b.varref(VarKind::Local, fv);
+    const NodeId A = b.varref(VarKind::Local, av);
+    std::vector<NodeId> out;
     if (!args.firsts.empty()) {
-      call = call_with(
-          args.firsts[0], {},
-          {{args.firsts.begin() + 1, args.firsts.end()}, args.rest}, p);
+      out.push_back(b.assign(VarKind::Local, fv, args.firsts[0]));
+      out.push_back(b.assign(
+          VarKind::Local, av,
+          values_array({{args.firsts.begin() + 1, args.firsts.end()},
+                        args.rest},
+                       p)));
     } else if (args.rest.valid()) {
-      const int32_t vv = ctx.alloc_local("$vals");
-      const NodeId V = b.varref(VarKind::Local, vv);
-      call = b.block(
-          {b.assign(VarKind::Local, vv, args.rest),
-           b.call_spread(
-               helper("$one", {V}, p), {},
-               helper("$select", {values_array({{b.literal(2)}, V}, p)}, p))});
+      // `pcall(...)`: f is the first of the expanding argument's values.
+      out.push_back(b.assign(VarKind::Local, av, args.rest));
+      out.push_back(b.assign(VarKind::Local, fv, helper("$one", {A}, p)));
+      out.push_back(b.assign(
+          VarKind::Local, av,
+          helper("$select", {values_array({{b.literal(2)}, A}, p)}, p)));
     } else {
-      call = b.call_value(b.nil_literal(), {});
+      out.push_back(b.assign(VarKind::Local, fv, b.nil_literal()));
+      out.push_back(b.assign(VarKind::Local, av, b.array_lit({})));
     }
-    const NodeId body =
-        helper("$append", {b.array_lit({b.bool_literal(true)}), call}, p);
+    const int32_t exc = ctx.alloc_local("$exc");
+    const NodeId E = b.varref(VarKind::Local, exc);
+    const NodeId body = helper(
+        "$append", {b.array_lit({b.bool_literal(true)}), b.call_spread(F, {}, A)},
+        p);
+    // A trap the executor raised arrives as its {message, line, col}
+    // object (a table is a Map here, so an object is one of those); pcall
+    // answers what Lua's would, a string with the chunk and line in front.
+    // The words after them are the executor's.
+    const NodeId trap = b.make_if(
+        b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}),
+                 b.str_literal("object")),
+        b.intrinsic(IntrinsicId::ObjectHas, {E, b.str_literal("message")}),
+        b.bool_literal(false));
+    const NodeId worded = b.binary(
+        BinOp::Add,
+        b.binary(BinOp::Add, b.str_literal(chunk + ":"),
+                 b.intrinsic(IntrinsicId::ToStr,
+                             {b.index(E, b.str_literal("line"))})),
+        b.binary(BinOp::Add, b.str_literal(": "),
+                 b.index(E, b.str_literal("message"))));
     const NodeId handler =
-        b.array_lit({b.bool_literal(false), b.varref(VarKind::Local, exc)});
-    const NodeId out = b.make_try(exc, body, handler);
+        b.array_lit({b.bool_literal(false), b.make_if(trap, worded, E)});
+    out.push_back(b.make_try(exc, body, handler));
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, out);
+    return b.scope(mark, end, b.block(out));
   }
 
   // -- Statements ---------------------------------------------------------
