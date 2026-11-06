@@ -25,7 +25,8 @@
 // passes blocks out of band, and this is the cheapest way to model that
 // over a calling convention that has no out-of-band channel:
 //
-//   * `yield a` is a call of parameter 0;
+//   * `yield a` is a call of parameter 0 -- the method's, from inside a
+//     block too, which captures it the way it captures `self`;
 //   * `block_given?` is parameter 0 not being nil;
 //   * `&blk` names parameter 0 rather than declaring a new one;
 //   * `Proc#arity` is FnArity minus one;
@@ -482,8 +483,14 @@ struct Binder {
       case "literal"_:
       case "itext"_:
       case "symbol"_:
+        return;
       case "selfexpr"_:
       case "ivar"_:
+        use_method_param(fn, 1);
+        return;
+      case "yieldexpr"_:
+        use_method_param(fn, 0);
+        for (const auto& c : a.nodes) resolve_expr(*c, fn);
         return;
       // `identh` is the same identifier with a tighter whitespace rule --
       // see grammar.h. Resolution does not care which one it came from.
@@ -494,6 +501,7 @@ struct Binder {
           ref_of[&a] = *v;
           return;
         }
+        if (n == "block_given?") use_method_param(fn, 0);
         if (is_global(n)) return;
         // Not a local: a paren-less call of a method defined somewhere in
         // the program, which emit resolves by name.
@@ -503,11 +511,18 @@ struct Binder {
       case "doblock"_:
         resolve_block(a, fn, false);
         return;
-      case "supercall"_:
+      case "supercall"_: {
+        use_method_param(fn, 0);
+        use_method_param(fn, 1);
+        const int32_t d = enclosing_def(fn);
+        if (d >= 0 && d != fn && fns[static_cast<size_t>(d)].cls_base >= 0) {
+          rs.use(fns[static_cast<size_t>(d)].cls_base, fn);
+        }
         if (!a.nodes.empty()) {
           for (const auto& x : a.nodes[0]->nodes) resolve_expr(*x, fn);
         }
         return;
+      }
       default:
         for (const auto& c : a.nodes) {
           if (c->tag == "cmpop"_ || c->tag == "addop"_ ||
@@ -1474,17 +1489,42 @@ struct Binder {
     return helper("$truthy", {v}, p);
   }
 
+  // The method a node sits in: the function itself when it is a `def`,
+  // and otherwise the nearest one around the block or lambda it is in --
+  // whose block `yield` calls, whose `self` `@x` reads, and whose super
+  // `super` reaches, as in Ruby. -1 at the top level.
+  int32_t enclosing_def(int32_t fn) const {
+    for (int32_t f = fn; f >= 0; f = rs.fns[static_cast<size_t>(f)].parent) {
+      if (fns[static_cast<size_t>(f)].is_def) return f;
+    }
+    return -1;
+  }
+
+  // A block reaching its method's parameter `i` (0 the block, 1 `self`)
+  // captures it, which resolution has to record before emit reads it.
+  void use_method_param(int32_t fn, size_t i) {
+    const int32_t d = enclosing_def(fn);
+    if (d < 0 || d == fn) return;
+    const FnInfo& di = fns[static_cast<size_t>(d)];
+    if (i == 1 && !di.is_method) return;
+    rs.use(di.params[i], fn);
+  }
+
   NodeId block_of(FnCtx& ctx, SrcPos p) {
-    return read_var(fns[static_cast<size_t>(ctx.fn)].params[0], ctx, p);
+    const int32_t d = enclosing_def(ctx.fn);
+    return read_var(fns[static_cast<size_t>(d < 0 ? ctx.fn : d)].params[0],
+                    ctx, p);
   }
 
   // `self` inside the method the given node sits in -- `params[1]`, always,
   // since parameter 0 is the block and every instance method's resolve_def
   // call put self right after it.
   NodeId self_of(const Ast& a, FnCtx& ctx, SrcPos p) {
-    const FnInfo& fi = fns[static_cast<size_t>(ctx.fn)];
-    if (!fi.is_method) fail(a, "'self' and '@' are only valid in a method");
-    return read_var(fi.params[1], ctx, p);
+    const int32_t d = enclosing_def(ctx.fn);
+    if (d < 0 || !fns[static_cast<size_t>(d)].is_method) {
+      fail(a, "'self' and '@' are only valid in a method");
+    }
+    return read_var(fns[static_cast<size_t>(d)].params[1], ctx, p);
   }
 
   // A method call this front end cannot resolve by name at bind time,
@@ -1829,8 +1869,11 @@ struct Binder {
                          emit_expr(*a.nodes[1], ctx),
                          emit_expr(*a.nodes[2], ctx));
       case "supercall"_: {
-        const FnInfo& fi = fns[static_cast<size_t>(ctx.fn)];
-        if (!fi.is_method) fail(a, "'super' used outside a method");
+        const int32_t d = enclosing_def(ctx.fn);
+        if (d < 0 || !fns[static_cast<size_t>(d)].is_method) {
+          fail(a, "'super' used outside a method");
+        }
+        const FnInfo& fi = fns[static_cast<size_t>(d)];
         const Args args =
             emit_call_args(a.nodes.empty() ? nullptr : a.nodes[0].get(), ctx);
         if (fi.cls_base < 0) return b.nil_literal();  // no explicit superclass

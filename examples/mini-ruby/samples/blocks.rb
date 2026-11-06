@@ -87,3 +87,23 @@ puts [1, 2, 3].map { |x| x * 3 }.inspect
 puts [1, 2, 3, 4].inject(0) { |a, b| a + b }
 puts [1, 2, 3, 4].inject { |a, b| a * b }
 puts 3.times { |i| print i }
+
+# Inside a block, `yield`, `block_given?`, `self`, `@x` and `super` are
+# the method's that the block is written in.
+class Tally
+  def initialize
+    @sum = 0
+  end
+  def add_each(xs)
+    xs.each { |x| @sum += yield(x) }
+    self
+  end
+  def sum
+    @sum
+  end
+end
+puts Tally.new.add_each([1, 2, 3]) { |x| x * 10 }.sum
+def any_block?
+  [1].map { |x| block_given? }.first
+end
+puts any_block?, any_block? { 1 }

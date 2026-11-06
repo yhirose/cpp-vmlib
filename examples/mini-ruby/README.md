@@ -49,7 +49,9 @@ makes one:
 
 Everything else follows from that with no further machinery:
 
-* `yield a` is a call of parameter 0.
+* `yield a` is a call of parameter 0 -- the method's own, even from
+  inside a block or lambda written in the method, which captures it from
+  there the way it captures `self` for `@x` and `super`.
 * `block_given?` is parameter 0 not being nil.
 * `&blk` in a parameter list *names* parameter 0 rather than declaring a
   new one -- so it can be called, passed on with `f(&blk)`, and asked its
