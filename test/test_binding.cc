@@ -305,6 +305,51 @@ int main() {
     }
   }
 
+  // --- 4c. Arguments a call does not read still run, in order. -----------
+  // Three arguments, each printing its number, to a call that reads one:
+  // all three print, first to last, and the call sees the first's value
+  // through the fresh local that stands in for it -- above a slot a closed
+  // scope gave back. Given no more than it reads, nothing is spilled and
+  // the arguments are the same nodes.
+  {
+    Module m;
+    m.funcs.resize(1);
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    FrameLayout f;
+    const int32_t mk = f.mark();
+    f.alloc_local("released");
+    f.release(mk);
+    const auto arg = [&](int64_t k) {
+      return b.block({b.intrinsic(IntrinsicId::Print, {b.literal(k)}),
+                      b.literal(k * 10)});
+    };
+    std::vector<NodeId> args{arg(1), arg(2), arg(3)};
+    const std::vector<NodeId> pre = f.spill_unread(b, args, 1);
+    if (pre.size() != 3 || args.size() != 1 || f.high_local != 2) {
+      std::fprintf(stderr, "FAIL: spill_unread: pre=%zu args=%zu high=%d\n",
+                   pre.size(), args.size(), f.high_local);
+      ++g_failures;
+    }
+    std::vector<NodeId> enough{arg(4)};
+    const NodeId only = enough[0];
+    const NodeId call = b.intrinsic(IntrinsicId::Print, {enough[0]});
+    if (!f.spill_unread(b, enough, 1).empty() || enough[0] != only ||
+        b.sequence({}, call) != call) {
+      std::fprintf(stderr, "FAIL: spill_unread spilled what was all read\n");
+      ++g_failures;
+    }
+    Func& mainf = m.funcs[0];
+    mainf.name = "main";
+    mainf.num_locals = f.high_local;
+    mainf.local_names = f.names();
+    mainf.body = b.scope(
+        0, f.high_local,
+        b.sequence(pre, b.intrinsic(IntrinsicId::Print, {args[0]})));
+    run_module(m, "spill_unread");
+    check_eq(joined(), "1|2|3|10|", "spill_unread output");
+  }
+
   // --- 5. FuncWriter: named slots, and a body that runs. ------------------
   // `sum(n)`: the loop a helper library is full of. Written with named
   // slots, so the frame's shape is stated once and finish() derives the

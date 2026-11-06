@@ -1369,9 +1369,13 @@ struct Binder {
   // A builtin's arguments, one value each: the shapes this front end
   // matches by name read them by position, so a spread has nowhere to go.
   // `lead` goes in front -- a method's receiver, which runs first.
+  // JavaScript runs every argument of a call, whether the function reads
+  // it or not, so the ones past `reads` still run (FrameLayout::
+  // spill_unread): `String(1, f())` calls f, after the 1 and before
+  // String.
   struct BuiltinArgs {
     std::vector<NodeId> args;  // the lead, then the arguments
-    std::vector<NodeId> pre;   // to run before the call (spill_surplus)
+    std::vector<NodeId> pre;   // to run before the call (spill_unread)
   };
   BuiltinArgs emit_args(const Ast& args, size_t reads, FnCtx& ctx,
                         NodeId lead = NodeId{}) {
@@ -1383,42 +1387,9 @@ struct Binder {
       }
       out.args.push_back(emit_expr(*c, ctx));
     }
-    out.pre = spill_surplus(out.args, reads + (lead.valid() ? 1 : 0), ctx,
-                            pos_of(args));
+    auto b = Builder(m).at(pos_of(args));
+    out.pre = ctx.spill_unread(b, out.args, reads + (lead.valid() ? 1 : 0));
     return out;
-  }
-
-  // JavaScript evaluates every argument of a call, whether the function
-  // reads it or not. When there are more than `reads`, all of them run
-  // first, in order -- the ones read into temporaries that stand in for
-  // them, the rest for their effects alone -- so `String(1, f())` still
-  // calls f, after the 1 and before String. Answers those statements; none
-  // when nothing is left over, and the call compiles as it did. Fresh
-  // slots: a later argument runs after one is set, and may hold a scope.
-  std::vector<NodeId> spill_surplus(std::vector<NodeId>& args, size_t reads,
-                                    FnCtx& ctx, SrcPos p) {
-    std::vector<NodeId> pre;
-    if (args.size() <= reads) return pre;
-    auto b = Builder(m).at(p);
-    for (size_t k = 0; k < args.size(); ++k) {
-      if (k >= reads) {
-        pre.push_back(args[k]);
-        continue;
-      }
-      const int32_t t = ctx.alloc_fresh_local("$arg");
-      pre.push_back(b.assign(VarKind::Local, t, args[k]));
-      args[k] = b.varref(VarKind::Local, t);
-    }
-    args.resize(reads);
-    return pre;
-  }
-
-  // `n`, with `pre` run before it.
-  NodeId run_first(std::vector<NodeId> pre, NodeId n, SrcPos p) {
-    if (pre.empty()) return n;
-    pre.push_back(n);
-    auto b = Builder(m).at(p);
-    return b.block(pre);
   }
 
   static bool has_spread(const Ast& list) {
@@ -1950,7 +1921,7 @@ struct Binder {
               ? empty
               : helper(n == "Map" ? "$mfill" : "$sfill", {empty, xs.args[0]},
                        p);
-      return chain(run_first(xs.pre, made, p));
+      return chain(b.sequence(xs.pre, made));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
     // over a cell of *this* frame holding the promise, which is the one
@@ -1965,24 +1936,22 @@ struct Binder {
       m.capture_maps.push_back(cs);
       const int32_t cm2 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
-      return chain(run_first(
+      return chain(b.sequence(
           xs.pre,
           b.block({b.cell_fresh(c),
                    b.assign(VarKind::Cell, c, helper("$pnew", {}, p)),
                    b.call_value(arg_or_nil(args, 0, p),
                                 {b.make_closure(rt.at("$presolve1"), cm1),
                                  b.make_closure(rt.at("$preject1"), cm2)}),
-                   b.varref(VarKind::Cell, c)}),
-          p));
+                   b.varref(VarKind::Cell, c)})));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
       const BuiltinArgs xs = emit_args(arglist, 1, ctx);
-      return chain(run_first(
+      return chain(b.sequence(
           xs.pre,
           b.object_lit({{b.str_literal("name"), b.str_literal(n)},
                         {b.str_literal("message"),
-                         helper("$str", {arg_or_nil(xs.args, 0, p)}, p)}}),
-          p));
+                         helper("$str", {arg_or_nil(xs.args, 0, p)}, p)}})));
     }
     // `new SomeClass(...)`: not a builtin, so it has to be a class -- and
     // one this call site can see statically, because binding `this` needs
@@ -2150,8 +2119,8 @@ struct Binder {
       if (c == nullptr) fail(prim, "String must be called here");
       i = 2;
       const BuiltinArgs xs = emit_args(*c->nodes[0], 1, ctx);
-      return run_first(xs.pre, helper("$str", {arg_or_nil(xs.args, 0, p)}, p),
-                       p);
+      return b.sequence(xs.pre,
+                        helper("$str", {arg_or_nil(xs.args, 0, p)}, p), p);
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
@@ -2169,7 +2138,7 @@ struct Binder {
           *c->nodes[0],
           g == "console" && mem == "log" ? std::string::npos : 1, ctx);
       const std::vector<NodeId>& args = xs.args;
-      const auto done = [&](NodeId n) { return run_first(xs.pre, n, p); };
+      const auto done = [&](NodeId n) { return b.sequence(xs.pre, n, p); };
       i = 3;
       // console.log(a, b): JavaScript joins its arguments with a space,
       // and this subset's samples hand it a string the program built
@@ -2215,13 +2184,13 @@ struct Binder {
     auto b = Builder(m).at(p);
     const Ast& arglist = *call.nodes[0];
     // A builtin reads its receiver and then `reads` arguments, one value
-    // each; any argument past those still runs (spill_surplus), after the
+    // each; any argument past those still runs (spill_unread), after the
     // receiver as JavaScript orders them. A method of the program's own
     // takes its arguments the way any call does.
     const auto builtin = [&](size_t reads, const auto& make) {
       const BuiltinArgs xs = emit_args(arglist, reads, ctx, recv);
       const auto at = [&](size_t k) { return arg_or_nil(xs.args, k + 1, p); };
-      return run_first(xs.pre, make(xs.args[0], at), p);
+      return b.sequence(xs.pre, make(xs.args[0], at));
     };
 
     // push takes any number of values, and a spread among them.

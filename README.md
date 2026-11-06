@@ -175,7 +175,11 @@ bookkeeping that goes with it: `alloc_local` for the names, `mark`/
 `release` so sibling blocks reuse slots and a frame's width is the deepest
 nesting rather than the total number of declarations, and
 `alloc_fresh_local` for a temporary written before expressions emitted
-earlier run -- a released slot could be one of their scopes' own.
+earlier run -- a released slot could be one of their scopes' own. Its
+`spill_unread` is for a call that reads fewer arguments than it is given,
+a library function lowered by name: every argument still runs, in order,
+the read ones into fresh temporaries that stand in for them, and
+`Builder::sequence` puts those statements ahead of the call.
 
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a

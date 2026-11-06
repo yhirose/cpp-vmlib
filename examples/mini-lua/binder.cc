@@ -106,13 +106,10 @@ bool is_global(const std::string& n) {
          n == "rawset" || n == "rawget";
 }
 
-// A `:name(...)` whose receiver is a string. Resolved by name at bind time,
-// because a subset without a string metatable has no runtime lookup to do
-// it with -- README.md lists the consequence.
 // How many arguments a library function reads, one value each; npos for
 // one that takes every value (print, io.write, select, pcall, table.pack)
 // or reads its own (the string natives). The arguments past those still
-// run -- see spill_surplus.
+// run -- FrameLayout::spill_unread.
 size_t library_reads(const std::string& g, const std::string& mem) {
   static const std::map<std::string, size_t> reads = {
       {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
@@ -128,6 +125,9 @@ size_t library_reads(const std::string& g, const std::string& mem) {
   return it == reads.end() ? std::string::npos : it->second;
 }
 
+// A `:name(...)` whose receiver is a string. Resolved by name at bind time,
+// because a subset without a string metatable has no runtime lookup to do
+// it with -- README.md lists the consequence.
 bool is_string_method(const std::string& n) {
   return n == "rep" || n == "sub" || n == "upper" || n == "lower" ||
          n == "len" || n == "byte";
@@ -1377,10 +1377,11 @@ struct Binder {
             if (args.rest.valid()) {
               one_each.push_back(helper("$one", {args.rest}, p));
             }
-            const std::vector<NodeId> pre = spill_surplus(
-                one_each, library_reads("string", name), ctx, p);
+            // Every argument runs, read or not (FrameLayout::spill_unread).
             auto bp = b.at(p);
-            cur = {run_first(bp, pre, string_call(name, one_each, p)), false};
+            const std::vector<NodeId> pre = ctx.spill_unread(
+                bp, one_each, library_reads("string", name));
+            cur = {bp.sequence(pre, string_call(name, one_each, p)), false};
             break;
           }
           const int32_t t = ctx.alloc_local("$self");
@@ -1423,39 +1424,6 @@ struct Binder {
 
   // The standard library, in the shapes this front end knows. A library
   // name is not a value: `print` alone is an error, `print(x)` is a call.
-  // Lua evaluates every argument of a call, whether the function reads it
-  // or not. When there are more arguments than `reads`, all of them run
-  // first, in order -- the ones the function reads into temporaries that
-  // stand in for them, the rest for their effects alone -- so `type(1,
-  // f())` still calls f, after the 1 and before type. Answers those
-  // statements; none when nothing is left over, and the call compiles as
-  // it did. Fresh slots: an argument after one of them runs after it is
-  // set, and may hold a scope (a pcall's) that gave a slot back.
-  std::vector<NodeId> spill_surplus(std::vector<NodeId>& args, size_t reads,
-                                    FnCtx& ctx, SrcPos p) {
-    std::vector<NodeId> pre;
-    if (args.size() <= reads) return pre;
-    auto b = Builder(m).at(p);
-    for (size_t k = 0; k < args.size(); ++k) {
-      if (k >= reads) {
-        pre.push_back(args[k]);
-        continue;
-      }
-      const int32_t t = ctx.alloc_fresh_local("$arg");
-      pre.push_back(b.assign(VarKind::Local, t, args[k]));
-      args[k] = b.varref(VarKind::Local, t);
-    }
-    args.resize(reads);
-    return pre;
-  }
-
-  // `n`, with `pre` run before it.
-  static NodeId run_first(Builder::At& b, std::vector<NodeId> pre, NodeId n) {
-    if (pre.empty()) return n;
-    pre.push_back(n);
-    return b.block(pre);
-  }
-
   Val emit_library(const Ast& a, size_t limit, FnCtx& ctx, size_t& i) {
     Builder b(m);
     const Ast& prim = *a.nodes[0];
@@ -1493,8 +1461,11 @@ struct Binder {
       return values_array(vals, arglist != nullptr ? pos_of(*arglist) : p);
     };
     i = after;
+    // Lua runs every argument of a call, whether the function reads it or
+    // not: `type(1, f())` still calls f, after the 1 and before type.
+    auto bp = b.at(p);
     const std::vector<NodeId> pre =
-        spill_surplus(args, library_reads(g, mem), ctx, p);
+        ctx.spill_unread(bp, args, library_reads(g, mem));
     const auto dispatch = [&]() -> Val {
 
       if (mem.empty()) {
@@ -1588,8 +1559,7 @@ struct Binder {
       fail(prim, "'" + g + "." + mem + "' is not supported here");
     };
     Val v = dispatch();
-    auto bp = b.at(p);
-    v.n = run_first(bp, pre, v.n);
+    v.n = bp.sequence(pre, v.n);
     return v;
   }
 
