@@ -1555,6 +1555,11 @@ struct Binder {
     const NodeId M = b.varref(VarKind::Local, mv);
     std::vector<NodeId> callargs{blk, T};
     callargs.insert(callargs.end(), args.begin(), args.end());
+    // Ruby runs the arguments before it looks for the method, so they run
+    // before a NoMethodError too.
+    std::vector<NodeId> refused(args.begin(), args.end());
+    refused.push_back(helper("$nometh", {T, b.str_literal(name)}, p));
+    const NodeId no_method = b.block(refused);
     return b.block(
         {b.assign(VarKind::Local, t, recv),
          b.assign(VarKind::Local, mv,
@@ -1564,8 +1569,7 @@ struct Binder {
                          p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
-                   b.call_value(M, callargs),
-                   helper("$nometh", {T, b.str_literal(name)}, p))});
+                   b.call_value(M, callargs), no_method)});
   }
 
   NodeId emit_classdef(const Ast& a, FnCtx& ctx) {
@@ -1815,10 +1819,17 @@ struct Binder {
         fail(target, "only plain assignment is supported through a "
                      "method here");
       }
+      // Its value is the value assigned, whatever the setter answers --
+      // kept in `$val` as the argument runs, and read back after.
       const std::string name(target.nodes.back()->nodes[0]->token);
       const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
       const NodeId v = emit_expr(*a.nodes[2], ctx);
-      return emit_dynamic_call(recv, name + "=", {v}, b.nil_literal(), ctx, p);
+      const int32_t vv = ctx.alloc_local("$val");
+      const NodeId V = b.varref(VarKind::Local, vv);
+      const NodeId kept = b.block({b.assign(VarKind::Local, vv, v), V});
+      return b.block({emit_dynamic_call(recv, name + "=", {kept},
+                                        b.nil_literal(), ctx, p),
+                      V});
     }
     if (target.tag != "postfix"_ ||
         target.nodes.back()->tag != "indexsfx"_) {

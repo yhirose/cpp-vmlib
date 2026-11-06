@@ -19,3 +19,7 @@ Empty
 made_arg runs
 wrong number of arguments (given 1, expected 0)
 Empty
+made_arg runs
+1
+made_arg runs
+NoMethodError

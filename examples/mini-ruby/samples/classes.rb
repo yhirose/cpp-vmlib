@@ -108,3 +108,18 @@ end
     puts e.message
   end
 end
+
+# `obj.attr = v` is worth v, whatever the setter answers, and v runs even
+# when nothing defines the setter.
+class Box
+  attr_accessor :item
+end
+def store(box)
+  box.item = made_arg
+end
+p store(Box.new)
+begin
+  3.item = made_arg
+rescue => e
+  puts e.class
+end
