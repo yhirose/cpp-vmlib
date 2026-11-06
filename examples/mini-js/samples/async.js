@@ -66,3 +66,7 @@ main().then((v) => {
   show('order', log);
 });
 tick('sync tail');
+
+// An async function that falls off its end resolves to undefined.
+async function quietly() { 1 + 1; }
+quietly().then((v) => console.log('fell off', typeof v));

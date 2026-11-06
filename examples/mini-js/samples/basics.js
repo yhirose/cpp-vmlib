@@ -45,3 +45,13 @@ show('assign value', [chained, av, ac, readAc(), (ao.k = 4), (av += 2),
                       setAv(), av]);
 if ((av = 0)) av = 1;
 show('assign test', [av]);
+
+// Falling off the end of a function is undefined, whatever its last
+// statement computed -- in a function, an arrow with a block, a method
+// and a generator's last step alike.
+function noReturn(x) { x + 1; }
+const blockArrow = () => { noReturn(1); };
+function* lastStep() { 5; }
+class Quiet { m() { 3; } }
+show('fall off', [typeof noReturn(1), typeof blockArrow(),
+                  typeof lastStep().next().value, typeof new Quiet().m()]);

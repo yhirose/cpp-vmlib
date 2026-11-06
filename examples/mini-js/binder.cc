@@ -2391,6 +2391,13 @@ struct Binder {
     std::vector<NodeId> stmts;
     stmts.insert(stmts.end(), pre.begin(), pre.end());
     stmts.push_back(body);
+    // A function returns its body's value in the IR, and a block's is its
+    // last statement's: falling off the end is undefined in JavaScript,
+    // whatever that statement was. An arrow's expression body is a return
+    // already.
+    if (fi.body->tag == "block"_) {
+      stmts.push_back(b.make_return(b.nil_literal()));
+    }
 
     Func built;
     built.name = fi.name;
