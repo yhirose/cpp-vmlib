@@ -3165,16 +3165,23 @@ struct Binder {
       case "funcdef"_: {
         const int32_t g = fn_of.at(&a);
         std::vector<NodeId> out;
+        // `@a @b def f` is `f = a(b(f))`: the decorator expressions run
+        // first, top to bottom, then the defaults, and the nearest
+        // decorator is applied first.
+        std::vector<NodeId> decorators;
+        if (a.nodes[0]->tag == "decorators"_) {
+          for (const auto& d : a.nodes[0]->nodes) {
+            const int32_t t = ctx.alloc_local("$dec");
+            out.push_back(
+                b.assign(VarKind::Local, t, emit_expr(*d->nodes[0], ctx)));
+            decorators.push_back(b.varref(VarKind::Local, t));
+          }
+        }
         emit_defaults(g, ctx, out, p);
         NodeId value = emit_closure(g, ctx, p);
-        // `@a @b def f` is `f = a(b(f))`: the nearest decorator runs first,
-        // so they are applied bottom-up.
-        if (a.nodes[0]->tag == "decorators"_) {
-          const Ast& ds = *a.nodes[0];
-          for (size_t k = ds.nodes.size(); k-- > 0;) {
-            value = b.call_value(emit_expr(*ds.nodes[k]->nodes[0], ctx),
-                                 {b.array_lit({value}), b.nil_literal()});
-          }
+        for (size_t k = decorators.size(); k-- > 0;) {
+          value = b.call_value(decorators[k],
+                               {b.array_lit({value}), b.nil_literal()});
         }
         out.push_back(write_var(decl_of.at(fn_ident(a)), value, ctx, p));
         return b.block(out);

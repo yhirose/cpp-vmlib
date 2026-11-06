@@ -182,3 +182,23 @@ def flatten(rows):
 
 
 print(list(flatten([[1, 2], [3], [], [4, 5]])))
+
+# A decorated def runs its decorator expressions first, top to bottom,
+# then its defaults, and applies the nearest decorator first.
+def announce(tag):
+    print("decorator", tag)
+    def apply(f):
+        print("apply", tag)
+        return f
+    return apply
+
+def default_of(v):
+    print("default", v)
+    return v
+
+@announce("outer")
+@announce("inner")
+def decorated(x=default_of(1)):
+    return x
+
+print(decorated())
