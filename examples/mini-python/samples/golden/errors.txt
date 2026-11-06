@@ -11,3 +11,7 @@ inner caught v
 outer caught TypeError
 caught IndexError: list index out of range
 caught KeyError: 'zz'
+''
+'5'
+"('a', 2)"
+"('x', 'y')"

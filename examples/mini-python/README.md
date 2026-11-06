@@ -111,6 +111,19 @@ Three things follow from it once and are then just true:
 `samples/functions.py` is the whole of this, checked line for line against
 `python3`, including the exact wording of `TypeError`'s three messages.
 
+A builtin -- `len(x)`, `xs.append(v)`, `s.strip(chars)` -- is emitted
+inline by name rather than called through the convention, so its
+arguments are emitted where it stands: each once, in source order, and
+shared by every branch a method name can take (a method of the program's
+own by that name gets them as any call does). Each builtin states the
+arguments it takes beside the call it builds. A count or a keyword it
+refuses runs them all first and raises CPython's `TypeError`, worded in
+the shape CPython uses for that builtin ("list.append() takes exactly
+one argument (2 given)", "pop expected at most 1 argument, got 2"),
+which is CPython 3.11's; one CPython takes but this front end does not
+implement -- `replace`'s count, `print`'s `end=` -- raises
+`NotImplementedError` instead.
+
 ## Inheritance, and the walk it is
 
 There is no class in this IR and nothing was added for one: a class is an

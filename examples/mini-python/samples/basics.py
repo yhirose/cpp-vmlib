@@ -72,3 +72,13 @@ def cells_of():
 cells_of()[noisy(0)] = noisy(5)
 cells_of()[noisy(1)] += noisy(2)
 print(cells)
+
+# A builtin's arguments run once, in source order, whatever order it reads
+# them in; one it does not take is a TypeError once they have run; and a
+# conversion called with nothing is its type's empty value.
+print(sorted([2, 3, 1], reverse=noisy(True), key=noisy(None)))
+try:
+    len(noisy([1]), noisy([2]))
+except TypeError:
+    print("TypeError")
+print(repr(str()), int(), float(), list(), bool(), tuple())

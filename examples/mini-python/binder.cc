@@ -782,7 +782,7 @@ struct Binder {
         "$kwcheck", "$kwmerge", "$missing", "$toomany",
         // Inheritance: a chain of ordinary objects, walked.
         "$clsfind", "$isname", "$isinstv", "$isinst", "$supercall",
-        "$excinit", "$noinit", "$dunder",
+        "$excinit", "$excmsg", "$noinit", "$dunder",
         // Tuples, and the sequence builtins that hand them back.
         "$tuple", "$untup", "$istup", "$tupstr", "$unpack", "$items",
         "$values", "$enumerate", "$zip", "$sorted", "$sum", "$minmax",
@@ -2316,12 +2316,23 @@ struct Binder {
     r.finish("$supercall");
   }
 
+  // What str() of an exception made with these arguments says, as
+  // BaseException.__str__ does: nothing for none, the one argument, or the
+  // tuple of them all.
+  void rt_excmsg() {
+    RT r(*this);
+    const auto [a] = r.params("a");
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(0)), r.ret(r.S(""))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(1)),
+                r.ret(r.idx(r.L(a), r.I(0)))));
+    r.add(r.ret(r.call("$str", {r.call("$tuple", {r.L(a)})})));
+    r.finish("$excmsg");
+  }
+
   void rt_excinit() {
     RT r(*this);
     const auto [self, a] = r.params("self", "a");
-    r.add(r.sidx(r.L(self), r.S(kMsgKey),
-                 r.iff(r.bin(BinOp::Gt, r.len(r.L(a)), r.I(0)),
-                       r.idx(r.L(a), r.I(0)), r.S(""))));
+    r.add(r.sidx(r.L(self), r.S(kMsgKey), r.call("$excmsg", {r.L(a)})));
     r.add(r.ret(r.Nil()));
     r.finish("$excinit");
   }
@@ -3084,7 +3095,7 @@ struct Binder {
     rt_acons(); rt_aext(); rt_rest(); rt_kwhas(); rt_hasname(); rt_kwrest();
     rt_kwcheck(); rt_kwmerge(); rt_missing(); rt_toomany();
     rt_clsfind(); rt_isname(); rt_isinstv(); rt_isinst(); rt_supercall();
-    rt_excinit(); rt_noinit(); rt_dunder();
+    rt_excmsg(); rt_excinit(); rt_noinit(); rt_dunder();
     rt_tuple(); rt_untup(); rt_istup(); rt_tupstr(); rt_unpack(); rt_items();
     rt_values(); rt_enumerate(); rt_zip(); rt_sorted(); rt_sum();
     rt_minmax(); rt_next();
@@ -3194,8 +3205,8 @@ struct Binder {
   // the two is refused as unsupported rather than as Python's TypeError,
   // which it would not be. `kw` names the keywords taken, in the order
   // `make` wants them; `py_kw` any more that CPython takes, `py_any_kw`
-  // that it takes any at all. `refused` replaces the wording outright for
-  // the few builtins with a sentence of their own.
+  // that it takes any at all. `few` and `many` replace the wording outright
+  // for the few builtins with a sentence of their own.
   enum class Shape { One, NoArgs, Clinic, Old };
   struct Takes {
     size_t min = 0;
@@ -3205,7 +3216,8 @@ struct Binder {
     std::vector<std::string> kw = {};
     std::vector<std::string> py_kw = {};
     bool py_any_kw = false;
-    std::string refused = {};
+    std::string few = {};
+    std::string many = {};
     std::string kw_owner = {};  // the name a keyword error gives, if not its own
   };
 
@@ -3254,7 +3266,8 @@ struct Binder {
     }
     const size_t n = g.pos.size();
     if (n < t.min || n > t.py_max) {
-      if (!t.refused.empty()) return refuse("TypeError", t.refused);
+      if (n < t.min && !t.few.empty()) return refuse("TypeError", t.few);
+      if (n > t.py_max && !t.many.empty()) return refuse("TypeError", t.many);
       if (t.max == 0 && t.py_max == 0 && !t.kw.empty()) {
         return refuse("TypeError", name + "() takes no positional arguments");
       }
@@ -3307,20 +3320,6 @@ struct Binder {
     for (const NodeId v : g.pos) pos.push_back(spill(v));
     for (size_t j = 0; j < g.kw.size(); ++j) kwv[at[j]] = spill(g.kw[j].second);
     return b.sequence(pre, make(pos, kwv));
-  }
-
-  // The positional-only path, for the builtins -- which are emitted inline
-  // and so are not reached through the calling convention below.
-  std::vector<NodeId> emit_args(const Ast* args, FnCtx& ctx) {
-    std::vector<NodeId> out;
-    if (args == nullptr || args->tag != "args"_) return out;
-    for (const auto& c : args->nodes) {
-      if (c->tag == "kwarg"_ || c->tag == "splat"_ || c->tag == "kwsplat"_) {
-        fail(*c, "a builtin takes positional arguments only here");
-      }
-      out.push_back(emit_expr(*c, ctx));
-    }
-    return out;
   }
 
   // -- The calling convention, at the call site ---------------------------
@@ -4465,32 +4464,6 @@ struct Binder {
       fail(prim, "'" + g + "' must be called here");
     }
     const Ast& call = *a.nodes[i];
-    if (g == "sorted") {
-      ++i;
-      const Ast* al = call.nodes.empty() ? nullptr : call.nodes[0].get();
-      if (al == nullptr || al->nodes.empty()) {
-        fail(prim, "sorted() takes an iterable here");
-      }
-      NodeId seq;
-      NodeId key = b.nil_literal(p);
-      NodeId rev = b.bool_literal(false, p);
-      for (const auto& c : al->nodes) {
-        if (c->tag == "kwarg"_) {
-          const std::string kn(c->nodes[0]->token);
-          if (kn == "key") {
-            key = emit_expr(*c->nodes[1], ctx);
-          } else if (kn == "reverse") {
-            rev = emit_expr(*c->nodes[1], ctx);
-          } else {
-            fail(*c, "sorted() takes key= and reverse= here");
-          }
-          continue;
-        }
-        if (seq.v != NodeId{}.v) fail(*c, "sorted() takes one iterable here");
-        seq = emit_expr(*c, ctx);
-      }
-      return helper("$sorted", {seq, key, rev}, p);
-    }
     if (g == "isinstance") {
       // The second argument is usually a bare type name, which is not a
       // value here -- `int` and `ValueError` are things this front end
@@ -4508,68 +4481,145 @@ struct Binder {
               : emit_expr(cls, ctx);
       return helper("$isinst", {emit_expr(what, ctx), cv}, p);
     }
-    std::vector<NodeId> args =
-        emit_args(call.nodes.empty() ? nullptr : call.nodes[0].get(), ctx);
+    // Every other builtin: its arguments run once, in source order, and
+    // each states what it takes beside the call it builds (see takes).
+    const Given given =
+        emit_given(call.nodes.empty() ? nullptr : call.nodes[0].get(), ctx);
     ++i;
-    const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal(p);
+    using Args = const std::vector<NodeId>&;
+    const auto opt = [&](Args v, size_t k, NodeId dflt) {
+      return k < v.size() && v[k].valid() ? v[k] : dflt;
+    };
+    const auto call_it = [&](const Takes& t,
+                             const std::function<NodeId(Args, Args)>& make) {
+      return takes(given, t, g, ctx, p, make);
+    };
+    const size_t any = std::string::npos;
+    const Takes one{1, 1, 1, Shape::One};
+    const auto clinic = [](size_t lo, size_t hi, size_t py_hi) {
+      return Takes{lo, hi, py_hi, Shape::Clinic};
+    };
+    const auto old = [](size_t lo, size_t hi, size_t py_hi) {
+      return Takes{lo, hi, py_hi, Shape::Old};
     };
 
     if (is_exception_name(g)) {
-      return b.object_lit({{b.str_literal(kExcKey, p), b.str_literal(g, p)},
-                           {b.str_literal(kMsgKey, p),
-                            args.empty() ? b.str_literal("", p) : args[0]}},
-                          p);
+      return call_it(Takes{0, any, any}, [&](Args a, Args) {
+        return b.object_lit({{b.str_literal(kExcKey, p), b.str_literal(g, p)},
+                             {b.str_literal(kMsgKey, p),
+                              helper("$excmsg", {b.array_lit(a, p)}, p)}},
+                            p);
+      });
+    }
+    if (g == "sorted") {
+      Takes t{1, 1, 1, Shape::Clinic, {"key", "reverse"}};
+      t.kw_owner = "sort";
+      return call_it(t, [&](Args a, Args kw) {
+        return helper("$sorted",
+                      {a[0], opt(kw, 0, b.nil_literal(p)),
+                       opt(kw, 1, b.bool_literal(false, p))},
+                      p);
+      });
     }
     if (g == "print") {
-      std::vector<NodeId> parts;
-      for (const NodeId v : args) parts.push_back(helper("$str", {v}, p));
-      return native("print", {b.array_lit(parts, p)}, p);
+      Takes t{0, any, any};
+      t.py_kw = {"sep", "end", "file", "flush"};
+      return call_it(t, [&](Args a, Args) {
+        std::vector<NodeId> parts;
+        for (const NodeId v : a) parts.push_back(helper("$str", {v}, p));
+        return native("print", {b.array_lit(parts, p)}, p);
+      });
     }
-    if (g == "len") return helper("$len", {a0(0)}, p);
-    if (g == "str") return helper("$str", {a0(0)}, p);
-    if (g == "int") return helper("$toint", {a0(0)}, p);
-    if (g == "float") return helper("$tofloat", {a0(0)}, p);
-    if (g == "list") return helper("$tolist", {a0(0)}, p);
-    if (g == "bool") return helper("$truthy", {a0(0)}, p);
-    if (g == "abs") return helper("$pyabs", {a0(0)}, p);
-    if (g == "type") return helper("$type", {a0(0)}, p);
-    if (g == "repr") return helper("$repr", {a0(0)}, p);
-    if (g == "next") {
-      return helper("$next",
-                    {a0(0), a0(1), b.bool_literal(args.size() > 1, p)}, p);
+    // A conversion called with nothing answers its type's empty value.
+    const auto convert = [&](const Takes& t, const char* fn, NodeId empty) {
+      return call_it(t, [&, fn, empty](Args a, Args) {
+        return a.empty() ? empty : helper(fn, {a[0]}, p);
+      });
+    };
+    if (g == "len") {
+      return call_it(one, [&](Args a, Args) { return helper("$len", {a[0]}, p); });
     }
+    if (g == "str") {
+      Takes t = old(0, 1, 3);
+      t.py_kw = {"object", "encoding", "errors"};
+      return convert(t, "$str", b.str_literal("", p));
+    }
+    if (g == "int") {
+      Takes t = old(0, 1, 2);
+      t.py_kw = {"base"};
+      return convert(t, "$toint", b.literal(0, p));
+    }
+    if (g == "float") return convert(clinic(0, 1, 1), "$tofloat", b.double_literal(0.0, p));
+    if (g == "list") return convert(clinic(0, 1, 1), "$tolist", b.array_lit({}, p));
+    if (g == "bool") return convert(clinic(0, 1, 1), "$truthy", b.bool_literal(false, p));
     if (g == "tuple") {
-      return helper("$tuple", {helper("$tolist", {a0(0)}, p)}, p);
+      return call_it(clinic(0, 1, 1), [&](Args a, Args) {
+        return helper("$tuple",
+                      {a.empty() ? b.array_lit({}, p)
+                                 : helper("$tolist", {a[0]}, p)},
+                      p);
+      });
+    }
+    if (g == "abs") {
+      return call_it(one, [&](Args a, Args) { return helper("$pyabs", {a[0]}, p); });
+    }
+    if (g == "repr") {
+      return call_it(one, [&](Args a, Args) { return helper("$repr", {a[0]}, p); });
+    }
+    if (g == "type") {
+      // type takes one argument or three, never two; type(name, bases,
+      // dict) makes a class, which is not implemented.
+      Takes t{1, 1, given.pos.size() == 3 ? size_t{3} : size_t{1}};
+      t.few = t.many = "type() takes 1 or 3 arguments";
+      return call_it(t, [&](Args a, Args) { return helper("$type", {a[0]}, p); });
+    }
+    if (g == "next") {
+      return call_it(clinic(1, 2, 2), [&](Args a, Args) {
+        return helper("$next",
+                      {a[0], opt(a, 1, b.nil_literal(p)),
+                       b.bool_literal(a.size() > 1, p)},
+                      p);
+      });
     }
     if (g == "enumerate") {
-      return helper("$enumerate",
-                    {a0(0), args.size() > 1 ? args[1] : b.literal(0, p)}, p);
+      Takes t = old(1, 2, 2);
+      t.py_kw = {"iterable", "start"};
+      t.few = "enumerate() missing required argument 'iterable'";
+      return call_it(t, [&](Args a, Args) {
+        return helper("$enumerate", {a[0], opt(a, 1, b.literal(0, p))}, p);
+      });
     }
     if (g == "zip") {
-      if (args.size() != 2) fail(prim, "zip() takes two iterables here");
-      return helper("$zip", {args[0], args[1]}, p);
+      return call_it(Takes{2, 2, any}, [&](Args a, Args) {
+        return helper("$zip", {a[0], a[1]}, p);
+      });
     }
     if (g == "sum") {
-      return helper("$sum",
-                    {a0(0), args.size() > 1 ? args[1] : b.literal(0, p)}, p);
+      Takes t = old(1, 2, 2);
+      t.py_kw = {"start"};
+      t.few = "sum() takes at least 1 positional argument (0 given)";
+      return call_it(t, [&](Args a, Args) {
+        return helper("$sum", {a[0], opt(a, 1, b.literal(0, p))}, p);
+      });
     }
     if (g == "min" || g == "max") {
-      const NodeId ismax = b.bool_literal(g == "max", p);
-      // `min(xs)` scans one iterable; `min(a, b)` scans its own arguments.
-      return helper("$minmax",
-                    {args.size() == 1 ? args[0] : b.array_lit(args, p), ismax},
-                    p);
+      Takes t = clinic(1, any, any);
+      t.py_kw = {"key", "default"};
+      return call_it(t, [&](Args a, Args) {
+        // `min(xs)` scans one iterable; `min(a, b)` scans its own arguments.
+        return helper("$minmax",
+                      {a.size() == 1 ? a[0] : b.array_lit(a, p),
+                       b.bool_literal(g == "max", p)},
+                      p);
+      });
     }
     if (g == "range") {
-      if (args.size() == 1) {
-        return helper("$range",
-                      {b.literal(0, p), args[0], b.literal(1, p)}, p);
-      }
-      return helper("$range",
-                    {a0(0), a0(1),
-                     args.size() > 2 ? args[2] : b.literal(1, p)},
-                    p);
+      return call_it(clinic(1, 3, 3), [&](Args a, Args) {
+        if (a.size() == 1) {
+          return helper("$range", {b.literal(0, p), a[0], b.literal(1, p)}, p);
+        }
+        return helper("$range", {a[0], a[1], opt(a, 2, b.literal(1, p))}, p);
+      });
     }
     fail(prim, "'" + g + "' is not supported here");
   }

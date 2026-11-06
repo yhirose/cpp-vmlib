@@ -84,3 +84,12 @@ print(selective("type"))
 # Container failures raise the exceptions Python names them by.
 print(attempt(lambda: [1, 2][9]))
 print(attempt(lambda: {"a": 1}["zz"]))
+
+# An exception's message is what it was made with: nothing, the one
+# argument, or the tuple of them all -- for a class of the program's own
+# too.
+class Detailed(Exception):
+    pass
+
+for made in [ValueError(), ValueError(5), ValueError("a", 2), Detailed("x", "y")]:
+    print(repr(str(made)))
