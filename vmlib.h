@@ -258,7 +258,10 @@ class Runtime {
   friend struct HeapObj;
   friend void heap_release_to_zero(HeapObj* h);
   void link(HeapObj* o);
+  // Off the heap list. unlink, for an object still whole, also takes it off
+  // the owned stack; detach is the list alone, for ~HeapObj.
   void unlink(HeapObj* o);
+  void detach(HeapObj* o);
   void mark();
   template <class ForEach>
   void strip_and_free(ForEach for_each);
@@ -4287,14 +4290,19 @@ inline void Runtime::link(HeapObj* o) {
   ++live_;
 }
 
-inline void Runtime::unlink(HeapObj* o) {
+inline void Runtime::detach(HeapObj* o) {
   if (o->prev) o->prev->next = o->next;
   else head_ = o->next;
   if (o->next) o->next->prev = o->prev;
   o->prev = o->next = nullptr;
   --live_;
-  // Every path that frees an object comes through here, which makes it the
-  // one place an owned-stack entry is tombstoned.
+}
+
+inline void Runtime::unlink(HeapObj* o) {
+  detach(o);
+  // Every path that frees an object comes through here before the object
+  // is destroyed, which makes it the one place an owned-stack entry is
+  // tombstoned.
   if (o->kind == ValueTag::Object) owned_unregister(static_cast<ObjectObj*>(o));
 }
 
@@ -4749,8 +4757,13 @@ inline HeapObj::HeapObj(ValueTag k) : rc(1), kind(k), owner(Runtime::current()) 
   if (owner) owner->link(this);
 }
 
+// Every free unlinks first and clears `owner`, so one is left here only when
+// a constructor above this one threw. That object never got as far as a
+// drop key, so it is on no owned stack -- and its derived part is already
+// destroyed, which is why only the list is touched: reading an ObjectObj's
+// owned_idx from here would read an object whose lifetime has ended.
 inline HeapObj::~HeapObj() {
-  if (owner) owner->unlink(this);
+  if (owner) owner->detach(this);
 }
 
 namespace detail {
