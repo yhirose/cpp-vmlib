@@ -216,6 +216,12 @@ Quietly different:
   property of the same name wins over them, a field does not, and
   everything else after a `.` that names neither a method nor a declared
   property is a field.
+* **Static field initializers run before `Main`**, class by class in
+  declaration order, each class's in textual order -- a static
+  constructor of the class's own, run once every class table and static
+  method exists. .NET runs a class's at its first use instead, so the
+  values agree and a side effect in an initializer happens at a
+  different moment.
 
 ## Where it fought back
 

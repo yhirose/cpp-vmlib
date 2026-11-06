@@ -107,6 +107,7 @@ struct FnInfo {
   bool is_generator = false;
   bool is_async = false;
   bool synth = false;  // a `using`'s dispose thunk, built by hand
+  bool static_init = false;  // a class's static field initializers
   std::string name = "?";
   std::vector<int32_t> params;  // params[0] is always `this`
   int32_t cls = -1;             // the class this method belongs to
@@ -139,6 +140,9 @@ struct ClassInfo {
   std::vector<AutoProp> auto_props;
   const Ast* ctor = nullptr;
   int32_t ctor_fn = -1;
+  // The static field initializers, as the static constructor C# makes of
+  // them; -1 when no static field has one.
+  int32_t cctor_fn = -1;
 };
 
 // default(T): what a field, an auto property or a static field of type T
@@ -466,6 +470,31 @@ struct Binder {
     // The field initializers and the base call run inside the constructor,
     // so they resolve there too.
     resolve_ctor_extras(ci);
+    resolve_static_init(ci, top);
+  }
+
+  // A class's static field initializers are the static constructor C#
+  // makes of them: a function of the class's own -- so a static field or
+  // method it names resolves as one inside a static method would -- that
+  // sets each field in textual order. The file scope runs it once every
+  // class table and static method exists, before Main.
+  void resolve_static_init(ClassInfo& ci, int32_t top) {
+    bool any = false;
+    for (const Ast* fd : ci.static_fields) any = any || field_parts(*fd).init;
+    if (!any) return;
+    const int32_t cls = class_by_name.at(ci.name);
+    const int32_t f = new_fn(top, ci.name + ".cctor");
+    fns[static_cast<size_t>(f)].cls = cls;
+    fns[static_cast<size_t>(f)].static_init = true;
+    rs.push_scope();
+    fns[static_cast<size_t>(f)].params.push_back(declare("this", f));
+    // It writes the fields through the class's own table.
+    rs.resolve(ci.name, f);
+    for (const Ast* fd : ci.static_fields) {
+      if (const Ast* init = field_parts(*fd).init) resolve_expr(*init, f);
+    }
+    rs.pop_scope();
+    ci.cctor_fn = f;
   }
 
   void resolve_ctor_extras(ClassInfo& ci) {
@@ -2024,6 +2053,18 @@ struct Binder {
       emit_ctor_prologue(classes[static_cast<size_t>(fi.cls)], ctx, body, p);
     }
     if (fi.body != nullptr) body.push_back(emit_block(*fi.body, ctx));
+    if (fi.static_init) {
+      const ClassInfo& ci = classes[static_cast<size_t>(fi.cls)];
+      for (const Ast* fd : ci.static_fields) {
+        const FieldParts sf = field_parts(*fd);
+        if (sf.init == nullptr) continue;
+        body.push_back(helper(
+            "$setf",
+            {read_var(ci.var, ctx, p), b.str_literal(std::string(sf.name->token)),
+             emit_expr(*sf.init, ctx)},
+            p));
+      }
+    }
 
     std::vector<NodeId> stmts;
     stmts.insert(stmts.end(), pre.begin(), pre.end());
@@ -2250,14 +2291,13 @@ struct Binder {
             b.str_literal(std::string(kMethodPrefix) + "set_" + ap.name),
             emit_auto_set(ap.name, p));
       }
-      // A static field without an initializer starts at its type's
-      // default.
+      // A static field starts at its type's default; its initializer, if
+      // any, runs in the class's static constructor below.
       for (const Ast* fd : ci.static_fields) {
         const FieldParts sf = field_parts(*fd);
         if (sf.name == nullptr) continue;
         kvs.emplace_back(b.str_literal(std::string(sf.name->token)),
-                         sf.init != nullptr ? emit_expr(*sf.init, ctx)
-                                            : default_of(sf.type, p));
+                         default_of(sf.type, p));
       }
       kvs.emplace_back(b.str_literal(kCtorKey),
                        emit_closure(ci.ctor_fn, ctx, p));
@@ -2276,7 +2316,13 @@ struct Binder {
       // The static's own function; its index was assigned in build().
       out.push_back(write_var(v, emit_closure(static_fn.at(v), ctx, p), ctx, p));
     }
-
+    // Every table and static method exists now, so each class's static
+    // initializers can run, class by class in declaration order.
+    for (const ClassInfo& ci : classes) {
+      if (ci.cctor_fn < 0) continue;
+      out.push_back(
+          b.call_value(emit_closure(ci.cctor_fn, ctx, p), {b.nil_literal()}));
+    }
     if (main_fn < 0) coreir_rt::fail("no static Main method", 0, 0);
     const int32_t main_var = static_by_name.at("Main");
     const auto [mk, mi] = rs.access(0, main_var);

@@ -14,6 +14,20 @@ class Holder {
   public int Echo(int x) { return x; }
 }
 
+// Static field initializers run in textual order, and may call a static
+// method and read the fields before them.
+class Seeded {
+  public static int Base = Seed();
+  static int Seed() { return 41; }
+  public static int Twice = Base * 2;
+  public static int Unset;
+  public static void Reset() { Unset = 0; }
+}
+
+class Derived2 {
+  public static int FromSeeded = Seeded.Twice + 1;
+}
+
 // A field or auto property nothing initialized holds its type's default.
 class Defaults {
   public int count;
@@ -182,5 +196,7 @@ class Program {
     Console.WriteLine(fresh.on);
     Console.WriteLine(fresh.label == null);
     Console.WriteLine(fresh.Auto + 2);
+    Console.WriteLine(Seeded.Base + " " + Seeded.Twice + " " + Seeded.Unset +
+                      " " + Derived2.FromSeeded);
   }
 }
