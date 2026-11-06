@@ -124,23 +124,24 @@ instance is an object pointing back at it; `C.new(...)` is a constructor
 this binder synthesizes:
 
 ```
-C = { "\x03init": <new>, "\x02m": <m>, "\x02drop": <drop>, "\x03name": "C" }
+C = { "\x01init": <new>, "\x01name": "C", "\x02m": <m>, "\x02drop": <drop> }
 C["new"] = MakeClosure(<synthesized ctor>, over the cell holding C)
 
 ctor(self, args...):
   inst = { "\x01class": C }
   inst["\x01drop"] = C["\x02drop"]        ; when the class declares one
-  C["\x03init"](inst, args...)
+  C["\x01init"](inst, args...)
   return inst
 ```
 
-Two prefixes, not one, and the difference matters: `"\x01" "drop"` is the
-runtime's own key, so a method table that stored its methods under the
-first prefix would make the *class itself* a resource. `0x02` also keeps
-methods out of `keys()` and out of a printed object, which is what culebra
-shows -- a class value prints as `{new: [function]}`. The declared `new`
-and the class's name sit under a third, `0x03`, so that a method named
-`init` or `name` is not the same key as either.
+Two prefixes, by who chose the name after them: `0x01` for the
+implementation's (`"\x01class"`, the runtime's `"\x01drop"`, and the class
+table's own `init` and `name`), `0x02` for the program's, its methods. The
+split matters: a method stored under the first would be the same key as
+those -- a method named `drop` would make the *class itself* a resource,
+one named `init` or `name` would overwrite the constructor or the name.
+`0x02` also keeps methods out of `keys()` and out of a printed object,
+which is what culebra shows -- a class value prints as `{new: [function]}`.
 
 The class binding is forced into a cell because its own constructor
 captures it. That is the chicken-and-egg of building the table and the

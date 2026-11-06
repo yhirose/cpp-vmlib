@@ -66,25 +66,24 @@ using namespace coreir;
 namespace mini_culebra {
 namespace {
 
-// The class table an instance points back at, and the destructor key the
-// runtime looks for. Both are spelled with a leading 0x01 for the reason
-// vmlib.h's kDropKey is: unspellable from a language whose identifiers are
-// printable, so a program cannot collide with them. (Split across two
-// string literals because "\x01class" would lex as one hex escape.)
+// Two prefixes, by who chose the name after them. 0x01 is a name the
+// implementation chose: an instance's class table and the runtime's
+// destructor key -- spelled with a leading 0x01 for the reason vmlib.h's
+// kDropKey is, unspellable from a language whose identifiers are
+// printable -- and, on the class table, the declared `new` the synthesized
+// constructor calls and the class's name. (Split across two string
+// literals because "\x01class" would lex as one hex escape.)
 constexpr char kClassKey[] = "\x01" "class";
-// Methods hang on the class table under a second prefix, not the first:
-// "\x01" "drop" is the runtime's own destructor key, and a class whose
-// method table used it would make the *class* a resource. 0x02 also keeps
-// every method out of `keys()` and out of a printed object, which is what
-// culebra shows -- a class value prints as `{new: [function]}`, its methods
-// being no more enumerable than an Error's fields are in JavaScript.
+constexpr char kInitKey[] = "\x01" "init";
+constexpr char kNameKey[] = "\x01" "name";
+// 0x02 is a name the program chose: its methods, on the class table. Not
+// 0x01, where a method named `drop` would be the runtime's destructor key
+// and make the *class* a resource, and a method named `init` or `name`
+// the class's own entries. 0x02 also keeps every method out of `keys()`
+// and out of a printed object, which is what culebra shows -- a class
+// value prints as `{new: [function]}`, its methods being no more
+// enumerable than an Error's fields are in JavaScript.
 constexpr char kMethodPrefix[] = "\x02";
-// What else the class table holds -- the declared `new` the synthesized
-// constructor calls, and the class's name -- goes under a third prefix:
-// under the methods' own, a method named `init` or `name` would be the
-// same key.
-constexpr char kInitKey[] = "\x03" "init";
-constexpr char kNameKey[] = "\x03" "name";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -1066,7 +1065,8 @@ struct Binder {
 
   // class C { new(...) {...} m(...) {...} drop() {...} }
   //
-  //   C = { "\x01init": <new>, "m": <m>, "drop": <drop> }   -- a cell
+  //   C = { "\x01init": <new>, "\x01name": "C", "\x02m": <m>,
+  //         "\x02drop": <drop> }   -- a cell
   //   C["new"] = MakeClosure(<synthesized constructor>, over C)
   //
   // The constructor is what turns the table into an instance: a fresh

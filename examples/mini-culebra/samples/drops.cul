@@ -143,7 +143,7 @@ fn run_escapes() {
 run_escapes()
 println("dropped with its holder: {log.size()}")
 
-# A temporary dies when the last thing holding it is done with it: a
+# A temporary handed to a call dies when the call is done with it: a
 # receiver when its method returns, before println prints the answer.
 class Tagged {
   new(id) { self.id = id }
