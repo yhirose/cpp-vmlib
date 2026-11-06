@@ -20,6 +20,12 @@ fn noisy_point() {
   Point.new(1, 2)
 }
 println("receiver: {noisy_point().norm2()}")
+# A call inside another call's arguments, or inside an index assigned
+# through, keeps its receiver in a temporary of its own, apart from the
+# outer one's.
+mut slots = [0, 0, 0]
+slots[Point.new(1, 0).x] += Point.new(5, 0).x
+println("nested: {slots} {p.label(Point.new(7, 0).label('Q'))}")
 println("args: {p.label('P')}")
 println("display: {p}")
 println("type: {type_of(p)} {type_of(Point)}")

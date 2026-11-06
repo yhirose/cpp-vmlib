@@ -1359,13 +1359,13 @@ struct Binder {
         case "membersfx"_: {
           const std::string name(sfx.nodes[0]->token);
           if (i + 1 < limit && a.nodes[i + 1]->tag == "callsfx"_) {
-            std::vector<NodeId> args =
-                emit_args(*a.nodes[i + 1]->nodes[0], ctx);
+            const Ast& arglist = *a.nodes[i + 1]->nodes[0];
             ++i;
             if (is_builtin_method(name)) {
               // culebra's standard library, supplied by the host: the
               // receiver goes first, and `map` calls back into the program
               // from C++ (see stdlib()).
+              std::vector<NodeId> args = emit_args(arglist, ctx);
               args.insert(args.begin(), cur);
               cur = native(name, args, p);
               break;
@@ -1375,9 +1375,12 @@ struct Binder {
             // both where the method is found and that `self`, so it runs
             // once, into a temporary both read -- scoped to the call, so
             // a receiver nothing else holds dies when the call returns, as
-            // it would have as a temporary value.
+            // it would have as a temporary value. The slot is claimed
+            // before the arguments are emitted: they run after it is
+            // written, so a scope of theirs must not hand it out again.
             const int32_t mark = ctx.mark();
             const int32_t t = ctx.alloc_local("$recv");
+            std::vector<NodeId> args = emit_args(arglist, ctx);
             const NodeId self = b.varref(VarKind::Local, t, p);
             const NodeId f =
                 helper("$methodof", {self, b.str_literal(name, p)}, p);
@@ -1445,10 +1448,13 @@ struct Binder {
     if (!member && last.tag != "indexsfx"_) {
       fail(last, "cannot assign to this expression");
     }
-    const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
-                              : emit_expr(*last.nodes[0], ctx);
+    // The temporaries are claimed before the key is emitted: the key runs
+    // after `$recv` is written, so a scope inside it (a method call, a
+    // block) must not hand that slot out again.
     const int32_t tr = ctx.alloc_local("$recv");
     const int32_t tk = ctx.alloc_local("$key");
+    const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
+                              : emit_expr(*last.nodes[0], ctx);
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);

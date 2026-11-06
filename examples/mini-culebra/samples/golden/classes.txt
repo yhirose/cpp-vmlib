@@ -3,6 +3,7 @@ method: 25
 chained: 100
 noisy
 receiver: 5
+nested: [0, 5, 0] Q(7, 0)(3, 4)
 args: P(3, 4)
 display: Point {mut x: 3, mut y: 4}
 type: Object Object
