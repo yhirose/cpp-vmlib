@@ -628,6 +628,22 @@ struct Binder {
     };
     r.add(r.iff(r.both(num(r.typ(a)), num(r.typ(b))),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    // A number's == hands anything that is not a number to that value's
+    // own == (Integer#== and Float#== in Ruby).
+    r.add(r.iff(r.both(num(r.typ(a)), r.is(r.typ(b), "object")),
+                r.ret(r.call("$eq", {r.L(b), r.L(a)}))));
+    // `a == b` is a call of a's ==, so an instance whose class defines one
+    // answers whatever it says, whatever b is; without one it is identity.
+    r.add(r.iff(
+        r.is(r.typ(a), "object"),
+        r.blk({r.set(c, r.call("$classof", {r.L(a)})),
+               r.iff(r.isnt(r.typ(c), "nil"),
+                     r.blk({r.set(m_, r.call("$mfind", {r.L(c), r.S("\x02==")})),
+                            r.iff(r.isnt(r.typ(m_), "nil"),
+                                  r.ret(r.call("$truthy",
+                                               {r.callb(r.L(m_),
+                                                        {r.L(a), r.L(b)})})))})),
+               r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}))})));
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
     r.add(r.iff(r.either(r.is(r.typ(a), "bool"), r.is(r.typ(a), "string")),
@@ -664,13 +680,6 @@ struct Binder {
                                  r.ret(r.Bo(false))),
                            r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                r.ret(r.Bo(true))})));
-    r.add(r.set(c, r.call("$classof", {r.L(a)})));
-    r.add(r.iff(
-        r.isnt(r.typ(c), "nil"),
-        r.blk({r.set(m_, r.call("$mfind", {r.L(c), r.S("\x02==")})),
-               r.iff(r.isnt(r.typ(m_), "nil"),
-                     r.ret(r.call("$truthy",
-                                  {r.callb(r.L(m_), {r.L(a), r.L(b)})})))})));
     r.add(r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)})));
     r.finish("$eq");
   }

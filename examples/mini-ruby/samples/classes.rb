@@ -158,3 +158,13 @@ begin
 rescue => e
   puts e.class
 end
+
+# `a == b` is a call of a's ==, whatever b is -- and a number's == hands
+# a value that is not a number to that value's own.
+class Loose
+  def ==(other)
+    true
+  end
+end
+loose = Loose.new
+p loose == 1, loose == "x", 1 == loose, 2.5 == loose, "x" == loose

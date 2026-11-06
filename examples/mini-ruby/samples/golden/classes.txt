@@ -29,3 +29,8 @@ with block
 in 0 []
 made_arg runs
 NoMethodError
+true
+true
+true
+true
+false
