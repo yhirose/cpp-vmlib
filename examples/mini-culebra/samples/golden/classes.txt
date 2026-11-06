@@ -1,6 +1,8 @@
 fields: 3 4
 method: 25
 chained: 100
+noisy
+receiver: 5
 args: P(3, 4)
 display: Point {mut x: 3, mut y: 4}
 type: Object Object

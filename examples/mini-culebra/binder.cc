@@ -1371,11 +1371,23 @@ struct Binder {
               break;
             }
             // Every function's parameter 0 is `self`, so a method call is
-            // an ordinary call with the receiver in front.
+            // an ordinary call with the receiver in front. The receiver is
+            // both where the method is found and that `self`, so it runs
+            // once, into a temporary both read -- scoped to the call, so
+            // a receiver nothing else holds dies when the call returns, as
+            // it would have as a temporary value.
+            const int32_t mark = ctx.mark();
+            const int32_t t = ctx.alloc_local("$recv");
+            const NodeId self = b.varref(VarKind::Local, t, p);
             const NodeId f =
-                helper("$methodof", {cur, b.str_literal(name, p)}, p);
-            args.insert(args.begin(), cur);
-            cur = b.call_value(f, args, p);
+                helper("$methodof", {self, b.str_literal(name, p)}, p);
+            args.insert(args.begin(), self);
+            const NodeId call =
+                b.block({b.assign(VarKind::Local, t, cur, p),
+                         b.call_value(f, args, p)},
+                        p);
+            const int32_t end = ctx.release(mark);
+            cur = b.scope(mark, end, call, p);
             break;
           }
           cur = helper("$mem", {cur, b.str_literal(name, p)}, p);

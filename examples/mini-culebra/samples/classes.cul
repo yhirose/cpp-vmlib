@@ -13,6 +13,13 @@ let p = Point.new(3, 4)
 println("fields: {p.x} {p.y}")
 println("method: {p.norm2()}")
 println("chained: {p.scaled(2).norm2()}")
+# The receiver is where the method is found and the `self` it gets, and
+# runs once for both.
+fn noisy_point() {
+  println("noisy")
+  Point.new(1, 2)
+}
+println("receiver: {noisy_point().norm2()}")
 println("args: {p.label('P')}")
 println("display: {p}")
 println("type: {type_of(p)} {type_of(Point)}")
