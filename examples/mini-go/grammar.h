@@ -133,7 +133,14 @@ inline constexpr const char* kGrammar = R"(
 
   strlit     <- '"' < ('\\' . / [^"\\])* > '"' _
   number     <- < [0-9]+ ('.' [0-9]+)? > _
-  ident      <- < [a-zA-Z_] [a-zA-Z0-9_]* > _
+  # A keyword is not an identifier: without this `if <-ch {` reads as a
+  # send to a channel named `if`.
+  ident      <- !keyword < [a-zA-Z_] [a-zA-Z0-9_]* > _
+  keyword    <- ('break' / 'case' / 'chan' / 'const' / 'continue' / 'default'
+              / 'defer' / 'else' / 'fallthrough' / 'for' / 'func' / 'go'
+              / 'goto' / 'if' / 'import' / 'interface' / 'map' / 'package'
+              / 'range' / 'return' / 'select' / 'struct' / 'switch' / 'type'
+              / 'var') ![a-zA-Z0-9_]
 
   ~_         <- ([ \t\r\n] / '//' [^\n]*)*
   ~__        <- ![a-zA-Z0-9_] _

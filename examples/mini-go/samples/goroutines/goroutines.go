@@ -99,6 +99,14 @@ func main() {
 	} else {
 		fmt.Println(0)
 	}
+
+	// A receive can head an `if` -- `if` is a keyword, not the name of a
+	// channel being sent to.
+	var flag chan int32 = make(chan int32)
+	go send(flag, 7)
+	if <-flag == 7 {
+		fmt.Println(7)
+	}
 }
 
 func send(ch chan int32, v int32) {
