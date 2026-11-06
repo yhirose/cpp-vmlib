@@ -134,5 +134,18 @@ class Program {
     } catch (Exception) {
       Console.WriteLine("null receiver");
     }
+
+    // An assignment is an expression worth the value assigned -- to a
+    // local, a property (whatever its setter does), or an element.
+    int assigned = 0;
+    Holder held = new Holder();
+    List<int> slots = new List<int>();
+    slots.Add(0);
+    Console.WriteLine(assigned = 5);
+    Console.WriteLine(held.Held = 7);
+    Console.WriteLine(held.Held += 2);
+    Console.WriteLine(slots[0] = 4);
+    int chained = assigned = 6;
+    Console.WriteLine(assigned + chained);
   }
 }

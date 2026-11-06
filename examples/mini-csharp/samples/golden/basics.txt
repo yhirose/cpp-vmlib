@@ -37,3 +37,8 @@ evaluated argument
 null receiver
 evaluated value
 null receiver
+5
+7
+9
+4
+12

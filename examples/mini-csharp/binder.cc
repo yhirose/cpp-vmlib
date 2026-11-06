@@ -1226,11 +1226,12 @@ struct Binder {
   }
 
   NodeId emit_expr_stmt(const Ast& a, FnCtx& ctx) {
+    if (a.tag == "assign"_) return emit_assign(a, ctx, false);
     if (!is_incdec(a)) return emit_expr(a, ctx);
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const bool up = a.nodes.back()->token == "++";
-    return emit_store(a, a.nodes.size() - 1, ctx, p, [&](auto&& cur) {
+    return emit_store(a, a.nodes.size() - 1, ctx, p, false, [&](auto&& cur) {
       return b.binary(up ? BinOp::Add : BinOp::Sub, cur(), b.literal(1));
     });
   }
@@ -1512,7 +1513,7 @@ struct Binder {
         return acc;
       }
       case "assign"_:
-        return emit_assign(a, ctx);
+        return emit_assign(a, ctx, true);
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
       default:
@@ -1777,19 +1778,34 @@ struct Binder {
   }
 
 
+  // `as_value` asks for the assigned value as the result -- what
+  // `Console.WriteLine(x = 5)` prints. A field's and an element's store
+  // already answers it; a local is read back after the write, and a
+  // property's value is kept in a temporary, since its setter answers
+  // nothing. A statement does not ask, and the store alone is what it
+  // compiles to.
   template <typename Combine>
   NodeId emit_store(const Ast& target, size_t limit, FnCtx& ctx, SrcPos p,
-                    Combine combine) {
+                    bool as_value, Combine combine) {
     auto b = Builder(m).at(p);
     if (target.tag == "postfix"_ && limit == 1) {
-      return emit_store(*target.nodes[0], 0, ctx, p, combine);
+      return emit_store(*target.nodes[0], 0, ctx, p, as_value, combine);
     }
+    const auto set_prop = [&](NodeId self, const std::string& name,
+                              NodeId value) {
+      if (!as_value) return emit_prop_set(self, name, value, ctx, p);
+      const int32_t tv = ctx.alloc_local("$val");
+      const NodeId V = b.varref(VarKind::Local, tv);
+      return b.block({b.assign(VarKind::Local, tv, value),
+                      emit_prop_set(self, name, V, ctx, p), V});
+    };
     if (target.tag == "ident"_) {
       const auto it = ref_of.find(&target);
       if (it != ref_of.end()) {
         const int32_t v = it->second;
         const auto read = [&] { return read_var(v, ctx, p); };
-        return write_var(v, combine(read), ctx, p);
+        const NodeId write = write_var(v, combine(read), ctx, p);
+        return as_value ? b.block({write, read()}) : write;
       }
       if (field_refs.count(&target) || static_field_refs.count(&target)) {
         const NodeId key = b.str_literal(std::string(target.token));
@@ -1808,7 +1824,7 @@ struct Binder {
         const std::string name(target.token);
         const NodeId self = this_of(ctx, p);
         const auto read = [&] { return emit_prop_get(self, name, ctx, p); };
-        return emit_prop_set(self, name, combine(read), ctx, p);
+        return set_prop(self, name, combine(read));
       }
       fail(target, "cannot assign to this");
     }
@@ -1827,7 +1843,7 @@ struct Binder {
       const NodeId R = b.varref(VarKind::Local, tr);
       const auto read = [&] { return emit_prop_get(R, name, ctx, p); };
       return b.block({b.assign(VarKind::Local, tr, recv),
-                      emit_prop_set(R, name, combine(read), ctx, p)});
+                      set_prop(R, name, combine(read))});
     }
     const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
                               : emit_expr(*last.nodes[0], ctx);
@@ -1844,13 +1860,14 @@ struct Binder {
          helper(member ? "$setf" : "$setidx", {R, K, combine(read)}, p)});
   }
 
-  NodeId emit_assign(const Ast& a, FnCtx& ctx) {
+  NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const std::string op(a.nodes[1]->token);
     const Ast& target = *a.nodes[0];
     const size_t limit = target.tag == "postfix"_ ? target.nodes.size() : 0;
-    return emit_store(target, limit, ctx, p, [&](auto&& cur) -> NodeId {
+    return emit_store(target, limit, ctx, p, as_value,
+                      [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(*a.nodes[2], ctx);
       if (op == "=") return v;
       if (op == "+=") return helper("$add", {cur(), v}, p);
