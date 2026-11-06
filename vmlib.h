@@ -7231,8 +7231,10 @@ struct Exec {
   // fill_params into the callee's locals.
   //
   // What take_args hands fill_params: how many arguments the fixed params
-  // take -- the extras stay with the caller, or go to the rest param -- and,
-  // for a chunk with a rest param, the fresh array of those extras.
+  // take -- the extras go to the rest param, or stay with a caller that
+  // only lends its arguments, or are released when the call takes its
+  // window (see push_closure_taking) -- and, for a chunk with a rest param,
+  // the fresh array of those extras.
   struct TakenArgs {
     int32_t fixed = 0;
     Value rest;
@@ -7250,7 +7252,14 @@ struct Exec {
     if (!fits && !ch.lenient_arity) arity_mismatch(ch, argc, pos);
     TakenArgs t;
     t.fixed = std::min(argc, fixed);
-    if (ch.rest_param) t.rest = rest_array(args, fixed, argc);
+    if (ch.rest_param) {
+      t.rest = rest_array(args, fixed, argc);
+    } else if (argc > fixed) {
+      // A lenient callee's extras: released here, before anything about
+      // the caller's frame has changed, when the window is the call's to
+      // take; a destructor they run is the caller's.
+      if constexpr (!std::is_const_v<Arg>) release_args(args, fixed, argc);
+    }
     return t;
   }
 
@@ -7329,11 +7338,11 @@ struct Exec {
 
   // A taken window's arguments the callee did not take: a native's, which
   // it only borrowed while it ran, and the extras a lenient callee
-  // without a rest param leaves over. Released at a point where the
-  // caller has moved on and nothing has been pushed, so a destructor they
-  // run is the caller's, as at the end of a statement. Out of line: both
-  // are off the path a closure call with the right count takes, which is
-  // the one every call loop runs.
+  // without a rest param leaves over (take_args). Released at a point
+  // where the caller has moved on and nothing has been pushed, so a
+  // destructor they run is the caller's, as at the end of a statement.
+  // Out of line: both are off the path a closure call with the right count
+  // takes, which is the one every call loop runs.
   VMLIB_NOINLINE static void release_args(Value* args, int32_t from,
                                           int32_t argc) {
     for (int32_t i = from; i < argc; ++i) coreir::detail::release_one(args[i]);
@@ -7363,11 +7372,6 @@ struct Exec {
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
     TakenArgs taken = take_args(ch, args, argc, pos);
-    if constexpr (taking) {
-      if (taken.fixed < argc && !ch.rest_param) {
-        release_args(args, taken.fixed, argc);
-      }
-    }
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.

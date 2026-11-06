@@ -100,10 +100,12 @@ struct Prog {
   coreir::NodeId collect() {
     return print(b.intrinsic(coreir::IntrinsicId::Collect, {}, p));
   }
-  // {name: "<name>", "\x01drop": <local 0>}
-  coreir::NodeId obj(const char* name) {
+  // {name: "<name>", "\x01drop": <drop>} -- main's local 0 unless the
+  // destructor is somewhere else in the function building it.
+  coreir::NodeId obj(const char* name) { return obj(name, local(0)); }
+  coreir::NodeId obj(const char* name, coreir::NodeId drop) {
     return b.object_lit({{str("name"), str(name)},
-                         {str("\x01" "drop"), local(0)}},
+                         {str("\x01" "drop"), drop}},
                         p);
   }
   coreir::NodeId mk(int32_t slot, const char* name) {
@@ -149,6 +151,13 @@ RunResult run_module(const coreir::Module& m, const std::string& what,
   return r;
 }
 
+// A host function taking one argument and answering 0: it only borrows
+// what it is handed.
+bool native_zero(coreir::NativeCall& c) {
+  c.result = coreir::Value::make_int(0);
+  return true;
+}
+
 void expect_clean(const RunResult& r, const std::string& what) {
   check_eq(r.failure, "", what + ": unexpected failure");
   check(r.left == 0, what + ": leaked " + std::to_string(r.left) +
@@ -166,13 +175,6 @@ void coreir_rt_out_raw(const char* bytes, int64_t len) {
   g_out.emplace_back(bytes, static_cast<size_t>(len));
 }
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
-
-// A host function taking one argument and answering 0: it only borrows
-// what it is handed.
-bool native_zero(coreir::NativeCall& c) {
-  c.result = coreir::Value::make_int(0);
-  return true;
-}
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
   throw Failure(msg);
@@ -971,50 +973,80 @@ int main() {
   //         it out of the caller's registers -- a fixed param, a rest
   //         param, a spread call's fixed argument -- or the call released
   //         it, an extra a lenient callee does not take or a native's,
-  //         borrowed while it ran. So print(f(<t>)) prints t first. -------
+  //         borrowed while it ran. So print(f(<t>)) prints t first. A tail
+  //         call releases its extras with the frame's other temporaries,
+  //         before its locals. --------------------------------------------
   {
     // funcs[2] zero(x) = 0; funcs[3] rest(...xs) = 0; funcs[4] none() = 0,
-    // lenient
-    const auto run = [&](const char* what, auto call, vm::RunOptions opts) {
+    // lenient; funcs[5] tail() = { own = {own}; return none(<t>) }, a tail
+    // call
+    const auto run = [&](const char* what, auto call, const char* want,
+                         vm::RunOptions opts = {}) {
       Prog g;
-      Func zero{"zero", 1, 0, NodeId{}, {"x"}, {}};
-      zero.num_params = 1;
-      zero.body = g.b.literal(0, g.p);
-      g.m.funcs.push_back(zero);
-      Func rest{"rest", 1, 0, NodeId{}, {"xs"}, {}};
-      rest.num_params = 1;
-      rest.rest_param = true;
-      rest.body = g.b.literal(0, g.p);
-      g.m.funcs.push_back(rest);
-      Func none{"none", 0, 0, NodeId{}, {}, {}};
-      none.lenient_arity = true;
-      none.body = g.b.literal(0, g.p);
-      g.m.funcs.push_back(none);
+      const auto ret0 = [&](const char* name, int32_t params) {
+        Func f{name, params, 0, NodeId{}, {}, {}};
+        f.num_params = params;
+        f.local_names.assign(static_cast<size_t>(params), "x");
+        f.body = g.b.literal(0, g.p);
+        return f;
+      };
+      g.m.funcs.push_back(ret0("zero", 1));
+      g.m.funcs.push_back(ret0("rest", 1));
+      g.m.funcs.back().rest_param = true;
+      g.m.funcs.push_back(ret0("none", 0));
+      g.m.funcs.back().lenient_arity = true;
+      // main hands tail its drop closure: tail(d).
+      Func tail{"tail", 2, 0, NodeId{}, {"d", "own"}, {}};
+      tail.num_params = 1;
+      tail.tail_calls = true;
+      tail.body = g.b.scope(
+          1, 2,
+          g.b.block({g.b.assign(VarKind::Local, 1, g.obj("own", g.local(0)),
+                                g.p),
+                     g.b.make_return(
+                         g.b.call_value(g.b.make_closure(4, 0, g.p),
+                                        {g.obj("t", g.local(0))}, g.p),
+                         g.p)},
+                    g.p),
+          g.p);
+      g.m.funcs.push_back(tail);
       g.main(g.b.block({g.bind_drop(), g.print(call(g)), g.print_str("after")},
                        g.p),
              {});
       expect_clean(run_module(g.m, what, opts), what);
-      check_eq(joined(), "t|0|after|", std::string(what) + " output");
+      check_eq(joined(), want, std::string(what) + " output");
     };
-    run("args: fixed param", [](Prog& g) {
-      return g.b.call_value(g.b.make_closure(2, 0, g.p), {g.obj("t")}, g.p);
-    }, {});
-    run("args: rest param", [](Prog& g) {
-      return g.b.call_value(g.b.make_closure(3, 0, g.p), {g.obj("t")}, g.p);
-    }, {});
-    run("args: lenient extra", [](Prog& g) {
-      return g.b.call_value(g.b.make_closure(4, 0, g.p), {g.obj("t")}, g.p);
-    }, {});
-    run("args: spread call", [](Prog& g) {
-      return g.b.call_spread(g.b.make_closure(2, 0, g.p), {g.obj("t")},
-                             g.b.array_lit({}, g.p), g.p);
-    }, {});
+    for (const auto& [what, fn] :
+         {std::pair{"args: fixed param", 2}, std::pair{"args: rest param", 3},
+          std::pair{"args: lenient extra", 4}}) {
+      run(what,
+          [fn = fn](Prog& g) {
+            return g.b.call_value(g.b.make_closure(fn, 0, g.p), {g.obj("t")},
+                                  g.p);
+          },
+          "t|0|after|");
+    }
+    run("args: spread call",
+        [](Prog& g) {
+          return g.b.call_spread(g.b.make_closure(2, 0, g.p), {g.obj("t")},
+                                 g.b.array_lit({}, g.p), g.p);
+        },
+        "t|0|after|");
     vm::RunOptions host;
     host.natives = {{"zero", 1, &native_zero, nullptr}};
-    run("args: native", [](Prog& g) {
-      return g.b.call_value(g.b.native_ref(g.b.declare_native("zero"), g.p),
-                            {g.obj("t")}, g.p);
-    }, host);
+    run("args: native",
+        [](Prog& g) {
+          return g.b.call_value(
+              g.b.native_ref(g.b.declare_native("zero"), g.p), {g.obj("t")},
+              g.p);
+        },
+        "t|0|after|", host);
+    run("args: tail call extra",
+        [](Prog& g) {
+          return g.b.call_value(g.b.make_closure(5, 0, g.p), {g.local(0)},
+                                g.p);
+        },
+        "t|own|0|after|");
   }
 
   // --- 19. A frame at max_call_depth that lets go of the last reference
@@ -1032,11 +1064,6 @@ int main() {
     callee.num_params = 1;
     callee.body = g.b.literal(0, g.p);
     g.m.funcs.push_back(callee);
-    const auto res = [&](const char* name, NodeId d) {
-      return g.b.object_lit({{g.str("name"), g.str(name)},
-                             {g.str("\x01" "drop"), d}},
-                            g.p);
-    };
     Func deep{"deep", 3, 0, NodeId{}, {"n", "d", "own"}, {}};
     deep.num_params = 2;
     const NodeId n = g.local(0);
@@ -1044,10 +1071,10 @@ int main() {
     deep.body = g.b.make_if(
         g.b.binary(BinOp::Eq, n, g.b.literal(0, g.p), g.p),
         g.b.block({g.b.call_value(g.b.make_closure(2, 0, g.p),
-                                  {res("arg", g.local(1))}, g.p),
+                                  {g.obj("arg", g.local(1))}, g.p),
                    g.b.scope(2, 3,
                              g.b.assign(VarKind::Local, 2,
-                                        res("local", g.local(1)), g.p),
+                                        g.obj("local", g.local(1)), g.p),
                              g.p),
                    g.b.literal(0, g.p)},
                   g.p),
