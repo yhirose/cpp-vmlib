@@ -94,3 +94,17 @@ end
 
 e = Empty.new
 puts e.class
+
+# With no initialize anywhere up the chain, new is Object's, which takes
+# no arguments: given some, they run and an ArgumentError follows.
+def made_arg
+  puts "made_arg runs"
+  1
+end
+[lambda { Empty.new(made_arg) }, lambda { Empty.new(*[]) }].each do |f|
+  begin
+    puts f.call.class
+  rescue => e
+    puts e.message
+  end
+end

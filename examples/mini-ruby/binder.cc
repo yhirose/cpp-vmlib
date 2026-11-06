@@ -2318,6 +2318,20 @@ struct Binder {
     const NodeId T = b.varref(VarKind::Local, t);
     const NodeId M = b.varref(VarKind::Local, mv);
     const NodeId blk = args.block.valid() ? args.block : b.nil_literal();
+    // No initialize anywhere up the chain is Object's own, which takes no
+    // arguments: given some, they run and an ArgumentError follows.
+    NodeId no_init;
+    if (!args.fixed.empty() || args.spread.valid() || args.block.valid()) {
+      const int32_t gv = ctx.alloc_local("$given");
+      const NodeId G = b.varref(VarKind::Local, gv);
+      std::vector<NodeId> run{b.assign(
+          VarKind::Local, gv,
+          b.intrinsic(IntrinsicId::Len, {values_array(args, ctx, p)}))};
+      if (args.block.valid()) run.push_back(args.block);
+      run.push_back(b.make_if(b.binary(BinOp::Ne, G, b.literal(0)),
+                              helper("$argerr", {G, b.str_literal("0")}, p)));
+      no_init = b.block(run);
+    }
     return b.block(
         {b.assign(VarKind::Local, t,
                   b.object_lit({{b.str_literal(kClassKey), cls}})),
@@ -2328,7 +2342,7 @@ struct Binder {
                          p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
-                   call_with(M, {blk, T}, args, p), NodeId{}),
+                   call_with(M, {blk, T}, args, p), no_init),
          T});
   }
 
