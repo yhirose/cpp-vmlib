@@ -54,6 +54,7 @@
 
 #include "binder.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <map>
@@ -241,7 +242,14 @@ struct FuncInfo {
   std::vector<TypeRef> param_types;
 };
 
-struct TypedExpr { NodeId node; Type type; int32_t second_half = -1; };
+// `fresh`: a struct value just built here, which nothing can alias yet
+// (see copy_struct).
+struct TypedExpr {
+  NodeId node;
+  Type type;
+  int32_t second_half = -1;
+  bool fresh = false;
+};
 
 // One struct field: its static type (README's Struct fields section) and
 // the props slot ObjectLit/FieldGet/FieldSet agree on -- declaration order,
@@ -359,7 +367,16 @@ struct Binder {
     for (size_t i = 0; i < sd.fields.size(); ++i) {
       kvs.emplace_back(b.str_literal(sd.fields[i].name), values[i]);
     }
-    return {b.object_lit(kvs), Type::Struct, sid};
+    return {b.object_lit(kvs), Type::Struct, sid, true};
+  }
+
+  // A read of a variable, or of a field of one: what evaluating twice
+  // costs nothing and changes nothing.
+  bool is_read(NodeId n) const {
+    const Tag t = m.at(n).tag;
+    if (t == Tag::VarRef) return true;
+    if (t == Tag::FieldGet) return is_read(m.child(n, 0));
+    return false;
   }
 
   // Go structs are values: `l.To = p` (or `Line{To: p}`, or `var q = p`)
@@ -370,13 +387,20 @@ struct Binder {
   // reference-shaped, the same ObjectObj Index/SetIndex already are). This
   // is that copy: a fresh ObjectLit, one FieldGet per field, recursing so a
   // struct nested inside a struct is copied too rather than the inner
-  // ObjectObj carried over by reference. A value already built by a
-  // structlit right here (Tag::ObjectLit) is already fresh -- nothing has
-  // had the chance to alias it yet -- so copying it again would only cost
-  // an allocation, not fix a bug.
+  // ObjectObj carried over by reference. A value make_struct just built is
+  // already fresh -- nothing has had the chance to alias it yet -- so
+  // copying it again would only cost an allocation, not fix a bug. The
+  // copy reads its source once per field, which is why only a fresh value
+  // may be anything but a read: a struct literal whose values run in
+  // temporaries first is a block, and still fresh.
   TypedExpr copy_struct(TypedExpr v, SrcPos p) {
     if (v.type != Type::Struct) return v;
-    if (m.at(v.node).tag == Tag::ObjectLit) return v;
+    if (v.fresh) return v;
+    if (!is_read(v.node)) {
+      coreir_rt::fail("internal error: a struct copy of a value that is not "
+                      "a read would evaluate it once per field",
+                      p.line, p.col);
+    }
     auto b = Builder(m).at(p);
     const StructDef& sd = structs[static_cast<size_t>(v.second_half)];
     std::vector<NodeId> values;
@@ -962,6 +986,7 @@ struct Binder {
         const StructDef& sd = structs[static_cast<size_t>(sid)];
         std::vector<NodeId> values(sd.fields.size());
         std::vector<bool> seen(sd.fields.size(), false);
+        std::vector<size_t> order;  // each field's index, in source order
         for (const auto& fiPtr : find_child(a, "fieldinits")->nodes) {
           const Ast& fi = *fiPtr;
           const std::string fname(find_child(fi, "ident")->token);
@@ -974,6 +999,7 @@ struct Binder {
           values[static_cast<size_t>(idx)] =
               emit_field_value(*fi.nodes.back(), ctx, fd, fi, p);
           seen[static_cast<size_t>(idx)] = true;
+          order.push_back(static_cast<size_t>(idx));
         }
         for (size_t i = 0; i < sd.fields.size(); ++i) {
           if (!seen[i]) {
@@ -981,7 +1007,23 @@ struct Binder {
                         "'");
           }
         }
-        return make_struct(sid, values, p);
+        // The values run in the order they are written, as Go's do, and the
+        // struct takes them in its fields' order: named out of that order,
+        // they go into temporaries first.
+        if (std::is_sorted(order.begin(), order.end())) {
+          return make_struct(sid, values, p);
+        }
+        std::vector<NodeId> pre;
+        for (const size_t k : order) {
+          const int32_t t = ctx.next_local++;
+          ctx.local_names.push_back("$field");
+          pre.push_back(b.assign(VarKind::Local, t, values[k]));
+          values[k] = b.varref(VarKind::Local, t);
+        }
+        TypedExpr made = make_struct(sid, values, p);
+        pre.push_back(made.node);
+        made.node = b.block(pre);
+        return made;
       }
       // []int64{}, or []int64{1, 2} -- children: the `type` token and an
       // "args" list of element expressions. Nothing is copied on the way

@@ -48,4 +48,14 @@ func main() {
 	q.Y = -1
 	fmt.Println(p.Y)
 	fmt.Println(q.Y)
+
+	// A literal's values run in the order they are written, whatever order
+	// the fields are declared in -- once each.
+	var r Point = Point{Y: noisy(8), X: noisy(9)}
+	fmt.Println(r.X)
+}
+
+func noisy(v int32) int32 {
+	fmt.Println(v)
+	return v
 }
