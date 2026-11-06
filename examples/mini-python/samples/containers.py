@@ -54,3 +54,13 @@ alias = xs
 copy = xs[:]
 alias.append(99)
 print(len(xs), len(copy), alias == xs)
+
+# `xs += it` extends the list in place, from any iterable, so every name
+# for it sees the change; `xs = xs + ys` makes a new one.
+xs = [1]
+same = xs
+xs += [2]
+xs += (3,)
+print(same, xs is same)
+xs = xs + [4]
+print(same, xs is same)

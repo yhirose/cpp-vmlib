@@ -3494,21 +3494,44 @@ struct Binder {
       return b.block(out);
     }
     const Ast& target = *targets.nodes[0];
-    const auto combine = [&](NodeId cur) -> NodeId {
+    // `cur` reads the target's present value; `pure` says reading it twice
+    // is free of effects, which a variable's is and a subscript's is not.
+    const auto combine = [&](const std::function<NodeId()>& cur,
+                             bool pure) -> NodeId {
       const NodeId v = emit_exprs(&values, ctx, p);
       if (op == "=") return v;
-      if (op == "+=") return helper("$add", {cur, v}, p);
-      if (op == "-=") return helper("$sub", {cur, v}, p);
-      if (op == "*=") return helper("$mul", {cur, v}, p);
-      if (op == "//=") return helper("$idiv", {cur, v}, p);
-      if (op == "/=") return helper("$fdiv", {cur, v}, p);
-      return helper("$mod", {cur, v}, p);
+      // `a += b` on a list extends it in place from any iterable and it
+      // stays the same list (list.__iadd__), which every other name for it
+      // sees; anything else is `a + b`. Tested here rather than in a
+      // helper of its own, which would put a second call on every
+      // `n += 1`.
+      if (op == "+=") {
+        std::vector<NodeId> pre;
+        std::function<NodeId()> now = cur;
+        if (!pure) {
+          const int32_t c = ctx.alloc_local("$cur");
+          pre.push_back(b.assign(VarKind::Local, c, cur()));
+          now = [&b, c] { return b.varref(VarKind::Local, c); };
+        }
+        return b.sequence(
+            pre, b.make_if(b.binary(BinOp::Eq,
+                                    b.intrinsic(IntrinsicId::TypeOf, {now()}),
+                                    b.str_literal("array")),
+                           helper("$aext", {now(), v}, p),
+                           helper("$add", {now(), v}, p)));
+      }
+      if (op == "-=") return helper("$sub", {cur(), v}, p);
+      if (op == "*=") return helper("$mul", {cur(), v}, p);
+      if (op == "//=") return helper("$idiv", {cur(), v}, p);
+      if (op == "/=") return helper("$fdiv", {cur(), v}, p);
+      return helper("$mod", {cur(), v}, p);
     };
 
     if (target.tag == "ident"_) {
       const auto it = decl_of.find(&target);
       const int32_t v = it != decl_of.end() ? it->second : ref_of.at(&target);
-      return write_var(v, combine(read_var(v, ctx, p)), ctx, p);
+      return write_var(
+          v, combine([&] { return read_var(v, ctx, p); }, true), ctx, p);
     }
     if (target.tag != "postfix"_ || target.nodes.size() < 2) {
       fail(target, "cannot assign to this expression");
@@ -3533,10 +3556,10 @@ struct Binder {
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const NodeId cur = helper(attr ? "$getattr" : "$idx", {R, K}, p);
+    const auto cur = [&] { return helper(attr ? "$getattr" : "$idx", {R, K}, p); };
     return b.block(
         {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         helper(attr ? "$setattr" : "$setidx", {R, K, combine(cur)}, p)});
+         helper(attr ? "$setattr" : "$setidx", {R, K, combine(cur, false)}, p)});
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
