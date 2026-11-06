@@ -32,3 +32,16 @@ show('numstr', [String(3), String(3.5), String(0.1 + 0.2), String(-0),
                 String(1000000), String(NaN), String(Infinity)]);
 show('strings', ['hello'.length, 'hello'[1], 'hello'.slice(1, 3),
                  'hello'.slice(-2), ''.length]);
+
+// An assignment is an expression whose value is what it stored, for a
+// variable -- captured or not -- as much as for a property.
+let av = 0;
+let ac = 0;
+const readAc = () => ac;
+const ao = {};
+const setAv = () => av = 7;
+const chained = (av = ac = 3);
+show('assign value', [chained, av, ac, readAc(), (ao.k = 4), (av += 2),
+                      setAv(), av]);
+if ((av = 0)) av = 1;
+show('assign test', [av]);

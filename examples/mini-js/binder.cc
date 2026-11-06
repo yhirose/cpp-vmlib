@@ -1547,6 +1547,7 @@ struct Binder {
 
   NodeId emit_expr_stmt(const Ast& a, FnCtx& ctx) {
     if (is_incdec(a)) return emit_incdec(a, ctx);
+    if (a.tag == "assign"_) return emit_assign(a, ctx, false);
     return emit_expr(a, ctx);
   }
 
@@ -1554,7 +1555,7 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const bool up = a.nodes.back()->token == "++";
-    return emit_store(a, a.nodes.size() - 1, ctx, p, [&](auto&& cur) {
+    return emit_store(a, a.nodes.size() - 1, ctx, p, false, [&](auto&& cur) {
       return up ? helper("$add", {cur(), b.double_literal(1.0)}, p)
                 : b.binary(BinOp::Sub, cur(), b.double_literal(1.0));
     });
@@ -1831,7 +1832,7 @@ struct Binder {
         return acc;
       }
       case "assign"_:
-        return emit_assign(a, ctx);
+        return emit_assign(a, ctx, true);
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
       case "arraylit"_: {
@@ -2269,16 +2270,21 @@ struct Binder {
   // which does not want the old one, does not emit the read at all --
   // reading a property is a $index call, and an orphan one would claim a
   // helper cell for a call nothing makes.
+  //
+  // `as_value` asks for the assigned value as the result, which is what
+  // `z = (y = 5)` and `return y = 3` read: a variable is read back after
+  // the write, and a property store's $setidx already answers the value.
+  // A statement does not ask, and the write alone is what it compiles to.
   template <typename Combine>
   NodeId emit_store(const Ast& target, size_t limit, FnCtx& ctx, SrcPos p,
-                    Combine combine) {
+                    bool as_value, Combine combine) {
     auto b = Builder(m).at(p);
     // `i++` hands over the whole postfix node with its `++` cut off, and
     // what is left may be a bare primary -- which optimize_ast folded, so
     // it is an "ident" wearing a "postfix" parent rather than a suffix
     // chain of length zero.
     if (target.tag == "postfix"_ && limit == 1) {
-      return emit_store(*target.nodes[0], 0, ctx, p, combine);
+      return emit_store(*target.nodes[0], 0, ctx, p, as_value, combine);
     }
     if (target.tag == "ident"_) {
       const auto it = ref_of.find(&target);
@@ -2289,7 +2295,8 @@ struct Binder {
                          rs.vars[static_cast<size_t>(v)].name + "'");
       }
       const auto read = [&] { return read_var(v, ctx, p); };
-      return write_var(v, combine(read), ctx, p);
+      const NodeId write = write_var(v, combine(read), ctx, p);
+      return as_value ? b.block({write, read()}) : write;
     }
     if (target.tag != "postfix"_ || limit < 2) {
       fail(target, "cannot assign to this expression");
@@ -2316,14 +2323,15 @@ struct Binder {
                     helper("$setidx", {R, K, combine(read)}, p)});
   }
 
-  NodeId emit_assign(const Ast& a, FnCtx& ctx) {
+  NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const std::string op(a.nodes[1]->token);
     const Ast& rhs = *a.nodes[2];
     const Ast& target = *a.nodes[0];
     const size_t limit = target.tag == "postfix"_ ? target.nodes.size() : 0;
-    return emit_store(target, limit, ctx, p, [&](auto&& cur) -> NodeId {
+    return emit_store(target, limit, ctx, p, as_value,
+                      [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(rhs, ctx);
       if (op == "=") return v;
       if (op == "+=") return helper("$add", {cur(), v}, p);
