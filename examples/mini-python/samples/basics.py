@@ -63,3 +63,12 @@ print(abs(noisy(-5)), abs(noisy(4)))
 # A chained comparison runs an operand only once the link before it has
 # held, so `1 > 2 < noisy(3)` never calls noisy.
 print(1 > 2 < noisy(3), 1 < noisy(2) < noisy(3) < noisy(0) < noisy(9))
+
+# `t[k] = v` runs v, then t, then k; `t[k] += v` reads t[k] before v runs.
+cells = [0, 0]
+def cells_of():
+    print("cells")
+    return cells
+cells_of()[noisy(0)] = noisy(5)
+cells_of()[noisy(1)] += noisy(2)
+print(cells)

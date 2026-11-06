@@ -3493,6 +3493,14 @@ struct Binder {
     if (!attr && last.tag != "indexsfx"_) {
       fail(last, "cannot assign to this expression");
     }
+    // `t[k] = v` runs v first, then t and k (Python's assignment statement:
+    // the value, then the target); `t[k] += v` reads t[k] before v runs.
+    if (op == "=") {
+      const int32_t tv = ctx.alloc_local("$val");
+      return b.block(
+          {b.assign(VarKind::Local, tv, emit_exprs(&values, ctx, p)),
+           emit_store(target, b.varref(VarKind::Local, tv), ctx, p)});
+    }
     const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
                             : emit_expr(*last.nodes[0], ctx);
     const int32_t tr = ctx.alloc_local("$recv");
@@ -3500,9 +3508,7 @@ struct Binder {
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const NodeId cur = op == "="
-                           ? b.nil_literal()
-                           : helper(attr ? "$getattr" : "$idx", {R, K}, p);
+    const NodeId cur = helper(attr ? "$getattr" : "$idx", {R, K}, p);
     return b.block(
         {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
          helper(attr ? "$setattr" : "$setidx", {R, K, combine(cur)}, p)});
