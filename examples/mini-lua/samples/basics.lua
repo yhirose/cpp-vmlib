@@ -38,3 +38,13 @@ repeat r = r + 1 until r == 3
 print(r)
 
 print(string.upper("abc"), ("xy"):rep(3), ("hello"):sub(2, 3), ("hello"):sub(-3))
+
+-- Multiple assignment evaluates every target's table and key before the
+-- values, so the i in arr[i] is the old one; a single target still
+-- evaluates every value, and takes the first.
+local function noisy(tag, v) io.write("[" .. tag .. "]") return v end
+local arr, i = {}, 3
+i, arr[i] = i + 1, 20
+print(i, arr[3], arr[4])
+local only = noisy("a", 1), noisy("b", 2)
+print(only)

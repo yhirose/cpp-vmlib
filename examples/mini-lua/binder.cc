@@ -1528,9 +1528,11 @@ struct Binder {
           }
           return b.block(out);
         }
-        if (names.nodes.size() == 1) {
+        // One name and one value binds it directly; one name and several
+        // values still evaluates them all, and takes the first.
+        if (names.nodes.size() == 1 && a.nodes[1]->nodes.size() == 1) {
           return bind_decl(decl_of.at(names.nodes[0].get()),
-                           emit_expr(*a.nodes[1]->nodes.back(), ctx) , ctx, p);
+                           emit_expr(*a.nodes[1]->nodes[0], ctx), ctx, p);
         }
         const int32_t t = ctx.alloc_local("$vals");
         const NodeId T = b.varref(VarKind::Local, t);
@@ -1835,25 +1837,71 @@ struct Binder {
         p);
   }
 
+  // An assignment, in lua5.4's order: every target's table and key first,
+  // left to right, then every value, then the stores right to left. The
+  // manual leaves the order open but fixes the consequence that matters --
+  // `i, a[i] = i+1, 20` sets a[3], the i in a[i] read before i changes --
+  // and lua5.4's own order is the oracle's. One target and one value is
+  // the store on its own, which evaluates in that order already.
   NodeId emit_assign(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const Ast& targets = *a.nodes[0];
     const Ast& values = *a.nodes[1];
-    if (targets.nodes.size() == 1) {
-      return emit_store(*targets.nodes[0],
-                        emit_expr(*values.nodes.back(), ctx), ctx, p);
+    if (targets.nodes.size() == 1 && values.nodes.size() == 1) {
+      return emit_store(*targets.nodes[0], emit_expr(*values.nodes[0], ctx),
+                        ctx, p);
     }
-    const int32_t t = ctx.alloc_local("$vals");
-    const NodeId T = b.varref(VarKind::Local, t);
-    std::vector<NodeId> out{
-        b.assign(VarKind::Local, t, emit_exprlist(values, ctx))};
-    for (size_t k = 0; k < targets.nodes.size(); ++k) {
-      out.push_back(emit_store(
-          *targets.nodes[k],
-          helper("$nth", {T, b.literal(static_cast<int64_t>(k))}, p), ctx, p));
+    std::vector<NodeId> out;
+    std::vector<Target> ts;
+    for (const auto& t : targets.nodes) ts.push_back(emit_target(*t, ctx, out));
+    const int32_t v = ctx.alloc_local("$vals");
+    const NodeId V = b.varref(VarKind::Local, v);
+    out.push_back(b.assign(VarKind::Local, v, emit_exprlist(values, ctx)));
+    for (size_t k = ts.size(); k-- > 0;) {
+      out.push_back(store_to(
+          ts[k], helper("$nth", {V, b.literal(static_cast<int64_t>(k))}, p),
+          ctx, p));
     }
     return b.block(out);
+  }
+
+  // An assignment target with its table and key evaluated now, into
+  // temporaries (appended to `out`), for a store that comes later.
+  struct Target {
+    const Ast* ident = nullptr;
+    NodeId table, key;
+  };
+
+  Target emit_target(const Ast& target, FnCtx& ctx, std::vector<NodeId>& out) {
+    const SrcPos p = pos_of(target);
+    auto b = Builder(m).at(p);
+    if (target.tag == "ident"_) return {&target, NodeId{}, NodeId{}};
+    if (target.tag != "suffixedexp"_ || target.nodes.size() < 2) {
+      fail(target, "cannot assign to this expression");
+    }
+    const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
+    const NodeId R = recv.multi ? helper("$one", {recv.n}, p) : recv.n;
+    const int32_t tt = ctx.alloc_local("$table");
+    out.push_back(b.assign(VarKind::Local, tt, R));
+    const Ast& last = *target.nodes.back();
+    NodeId key;
+    if (last.tag == "dotsfx"_) {
+      key = b.str_literal(std::string(last.nodes[0]->token));
+    } else if (last.tag == "indexsfx"_) {
+      key = emit_expr(*last.nodes[0], ctx);
+    } else {
+      fail(last, "cannot assign to a call");
+    }
+    const int32_t tk = ctx.alloc_local("$key");
+    out.push_back(b.assign(VarKind::Local, tk, key));
+    return {nullptr, b.varref(VarKind::Local, tt), b.varref(VarKind::Local, tk)};
+  }
+
+  NodeId store_to(const Target& t, NodeId value, FnCtx& ctx, SrcPos p) {
+    auto b = Builder(m).at(p);
+    if (t.ident != nullptr) return emit_store(*t.ident, value, ctx, p);
+    return helper("$set", {t.table, t.key, value}, p);
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {

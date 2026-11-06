@@ -14,3 +14,5 @@ number	string	table	function	nil
 15	5
 3
 ABC	xyxyxy	el	llo
+4	20	nil
+[a][b]1
