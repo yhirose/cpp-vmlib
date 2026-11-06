@@ -56,3 +56,10 @@
 (define (sort xs)
   (if (null? xs) '() (insert (car xs) (sort (cdr xs)))))
 (display (sort '(5 2 8 1 9 3))) (newline)
+
+; A dotted pair written as data, not only built with cons.
+(display (cdr '(1 . 2))) (display " ") (display '((a . 1) (b . 2) . c))
+(newline)
+(display (cdr (assoc 'b '((a . 1) (b . 2))))) (newline)
+; A quote inside quoted data is data too.
+(display '(a 'b)) (display " ") (display ''c) (newline)

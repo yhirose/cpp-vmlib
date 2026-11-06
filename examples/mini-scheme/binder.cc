@@ -1087,13 +1087,31 @@ struct Binder {
   NodeId datum(const Ast& a, SrcPos p) {
     auto b = Builder(m).at(p);
     if (a.tag == "list"_) {
+      // `(a b . c)` ends in c rather than '(): the dot, one datum after it,
+      // and at least one before it, which is the only place R7RS allows a
+      // dot in a list.
+      size_t n = a.nodes.size();
       NodeId acc = b.nil_literal();
-      for (size_t i = a.nodes.size(); i-- > 0;) {
+      for (size_t i = 0; i < n; ++i) {
+        const Ast& x = *a.nodes[i];
+        if (x.tag != "symbol"_ || x.token != ".") continue;
+        if (i == 0 || i + 2 != n) fail(x, "malformed dotted list");
+        acc = datum(*a.nodes[i + 1], p);
+        n = i;
+        break;
+      }
+      for (size_t i = n; i-- > 0;) {
         acc = b.array_lit({datum(*a.nodes[i], p), acc});
       }
       return acc;
     }
-    if (a.tag == "quoted"_) return datum(*a.nodes[0], p);
+    // A quote inside quoted data stays: `'(a 'b)` is `(a (quote b))`. (The
+    // outermost quote is the one emit_form strips before it gets here.)
+    if (a.tag == "quoted"_) {
+      return b.array_lit(
+          {b.str_literal("quote"),
+           b.array_lit({datum(*a.nodes[0], p), b.nil_literal()})});
+    }
     return atom(a, p);
   }
 
