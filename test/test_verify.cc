@@ -2,7 +2,8 @@
 // hand-edited Module) can produce but the Builder never would: each is a
 // way the compiler or the executor would otherwise read out of bounds. And
 // the one shape that looks suspicious and is fine -- a node shared between
-// two parents -- stays accepted.
+// two parents -- stays accepted; shared_effects is what tells the sharing
+// that runs something twice from the sharing that is harmless.
 
 #include <cstdio>
 #include <functional>
@@ -40,6 +41,20 @@ std::string verdict(const std::function<NodeId(Module&, Builder&)>& build,
        bare ? expr : b.intrinsic(IntrinsicId::Print, {expr}, p), {}, {}});
   const auto err = verify(m);
   return err ? *err : "";
+}
+
+// shared_effects over a one-function module whose body `build` makes, its
+// findings joined by "|".
+std::string shared(const std::function<NodeId(Builder&)>& build) {
+  Module m;
+  Builder b(m);
+  m.capture_maps.push_back({});
+  m.funcs.push_back({"main", 0, 0, NodeId{}, {}, {}});
+  m.funcs.push_back({"f", 0, 0, b.literal(1, {9, 9}), {}, {}});
+  m.funcs[0].body = build(b);
+  std::string out;
+  for (const SharedEffect& e : shared_effects(m)) out += to_string(m, e) + "|";
+  return out;
 }
 
 }  // namespace
@@ -133,6 +148,81 @@ int main() {
              return b.binary(BinOp::Mul, sum, sum, p);
            }),
            "", "a shared node is fine");
+
+  // shared_effects: a call is at 2:2, what holds it at 3:3 and 4:4. Its
+  // callee is a read, so the call itself is what makes it observable.
+  const auto call = [&](Builder& b) {
+    return b.call_value(b.varref(VarKind::Local, 0, p), {}, {2, 2});
+  };
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             return b.binary(BinOp::Add, c, c, {3, 3});
+           }),
+           "2:2: callvalue runs twice in binary@3:3|",
+           "a call under both operands runs twice");
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             return b.make_if(b.bool_literal(true, p), c, c, {3, 3});
+           }),
+           "", "a call under then and else runs once");
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             return b.make_try(0, c, c, {3, 3});
+           }),
+           "2:2: callvalue runs twice in try@3:3|",
+           "a call under a try's body and its handler can run twice");
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             return b.make_switch(c, {{b.literal(1, p), c}}, NodeId{}, {3, 3});
+           }),
+           "2:2: callvalue runs twice in switch@3:3|",
+           "a call as a switch's subject and in a case runs twice");
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             return b.make_switch(b.literal(0, p),
+                                  {{b.literal(1, p), c}, {b.literal(2, p), c}},
+                                  NodeId{}, {3, 3});
+           }),
+           "", "a call in two cases runs once");
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             const NodeId both = b.block({c}, p);
+             return b.make_if(b.bool_literal(true, p),
+                              b.block({both, b.block({c}, p)}, {3, 3}), both,
+                              {4, 4});
+           }),
+           "2:2: callvalue runs twice in block@3:3|",
+           "a call under both arms, and again under one of them, runs twice");
+  {
+    // Shared by two functions' bodies: once per call of either.
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    const NodeId c = call(b);
+    m.funcs.push_back({"main", 0, 0, b.block({c}, p), {}, {}});
+    m.funcs.push_back({"f", 0, 0, b.block({c}, p), {}, {}});
+    check_eq(std::to_string(shared_effects(m).size()), "0",
+             "a call in two functions runs once in each");
+  }
+  check_eq(shared([&](Builder& b) {
+             const NodeId c = call(b);
+             const NodeId sum = b.binary(BinOp::Add, c, b.literal(1, p), {3, 3});
+             return b.array_lit({sum, sum}, {4, 4});
+           }),
+           "3:3: binary runs twice in arraylit@4:4|",
+           "a read over a call is as observable as the call");
+  check_eq(shared([&](Builder& b) {
+             const NodeId map = b.intrinsic(IntrinsicId::MapNew, {}, {2, 2});
+             return b.array_lit({map, map}, {4, 4});
+           }),
+           "2:2: intrinsic runs twice in arraylit@4:4|",
+           "a fresh map is observable");
+  check_eq(shared([&](Builder& b) {
+             const NodeId x = b.varref(VarKind::Local, 0, p);
+             const NodeId s = b.intrinsic(IntrinsicId::ToStr, {x}, p);
+             return b.array_lit({s, s, x, x}, {4, 4});
+           }),
+           "", "a read, or a string built from one, is not");
 
   if (g_failures != 0) {
     std::fprintf(stderr, "verify: %d failure(s)\n", g_failures);

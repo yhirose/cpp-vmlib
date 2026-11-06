@@ -2213,6 +2213,25 @@ private:
 
 std::optional<std::string> verify(const Module& m);
 
+// A node whose evaluation a program can observe -- a call, a store, a
+// throw, a fresh object -- that one run of a function body evaluates twice.
+// verify() allows sharing, and for a read it costs only time: each parent
+// compiles the node, so it runs once per parent that runs. For this kind it
+// is a front end evaluating something twice, the bug class the examples'
+// audits kept finding. Of the control flow, only If and Switch are
+// followed -- they run one arm -- so two runs a return or a throw keeps
+// apart still count as two. shared_effects lists each such node once, with
+// `at`, the innermost node one run of which evaluates it twice; a front
+// end's test runs it over every program it ships (--check-sharing,
+// test/run_sharing.cmake).
+struct SharedEffect {
+  NodeId node;
+  NodeId at;
+};
+std::vector<SharedEffect> shared_effects(const Module& m);
+// "line:col: callvalue runs twice in block@line:col".
+std::string to_string(const Module& m, const SharedEffect& e);
+
 // A readable dump of the IR, for --dump-ir.
 std::string to_string(const Module& m);
 
@@ -5482,6 +5501,220 @@ inline std::optional<std::string> verify(const Module& m) {
     return std::string("entry function cannot take a rest param");
   }
   return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// shared_effects -- a node evaluated twice
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+// Whether running a node of this kind can be told from not running it, its
+// children aside: it calls, writes, throws, suspends, makes a cell, or
+// builds an object a program could compare by identity (Same). The
+// structural tags -- If, Switch, Block, While, Scope, TryCatch -- are as
+// observable as what they hold, and decide nothing here themselves.
+inline constexpr bool observable(Tag t) {
+  switch (t) {
+    case Tag::Literal:
+    case Tag::VarRef:
+    case Tag::Unary:
+    case Tag::Binary:
+    case Tag::If:
+    case Tag::Switch:
+    case Tag::While:
+    case Tag::Block:
+    case Tag::Intrinsic:  // per IntrinsicId, below
+    case Tag::Index:
+    case Tag::FieldGet:
+    case Tag::Scope:
+    case Tag::TryCatch:
+    case Tag::NativeRef:
+      return false;
+    case Tag::Assign:
+    case Tag::MakeClosure:
+    case Tag::CallValue:
+    case Tag::CallSpread:
+    case Tag::ArrayLit:
+    case Tag::ObjectLit:
+    case Tag::SetIndex:
+    case Tag::FieldSet:
+    case Tag::Return:
+    case Tag::Break:
+    case Tag::Continue:
+    case Tag::Throw:
+    case Tag::Defer:
+    case Tag::CellFresh:
+    case Tag::Yield:
+      return true;
+  }
+  return true;
+}
+
+// The same per intrinsic. A string is a value here, so building one (ToStr,
+// StrSlice, ...) is not observable; building an array or a map is.
+inline constexpr bool observable(IntrinsicId id) {
+  switch (id) {
+    case IntrinsicId::Len:
+    case IntrinsicId::ToStr:
+    case IntrinsicId::TypeOf:
+    case IntrinsicId::ToInt:
+    case IntrinsicId::ToDouble:
+    case IntrinsicId::FMod:
+    case IntrinsicId::Pow:
+    case IntrinsicId::ObjectHas:
+    case IntrinsicId::ArgCount:
+    case IntrinsicId::Same:
+    case IntrinsicId::FnArity:
+    case IntrinsicId::ToFloat32:
+    case IntrinsicId::StrSlice:
+    case IntrinsicId::StrByte:
+    case IntrinsicId::StrFromByte:
+    case IntrinsicId::StrUpper:
+    case IntrinsicId::StrLower:
+    case IntrinsicId::CoroStatus:
+    case IntrinsicId::CoroCurrent:
+      return false;
+    case IntrinsicId::Print:
+    case IntrinsicId::ReadInt:
+    case IntrinsicId::PrintRaw:
+    case IntrinsicId::ArrayPush:
+    case IntrinsicId::ArrayPop:
+    case IntrinsicId::ArrayConcat:
+    case IntrinsicId::ArrayFill:
+    case IntrinsicId::ObjectKeys:
+    case IntrinsicId::ObjectRemove:
+    case IntrinsicId::Collect:
+    case IntrinsicId::HeapStats:
+    case IntrinsicId::GenResume:
+    case IntrinsicId::GenReturn:
+    case IntrinsicId::GenThrow:
+    case IntrinsicId::Enqueue:
+    case IntrinsicId::ArraySlice:
+    case IntrinsicId::MapNew:
+    case IntrinsicId::CoroCreate:
+    case IntrinsicId::CoroResume:
+    case IntrinsicId::CoroYield:
+    case IntrinsicId::CoroClose:
+      return true;
+  }
+  return true;
+}
+
+struct SharingScan {
+  const Module& m;
+  std::vector<std::vector<uint32_t>> parents;  // per node, one per use
+  std::vector<signed char> effect;  // per node: -1 not yet known, 0, 1
+
+  explicit SharingScan(const Module& mod)
+      : m(mod), parents(mod.nodes.size()), effect(mod.nodes.size(), -1) {
+    // Only what a function body reaches runs: a node built and then left
+    // unused is nobody's child.
+    std::vector<char> live(m.nodes.size(), 0);
+    std::vector<uint32_t> work;
+    for (const Func& f : m.funcs) {
+      if (f.body.valid()) work.push_back(f.body.v);
+    }
+    while (!work.empty()) {
+      const uint32_t x = work.back();
+      work.pop_back();
+      if (live[x]) continue;
+      live[x] = 1;
+      for (uint32_t i = 0; i < m.nodes[x].num_children; ++i) {
+        const uint32_t c = m.child(NodeId{x}, i).v;
+        parents[c].push_back(x);
+        work.push_back(c);
+      }
+    }
+  }
+
+  // Whether running `n` can be told from not running it.
+  bool observable_node(uint32_t n) {
+    if (effect[n] >= 0) return effect[n] != 0;
+    const Node& x = m.nodes[n];
+    bool r = x.tag == Tag::Intrinsic
+                 ? observable(static_cast<IntrinsicId>(x.op))
+                 : observable(x.tag);
+    for (uint32_t i = 0; !r && i < x.num_children; ++i) {
+      r = observable_node(m.child(NodeId{n}, i).v);
+    }
+    effect[n] = r ? 1 : 0;
+    return r;
+  }
+
+  // How many times one run of a node evaluates `target`, 0, 1 or 2 (for
+  // "more than once"): its children's counts added up, except that an If
+  // or a Switch runs its subject and then one arm. `ancestor` marks the
+  // nodes with `target` below them, the only ones that count above 0.
+  struct Count {
+    const Module& m;
+    uint32_t target;
+    const std::vector<char>& ancestor;
+    std::vector<signed char> memo;  // -1 not yet counted
+    // The first node counted at 2. A node is counted after its children,
+    // so that is the innermost: its children are all below 2.
+    uint32_t at = UINT32_MAX;
+
+    int of(uint32_t n) {
+      if (n == target) return 1;
+      if (!ancestor[n]) return 0;
+      if (memo[n] >= 0) return memo[n];
+      const Node& x = m.nodes[n];
+      const bool one_arm = x.tag == Tag::If || x.tag == Tag::Switch;
+      int sum = 0, arm = 0;
+      for (uint32_t i = 0; i < x.num_children; ++i) {
+        const int c = of(m.child(NodeId{n}, i).v);
+        if (one_arm && i > 0) {
+          arm = std::max(arm, c);
+        } else {
+          sum += c;
+        }
+      }
+      const int r = std::min(sum + arm, 2);
+      if (r == 2 && at == UINT32_MAX) at = n;
+      memo[n] = static_cast<signed char>(r);
+      return r;
+    }
+  };
+
+  // The innermost node one run of which evaluates `n` twice, if any.
+  std::optional<uint32_t> twice(uint32_t n) const {
+    std::vector<char> ancestor(m.nodes.size(), 0);
+    std::vector<uint32_t> work(parents[n]);
+    while (!work.empty()) {
+      const uint32_t x = work.back();
+      work.pop_back();
+      if (ancestor[x]) continue;
+      ancestor[x] = 1;
+      work.insert(work.end(), parents[x].begin(), parents[x].end());
+    }
+    Count count{m, n, ancestor, std::vector<signed char>(m.nodes.size(), -1)};
+    for (const Func& f : m.funcs) {
+      if (f.body.valid() && count.of(f.body.v) == 2) return count.at;
+    }
+    return std::nullopt;
+  }
+};
+
+}  // namespace detail
+
+inline std::vector<SharedEffect> shared_effects(const Module& m) {
+  detail::SharingScan scan(m);
+  std::vector<SharedEffect> out;
+  for (uint32_t n = 0; n < m.nodes.size(); ++n) {
+    if (scan.parents[n].size() < 2 || !scan.observable_node(n)) continue;
+    if (const auto at = scan.twice(n)) out.push_back({NodeId{n}, NodeId{*at}});
+  }
+  return out;
+}
+
+inline std::string to_string(const Module& m, const SharedEffect& e) {
+  const auto pos = [&](NodeId id) {
+    const SrcPos p = m.pos_of(id);
+    return std::to_string(p.line) + ":" + std::to_string(p.col);
+  };
+  return pos(e.node) + ": " + name_of(m.at(e.node).tag) + " runs twice in " +
+         name_of(m.at(e.at).tag) + "@" + pos(e.at);
 }
 
 inline std::string to_string(const Module& m) {

@@ -181,6 +181,16 @@ a library function lowered by name: every argument still runs, in order,
 the read ones into fresh temporaries that stand in for them, and
 `Builder::sequence` puts those statements ahead of the call.
 
+A node reached from two parents is compiled under each, so it runs once per
+parent that runs. `verify()` allows it -- for a read it costs only time --
+but a call, a store or a fresh object reached twice is a front end
+evaluating something twice. `shared_effects(m)` lists exactly those: a node
+whose subtree the program could observe running, which one run of a
+function body evaluates twice, and the innermost node that does it. Of the
+control flow it follows only `If` and `Switch`, which run one arm, so a
+node under both arms of one `If` is fine and two runs a `return` keeps
+apart are still two -- test both conditions in one `If` instead.
+
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
 dynamically typed language needs and the IR has no opinion about. The
