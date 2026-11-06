@@ -2021,7 +2021,6 @@ struct Binder {
   }
 
   NodeId store_to(const Target& t, NodeId value, FnCtx& ctx, SrcPos p) {
-    auto b = Builder(m).at(p);
     if (t.ident != nullptr) return emit_store(*t.ident, value, ctx, p);
     return helper("$set", {t.table, t.key, value}, p);
   }

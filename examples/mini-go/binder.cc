@@ -61,6 +61,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <peglib.h>
@@ -224,7 +225,7 @@ struct TypeRef { Type type; int32_t second_half = -1; };
 struct LocalInfo { int32_t slot; Type type; int32_t second_half = -1; };
 
 struct FuncCtx {
-  std::map<std::string, LocalInfo> locals;
+  std::map<std::string, LocalInfo, std::less<>> locals;
   std::vector<std::string> local_names;  // parallel to Func::num_locals
   int32_t next_local = 0;
   // A `go` statement's cells: one per argument it evaluates, so the
@@ -344,9 +345,9 @@ struct Binder {
   // Hands back the LocalInfo rather than a built VarRef because the
   // assignment forms want the slot, not a value node.
   static const LocalInfo& local_of(const Ast& at, FuncCtx& ctx,
-                                   const std::string& name) {
+                                   std::string_view name) {
     auto it = ctx.locals.find(name);
-    if (it == ctx.locals.end()) fail(at, "undeclared: " + name);
+    if (it == ctx.locals.end()) fail(at, "undeclared: " + std::string(name));
     return it->second;
   }
 
@@ -444,7 +445,7 @@ struct Binder {
   // ObjectObj the parent holds, so the FieldSet at the end lands on the
   // struct actually stored there rather than on a copy.
   TypedExpr walk_fields(const Ast& a, FuncCtx& ctx, size_t last, SrcPos p) {
-    const LocalInfo& li = local_of(a, ctx, std::string(a.nodes[0]->token));
+    const LocalInfo& li = local_of(a, ctx, a.nodes[0]->token);
     auto b = Builder(m).at(p);
     TypedExpr cur{b.varref(VarKind::Local, li.slot), li.type, li.second_half};
     for (size_t i = 1; i < last; ++i) {
@@ -961,7 +962,7 @@ struct Binder {
       case "strlit"_:
         return {b.str_literal(unescape(std::string(a.token), a)), Type::Str};
       case "ident"_: {
-        const LocalInfo& li = local_of(a, ctx, std::string(a.token));
+        const LocalInfo& li = local_of(a, ctx, a.token);
         return {b.varref(VarKind::Local, li.slot), li.type, li.second_half};
       }
       case "neg"_: {
@@ -1184,7 +1185,7 @@ struct Binder {
   // (`xs[i]`), a write (`xs[i] = v`) and an append all need first, and the
   // same shape channel_local below has for the other container type.
   const LocalInfo& slice_local(const Ast& ident, FuncCtx& ctx) {
-    const LocalInfo& li = local_of(ident, ctx, std::string(ident.token));
+    const LocalInfo& li = local_of(ident, ctx, ident.token);
     if (li.type != Type::Slice) {
       fail(ident, "'" + std::string(ident.token) + "' (" +
                       describe_type(li.type, li.second_half) +
@@ -1245,7 +1246,7 @@ struct Binder {
   // The local an ident names, required to be a channel -- what both ends
   // of a channel operation need before anything else.
   const LocalInfo& channel_local(const Ast& ident, FuncCtx& ctx) {
-    const LocalInfo& li = local_of(ident, ctx, std::string(ident.token));
+    const LocalInfo& li = local_of(ident, ctx, ident.token);
     if (li.type != Type::Chan) {
       fail(ident, "'" + std::string(ident.token) + "' (" +
                       describe_type(li.type, li.second_half) +
@@ -1419,7 +1420,7 @@ struct Binder {
               find_child(rhs, "ident")->token == "append") {
             return emit_append(rhs, ctx, target, p);
           }
-          const LocalInfo& li = local_of(a, ctx, std::string(target.token));
+          const LocalInfo& li = local_of(a, ctx, target.token);
           return b.assign(VarKind::Local, li.slot,
                           emit_local_value(*a.nodes.back(), ctx, li.type,
                                            li.second_half, a, p));
