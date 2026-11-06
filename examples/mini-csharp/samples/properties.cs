@@ -16,6 +16,11 @@ class Counter {
   public void Bump() {
     Value = Value + 1;
   }
+
+  // A property named without `this.` takes a suffix like any other value.
+  public string Shown() {
+    return "value " + Value.ToString();
+  }
 }
 
 class Temperature {
@@ -59,6 +64,7 @@ class Program {
     Console.WriteLine(c.Value);
     c.Value += 10;
     Console.WriteLine(c.Value);
+    Console.WriteLine(c.Shown());
 
     Temperature t = new Temperature();
     t.Celsius = 100.0;

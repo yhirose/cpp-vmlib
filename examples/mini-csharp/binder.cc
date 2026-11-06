@@ -1577,7 +1577,10 @@ struct Binder {
       // generic path turns it into a method lookup on the table itself.
       cur = emit_library(a, limit, ctx, i);
     } else if (prim.tag == "ident"_ && !ref_of.count(&prim) &&
-               !field_refs.count(&prim) && !static_field_refs.count(&prim)) {
+               !field_refs.count(&prim) && !prop_refs.count(&prim) &&
+               !static_field_refs.count(&prim)) {
+      // A name nothing in the program binds -- not a local, nor a field
+      // or property reached through an implicit `this` -- is the library's.
       cur = emit_library(a, limit, ctx, i);
     } else {
       cur = emit_expr(prim, ctx);
