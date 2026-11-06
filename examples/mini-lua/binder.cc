@@ -588,11 +588,25 @@ struct Binder {
     r.finish(name);
   }
 
+  // `..` joins strings and numbers, a number written the way tostring
+  // writes it. Anything else is an error -- __tostring plays no part, and
+  // __concat is not in this subset -- named by the operand that is
+  // neither, the left one first, as Lua's message names it.
   void rt_cat() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.ret(
-        r.bin(BinOp::Add, r.call("$str", {r.L(a)}), r.call("$str", {r.L(b)}))));
+    const auto ok = [&](FuncWriter::Slot v) {
+      return r.either(r.is(r.typ(v), "string"), r.is_num(r.typ(v)));
+    };
+    r.add(r.iff(r.both(ok(a), ok(b)),
+                r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),
+                            r.call("$str", {r.L(b)})))));
+    const NodeId bad = r.iff(ok(a), r.L(b), r.L(a));
+    r.add(r.b.make_throw(r.bin(
+        BinOp::Add,
+        r.bin(BinOp::Add, r.S("attempt to concatenate a "),
+              r.nat("type", {bad})),
+        r.S(" value"))));
     r.finish("$cat");
   }
 

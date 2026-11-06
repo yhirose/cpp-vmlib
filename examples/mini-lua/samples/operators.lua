@@ -98,3 +98,8 @@ local show, kind, str = print, type, tostring
 show("via a local:", str(a), kind(show), a)
 local k1, k2 = kind(1)
 print(k1, k2)
+-- `..` joins strings and numbers only: a table is an error even with a
+-- __tostring, and so are nil and a boolean.
+local shown = setmetatable({}, {__tostring = function() return "T" end})
+print((pcall(function() return shown .. "x" end)),
+      (pcall(function() return "x" .. nil end)), 1 .. 2, 1.5 .. "!")

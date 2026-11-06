@@ -14,3 +14,4 @@ true	true
 1:a 2:b 3:c
 via a local:	(1, 2)	function	(1, 2)
 number	nil
+false	false	12	1.5!

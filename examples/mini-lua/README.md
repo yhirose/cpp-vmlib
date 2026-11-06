@@ -249,7 +249,6 @@ Quietly different:
   (`bad argument #1 to 'select' ...`) has Lua's words but no `chunk:line:`
   in front; nothing names the variable involved, the way Lua's
   `(local 'x')` does.
-
 * **`#` on a table with a hole may pick a different border.** Lua says any
   border is valid; this front end walks from 1 and Lua uses its array
   part's size, so the two can disagree about a table you have deleted from
