@@ -438,10 +438,13 @@ struct Binder {
         r.iff(r.is(r.typ(a), "bool"), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     r.add(r.iff(r.is(r.typ(a), "string"),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
+    // The same table is equal to itself without asking __eq, which Lua
+    // consults only for two different ones.
     r.add(r.iff(
         r.is(r.typ(a), "map"),
         r.blk(
-            {r.set(m, r.call("$mm", {r.L(a), r.S("__eq")})),
+            {r.iff(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}), r.ret(r.Bo(true))),
+             r.set(m, r.call("$mm", {r.L(a), r.S("__eq")})),
              r.iff(r.isnt(r.typ(m), "nil"),
                    r.ret(r.call(
                        "$truthy",

@@ -73,3 +73,6 @@ local holder = {twice = setmetatable({}, {
   __call = function(self, me, x) return x * 2 end
 })}
 print(holder:twice(21))
+-- A table is equal to itself without consulting __eq.
+local loud = setmetatable({}, {__eq = function() io.write("<eq>") return false end})
+print(loud == loud, loud ~= loud)
