@@ -48,3 +48,12 @@ byRef.set(k2, 'second');
 show('reference keys', [byRef.size, byRef.get(k1), byRef.get(k2)]);
 
 show('typeof', [typeof m, typeof s]);
+
+// Built from anything for...of walks: [key, value] pairs for a Map,
+// values for a Set, and nothing for undefined.
+const fromPairs = new Map([['a', 1], ['b', 2]]);
+const copied = new Map(fromPairs);
+copied.set('c', 3);
+const fromStr = new Set('abca');
+show('built', [fromPairs.get('b'), fromPairs.size, copied.size,
+               fromStr.size, new Set([1, 1, 2]).size, new Map().size]);

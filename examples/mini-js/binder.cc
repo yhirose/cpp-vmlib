@@ -490,6 +490,7 @@ struct Binder {
         "$join",   "$add",     "$index",   "$setidx",   "$slice",
         "$push",   "$iter",    "$iternext", "$throwtype", "$minner",
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
+        "$mfill",  "$sfill",
         "$pnew",   "$ispromise", "$psettle", "$pon",    "$topromise",
         "$presolve", "$adopt", "$then",    "$react",    "$presolve1",
         "$preject1", "$await",   "$prejected", "$arrayof", "$pushall",
@@ -967,6 +968,27 @@ struct Binder {
     r.finish("$mdel");
   }
 
+  // new Map(entries) and new Set(values): the new collection, filled from
+  // whatever for...of could walk ($iter) -- each entry a [key, value]
+  // pair for a Map -- and left empty for undefined.
+  void rt_fill(const std::string& name, bool pairs) {
+    RT r(*this);
+    const auto [o, init] = r.params("o", "init");
+    const auto [it, st, e] = r.locals("it", "st", "e");
+    r.add(r.iff(r.is(r.typ(init), "nil"), r.ret(r.L(o))));
+    r.add(r.set(it, r.call("$iter", {r.L(init)})));
+    const NodeId add =
+        pairs ? r.call("$mset", {r.L(o), r.idx(r.L(e), r.I(0)),
+                                 r.idx(r.L(e), r.I(1))})
+              : r.call("$sadd", {r.L(o), r.L(e)});
+    r.add(r.wh(r.Bo(true),
+               r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
+                      r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
+                      r.set(e, r.idx(r.L(st), "value")), add})));
+    r.add(r.ret(r.L(o)));
+    r.finish(name);
+  }
+
   void rt_sadd() {
     RT r(*this);
     const auto [o, v] = r.params("o", "v");
@@ -1191,6 +1213,8 @@ struct Binder {
     rt_mhas();
     rt_mdel();
     rt_sadd();
+    rt_fill("$mfill", true);
+    rt_fill("$sfill", false);
     rt_pnew();
     rt_ispromise();
     rt_psettle();
@@ -1895,21 +1919,19 @@ struct Binder {
     const auto chain = [&](NodeId built) {
       return apply_suffixes(built, a, 2, a.nodes.size(), ctx);
     };
-    if (n == "Map") {
-      const BuiltinArgs xs = emit_args(arglist, 0, ctx);
-      return chain(run_first(
-          xs.pre,
-          b.object_lit(
-              {{b.str_literal("$map"), b.intrinsic(IntrinsicId::MapNew, {})}}),
-          p));
-    }
-    if (n == "Set") {
-      const BuiltinArgs xs = emit_args(arglist, 0, ctx);
-      return chain(run_first(
-          xs.pre,
-          b.object_lit(
-              {{b.str_literal("$set"), b.intrinsic(IntrinsicId::MapNew, {})}}),
-          p));
+    // new Map(entries) and new Set(values), filled by $mfill/$sfill from
+    // anything for...of walks.
+    if (n == "Map" || n == "Set") {
+      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
+      const NodeId empty = b.object_lit(
+          {{b.str_literal(n == "Map" ? "$map" : "$set"),
+            b.intrinsic(IntrinsicId::MapNew, {})}});
+      const NodeId made =
+          xs.args.empty()
+              ? empty
+              : helper(n == "Map" ? "$mfill" : "$sfill", {empty, xs.args[0]},
+                       p);
+      return chain(run_first(xs.pre, made, p));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
     // over a cell of *this* frame holding the promise, which is the one
