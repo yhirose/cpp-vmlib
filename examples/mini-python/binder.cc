@@ -4836,8 +4836,14 @@ struct Binder {
                     NodeId{}));
     }
     if (!has_kwrest) {
-      pre.push_back(
-          rt.call("$kwcheck", {K, all_names, b.str_literal(fi.name)}, p));
+      // Only a keyword can be one the function does not take, so a call
+      // that passed none -- K is nil, the way every positional call
+      // arrives -- skips $kwcheck, and the names it would be handed.
+      pre.push_back(b.make_if(
+          b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {K}),
+                   b.str_literal("nil")),
+          rt.call("$kwcheck", {K, all_names, b.str_literal(fi.name)}, p),
+          NodeId{}));
     }
   }
 
