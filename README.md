@@ -968,8 +968,8 @@ listens; this is that, decided at compile time.
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
 -- under `examples/<name>/`. The rest is shared: its `main.cc` names the
 binder and whatever `vm::RunOptions` its programs need, and hands them to
-the command line every front end here runs (`examples/common/driver.h`:
-`--dump-ir`, `--dump-bc`, `--check-sharing`, `--profile`);
+the command line every front end here runs (`examples/common/driver.h`,
+which lists its flags);
 its `CMakeLists.txt` is one `add_front_end()` call
 (`examples/common/CMakeLists.txt`), which builds it and registers its
 tests -- `samples/` against their `golden/` transcripts, `uncaught/` and
