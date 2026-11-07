@@ -78,11 +78,18 @@ if(VMLIB_BUILD_BENCH)
   add_subdirectory(bench)
 endif()
 
-# Every front end front_end_tests registered, one per line -- its target,
-# source extension and language (test/languages.sh) -- for what runs them
-# outside ctest: bench/languages/run.sh reads it from the build directory.
+# Every front end front_end_tests registered, one per line of tab-separated
+# fields -- its target, the binary CMake builds it to, its source
+# extension, its language (test/languages.sh) and its tests' name prefix
+# -- for what runs them outside ctest: bench/languages/run.sh and
+# test/goldens.sh read it from the build directory. A generator with more
+# than one configuration builds a binary per configuration, and gets a
+# list for each, front-ends-<config>.txt.
 get_property(front_ends GLOBAL PROPERTY VMLIB_FRONT_ENDS)
 list(JOIN front_ends "\n" front_ends)
-file(WRITE ${CMAKE_BINARY_DIR}/front-ends.txt "${front_ends}\n")
+get_property(multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+file(GENERATE
+     OUTPUT ${CMAKE_BINARY_DIR}/front-ends$<$<BOOL:${multi_config}>:-$<CONFIG>>.txt
+     CONTENT "${front_ends}\n")
 
 install(FILES vmlib.h DESTINATION include)

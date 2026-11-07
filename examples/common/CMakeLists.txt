@@ -92,9 +92,11 @@ function(front_end_tests prefix target)
     set(lead -DLEAD=${arg_LEAD})
   endif()
   # For what runs a front end outside ctest: the top-level CMakeLists.txt
-  # writes these into the build directory, as front-ends.txt.
-  set_property(GLOBAL APPEND PROPERTY VMLIB_FRONT_ENDS
-               "${target} ${arg_EXT} ${arg_LANG}")
+  # writes these into the build directory, as front-ends.txt. The prefix
+  # comes last, since PL/0's is empty.
+  string(JOIN "\t" line ${target} $<TARGET_FILE:${target}> ${arg_EXT}
+              ${arg_LANG} "${prefix}")
+  set_property(GLOBAL APPEND PROPERTY VMLIB_FRONT_ENDS "${line}")
   set(scripts ${PROJECT_SOURCE_DIR}/test)
   set(samples -DDIR=${arg_DIR}/samples -DLANG=${arg_LANG} ${lead}
               -P ${scripts}/run_samples.cmake)

@@ -86,11 +86,6 @@ ROOT=$(cd ../.. && pwd)
 . "$ROOT/test/languages.sh"
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build"}
 FRONT_ENDS=$BUILD_DIR/front-ends.txt
-if [ ! -f "$FRONT_ENDS" ]; then
-  echo "$0: no $FRONT_ENDS -- configure $BUILD_DIR with" \
-       "-DVMLIB_BUILD_EXAMPLES=ON" >&2
-  exit 1
-fi
 REPS=3
 if [ "${1:-}" = "--reps" ]; then REPS=$2; fi
 
@@ -100,6 +95,23 @@ SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
 WORKLOADS=(startup fib loop array strings)
+
+# The front ends to time: every one the build registered that has a
+# program here (PL/0 has none). A build without the examples registers
+# none of them, which is an error rather than an empty table.
+BINS=() EXTS=() LANGS=()
+if [ -f "$FRONT_ENDS" ]; then
+  while IFS=$'\t' read -r _ bin ext lang _; do
+    if [ -f "${WORKLOADS[0]}.$ext" ]; then
+      BINS+=("$bin") EXTS+=("$ext") LANGS+=("$lang")
+    fi
+  done <"$FRONT_ENDS"
+fi
+if [ ${#BINS[@]} -eq 0 ]; then
+  echo "$0: no front end with a program here in $FRONT_ENDS -- configure" \
+       "$BUILD_DIR with -DVMLIB_BUILD_EXAMPLES=ON" >&2
+  exit 1
+fi
 declare -A EXPECT=(
   [startup]=1
   [fib]=317811
@@ -149,13 +161,13 @@ best_ms() {
   echo $(((best + 500) / 1000))
 }
 
-# One workload through one front end, FRONT_END EXT LANG as front-ends.txt
-# lists it: its own binary, then the real language -- compiled first,
-# outside the timed runs, where it has a compile step, and "-" where that
-# compile fails or it is not installed.
+# One workload through the front end at index $2 of the lists above: its
+# own binary, then the real language -- compiled first, outside the timed
+# runs, where it has a compile step, and "-" where that compile fails or
+# it is not installed.
 row() {
-  local workload=$1 fe=$2 lang=$4 file=$1.$3 mini_ms real_ms=-
-  mini_ms=$(best_ms "$workload" "$BUILD_DIR/examples/$fe/$fe" "$file")
+  local workload=$1 lang=${LANGS[$2]} file=$1.${EXTS[$2]} mini_ms real_ms=-
+  mini_ms=$(best_ms "$workload" "${BINS[$2]}" "$file")
   if lang_command "$lang" "$SCRATCH/$lang-$workload" "$file" 2>/dev/null; then
     real_ms=$(best_ms "$workload" "${CMD[@]}")
   fi
@@ -164,10 +176,8 @@ row() {
 }
 
 printf 'task\tlang\tmini\treal\treal_ms\n'
-# The list is read on its own descriptor, so that no timed program
-# inherits it as its stdin.
 for w in "${WORKLOADS[@]}"; do
-  while read -r fe ext lang <&3; do
-    if [ -f "$w.$ext" ]; then row "$w" "$fe" "$ext" "$lang"; fi
-  done 3<"$FRONT_ENDS"
+  for i in "${!BINS[@]}"; do
+    row "$w" "$i"
+  done
 done
