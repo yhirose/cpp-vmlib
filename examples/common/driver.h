@@ -55,8 +55,8 @@ struct FrontEnd {
   vm::RunOptions run;
   // Whether several files make one program: they are concatenated in
   // order, each followed by a line break, and the last one names the
-  // program. Without it a program is one file, and of several operands the
-  // last is the one read.
+  // program. Without it a program is one file, and a second is a usage
+  // error.
   bool concatenate = false;
 };
 

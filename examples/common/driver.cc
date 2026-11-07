@@ -1,6 +1,6 @@
 #include <fstream>
 #include <iostream>
-#include <sstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -45,33 +45,35 @@ int main(int argc, char** argv, const FrontEnd& fe) {
     } else if (a.rfind("--", 0) == 0) {
       usage(fe);
       return 2;
-    } else if (fe.concatenate || paths.empty()) {
-      paths.push_back(a);
     } else {
-      paths.back() = a;
+      paths.push_back(a);
     }
   }
-  if (paths.empty()) {
+  if (paths.empty() || (paths.size() > 1 && !fe.concatenate)) {
     usage(fe);
     return 2;
   }
 
-  std::ostringstream ss;
+  // Read as text rather than streamed into an ostringstream: an empty
+  // file inserts nothing, which sets the stream's failbit and would drop
+  // every file after it.
+  std::string source;
   for (const std::string& path : paths) {
     std::ifstream in(path);
     if (!in) {
       std::cerr << fe.name << ": cannot open " << path << "\n";
       return 2;
     }
-    ss << in.rdbuf();
-    if (fe.concatenate) ss << "\n";
+    source.append(std::istreambuf_iterator<char>(in),
+                  std::istreambuf_iterator<char>());
+    if (fe.concatenate) source += '\n';
   }
 
   // The last file names the program: in every position the stdio host
   // reports, and to a binder that takes the path itself.
   const std::string& path = paths.back();
   coreir_rt_default::set_path(path);
-  const coreir::Module m = fe.bind(ss.str(), path);
+  const coreir::Module m = fe.bind(source, path);
 
   if (dump_ir) {
     std::cout << coreir::to_string(m);
