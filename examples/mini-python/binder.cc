@@ -3068,6 +3068,14 @@ struct Binder {
     return op_or_helper(rt, op, x, y, tags_named({"int", "string"}), h, p);
   }
 
+  // `c[k]`: a list's or a string's element at an index in range is
+  // Index's; a negative index, one out of range (IndexError), a tuple and
+  // a dict are $idx's.
+  NodeId index(NodeId c, NodeId k, SrcPos p) {
+    return Builder(m).at(p).index(
+        c, k, {rt.ref("$idx", p), tags_named({"array", "string", "int"})});
+  }
+
   // `==` on two values of these types is Eq's, and on two of different
   // types, which Eq refuses, $eq's, which also asks a bignum, a float, a
   // container or an object's own `__eq__`.
@@ -4229,7 +4237,7 @@ struct Binder {
                           {cur, b.nil_literal(p), b.nil_literal(p)}, p);
             break;
           }
-          cur = rt.call("$idx", {cur, emit_expr(sub, ctx)}, p);
+          cur = index(cur, emit_expr(sub, ctx), p);
           break;
         }
         default:  // callsfx
