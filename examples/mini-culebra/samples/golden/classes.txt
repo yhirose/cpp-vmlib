@@ -6,12 +6,13 @@ receiver: 5
 nested: [0, 5, 0] Q(7, 0)(3, 4)
 args: P(3, 4)
 display: Point {mut x: 3, mut y: 4}
-type: Object Object
-class value: {new: [function]}
+type: Point Class
+class value: {new: [function], name: 'Point'}
+class name: Point ['new', 'name']
 mutable fields: Point {mut x: 9, mut y: 2} 85
 equality: true
 identity: true
 collection: [2, 8, 18]
-closed-over class: Shifted {mut v: 105}
-init method name method 1
+closed-over class: Shifted {mut v: 105} Shifted
+init method name method 1 Labeled
 fields: ['x'] 1

@@ -35,7 +35,7 @@
 # running the file PL0_CUL -- and the environment overrides any of them,
 # the way CC names a C compiler: to run a version installed under another
 # name (PYTHON=python3.14), or two releases of one implementation side by
-# side, as mini-culebra's and PL/0's are (below).
+# side (PL0_CULEBRA).
 
 if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -53,7 +53,7 @@ declare -A LANG_NAME=(
 )
 
 # A version matches when it is this one or a release of it: 3.14 is any
-# 3.14.x, and 0.4.0 is exactly 0.4.0 (not a 0.4.0-12-gabcdef build from
+# 3.14.x, and 0.8.0 is exactly 0.8.0 (not a 0.8.0-37-g6447b28d build from
 # between releases).
 #
 # python 3.14: CPython rewords its messages between minor releases -- 3.14
@@ -61,23 +61,22 @@ declare -A LANG_NAME=(
 #   values to unpack" its count -- and mini-python's words are 3.14's.
 # ruby 3.3: 3.4 changed Hash#inspect from {"a"=>1} to {"a" => 1}, and
 #   mini-ruby prints the former.
-# culebra 0.4.0: culebra is not at 1.0 and its output moves between
-#   releases, and mini-culebra's is 0.4.0's. 0.5.0 began answering
-#   type_of with an object's class ("Point", and "Class" for the class)
-#   where 0.4.0 says "Object" for both, and printing a class value with
-#   its name. mini-culebra has not followed (see its README).
-# pl0 0.8.0: culebra 0.8.0 running pl0.cul from the same release tag, a
-#   different culebra from mini-culebra's. pl0.cul is written against its
-#   own release's PEG API, which keeps changing (0.8.0 runs no earlier
-#   release's pl0.cul, and 0.4.0 predates pl0.cul altogether), so PL/0's
-#   is the newest release, whose pl0.cul reproduces its goldens.
+# culebra 0.8.0: culebra is not at 1.0 and its output moves between
+#   releases -- 0.5.0 began answering type_of with an object's class
+#   ("Point", and "Class" for the class) where 0.4.0 said "Object", and
+#   printing a class value with its name -- and even between the commits
+#   in between, so mini-culebra follows one release, and moves with the
+#   pin.
+# pl0 0.8.0: culebra 0.8.0 running pl0.cul from the same release tag.
+#   pl0.cul is written against its own release's PEG API, which keeps
+#   changing (0.8.0 runs no earlier release's pl0.cul).
 # csharp 8.0 is .NET's: the program is built for net8.0, and the newest
 #   8.0.x runtime is what runs it.
 # The rest are pinned at the release the language is named by (Lua 5.4,
 # Guile 3.0) or at a current one (Node's LTS, Go's newest), so that what
 # checks the goldens does not move under them when a newer one comes out.
 declare -A LANG_VERSION=(
-  [python]=3.14 [ruby]=3.3 [lua]=5.4 [scheme]=3.0 [culebra]=0.4.0 [js]=24
+  [python]=3.14 [ruby]=3.3 [lua]=5.4 [scheme]=3.0 [culebra]=0.8.0 [js]=24
   [csharp]=8.0 [go]=1.27 [pl0]=0.8.0
 )
 

@@ -28,11 +28,14 @@ slots[Point.new(1, 0).x] += Point.new(5, 0).x
 println("nested: {slots} {p.label(Point.new(7, 0).label('Q'))}")
 println("args: {p.label('P')}")
 println("display: {p}")
+# An instance's type is its class's name, and a class's own is Class.
 println("type: {type_of(p)} {type_of(Point)}")
 
-# The class value itself is an object with one enumerable key: its methods
-# are not properties a program can enumerate, which is culebra's rendering.
+# The class value itself is an object with two enumerable keys, `new` and
+# its `name`: its methods are not properties a program can enumerate,
+# which is culebra's rendering.
 println("class value: {Point}")
+println("class name: {Point.name} {Point.keys()}")
 
 # Every function's parameter 0 is `self`, which is what lets a method be
 # taken as a value and applied to a receiver later.
@@ -60,7 +63,7 @@ fn make_class(offset) {
   Shifted
 }
 let S = make_class(100)
-println("closed-over class: {S.new(5)}")
+println("closed-over class: {S.new(5)} {type_of(S.new(5))}")
 
 # A method may be named `init` or `name`: neither is where the class keeps
 # its constructor or its own name.
@@ -70,7 +73,7 @@ class Labeled {
   name() { "name method" }
 }
 let labeled = Labeled.new(1)
-println("{labeled.init()} {labeled.name()} {labeled.x}")
+println("{labeled.init()} {labeled.name()} {labeled.x} {Labeled.name}")
 
 # An instance's fields are what keys() lists and size() counts: the class it
 # points back at is none of them.

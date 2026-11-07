@@ -126,6 +126,7 @@ this binder synthesizes:
 ```
 C = { "\x01init": <new>, "\x01n": "C", "\x02m": <m>, "\x02drop": <drop> }
 C["new"] = MakeClosure(<synthesized ctor>, over the cell holding C)
+C["name"] = "C"
 
 ctor(self, args...):
   inst = { "\x01c": C }
@@ -139,12 +140,23 @@ implementation's (the instance's `"\x01c"`, the runtime's `"\x01drop"`,
 and the class table's own `init` and name), `0x02` for the program's, its
 methods. The split matters: a method stored under the first would be the
 same key as those -- a method named `drop` would make the *class itself* a
-resource, one named `init` would overwrite the constructor. `0x02` also
-keeps methods out of `keys()` and out of a printed object, which is what
-culebra shows -- a class value prints as `{new: [function]}`. The rule
-and the layout are [examples/common/runtime_parts.h](../common/runtime_parts.h)'s,
-which mini-ruby, mini-python and mini-csharp share, with a base link this
-front end has no use for.
+resource, one named `init` would overwrite the constructor -- and one
+stored bare would be the class's own `new` or `name`. `0x02` also keeps
+methods out of `keys()` and out of a printed object, which is what culebra
+shows: a class value's fields are `new` and its `name`, and it prints as
+`{new: [function], name: 'Point'}`. The rule and the layout are
+[examples/common/runtime_parts.h](../common/runtime_parts.h)'s, which
+mini-ruby, mini-python and mini-csharp share, with a base link this front
+end has no use for.
+
+The name is there twice. The program's `name` field is a copy;
+`"\x01n"` is the class's own, where culebra keeps it, in data a program
+cannot write. That one is what an instance prints and what `type_of` (a
+host function, below) answers for it, so a write to `Point.name` -- an
+error in culebra, unchecked here -- cannot change every `Point`'s type. A
+class table is the object holding it, which `type_of` answers `Class`;
+any other object -- a literal with a `new` and a `name` of its own
+included -- is an `Object`.
 
 The class binding is forced into a cell because its own constructor
 captures it. That is the chicken-and-egg of building the table and the
@@ -247,11 +259,14 @@ Quietly different:
   statement ends becomes a failing diff.
 * **Immutability is not enforced.** culebra rejects `p.x = 1` on a property
   the literal did not declare `mut`, and rejects assigning to a `let`
-  binding (which this front end *does* check). The samples stay on the
-  right side of the rule -- mutation goes through arrays and class
-  instances -- because a printed object shows `mut` per property and this
-  front end does not track that per property. It infers it: a class
-  instance's fields are all mutable, a literal's are not.
+  binding (which this front end *does* check), and a class value's `new`
+  and `name` are not writable (here a write to `name` reaches only the
+  copy a program sees; see above). The samples stay on the right side of
+  the rule -- mutation goes through arrays and class instances -- because
+  a printed object shows `mut` per property and this front end does not
+  track that per property. It infers it: a class instance's fields are
+  all mutable, a literal's are not, and neither are a class value's (where
+  culebra prints a field added to one as `mut`).
 * **Runtime traps are not culebra's errors.** A divide by zero or a call
   with the wrong arity raises the executor's own trap value, which a `catch`
   lands but which has no `.kind`. The two container errors this binder
@@ -274,13 +289,12 @@ here.
 
 `test/goldens.sh mini-culebra` checks the goldens against `culebra`, and
 `--update` regenerates them -- by hand, never from the build, for the
-reason that script states. They are culebra 0.4.0's output, the release
+reason that script states. They are culebra 0.8.0's output, the release
 `test/languages.sh` pins, and this front end is a slice of that release:
-culebra is not at 1.0, and later ones have moved. Since 0.5.0, `type_of`
-answers an object's class (`Point`, and `Class` for the class itself)
-where this says `Object`, and a class value prints with its name, so
-`classes.cul` differs. (`iterators.cul` names its class `Span`: 0.8.0
-takes a class named `Range` for its own built-in range.)
+culebra is not at 1.0 and its output moves, so a new pin is a new
+comparison, and whatever it shows is this front end's to follow.
+(`iterators.cul` names its class `Span`: 0.8.0 takes a class named
+`Range` for its own built-in range.)
 
 All eight samples are also clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --

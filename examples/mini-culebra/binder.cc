@@ -74,14 +74,24 @@ namespace {
 // destructor key -- unspellable from a language whose identifiers are
 // printable, the reason vmlib.h's kDropKey starts with it -- and, on the
 // class table, its name (kNameKey) and the declared `new` the synthesized
-// constructor calls. 0x02 is the program's: its methods, program_key(name).
-// Not 0x01, where a method named `drop` would be the runtime's destructor
-// key and make the *class* a resource, and one named `init` the
-// constructor. 0x02 also keeps every method out of `keys()` and out
-// of a printed object, which is what culebra shows -- a class value prints
-// as `{new: [function]}`, its methods being no more enumerable than an
-// Error's fields are in JavaScript.
+// constructor calls. The name is kept there, where a program cannot write
+// it, as culebra keeps it in the class's own data: it is what an instance
+// prints and what `type_of` answers for one, and an object holding it is
+// a class. 0x02 is the program's: its methods, program_key(name). Not
+// 0x01, where a method named `drop` would be the runtime's destructor key
+// and make the *class* a resource, and one named `init` the constructor;
+// nor bare, where one named `new` or `name` would be the class's own
+// field. 0x02 also keeps every method out of `keys()` and out of a printed
+// object, which is what culebra shows -- a class value prints as
+// `{new: [function], name: 'Point'}`, its methods being no more enumerable
+// than an Error's fields are in JavaScript.
 constexpr char kInitKey[] = "\x01" "init";
+// The two fields a class value shows a program, in the order culebra
+// prints them: its constructor and a copy of its name. Writing either is
+// an error in culebra and goes unchecked here (README.md); the copy is all
+// such a write can reach.
+constexpr char kNewField[] = "new";
+constexpr char kNameField[] = "name";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -950,6 +960,10 @@ struct Binder {
   //   C = { "\x01init": <new>, "\x01n": "C", "\x02m": <m>,
   //         "\x02drop": <drop> }   -- a cell
   //   C["new"] = MakeClosure(<synthesized constructor>, over C)
+  //   C["name"] = "C"
+  //
+  // `new` and `name` are the two fields a program sees, in that order, as
+  // culebra prints a class value.
   //
   // The constructor is what turns the table into an instance: a fresh
   // object carrying kClassKey (so a method call can find the table) and,
@@ -974,16 +988,16 @@ struct Binder {
       }
       if (name == "drop") has_drop = true;
       const std::string key =
-          name == "new" ? kInitKey : program_key(name);
-      if (name == "new") {
+          name == kNewField ? kInitKey : program_key(name);
+      if (name == kNewField) {
         init_params =
             static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
       }
       kvs.emplace_back(b.str_literal(key), emit_closure(g, ctx, p));
     }
-    kvs.emplace_back(b.str_literal(kNameKey),
-                     b.str_literal(std::string(a.nodes[0]->token)));
-    emit_ctor(ctor_fn, init_params, has_drop, std::string(a.nodes[0]->token));
+    const std::string cname(a.nodes[0]->token);
+    kvs.emplace_back(b.str_literal(kNameKey), b.str_literal(cname));
+    emit_ctor(ctor_fn, init_params, has_drop, cname);
 
     std::vector<CaptureSrc> cs{{VarKind::Cell, cell}};
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
@@ -991,8 +1005,10 @@ struct Binder {
     return b.block(
         {b.assign(VarKind::Cell, cell, b.object_lit(kvs)),
          b.set_index(
-             b.varref(VarKind::Cell, cell), b.str_literal("new"),
-             b.make_closure(rs.fns[static_cast<size_t>(ctor_fn)].index, cm))});
+             b.varref(VarKind::Cell, cell), b.str_literal(kNewField),
+             b.make_closure(rs.fns[static_cast<size_t>(ctor_fn)].index, cm)),
+         b.set_index(b.varref(VarKind::Cell, cell), b.str_literal(kNameField),
+                     b.str_literal(cname))});
   }
 
   void emit_ctor(int32_t g, int32_t init_params, bool has_drop,
@@ -1504,8 +1520,21 @@ bool native_print(NativeCall& c) {
 // culebra's own type names, which are not the VM's ("Long", not "int").
 // Mapping one vocabulary onto the other is exactly the kind of thing a
 // host function is for -- the IR has TypeOf, and what a language calls
-// each answer is the language's business.
+// each answer is the language's business. An object is typed by what made
+// it: an instance by its class's name (kNameKey, not the `name` field a
+// program could write), a class table -- the object holding that name --
+// as a Class, anything else -- a literal, however class-like its fields --
+// as an Object.
 bool native_type_of(NativeCall& c) {
+  if (c.arg(0).is_object()) {
+    ObjectObj* o = c.arg(0).as_object();
+    if (const Value* cls = o->find(kClassKey)) {
+      c.result = *cls->as_object()->find(kNameKey);
+    } else {
+      c.result = Value::make_str(o->find(kNameKey) ? "Class" : "Object");
+    }
+    return true;
+  }
   const char* n = "Object";
   switch (c.arg(0).tag()) {
     case ValueTag::Nil: n = "Nil"; break;
