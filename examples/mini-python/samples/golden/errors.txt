@@ -9,6 +9,8 @@ caught RuntimeError: deep ['finally on raise']
 ['body 0', 'finally 0', 'finally 1']
 inner caught v
 outer caught TypeError
+except ValueError bare except nothing raised
+bare except alone
 caught IndexError: list index out of range
 caught KeyError: 'zz'
 ''

@@ -3503,28 +3503,34 @@ struct Binder {
       out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p)));
     }
     const NodeId body = emit_block(*a.nodes[0], ctx);
-    // The clauses are tried in order and what none of them claims is
-    // re-thrown: one nested If per clause, and nothing else.
-    NodeId handler = b.make_throw(E);
-    for (size_t k = excs.size(); k-- > 0;) {
-      const Ast& ex = *excs[k];
-      const bool bare = ex.nodes[0]->tag == "block"_;
+    // The clauses are tried in order, one nested If per clause that names
+    // what it catches. What none of them claims goes to a bare `except:`,
+    // which Python allows only last, or else is re-thrown.
+    const auto is_bare = [](const Ast& ex) {
+      return ex.nodes[0]->tag == "block"_;
+    };
+    const auto clause = [&](const Ast& ex) {
       std::vector<NodeId> hs;
-      if (!bare && ex.nodes.size() > 2) {
+      if (!is_bare(ex) && ex.nodes.size() > 2) {
         hs.push_back(write_var(decl_of.at(ex.nodes[1].get()), E, ctx, p));
       }
       hs.push_back(emit_block(*ex.nodes.back(), ctx));
-      if (bare) {
-        handler = b.block(hs);
-        continue;
-      }
+      return b.block(hs);
+    };
+    size_t k = excs.size();
+    NodeId handler = k > 0 && is_bare(*excs[k - 1]) ? clause(*excs[--k])
+                                                    : b.make_throw(E);
+    while (k-- > 0) {
+      const Ast& ex = *excs[k];
+      if (is_bare(ex)) fail(ex, "default 'except:' must be last");
+      const NodeId then = clause(ex);
       // A builtin exception is not a class here, so it travels as its
       // name; a class of the program's own travels as its value.
       const Ast& caught = *ex.nodes[0];
       const NodeId cls = ref_of.count(&caught)
                              ? read_var(ref_of.at(&caught), ctx, p)
                              : b.str_literal(std::string(caught.token));
-      handler = b.make_if(rt.call("$isexc", {E, cls}, p), b.block(hs), handler);
+      handler = b.make_if(rt.call("$isexc", {E, cls}, p), then, handler);
     }
     out.push_back(b.make_try(slot, body, handler));
     const int32_t n = ctx.mark();

@@ -81,6 +81,26 @@ def selective(kind):
 print(selective("value"))
 print(selective("type"))
 
+# A bare `except:` claims whatever the clauses before it did not, and has
+# to be the last of them.
+def bare(kind):
+    try:
+        if kind == "value":
+            raise ValueError("v")
+        if kind == "key":
+            raise KeyError("k")
+        return "nothing raised"
+    except ValueError:
+        return "except ValueError"
+    except:
+        return "bare except"
+
+print(bare("value"), bare("key"), bare("none"))
+try:
+    print(1 // 0)
+except:
+    print("bare except alone")
+
 # Container failures raise the exceptions Python names them by.
 print(attempt(lambda: [1, 2][9]))
 print(attempt(lambda: {"a": 1}["zz"]))
