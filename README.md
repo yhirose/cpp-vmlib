@@ -869,12 +869,13 @@ uses for the executor's own compile step; Go gets the same treatment
 because `go run` compiles and links on every invocation, so timing it
 would report a compiler rather than a runtime. What the script times for
 Go is the binary `go build` produced, which is why its `startup` row is
-the floor the rest of the table reads against. A language's own toolchain
-not found on `PATH` is skipped and reported as `-` rather than failing the
-run, since not every machine has all eight -- CI installs what it
-reasonably can (see its own workflow for exactly what) and gets a `-`-free
-table as a result, but a local run stays honest about whatever this one
-happens to be missing.
+the floor the rest of the table reads against. Each language runs the way
+`test/languages.sh` says, as when the samples' goldens are checked, and
+one whose toolchain is not found on `PATH` is skipped and reported as `-`
+rather than failing the run, since not every machine has all eight -- CI
+installs all of them, at the versions `test/languages.sh` pins, and gets a
+`-`-free table as a result, but a local run stays honest about whatever
+this one happens to be missing.
 Run it as `bench/languages/run.sh --reps N` after building with
 `-DVMLIB_BUILD_EXAMPLES=ON`; CI runs both this and `bench/bench.cc` on every
 push and puts the results in the job summary, not in an artifact nobody

@@ -1,8 +1,9 @@
 # The real language each example front end imitates, and how to run a
 # program under it -- the one place that knows. test/goldens.sh runs every
 # front end's samples through it to make and check their golden files,
-# and bench/languages/run.sh times it next to the front end. Sourced, not
-# run.
+# bench/languages/run.sh times it next to the front end, and
+# .github/actions/languages installs it in CI at the versions below.
+# Sourced, not run.
 #
 # A language is named as its front end is, less the `mini-`:
 # examples/mini-python's is `python`, and examples/pl0's is `pl0` --
@@ -12,8 +13,9 @@
 #   LANG_EXT[lang]       its programs' file extension.
 #   LANG_NAME[lang]      what its implementation is called.
 #   LANG_VERSION[lang]   the version whose output the goldens are, and the
-#                        only one test/goldens.sh accepts. Below is why
-#                        each is pinned as tightly as it is.
+#                        only one test/goldens.sh accepts (CI installs
+#                        exactly these). Below is why each is pinned as
+#                        tightly as it is.
 #   lang_version LANG    prints the version of LANG that would run.
 #   lang_command LANG SCRATCH FILE...
 #                        sets the array CMD to the command that runs the

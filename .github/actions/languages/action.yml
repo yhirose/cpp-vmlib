@@ -1,0 +1,67 @@
+name: languages
+description: >-
+  The real language every example front end imitates, at the version
+  test/languages.sh pins it to: the oracle test/goldens.sh checks the
+  samples' goldens against, and the baseline bench/languages times the
+  front ends next to. Linux only (lua and guile come from apt), and the
+  repository must already be checked out.
+
+runs:
+  using: composite
+  steps:
+    # The versions, read from the one place that pins them; test/goldens.sh
+    # refuses any other.
+    - id: pin
+      shell: bash
+      run: |
+        . test/languages.sh
+        for lang in "${!LANG_VERSION[@]}"; do
+          echo "$lang=${LANG_VERSION[$lang]}"
+        done >>"$GITHUB_OUTPUT"
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ steps.pin.outputs.python }}
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ steps.pin.outputs.ruby }}
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ steps.pin.outputs.js }}
+    # No cache: there is no go.sum to key one on, only single-file programs.
+    - uses: actions/setup-go@v7
+      with:
+        go-version: ${{ steps.pin.outputs.go }}
+        cache: false
+    - uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ steps.pin.outputs.csharp }}.x
+    # Debian names both packages by the version, so the pin picks them.
+    - shell: bash
+      env:
+        LUA_VERSION: ${{ steps.pin.outputs.lua }}
+        GUILE_VERSION: ${{ steps.pin.outputs.scheme }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y "lua$LUA_VERSION" "guile-$GUILE_VERSION"
+    # culebra has no package; its own docs point at the tagged release's
+    # prebuilt binary rather than building from source (see
+    # https://github.com/yhirose/culebra/blob/master/docs/handbook.ja.md#1-%E5%B0%8E%E5%85%A5).
+    # Two releases of it: mini-culebra's on PATH, and PL/0's beside the
+    # pl0.cul from its tag, which the release itself does not ship.
+    - shell: bash
+      env:
+        CULEBRA_VERSION: ${{ steps.pin.outputs.culebra }}
+        PL0_VERSION: ${{ steps.pin.outputs.pl0 }}
+      run: |
+        release() {
+          mkdir -p "$2"
+          curl -fsSL "https://github.com/yhirose/culebra/releases/download/v$1/culebra-linux-x64.tar.gz" |
+            tar xz -C "$2" --strip-components=1
+        }
+        release "$CULEBRA_VERSION" "$RUNNER_TEMP/culebra"
+        release "$PL0_VERSION" "$RUNNER_TEMP/pl0"
+        curl -fsSL -o "$RUNNER_TEMP/pl0/pl0.cul" \
+          "https://raw.githubusercontent.com/yhirose/culebra/v$PL0_VERSION/examples/languages/pl0/pl0.cul"
+        echo "$RUNNER_TEMP/culebra" >>"$GITHUB_PATH"
+        echo "PL0_CULEBRA=$RUNNER_TEMP/pl0/culebra" >>"$GITHUB_ENV"
+        echo "PL0_CUL=$RUNNER_TEMP/pl0/pl0.cul" >>"$GITHUB_ENV"
