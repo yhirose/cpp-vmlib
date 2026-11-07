@@ -3052,7 +3052,9 @@ struct Binder {
     if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p, true);
     if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p, true);
     const uint32_t ints = tags_named("int");
-    if (h == "$idiv") return op_or_helper(rt, BinOp::FloorDiv, x, y, ints, h, p);
+    if (h == "$idiv") {
+      return op_or_helper(rt, BinOp::FloorDiv, x, y, ints, h, p);
+    }
     if (h == "$mod") return op_or_helper(rt, BinOp::FloorMod, x, y, ints, h, p);
     return rt.call(h, {x, y}, p);
   }

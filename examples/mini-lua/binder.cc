@@ -1271,7 +1271,8 @@ struct Binder {
           else if (t == "-") acc = arith(BinOp::Sub, "$subm", acc, rhs, op_p);
           else if (t == "*") acc = arith(BinOp::Mul, "$mulm", acc, rhs, op_p);
           else if (t == "/") acc = rt.call("$div", {acc, rhs}, op_p);
-          else if (t == "//") acc = floor(BinOp::FloorDiv, "$idiv", acc, rhs, op_p);
+          else if (t == "//")
+            acc = floor(BinOp::FloorDiv, "$idiv", acc, rhs, op_p);
           else acc = floor(BinOp::FloorMod, "$mod", acc, rhs, op_p);
         }
         return {acc};

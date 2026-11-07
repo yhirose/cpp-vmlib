@@ -390,7 +390,9 @@ int main() {
         Builder b(m);
         const auto lit = [&](const Operand& o) {
           const std::string n = o.name;
-          if (n == "false" || n == "true") return b.bool_literal(n == "true", p);
+          if (n == "false" || n == "true") {
+            return b.bool_literal(n == "true", p);
+          }
           if (n == "0") return b.literal(0, p);
           if (n == "0.0") return b.double_literal(0.0, p);
           if (n == "nil") return b.nil_literal(p);

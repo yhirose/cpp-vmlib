@@ -7222,7 +7222,8 @@ struct FnCompiler {
   bool literal_truthy(NodeId id) const {
     switch (m.const_kind(id)) {
       case ConstKind::Nil:    return Value().truthy();
-      case ConstKind::Bool:   return Value::make_bool(m.bool_const(id)).truthy();
+      case ConstKind::Bool:
+        return Value::make_bool(m.bool_const(id)).truthy();
       case ConstKind::Int:    return Value::make_int(m.int_const(id)).truthy();
       case ConstKind::Double:
         return Value::make_double(m.double_const(id)).truthy();
