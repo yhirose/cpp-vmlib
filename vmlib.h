@@ -1259,6 +1259,13 @@ inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 // and Ruby's grow) takes int64's answer only when it is the true one.
 inline constexpr int32_t kExact = 1;
 
+// The operators whose int result can wrap: Add, Sub, Mul and Neg, the only
+// ones kExact means anything for.
+inline constexpr bool can_wrap(BinOp op) {
+  return op == BinOp::Add || op == BinOp::Sub || op == BinOp::Mul;
+}
+inline constexpr bool can_wrap(UnOp op) { return op == UnOp::Neg; }
+
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
 // shortest-round-trip doubles included. A language whose display rules
 // differ (culebra prints whole doubles as "4.0") post-processes the result
@@ -1797,22 +1804,42 @@ inline constexpr bool yields_value(Tag t) {
 // do not survive that.
 // ---------------------------------------------------------------------------
 
-// `fallback` is invalid when the operator has none, and `tags` and
-// `exact` then say nothing (Tag::Unary).
-struct UnaryView {
-  UnOp op;
-  NodeId operand, fallback;
-  uint32_t tags;
-  bool exact;
+// An operation's fallback (Tag::Unary has the rule): what is called when
+// an operand's tag is not in `tags`, the operation traps, or -- `exact` --
+// an int result wraps. The callee is invalid when there is none.
+struct Fallback {
+  NodeId callee;
+  uint32_t tags = 0;
+  bool exact = false;
+  bool valid() const { return callee.valid(); }
 };
-struct BinaryView {
-  BinOp op;
-  NodeId lhs, rhs, fallback;
-  uint32_t tags;
-  bool exact;
-};
-// `fallback` invalid when there is none, as for an operator.
-struct IndexView { NodeId receiver, key, fallback; uint32_t tags; };
+
+// The operands of a tag that may name a fallback -- Unary, Binary, Index
+// -- and 0 for every other tag. The fallback, when there is one, is the
+// child after them, with its set in Node::a and its flags in Node::b: the
+// one statement of that layout, which the views, verify(), the effects
+// scan, the dump and the compiler all read through.
+inline constexpr uint32_t operands_of(Tag t) {
+  switch (t) {
+    case Tag::Unary:  return 1;
+    case Tag::Binary:
+    case Tag::Index:  return 2;
+    default:          return 0;
+  }
+}
+inline bool names_fallback(const Node& x) {
+  return operands_of(x.tag) > 0 && x.num_children > operands_of(x.tag);
+}
+inline Fallback fallback_of(const Module& m, NodeId n) {
+  const Node& x = m.at(n);
+  if (!names_fallback(x)) return {};
+  return {m.child(n, operands_of(x.tag)), static_cast<uint32_t>(x.a),
+          (x.b & kExact) != 0};
+}
+
+struct UnaryView  { UnOp op; NodeId operand; Fallback fallback; };
+struct BinaryView { BinOp op; NodeId lhs, rhs; Fallback fallback; };
+struct IndexView  { NodeId receiver, key; Fallback fallback; };
 struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
@@ -1842,22 +1869,14 @@ struct LoopJumpView { int32_t depth; };
 struct NativeRefView { int32_t index; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
-  const Node& x = m.at(n);
-  return {static_cast<UnOp>(x.op), m.child(n, 0),
-          x.num_children > 1 ? m.child(n, 1) : NodeId{},
-          static_cast<uint32_t>(x.a), (x.b & kExact) != 0};
+  return {static_cast<UnOp>(m.at(n).op), m.child(n, 0), fallback_of(m, n)};
 }
 inline BinaryView view_binary(const Module& m, NodeId n) {
-  const Node& x = m.at(n);
-  return {static_cast<BinOp>(x.op), m.child(n, 0), m.child(n, 1),
-          x.num_children > 2 ? m.child(n, 2) : NodeId{},
-          static_cast<uint32_t>(x.a), (x.b & kExact) != 0};
+  return {static_cast<BinOp>(m.at(n).op), m.child(n, 0), m.child(n, 1),
+          fallback_of(m, n)};
 }
 inline IndexView view_index(const Module& m, NodeId n) {
-  const Node& x = m.at(n);
-  return {m.child(n, 0), m.child(n, 1),
-          x.num_children > 2 ? m.child(n, 2) : NodeId{},
-          static_cast<uint32_t>(x.a)};
+  return {m.child(n, 0), m.child(n, 1), fallback_of(m, n)};
 }
 inline AssignView view_assign(const Module& m, NodeId n) {
   return {static_cast<VarKind>(m.at(n).op), m.at(n).a, m.child(n, 0)};
@@ -1925,15 +1944,6 @@ inline NativeRefView view_native_ref(const Module& m, NodeId n) {
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
-
-// An operator's fallback, for Builder::unary and Builder::binary
-// (Tag::Unary has the rule): what is called when an operand's tag is not in
-// `tags`, the operator traps, or -- `exact` -- an int result wraps.
-struct Fallback {
-  NodeId callee;
-  uint32_t tags = 0;
-  bool exact = false;
-};
 
 class Builder {
 public:
@@ -2015,15 +2025,11 @@ public:
     return emit(Tag::Binary, static_cast<uint8_t>(op), p, 0, 0, {lhs, rhs});
   }
   NodeId unary(UnOp op, NodeId operand, const Fallback& f, SrcPos p) {
-    return emit(Tag::Unary, static_cast<uint8_t>(op), p,
-                static_cast<int32_t>(f.tags), f.exact ? kExact : 0,
-                {operand, f.callee});
+    return or_call(Tag::Unary, static_cast<uint8_t>(op), {operand}, f, p);
   }
   NodeId binary(BinOp op, NodeId lhs, NodeId rhs, const Fallback& f,
                 SrcPos p) {
-    return emit(Tag::Binary, static_cast<uint8_t>(op), p,
-                static_cast<int32_t>(f.tags), f.exact ? kExact : 0,
-                {lhs, rhs, f.callee});
+    return or_call(Tag::Binary, static_cast<uint8_t>(op), {lhs, rhs}, f, p);
   }
   NodeId assign(VarKind k, int32_t index, NodeId value, SrcPos p) {
     return emit(Tag::Assign, static_cast<uint8_t>(k), p, index, 0, {value});
@@ -2126,8 +2132,7 @@ public:
     return emit(Tag::Index, 0, p, 0, 0, {recv, key});
   }
   NodeId index(NodeId recv, NodeId key, const Fallback& f, SrcPos p) {
-    return emit(Tag::Index, 0, p, static_cast<int32_t>(f.tags), 0,
-                {recv, key, f.callee});
+    return or_call(Tag::Index, 0, {recv, key}, f, p);
   }
   NodeId set_index(NodeId recv, NodeId key, NodeId value, SrcPos p) {
     return emit(Tag::SetIndex, 0, p, 0, 0, {recv, key, value});
@@ -2308,6 +2313,15 @@ private:
     return c.kind == ConstKind::Str && c.bits >= 0 &&
            static_cast<size_t>(c.bits) < m_.str_consts.size() &&
            m_.str_consts[static_cast<size_t>(c.bits)] == s;
+  }
+
+  // An operation with a fallback, laid out as operands_of says. An `exact`
+  // the operation cannot use is kept, for verify() to refuse.
+  NodeId or_call(Tag tag, uint8_t op, std::vector<NodeId> operands,
+                 const Fallback& f, SrcPos p) {
+    operands.push_back(f.callee);
+    return emit(tag, op, p, static_cast<int32_t>(f.tags),
+                f.exact ? kExact : 0, operands);
   }
 
   NodeId emit(Tag tag, uint8_t op, SrcPos p, int32_t a, int32_t b,
@@ -3448,6 +3462,11 @@ inline const char* type_name(ValueTag t) {
 inline constexpr uint32_t kAllTags =
     (1u << (static_cast<uint32_t>(kLastValueTag) + 1)) - 1;
 
+// Whether a set of tags holds `t`.
+inline constexpr bool has_tag(uint32_t set, ValueTag t) {
+  return (set >> static_cast<uint32_t>(t) & 1u) != 0;
+}
+
 inline uint32_t tags_named(std::string_view name) {
   uint32_t set = 0;
   for (uint32_t t = 0; t <= static_cast<uint32_t>(kLastValueTag); ++t) {
@@ -3496,6 +3515,7 @@ inline int64_t wrap_neg(int64_t a) {
 inline bool wraps(BinOp op, int64_t a, int64_t b) {
   constexpr int64_t lo = std::numeric_limits<int64_t>::min();
   constexpr int64_t hi = std::numeric_limits<int64_t>::max();
+  if (!can_wrap(op)) return false;
   switch (op) {
     case BinOp::Add: return b > 0 ? a > hi - b : a < lo - b;
     case BinOp::Sub: return b < 0 ? a > hi + b : a < lo + b;
@@ -3504,11 +3524,11 @@ inline bool wraps(BinOp op, int64_t a, int64_t b) {
       if (b > 0) return a < lo / b;
       return a != 0 && b < hi / a;
     default:
-      return false;
+      return false;  // !can_wrap(op), answered above
   }
 }
 inline bool wraps(UnOp op, int64_t a) {
-  return op == UnOp::Neg && a == std::numeric_limits<int64_t>::min();
+  return can_wrap(op) && a == std::numeric_limits<int64_t>::min();
 }
 
 // Operators that never widen to double: the classic bitops plus the
@@ -5492,23 +5512,30 @@ struct Verifier {
            (c.bits >= 0 && static_cast<size_t>(c.bits) < m.str_consts.size());
   }
 
-  // An operator's tag set and flags (Tag::Unary): none without a fallback,
-  // since nothing would read them; with one, tags that exist and flags
-  // that do, and kExact only where an int result can wrap.
-  static const char* fallback_error(const Node& n, bool has_fallback,
-                                    bool can_wrap) {
-    if (!has_fallback) {
-      if (n.a == 0 && n.b == 0) return nullptr;
-      return "operator has tags or flags but no fallback";
+  // An operation that may name a fallback (Tag::Unary): its operands and
+  // at most the fallback after them; no tag set or flag without one, since
+  // nothing would read them; with one, tags that exist and flags that do,
+  // and kExact only where an int result can wrap.
+  bool check_fallback(const Node& n, bool wrappable) {
+    const uint32_t k = operands_of(n.tag);
+    if (n.num_children != k && n.num_children != k + 1) {
+      std::string what = name_of(n.tag);
+      what[0] = static_cast<char>(what[0] - 'a' + 'A');
+      return fail(what + " takes " + std::to_string(k) + " or " +
+                  std::to_string(k + 1) + " children");
+    }
+    if (!names_fallback(n)) {
+      if (n.a == 0 && n.b == 0) return true;
+      return fail("operator has tags or flags but no fallback");
     }
     if ((static_cast<uint32_t>(n.a) & ~kAllTags) != 0) {
-      return "operator's tag set names no tag";
+      return fail("operator's tag set names no tag");
     }
-    if ((n.b & ~kExact) != 0) return "unknown operator flag";
-    if ((n.b & kExact) != 0 && !can_wrap) {
-      return "only Add, Sub, Mul and Neg can be exact";
+    if ((n.b & ~kExact) != 0) return fail("unknown operator flag");
+    if ((n.b & kExact) != 0 && !wrappable) {
+      return fail("only Add, Sub, Mul and Neg can be exact");
     }
-    return nullptr;
+    return true;
   }
 
   // The subject aside, children come in (key, body) pairs plus an optional
@@ -5629,37 +5656,20 @@ struct Verifier {
         if (n.op > static_cast<uint8_t>(kLastUnOp)) {
           return fail("unknown unary operator");
         }
-        if (n.num_children != 1 && n.num_children != 2) {
-          return fail("Unary takes 1 or 2 children");
-        }
-        if (const char* e = fallback_error(
-                n, n.num_children == 2,
-                static_cast<UnOp>(n.op) == UnOp::Neg)) {
-          return fail(e);
+        if (!check_fallback(n, can_wrap(static_cast<UnOp>(n.op)))) {
+          return false;
         }
         break;
-      case Tag::Binary: {
+      case Tag::Binary:
         if (n.op > static_cast<uint8_t>(kLastBinOp)) {
           return fail("unknown binary operator");
         }
-        if (n.num_children != 2 && n.num_children != 3) {
-          return fail("Binary takes 2 or 3 children");
-        }
-        const auto op = static_cast<BinOp>(n.op);
-        if (const char* e = fallback_error(
-                n, n.num_children == 3,
-                op == BinOp::Add || op == BinOp::Sub || op == BinOp::Mul)) {
-          return fail(e);
+        if (!check_fallback(n, can_wrap(static_cast<BinOp>(n.op)))) {
+          return false;
         }
         break;
-      }
       case Tag::Index:
-        if (n.num_children != 2 && n.num_children != 3) {
-          return fail("Index takes 2 or 3 children");
-        }
-        if (const char* e = fallback_error(n, n.num_children == 3, false)) {
-          return fail(e);
-        }
+        if (!check_fallback(n, false)) return false;
         break;
       case Tag::VarRef:
       case Tag::Assign: {
@@ -5888,7 +5898,7 @@ inline std::string tag_set_text(uint32_t set) {
   for (uint32_t t = 0; t <= static_cast<uint32_t>(kLastValueTag); ++t) {
     const char* name = type_name(static_cast<ValueTag>(t));
     // Only at the name's first tag, so "function" is not printed twice.
-    if ((set >> t & 1u) &&
+    if (has_tag(set, static_cast<ValueTag>(t)) &&
         std::countr_zero(tags_named(name)) == static_cast<int>(t)) {
       if (out.back() != '{') out += ",";
       out += name;
@@ -5903,10 +5913,12 @@ struct Dumper {
 
   void indent(int d) { out << std::string(static_cast<size_t>(d) * 2, ' '); }
 
-  // An operator's fallback: the tags it answers on, and whether exactly.
-  void fallback(uint32_t tags, bool exact) {
-    out << " or-call " << tag_set_text(tags);
-    if (exact) out << " exact";
+  // An operation's fallback, if it has one: the tags it answers on, and
+  // whether exactly.
+  void fallback(const Fallback& f) {
+    if (!f.valid()) return;
+    out << " or-call " << tag_set_text(f.tags);
+    if (f.exact) out << " exact";
   }
 
   void node(NodeId id, int d) {
@@ -5926,13 +5938,13 @@ struct Dumper {
       case Tag::Unary: {
         const auto v = view_unary(m, id);
         out << name_of(v.op);
-        if (v.fallback.valid()) fallback(v.tags, v.exact);
+        fallback(v.fallback);
         break;
       }
       case Tag::Binary: {
         const auto v = view_binary(m, id);
         out << name_of(v.op);
-        if (v.fallback.valid()) fallback(v.tags, v.exact);
+        fallback(v.fallback);
         break;
       }
       case Tag::Assign: {
@@ -5983,12 +5995,10 @@ struct Dumper {
         break;
       case Tag::ArrayLit:  out << "arraylit"; break;
       case Tag::ObjectLit: out << "objectlit"; break;
-      case Tag::Index: {
-        const auto v = view_index(m, id);
+      case Tag::Index:
         out << "index";
-        if (v.fallback.valid()) fallback(v.tags, false);
+        fallback(view_index(m, id).fallback);
         break;
-      }
       case Tag::SetIndex: out << "setindex"; break;
       // One case for both: FieldSetView is FieldView plus a value child, so
       // the slot and the name const are the same a/b either way, and the
@@ -6159,16 +6169,11 @@ inline constexpr bool observable(IntrinsicId id) {
 }
 
 // Whether running `x` can be told from not running it, its children aside.
-// An operator or an Index with a fallback (Tag::Unary) may call it, as a
-// call does: it is the one with a child more than its operands.
+// An operation with a fallback (Tag::Unary) may call it, as a call does.
 inline bool observable(const Node& x) {
-  switch (x.tag) {
-    case Tag::Intrinsic: return observable(static_cast<IntrinsicId>(x.op));
-    case Tag::Unary:     return x.num_children > 1;
-    case Tag::Binary:
-    case Tag::Index:     return x.num_children > 2;
-    default:             return observable(x.tag);
-  }
+  if (names_fallback(x)) return true;
+  return x.tag == Tag::Intrinsic ? observable(static_cast<IntrinsicId>(x.op))
+                                 : observable(x.tag);
 }
 
 // Which nodes run: the ones a function body reaches. A node built and then
@@ -7159,17 +7164,21 @@ struct FnCompiler {
   // Try jumping past it. The result register comes first so the operands
   // stay in theirs, held until the statement ends as a call's arguments
   // are, whichever path ran.
-  int32_t compile_try(Op op, NodeId id, std::initializer_list<NodeId> operands,
-                      NodeId fallback, uint32_t tags, bool exact, bool tail) {
+  int32_t compile_or_call(NodeId id, bool tail) {
     const Node& n = m.at(id);
+    const Fallback f = fallback_of(m, id);
+    const uint32_t k = operands_of(n.tag);
+    const Op op = n.tag == Tag::Unary    ? Op::TryUnary
+                  : n.tag == Tag::Binary ? Op::TryBinary
+                                         : Op::TryIndex;
     const int32_t base = top;
     const int32_t dst = alloc();
-    for (const NodeId x : operands) compile_operand(x);
-    const size_t at = emit(op, dst, try_mode(n.op, exact ? kExact : 0),
-                           static_cast<int32_t>(tags), n.pos);
-    const int32_t callee = compile_expr(fallback);
-    emit_call(dst, callee, dst + 1, static_cast<int32_t>(operands.size()),
-              false, tail, n.pos);
+    for (uint32_t i = 0; i < k; ++i) compile_operand(m.child(id, i));
+    const size_t at = emit(op, dst, try_mode(n.op, f.exact ? kExact : 0),
+                           static_cast<int32_t>(f.tags), n.pos);
+    const int32_t callee = compile_expr(f.callee);
+    emit_call(dst, callee, dst + 1, static_cast<int32_t>(k), false, tail,
+              n.pos);
     ch.code[at].d = here();
     top = base;
     alloc();
@@ -7259,7 +7268,7 @@ struct FnCompiler {
   // language's truthiness, costs only the comparison.
   bool answers_alone(const UnaryView& v) const {
     return (v.op == UnOp::Not || v.op == UnOp::Truth) &&
-           (v.tags & tags_named("bool")) != 0 && yields_bool(v.operand);
+           has_tag(v.fallback.tags, ValueTag::Bool) && yields_bool(v.operand);
   }
 
   // A condition, compiled as the jumps it decides between rather than as a
@@ -7380,8 +7389,7 @@ struct FnCompiler {
       case Tag::Unary: {
         auto v = view_unary(m, id);
         if (v.fallback.valid() && !answers_alone(v)) {
-          return compile_try(Op::TryUnary, id, {v.operand}, v.fallback,
-                             v.tags, v.exact, tail);
+          return compile_or_call(id, tail);
         }
         return compile_op(op_of(v.op), n.pos, v.operand);
       }
@@ -7392,8 +7400,7 @@ struct FnCompiler {
       case Tag::Binary: {
         auto v = view_binary(m, id);
         if (v.fallback.valid()) {
-          return compile_try(Op::TryBinary, id, {v.lhs, v.rhs}, v.fallback,
-                             v.tags, v.exact, tail);
+          return compile_or_call(id, tail);
         }
         if (const auto r = compile_type_test(v, n.pos)) return *r;
         // A failing division reports at its right operand, so that is the
@@ -7488,8 +7495,7 @@ struct FnCompiler {
       case Tag::Index: {
         const auto v = view_index(m, id);
         if (v.fallback.valid()) {
-          return compile_try(Op::TryIndex, id, {v.receiver, v.key}, v.fallback,
-                             v.tags, false, tail);
+          return compile_or_call(id, tail);
         }
         return compile_op(Op::Index, n.pos, v.receiver, v.key);
       }
@@ -9317,7 +9323,7 @@ struct Exec {
   static bool try_operator(Frame& f, const Insn& in) {
     const auto tags = static_cast<uint32_t>(in.c);
     const auto in_set = [tags](const Value& v) {
-      return (tags >> static_cast<uint32_t>(v.tag()) & 1u) != 0;
+      return has_tag(tags, v.tag());
     };
     const bool exact = (try_flags(in.b) & kExact) != 0;
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
@@ -9656,8 +9662,7 @@ struct Exec {
           break;
         case Op::TypeIn:
           f.regs[in.a] = Value::make_bool(
-              (static_cast<uint32_t>(in.c) >>
-               static_cast<uint32_t>(f.regs[in.b].tag())) & 1u);
+              has_tag(static_cast<uint32_t>(in.c), f.regs[in.b].tag()));
           break;
         case Op::SameType:
           f.regs[in.a] = Value::make_bool(

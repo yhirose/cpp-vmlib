@@ -355,11 +355,10 @@ int main() {
            }),
            "operator has tags or flags but no fallback",
            "an Index's tags without a fallback");
-  check_eq(verdict([&](Module& m, Builder& b) {
-             const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p),
-                                      {callee(b), 1}, p);
-             m.nodes[n.v].b = kExact;
-             return n;
+  // Built exact, the Builder keeps the flag for verify() to refuse.
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, true}, p);
            }),
            "only Add, Sub, Mul and Neg can be exact", "an exact Index");
   check_eq(verdict([&](Module& m, Builder& b) {
