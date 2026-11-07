@@ -119,16 +119,17 @@ A few things worth knowing before you write a binder:
 - **Intrinsics** are what a language cannot write in itself: `Print`,
   `ReadInt`, `Len`, `ToStr`, `TypeOf`, numeric conversions, the array,
   object and map primitives (`ArrayPush`, `ArraySlice`, `ObjectKeys`,
-  `MapNew`, ...), the string primitives (`StrSlice`, `StrByte`,
-  `StrFromByte`, `StrUpper`, `StrLower`), `Same`, `Collect`, the generator
-  and coroutine protocols (`GenResume`, `CoroResume`, `CoroYield`, ...) and
-  the job queue (`Enqueue`). Everything else -- map, filter, a channel, a
-  Promise -- is a loop or an object your front end writes in its own
-  language. `TypeOf` answers a string, but compared straight against a
-  string literal (`TypeOf(x) == "array"`) or against another `TypeOf` it
-  compiles to a test of the tags and builds no string at all; a type
-  string kept in a variable and compared later builds one, and so does
-  each literal it meets.
+  `MapNew`, ...), the slot no key reaches (`MetaGet`, `MetaSet`; see
+  [Hidden state](#hidden-state)), the string primitives (`StrSlice`,
+  `StrByte`, `StrFromByte`, `StrUpper`, `StrLower`), `Same`, `Collect`, the
+  generator and coroutine protocols (`GenResume`, `CoroResume`,
+  `CoroYield`, ...) and the job queue (`Enqueue`). Everything else -- map,
+  filter, a channel, a Promise -- is a loop or an object your front end
+  writes in its own language. `TypeOf` answers a string, but compared
+  straight against a string literal (`TypeOf(x) == "array"`) or against
+  another `TypeOf` it compiles to a test of the tags and builds no string
+  at all; a type string kept in a variable and compared later builds one,
+  and so does each literal it meets.
 - **An operator may name a fallback.** `Unary` and `Binary` are the VM's
   own operators. Given a fallback (`b.binary(op, x, y, Fallback{callee,
   tags, exact}, p)`), the operator answers only when every operand's tag
@@ -617,6 +618,41 @@ runs every key through it before `Index`, `SetIndex`, `ObjectHas` or
 | Lua | `t[1.0]` and `t[1]` are one slot | a double that equals an int becomes that int (mini-lua's `$key`) |
 | JavaScript `Map`/`Set` | SameValueZero: `+0` and `-0` are one key | `-0.0` becomes `0.0` |
 | Python `dict` | `1`, `1.0` and `True` are one key | a bool or an integral double becomes the int (mini-python leaves `True` and `1` apart, and says so) |
+
+## Hidden state
+
+A front end keeps state of its own on the objects a program holds: an
+instance's class, the mark that says a value is a tuple or a range, a
+promise's state, a Lua table's metatable. Kept under keys, it is one
+string away from the program. A key that starts with a byte no
+identifier can spell keeps the implementation's names apart from the
+program's names, but not from its strings, and a language that indexes
+an object by a computed string, or writes a raw control byte in a
+literal, reaches it -- a Lua program could strip a table's metatable by
+assigning nil under the right string -- and every listing, count and
+comparison of an object's keys has to step over the implementation's.
+
+So every `Object` and every `Map` has one slot that no key names,
+`ObjectObj::meta`, read with `MetaGet(v)` and written with `MetaSet(o,
+m)`. Nothing a program does with keys reaches it: `Index`, `ObjectHas`,
+`ObjectKeys`, `ObjectRemove` and `Len` all pass it by, so there is
+nothing for a listing to filter and nothing for a string to forge. Only
+a front end emits the two intrinsics, for itself. `MetaGet` answers nil
+for an object or map whose slot was never set and for every other value,
+which has none, so "the class of `v`" is one read whatever `v` is;
+`MetaSet` traps on anything but an object or a map, and answers the
+object, so an object built with its meta is one expression -- the lines
+Lua's `getmetatable` and `setmetatable` draw. The slot is a reference like any
+other: the collector traces it (a cycle through it is garbage, and the
+owned stack's analysis at a scope's exit sees through it), and a freed
+object releases it after everything else it held, the way an instance's
+type outlives its dict in CPython.
+
+What goes in it is the front end's. Lua's metatable, CPython's
+`ob_type`, Ruby's `klass` and JavaScript's internal slots are each this
+one slot, and an object with more than one fact to hide keeps them
+together in what the slot holds: an array no program can reach, so its
+positions are names nobody else can spell.
 
 ## Strings and slices
 

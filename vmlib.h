@@ -629,6 +629,18 @@ struct ObjectObj : HeapObj {
   // raised again, which is what lets an uncaught one report its own
   // diagnostic (coreir::trap_diagnostic).
   bool trap = false;
+  // The implementation's own slot: one value no key names, so nothing a
+  // program does with keys -- Index, ObjectHas, ObjectKeys, Len, printing,
+  // a comparison -- reaches it. Only MetaGet and MetaSet do, and a front
+  // end emits those for itself, never on a program's behalf. What it holds
+  // is the front end's to decide: an instance's class, the brand that says
+  // which of the language's kinds an object is, a builtin's internal state.
+  // Lua's metatable, CPython's ob_type, Ruby's klass and JavaScript's
+  // [[Prototype]] are each this one slot. A reference like any other:
+  // traced by the collector and released when the object is freed -- after
+  // the props, so it outlives what the object holds, as an instance's type
+  // outlives its dict in CPython's dealloc.
+  Value meta;
 
   Value* find(const std::string& k) {
     for (auto& kv : props) {
@@ -834,6 +846,10 @@ struct MapObj : HeapObj {
   std::vector<std::pair<Value, Value>> entries;
   std::unordered_map<MapKeyRef, size_t, MapKeyHash> index;
   size_t live = 0;
+  // ObjectObj::meta, the same slot: a map is what a language's table or
+  // dictionary is built on, and a Lua table has its metatable as an
+  // instance has its class. No key reaches it, of whatever type.
+  Value meta;
 
   Value* find(const Value& k) {
     auto it = index.find(MapKeyRef::of(k));
@@ -881,6 +897,15 @@ struct MapObj : HeapObj {
     detail::release_detached(entries);
   }
 };
+
+// The slot MetaGet and MetaSet reach, for the executor and for a host
+// function asking the same in C++: an Object's or a Map's, and null for
+// every other value, which carries none.
+inline Value* meta_slot(const Value& v) {
+  if (v.is_object()) return &v.as_object()->meta;
+  if (v.is_map()) return &v.as_map()->meta;
+  return nullptr;
+}
 
 inline Value Value::make_array(std::vector<Value> items) {
   auto* a = new ArrayObj();
@@ -1468,12 +1493,23 @@ enum class IntrinsicId : uint8_t {
   CoroClose,    // (coroutine) -> nil
   CoroStatus,   // (coroutine) -> str
   CoroCurrent,  // () -> coroutine | nil
+  // The implementation's slot on an Object or a Map (ObjectObj::meta): one
+  // value no key reaches, where a front end keeps what a program must not
+  // read, forge or strip by spelling a key -- an instance's class, a brand,
+  // a builtin's internal state. MetaGet answers it: nil for an Object or a
+  // Map whose slot was never set, and for every other value, which has
+  // none -- so "the class of v" is one read, whatever v is. MetaSet traps
+  // on anything but an Object or a Map, and answers the object, so an
+  // object built with its meta is one expression. Lua's getmetatable and
+  // setmetatable draw the same lines.
+  MetaGet,      // (v) -> value | nil
+  MetaSet,      // (object | map, value) -> the object
 };
 
 // The last enumerator, for the scans (from_name, test_names) that walk the
 // enum's range: one place to move when an intrinsic is added, rather than
 // every scan naming the last one itself.
-inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::CoroCurrent;
+inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::MetaSet;
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -1765,6 +1801,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::CoroClose: return 1;
     case IntrinsicId::CoroStatus: return 1;
     case IntrinsicId::CoroCurrent: return 0;
+    case IntrinsicId::MetaGet: return 1;
+    case IntrinsicId::MetaSet: return 2;
   }
   return 0;
 }
@@ -3207,6 +3245,12 @@ class FuncWriter {
     return b.set_index(r, S(k), v);
   }
   NodeId has(NodeId r, NodeId k) { return in(IntrinsicId::ObjectHas, {r, k}); }
+  // The slot no key reaches (ObjectObj::meta): read, and written -- the
+  // write answering the object it wrote.
+  NodeId meta(NodeId v) { return in(IntrinsicId::MetaGet, {v}); }
+  NodeId set_meta(NodeId o, NodeId m) {
+    return in(IntrinsicId::MetaSet, {o, m});
+  }
   NodeId push(NodeId a, NodeId v) { return in(IntrinsicId::ArrayPush, {a, v}); }
   NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
   NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
@@ -4238,6 +4282,8 @@ enum class Op : uint8_t {
   CoroClose,    // a = coroutine reg
   CoroStatus,   // a = dst, b = coroutine reg
   CoroCurrent,  // a = dst
+  MetaGet,      // a = dst, b = src   (nil for a value with no slot)
+  MetaSet,      // a = dst, b = object or map reg, c = value reg
 };
 
 // TryUnary's and TryBinary's b: the operator (a UnOp or a BinOp, which the
@@ -4360,6 +4406,8 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::CoroClose:    return Op::CoroClose;
     case I::CoroStatus:   return Op::CoroStatus;
     case I::CoroCurrent:  return Op::CoroCurrent;
+    case I::MetaGet:      return Op::MetaGet;
+    case I::MetaSet:      return Op::MetaSet;
   }
   return Op::LoadNil;
 }
@@ -4892,7 +4940,10 @@ void visit_children(HeapObj* o, Fn fn) {
   };
   on_heap_kind(o, Overloaded{
       [&](ArrayObj& a) { for (const Value& v : a.items) visit(v); },
-      [&](ObjectObj& x) { for (const auto& kv : x.props) visit(kv.second); },
+      [&](ObjectObj& x) {
+        for (const auto& kv : x.props) visit(kv.second);
+        visit(x.meta);
+      },
       [&](CellObj& c) { visit(c.v); },
       [&](ClosureObj& c) { for (const Value& v : c.cells) visit(v); },
       [&](GeneratorObj& g) { visit_gen_frame(g.frame, visit); },
@@ -4903,6 +4954,7 @@ void visit_children(HeapObj* o, Fn fn) {
           visit(kv.first);
           visit(kv.second);
         }
+        visit(mp.meta);
       },
       [&](CoroObj& co) {
         visit(co.fn);
@@ -5318,14 +5370,21 @@ namespace detail {
 // container is detached and released after the object is already empty:
 // releasing a child can run its drop hook (owned_scope_exit strips with
 // sweeping_ off), and a hook may read or write this object -- which must not
-// be half-way through releasing its own elements.
+// be half-way through releasing its own elements. An object's or a map's
+// meta goes last, after everything it holds (ObjectObj::meta).
 inline constexpr Overloaded strip_refs{
     [](ArrayObj& a) { release_detached(a.items); },
-    [](ObjectObj& x) { release_detached(x.props); },
+    [](ObjectObj& x) {
+      release_detached(x.props);
+      x.meta = Value();
+    },
     [](CellObj& c) { c.v = Value(); },
     [](ClosureObj& c) { release_detached(c.cells); },
     [](GeneratorObj& g) { release_detached(g.frame); },
-    [](MapObj& mp) { mp.clear(); },
+    [](MapObj& mp) {
+      mp.clear();
+      mp.meta = Value();
+    },
     [](CoroObj& co) {
       co.fn = Value();
       // Top frame first, the way a stack unwinds and the order CoroClose
@@ -5498,6 +5557,8 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::CoroClose: return "coroclose";
     case IntrinsicId::CoroStatus: return "corostatus";
     case IntrinsicId::CoroCurrent: return "corocurrent";
+    case IntrinsicId::MetaGet: return "metaget";
+    case IntrinsicId::MetaSet: return "metaset";
   }
   return "?";
 }
@@ -6209,6 +6270,7 @@ inline constexpr bool observable(IntrinsicId id) {
     case IntrinsicId::StrLower:
     case IntrinsicId::CoroStatus:
     case IntrinsicId::CoroCurrent:
+    case IntrinsicId::MetaGet:
       return false;
     case IntrinsicId::Print:
     case IntrinsicId::ReadInt:
@@ -6231,6 +6293,7 @@ inline constexpr bool observable(IntrinsicId id) {
     case IntrinsicId::CoroResume:
     case IntrinsicId::CoroYield:
     case IntrinsicId::CoroClose:
+    case IntrinsicId::MetaSet:
       return true;
   }
   return true;
@@ -6528,6 +6591,8 @@ inline const char* name_of(Op op) {
     case Op::CoroClose:   return "coroclose";
     case Op::CoroStatus:  return "corostatus";
     case Op::CoroCurrent: return "corocurrent";
+    case Op::MetaGet:     return "metaget";
+    case Op::MetaSet:     return "metaset";
   }
   return "?";
 }
@@ -6680,7 +6745,8 @@ inline std::string to_string(const Program& p) {
         case Op::ArraySlice: case Op::StrByte: case Op::StrFromByte:
         case Op::StrUpper: case Op::StrLower: case Op::NewMap:
         case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
-        case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent: {
+        case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent:
+        case Op::MetaGet: case Op::MetaSet: {
           const coreir::IntrinsicId id = *intrinsic_of(in.op);
           const int32_t regs[] = {in.a, in.b, in.c, in.d};
           const uint32_t n =
@@ -10291,6 +10357,23 @@ struct Exec {
           const size_t bottom = coro_bottom();
           f.regs[in.a] =
               bottom < frames.size() ? frames[bottom]->coro_self : Value();
+          break;
+        }
+        case Op::MetaGet: {
+          // Safe when in.a == in.b, for FieldGet's reason: the slot's value
+          // is retained before the object it was read from is released.
+          const Value* slot = meta_slot(f.regs[in.b]);
+          f.regs[in.a] = slot ? *slot : Value();
+          break;
+        }
+        case Op::MetaSet: {
+          Value* slot = meta_slot(f.regs[in.b]);
+          if (!slot) {
+            fail(f, std::string("cannot set the meta of ") +
+                        type_name(f.regs[in.b].tag()));
+          }
+          *slot = f.regs[in.c];
+          f.regs[in.a] = f.regs[in.b];
           break;
         }
       }
