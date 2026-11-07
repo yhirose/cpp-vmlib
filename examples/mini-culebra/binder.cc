@@ -660,14 +660,13 @@ struct Binder {
     const auto [cls, key] = r.locals("cls", "key");
     r.add(r.iff(
         r.is(r.typ(recv), "object"),
-        r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(recv), r.L(name)}),
-                     r.ret(r.idx(r.L(recv), r.L(name)))),
-               r.iff(r.in(IntrinsicId::ObjectHas, {r.L(recv), r.S(kClassKey)}),
-                     r.blk({r.set(cls, r.idx(r.L(recv), kClassKey)),
-                            r.set(key, program_key(r, r.L(name))),
-                            r.iff(r.in(IntrinsicId::ObjectHas,
-                                       {r.L(cls), r.L(key)}),
-                                  r.ret(r.idx(r.L(cls), r.L(key))))}))})));
+        r.iff(r.in(IntrinsicId::ObjectHas, {r.L(recv), r.L(name)}),
+              r.ret(r.idx(r.L(recv), r.L(name))))));
+    r.add(r.set(cls, instance_class(r, recv)));
+    r.add(r.iff(r.is(r.typ(cls), "object"),
+                r.blk({r.set(key, program_key(r, r.L(name))),
+                       r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.L(key)}),
+                             r.ret(r.idx(r.L(cls), r.L(key))))})));
     r.add(r.ret(r.call(
         "$err",
         {r.S("NameError"), r.bin(BinOp::Add, r.S("no method "), r.L(name))})));
@@ -691,16 +690,14 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(generator_cursor(r, r.L(v)))));
     r.add(r.iff(r.is(r.typ(v), "array"), r.ret(sequence_cursor(r, r.L(v)))));
+    r.add(r.set(cls, instance_class(r, v)));
     r.add(r.iff(
-        r.is(r.typ(v), "object"),
-        r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kClassKey)}),
-              r.blk({r.set(cls, r.idx(r.L(v), kClassKey)),
-                     r.set(key, r.S(program_key("iter"))),
-                     r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.L(key)}),
-                           r.ret(cursor(
-                               r, "c",
-                               r.b.call_value(r.idx(r.L(cls), r.L(key)),
-                                              {r.L(v)}))))}))));
+        r.is(r.typ(cls), "object"),
+        r.blk({r.set(key, r.S(program_key("iter"))),
+               r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.L(key)}),
+                     r.ret(cursor(r, "c",
+                                  r.b.call_value(r.idx(r.L(cls), r.L(key)),
+                                                 {r.L(v)}))))})));
     r.add(r.ret(r.call("$err", {r.S("TypeError"),
                                 r.S("value is not iterable")})));
     r.finish("$iter");

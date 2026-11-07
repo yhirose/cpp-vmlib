@@ -1297,10 +1297,7 @@ struct Binder {
   void rt_classof() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Nil())));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
-                r.ret(r.Nil())));
-    r.add(r.ret(r.idx(r.L(v), kClassKey)));
+    r.add(r.ret(instance_class(r, v)));
     r.finish("$classof");
   }
 

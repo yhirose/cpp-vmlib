@@ -2163,9 +2163,7 @@ struct Binder {
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
                 r.ret(r.bin(BinOp::Eq, r.idx(r.L(v), kExcKey), r.L(name)))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
-                r.ret(r.Bo(false))));
-    r.add(r.set(t, r.idx(r.L(v), kClassKey)));
+    r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(
         r, t,
         r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
@@ -2181,10 +2179,7 @@ struct Binder {
     RT r(*this);
     const auto [v, cls] = r.params("v", "cls");
     const auto [t] = r.locals("t");
-    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
-                r.ret(r.Bo(false))));
-    r.add(r.set(t, r.idx(r.L(v), kClassKey)));
+    r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(r, t,
                      r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
                                   r.in(IntrinsicId::Same,
@@ -2267,10 +2262,7 @@ struct Binder {
   void rt_dunder() {
     RT r(*this);
     const auto [v, key] = r.params("v", "key");
-    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Nil())));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
-                r.ret(r.Nil())));
-    r.add(r.ret(r.call("$clsfind", {r.idx(r.L(v), kClassKey), r.L(key)})));
+    r.add(r.ret(r.call("$clsfind", {instance_class(r, v), r.L(key)})));
     r.finish("$dunder");
   }
 

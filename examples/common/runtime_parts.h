@@ -87,6 +87,13 @@ inline constexpr char kNameKey[] = "\x01" "n";
 static_assert(kClassKey[0] == kImplPrefix && kBaseKey[0] == kImplPrefix &&
               kNameKey[0] == kImplPrefix);
 
+// The class of `v`: its table when it is an instance, nil for anything
+// else -- an object that is no instance has no kClassKey, and Index reads
+// a missing key as nil.
+inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
+  return w.iff(w.is(w.typ(v), "object"), w.idx(w.L(v), kClassKey), w.Nil());
+}
+
 // The walk, as the While it is: from the table in `c`, each table up the
 // chain in turn, nearest first, until one has no base. `visit` runs at each
 // and returns from the helper when it finds what it is after; a walk that
