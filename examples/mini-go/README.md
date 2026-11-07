@@ -12,8 +12,9 @@ sections turned into running code, checked against real Go.
 A source file here is real Go -- every sample in `samples/` also runs
 unmodified under `go run`, and each sample's `golden/` output is what it
 prints built by `go build` (`test/languages.sh`), the same relationship
-PL/0's samples have to culebra's own PL/0 interpreter. What is covered: top-level `func`s with typed params and an
-optional return type, `var` with an explicit `int32`/`int64`/`uint32`/
+PL/0's samples have to culebra's own PL/0 interpreter. What is covered:
+top-level `func`s with typed params and an optional return type, `var`
+with an explicit `int32`/`int64`/`uint32`/
 `float32`/`float64`/`bool`/`string` or `[]T` type, assignment, `return`,
 `fmt.Println`, arithmetic (`+ - * / %`), comparison (`== != < <= > >=`) and
 type-conversion (`int32(x)`, `float64(x)`, ...) expressions, `type ...

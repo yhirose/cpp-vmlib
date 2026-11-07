@@ -24,8 +24,8 @@ build/examples/mini-js/mini-js [--dump-ir] [--dump-bc] [--check-sharing] FILE.js
 More than one file is concatenated, in order, into one program. That is
 not something `node` does, and it exists for exactly one reason: the
 samples share `samples/prelude.js` without this subset needing a module
-system it has no other use for. The oracle side of the same comparison is
-`cat prelude.js sample.js | node`; see `test/languages.sh`.
+system it has no other use for. The oracle side of the same comparison
+joins the two into one file and runs `node` on it (`test/languages.sh`).
 
 ## What the VM does *not* decide
 

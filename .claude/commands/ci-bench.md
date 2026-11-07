@@ -68,9 +68,9 @@ summary-only table is browser-only and unreachable from here.
 
    - any `warning:` line (a wrong answer beats a fast one);
    - a `-` in `real_ms` where that toolchain was supposed to be installed
-     (the job installs lua5.4, guile-3.0, dotnet and culebra, and relies on
-     the runner image for python3, ruby, node and go) -- a `-` there means
-     an install step regressed, not that the language is slow;
+     (the job installs all eight, through `.github/actions/languages`, at
+     the versions `test/languages.sh` pins) -- a `-` there means an install
+     step regressed, not that the language is slow;
    - a front end far off its own previous shape, or far off the real
      language on one workload but not the others.
 
