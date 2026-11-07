@@ -21,7 +21,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -125,7 +124,8 @@ inline void find_in_chain(FuncWriter& w) {
 //   {k: "a", v: <array or string>, i: 0}   sequence_cursor, by index
 //
 // A front end with a kind of its own -- mini-culebra's custom iterator
-// protocol -- builds it with cursor() and steps it in iter_step's `own`.
+// protocol -- builds it with cursor() and steps it itself, ahead of
+// iter_step.
 
 inline NodeId cursor(FuncWriter& w, const std::string& kind, NodeId v) {
   return w.obj({{"k", w.S(kind)}, {"v", v}});
@@ -154,19 +154,14 @@ inline NodeId step(FuncWriter& w, NodeId value) {
   return w.obj({{"value", value}, {"done", w.Bo(false)}});
 }
 
-// `(it)`: the next step of a cursor. `own(it, a)` adds the statements for a
-// front end's own kinds of cursor, tested after a generator's and before a
-// sequence's; `a` is a local it may use, and it may declare more.
-inline void iter_step(
-    FuncWriter& w,
-    const std::function<void(FuncWriter::Slot it, FuncWriter::Slot a)>& own =
-        {}) {
-  const auto [it] = w.params("it");
+// The next step of the cursor in `it`, the parameter the front end declared
+// for its `$iternext(it)` -- after any statements of its own, for cursor
+// kinds of its own.
+inline void iter_step(FuncWriter& w, FuncWriter::Slot it) {
   const auto [a, i] = w.locals("a", "i");
   w.add(w.iff(cursor_is(w, it, "g"),
               w.ret(w.in(IntrinsicId::GenResume,
                          {cursor_source(w, it), w.Nil()}))));
-  if (own) own(it, a);
   w.add(w.set(a, cursor_source(w, it)));
   w.add(w.set(i, w.idx(w.L(it), "i")));
   w.add(w.iff(w.bin(BinOp::Ge, w.L(i), w.len(w.L(a))), w.ret(step_done(w))));
@@ -417,9 +412,10 @@ inline void write_promise_helpers(HelperTable& rt) {
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.
 // * mini-ruby's iteration. Its cursor walks a Hash too, and a Hash's step
-//   answers a key beside the value; it has no generator to step. The
-//   shared step could take that as an `own` kind, but at the cost of an
-//   extra test in every `.each`, a hot path, for no other front end's use.
+//   answers a key beside the value; it has no generator to step. Its
+//   $iternext builds its cursors and its steps with the shared parts, but
+//   runs its own step: iter_step would add a generator test to every
+//   `.each`, a hot path, for a kind Ruby does not have.
 // * An `async` function's lowering into three funcs (mini-js, mini-csharp):
 //   it is the emit pass's, built from each binder's own frames and
 //   captures, not a helper.

@@ -980,7 +980,8 @@ struct Binder {
 
   void rt_iternext() {
     RT r(*this);
-    iter_step(r);
+    const auto [it] = r.params("it");
+    iter_step(r, it);
     r.finish("$iternext");
   }
 

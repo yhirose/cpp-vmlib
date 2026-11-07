@@ -214,7 +214,7 @@ kind comes back. The other two kinds, and the step that answers
 `{value, done}` for all three, are
 [examples/common/runtime_parts.h](../common/runtime_parts.h)'s, which
 mini-js, mini-python and mini-csharp drive their loops with too; this
-kind is the `own` arm culebra adds to that step.
+kind is the arm culebra's `$iternext` tests ahead of that step.
 
 culebra's full protocol has a fourth part, `dispose()`, called however the
 loop is left. This front end does not reach it: wiring it through `Defer`

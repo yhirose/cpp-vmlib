@@ -706,25 +706,25 @@ struct Binder {
     r.finish("$iter");
   }
 
-  // The shared step (runtime_parts.h), with culebra's own kind of cursor:
-  // "c", an object whose class answered `iter`, driven by `has_next` and
-  // `next`.
+  // culebra's own kind of cursor, "c" -- an object whose class answered
+  // `iter`, driven by `has_next` and `next` -- and then the shared step
+  // (runtime_parts.h) for a generator's and an array's.
   void rt_iternext() {
     RT r(*this);
-    iter_step(r, [&](FuncWriter::Slot it, FuncWriter::Slot a) {
-      const auto [hn] = r.locals("hn");
-      r.add(r.iff(
-          cursor_is(r, it, "c"),
-          r.blk({r.set(a, cursor_source(r, it)),
-                 r.set(hn, r.b.call_value(
-                               r.call("$methodof", {r.L(a), r.S("has_next")}),
-                               {r.L(a)})),
-                 r.iff(r.bin(BinOp::Eq, r.L(hn), r.Bo(false)),
-                       r.ret(step_done(r))),
-                 r.ret(step(r, r.b.call_value(
-                                   r.call("$methodof", {r.L(a), r.S("next")}),
-                                   {r.L(a)})))})));
-    });
+    const auto [it] = r.params("it");
+    const auto [obj, hn] = r.locals("obj", "hn");
+    r.add(r.iff(
+        cursor_is(r, it, "c"),
+        r.blk({r.set(obj, cursor_source(r, it)),
+               r.set(hn, r.b.call_value(
+                             r.call("$methodof", {r.L(obj), r.S("has_next")}),
+                             {r.L(obj)})),
+               r.iff(r.bin(BinOp::Eq, r.L(hn), r.Bo(false)),
+                     r.ret(step_done(r))),
+               r.ret(step(r, r.b.call_value(
+                                 r.call("$methodof", {r.L(obj), r.S("next")}),
+                                 {r.L(obj)})))})));
+    iter_step(r, it);
     r.finish("$iternext");
   }
 
