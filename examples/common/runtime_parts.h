@@ -15,7 +15,8 @@
 // The parts are FuncWriter-level: a function that writes a helper's body
 // into a writer the front end made, or a statement it adds to one. The
 // front end still lists the helper's name and finishes it, so each keeps
-// its own name and its own place in its runtime.
+// its own name and its own place in its runtime -- all but the promise's
+// helpers, which call one another and so come with their names.
 
 #pragma once
 
@@ -42,10 +43,10 @@ using coreir::NodeId;
 // class, a class's base and name, the runtime's destructor key (vmlib.h's
 // kDropKey) -- start with 0x01. The program's names that have to sit beside
 // them or beside its own fields -- its methods on a class table, the field
-// behind a C# auto property -- start with 0x02. Neither byte can
-// begin a name any of these languages lets a program write, so the
-// program's own fields, unprefixed, meet neither; and the two never meet
-// each other, so a method named `drop`, `init`, `name` or `ctor` is not the
+// behind a C# auto property -- start with 0x02. Neither byte can begin a
+// name any of these languages lets a program write, so the program's own
+// fields, unprefixed, meet neither; and the two never meet each other, so
+// a method named `drop`, `init`, `name` or `ctor` is not the
 // implementation's key of the same name. mini-culebra arrived at this rule
 // (its methods once sat under the runtime's own prefix, which made a class
 // with a `drop` method a resource), and mini-csharp, whose class tables kept

@@ -37,8 +37,9 @@
 // which is a trap where JavaScript wants `false`), for `typeof` (TypeOf's
 // vocabulary is the VM's, not JavaScript's), and for `String(n)` (to_display
 // is shortest-round-trip, which is *nearly* ES Number::toString but not
-// it). Each of those is a $-named func this binder writes once per module;
-// the `$` keeps them out of the source language's reach.
+// it). Each of those is a $-named func this binder writes once per module,
+// reached by its Module::funcs slot and never bound in the program's scope,
+// so `$truthy`, a name JavaScript can spell, still cannot reach it.
 
 #include "binder.h"
 
@@ -492,8 +493,10 @@ struct Binder {
   // lives in this file: the header's own comments say so for each of them
   // (Value::truthy on the empty string and NaN, eval_binop refusing to
   // compare across types, to_display's shortest-round-trip doubles). The
-  // `$` prefix keeps these out of the source language's reach, the same
-  // convention examples/mini-go's channel runtime uses.
+  // `$` prefix only marks them as the runtime's, as examples/mini-go's
+  // channel runtime does: they are reached through the HelperTable, never
+  // bound where a program's names are, so a program's own `$str` is not
+  // one of them.
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
