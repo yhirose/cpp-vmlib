@@ -45,30 +45,30 @@
 
 #include "grammar.h"
 #include "layout.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
+using namespace runtime_parts;
 
 namespace mini_python {
 namespace {
 
-// A bignum's two fields, a class instance's back-pointer and an
-// exception's name and message, all under keys whose first byte no Python
-// source can produce -- the trick vmlib.h's own kDropKey uses.
+// A bignum's two fields and an exception's name and message, under keys
+// the implementation chose (runtime_parts.h's kImplPrefix) -- whose first
+// byte no Python source can produce, the trick vmlib.h's own kDropKey uses.
+// A class instance's back-pointer is the class layout's kClassKey.
 constexpr char kBigKey[] = "\x01" "b";   // the limb array
 constexpr char kSignKey[] = "\x01" "s";  // -1 or 1
-constexpr char kClassKey[] = "\x01" "c";
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
-constexpr char kNameKey[] = "\x01" "n";
-// Inheritance: a class table points at its base's table, carries the class
-// value (the constructor closure) so that `isinstance` and `except` have an
-// identity to compare, and names the builtin exception it is rooted at --
-// `Exception` is not a class here, so a class that derives from one is
-// marked rather than linked. See README.md.
-constexpr char kBaseKey[] = "\x01" "p";
+// Inheritance: a class table points at its base's table (kBaseKey), carries
+// the class value (the constructor closure) so that `isinstance` and
+// `except` have an identity to compare, and names the builtin exception it
+// is rooted at -- `Exception` is not a class here, so a class that derives
+// from one is marked rather than linked. See README.md.
 constexpr char kIdKey[] = "\x01" "k";
 constexpr char kRootKey[] = "\x01" "x";
 // A tuple is an array wrapped in an object, which is the only way to keep
@@ -1406,7 +1406,7 @@ struct Binder {
                            r.ret(r.Bo(false))),
                      r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
                                           r.idx(r.L(b), kTupKey)}))})));
-    r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S("\x02__eq__")})));
+    r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S(program_key("__eq__"))})));
     r.add(r.iff(r.isnt(r.typ(f_), "nil"),
                 r.ret(r.call("$truthy",
                              {r.b.call_value(r.L(f_), {r.arr({r.L(a), r.L(b)}),
@@ -1480,7 +1480,7 @@ struct Binder {
                 r.ret(r.call("$tupstr", {r.idx(r.L(v), kTupKey)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
                 r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
-    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__str__")})));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S(program_key("__str__"))})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
@@ -1555,7 +1555,7 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [f] = r.locals("f");
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.call("$strrepr", {r.L(v)}))));
-    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("\x02__repr__")})));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S(program_key("__repr__"))})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
@@ -1772,7 +1772,7 @@ struct Binder {
              r.iff(
                  r.has(r.L(o), r.S(kClassKey)),
                  r.blk(
-                     {r.set(key, r.bin(BinOp::Add, r.S("\x02"), r.L(name))),
+                     {r.set(key, program_key(r, r.L(name))),
                       r.set(cls, r.call("$clsfind",
                                         {r.idx(r.L(o), kClassKey), r.L(key)})),
                       r.iff(r.isnt(r.typ(cls), "nil"), r.ret(r.L(cls)))}))})));
@@ -2202,17 +2202,7 @@ struct Binder {
 
   void rt_clsfind() {  // the method `key` names, from `t` or an ancestor
     RT r(*this);
-    const auto [t, key] = r.params("t", "key");
-    const auto [c] = r.locals("c");
-    r.add(r.set(c, r.L(t)));
-    r.add(r.wh(
-        r.is(r.typ(c), "object"),
-        r.blk(
-            {r.iff(r.has(r.L(c), r.L(key)), r.ret(r.idx(r.L(c), r.L(key)))),
-             r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.S(kBaseKey)), r.Bo(false)),
-                   r.b.make_break()),
-             r.set(c, r.idx(r.L(c), kBaseKey))})));
-    r.add(r.ret(r.Nil()));
+    find_in_chain(r);
     r.finish("$clsfind");
   }
 
@@ -2229,15 +2219,11 @@ struct Binder {
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
     r.add(r.set(t, r.idx(r.L(v), kClassKey)));
-    r.add(r.wh(
-        r.is(r.typ(t), "object"),
-        r.blk(
-            {r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
-                          r.bin(BinOp::Eq, r.idx(r.L(t), kRootKey), r.L(name))),
-                   r.ret(r.Bo(true))),
-             r.iff(r.bin(BinOp::Eq, r.has(r.L(t), r.S(kBaseKey)), r.Bo(false)),
-                   r.b.make_break()),
-             r.set(t, r.idx(r.L(t), kBaseKey))})));
+    r.add(walk_bases(
+        r, t,
+        r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
+                     r.bin(BinOp::Eq, r.idx(r.L(t), kRootKey), r.L(name))),
+              r.ret(r.Bo(true)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isname");
   }
@@ -2252,15 +2238,11 @@ struct Binder {
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(v), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.Bo(false))));
     r.add(r.set(t, r.idx(r.L(v), kClassKey)));
-    r.add(r.wh(r.is(r.typ(t), "object"),
-               r.blk({r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
-                                   r.in(IntrinsicId::Same,
-                                        {r.idx(r.L(t), kIdKey), r.L(cls)})),
-                            r.ret(r.Bo(true))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(t), r.S(kBaseKey)),
-                                  r.Bo(false)),
-                            r.b.make_break()),
-                      r.set(t, r.idx(r.L(t), kBaseKey))})));
+    r.add(walk_bases(r, t,
+                     r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
+                                  r.in(IntrinsicId::Same,
+                                       {r.idx(r.L(t), kIdKey), r.L(cls)})),
+                           r.ret(r.Bo(true)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isinstv");
   }
@@ -2291,7 +2273,7 @@ struct Binder {
                              r.ret(r.b.call_value(
                                  r.L(f), {r.call("$acons", {r.L(self), r.L(a)}),
                                           r.L(k)})))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S("\x02__init__")),
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S(program_key("__init__"))),
                 r.ret(r.call("$excinit", {r.L(self), r.L(a)}))));
     r.add(r.ret(r.call(
         "$exc", {r.S("AttributeError"),
@@ -3853,7 +3835,8 @@ struct Binder {
       kvs.emplace_back(b.str_literal(kRootKey), b.str_literal(ci.root));
     }
     for (const auto& [name, g] : methods) {
-      kvs.emplace_back(b.str_literal("\x02" + name), emit_closure(g, ctx, p));
+      kvs.emplace_back(b.str_literal(program_key(name)),
+                       emit_closure(g, ctx, p));
     }
     // The table lives in a cell -- the constructor captures it, and so does
     // any method that says `super()`.
@@ -3899,7 +3882,8 @@ struct Binder {
         b.assign(VarKind::Local, 2,
                  b.object_lit({{b.str_literal(kClassKey, p), C}}, p), p),
         b.assign(VarKind::Local, 3,
-                 rt.call("$clsfind", {C, b.str_literal("\x02__init__", p)}, p),
+                 rt.call("$clsfind",
+                         {C, b.str_literal(program_key("__init__"), p)}, p),
                  p),
         b.make_if(
             b.binary(BinOp::Ne,
@@ -4203,8 +4187,8 @@ struct Binder {
           {read_var(params[0].var, ctx, pos_of(prim)),
            b.index(table, b.str_literal(kBaseKey, pos_of(prim)),
                     pos_of(prim)),
-           b.str_literal("\x02" + std::string(a.nodes[2]->nodes[0]->token),
-                          pos_of(prim)),
+           b.str_literal(program_key(std::string(a.nodes[2]->nodes[0]->token)),
+                         pos_of(prim)),
            A, K},
           pos_of(prim));
       i = 4;

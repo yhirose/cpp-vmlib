@@ -247,6 +247,17 @@ are all top-level, so there is nothing to closure-convert, and its few
 helpers sit in its own table of funcs. The other seven front ends use all
 four.
 
+What the helpers *say* is the language's, not the library's: how a class
+finds a method, what is false, how a value prints. Where front ends here
+made the same decision and wrote it the same way, it is kept once, outside
+`vmlib.h`, in [examples/common/runtime_parts.h](examples/common/runtime_parts.h)
+-- the class layout and the walk up its bases, so far -- and the end of
+that file lists what each front end still writes for itself, and why. Its
+key convention is worth taking even without the rest: the
+implementation's own object keys start with `0x01` (`vmlib.h`'s `kDropKey`
+is one), and a program's names kept beside them, its methods on a class
+table, with `0x02`, so that neither can meet the other or a field.
+
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.
 Only the second has a check that runs over a new front end's programs; the
@@ -274,11 +285,11 @@ kept as the golden (see [Testing](#testing)).
   must end in the language's nothing; a constructor that returns an object
   is what `new` gives.
 - *The implementation's names stay out of the program's.* A key the
-  implementation chooses needs a prefix no identifier can spell, as
-  `kDropKey`'s `"\x01"` does; mini-culebra's class table keeps its own
-  entries under `"\x01"` and the program's methods under `"\x02"` (see its
-  [Classes, without a class in the IR](examples/mini-culebra/README.md#classes-without-a-class-in-the-ir)),
-  after its `init` and `name` had collided with methods of those names.
+  implementation chooses needs a prefix no identifier can spell -- the
+  `0x01`/`0x02` convention above. mini-culebra's `init` and `name` had
+  collided with methods of those names, mini-csharp's class name and
+  constructor with methods called `name` and `ctor`, and mini-js's `$map`
+  and `$methods` with properties a program can spell.
 - *Printing is the language's*: number formatting, string escapes and
   `repr`, how a record or a procedure displays, an error's wording, and the
   report of an uncaught exception, which `test/run_errors.cmake` pins for

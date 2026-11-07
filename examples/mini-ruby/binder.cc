@@ -52,26 +52,24 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
+using namespace runtime_parts;
 
 namespace mini_ruby {
 namespace {
 
-// An exception's kind and message, a Range's two ends, and a class's own
-// bookkeeping, all under keys no Ruby identifier can be -- kMethodPrefix
-// is the trick every class-bearing front end here uses for a method's own
-// key, so `"\x02" + name` never collides with a field a program set.
+// An exception's kind and message and a Range's marker, under keys the
+// implementation chose (runtime_parts.h's kImplPrefix), beside the class
+// layout's own kClassKey, kBaseKey and kNameKey. A method's key is
+// program_key(name), so no method meets one of these or a field.
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
 constexpr char kRangeKey[] = "\x01" "r";
-constexpr char kClassKey[] = "\x01" "c";
-constexpr char kBaseKey[] = "\x01" "p";
-constexpr char kNameKey[] = "\x01" "n";
-constexpr char kMethodPrefix = '\x02';
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -630,7 +628,8 @@ struct Binder {
         r.is(r.typ(a), "object"),
         r.blk({r.set(c, r.call("$classof", {r.L(a)})),
                r.iff(r.isnt(r.typ(c), "nil"),
-                     r.blk({r.set(m_, r.call("$mfind", {r.L(c), r.S("\x02==")})),
+                     r.blk({r.set(m_, r.call("$mfind",
+                                             {r.L(c), r.S(program_key("=="))})),
                             r.iff(r.isnt(r.typ(m_), "nil"),
                                   r.ret(r.call("$truthy",
                                                {r.callb(r.L(m_),
@@ -825,7 +824,8 @@ struct Binder {
     r.add(r.iff(
         r.isnt(r.typ(c), "nil"),
         r.blk(
-            {r.set(m, r.call("$mfind", {r.L(c), r.S("\x02to_s")})),
+            {r.set(m,
+                   r.call("$mfind", {r.L(c), r.S(program_key("to_s"))})),
              r.iff(r.isnt(r.typ(m), "nil"),
                    r.ret(r.call("$str", {r.callb(r.L(m), {r.L(v)})}))),
              r.ret(r.bin(BinOp::Add,
@@ -850,7 +850,8 @@ struct Binder {
              r.iff(
                  r.isnt(r.typ(c), "nil"),
                  r.blk(
-                     {r.set(m, r.call("$mfind", {r.L(c), r.S("\x02inspect")})),
+                     {r.set(m, r.call("$mfind",
+                                      {r.L(c), r.S(program_key("inspect"))})),
                       r.iff(r.isnt(r.typ(m), "nil"),
                             r.ret(r.call("$str",
                                          {r.callb(r.L(m), {r.L(v)})})))}))})));
@@ -1356,17 +1357,7 @@ struct Binder {
 
   void rt_mfind() {
     RT r(*this);
-    const auto [t, key] = r.params("t", "key");
-    const auto [c] = r.locals("c");
-    r.add(r.set(c, r.L(t)));
-    r.add(r.wh(
-        r.is(r.typ(c), "object"),
-        r.blk(
-            {r.iff(r.has(r.L(c), r.L(key)), r.ret(r.idx(r.L(c), r.L(key)))),
-             r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.S(kBaseKey)), r.Bo(false)),
-                   r.b.make_break()),
-             r.set(c, r.idx(r.L(c), kBaseKey))})));
-    r.add(r.ret(r.Nil()));
+    find_in_chain(r);
     r.finish("$mfind");
   }
 
@@ -1400,13 +1391,9 @@ struct Binder {
     const auto [v, cls] = r.params("v", "cls");
     const auto [t] = r.locals("t");
     r.add(r.set(t, r.call("$classof", {r.L(v)})));
-    r.add(r.wh(r.is(r.typ(t), "object"),
-               r.blk({r.iff(r.in(IntrinsicId::Same, {r.L(t), r.L(cls)}),
-                            r.ret(r.Bo(true))),
-                      r.iff(r.bin(BinOp::Eq, r.has(r.L(t), r.S(kBaseKey)),
-                                  r.Bo(false)),
-                            r.b.make_break()),
-                      r.set(t, r.idx(r.L(t), kBaseKey))})));
+    r.add(walk_bases(r, t,
+                     r.iff(r.in(IntrinsicId::Same, {r.L(t), r.L(cls)}),
+                           r.ret(r.Bo(true)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isa");
   }
@@ -1557,7 +1544,7 @@ struct Binder {
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
                           {rt.call("$classof", {T}, p),
-                           b.str_literal(std::string(1, kMethodPrefix) + name)},
+                           b.str_literal(program_key(name))},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
@@ -1580,8 +1567,7 @@ struct Binder {
       const NodeId method = fns[static_cast<size_t>(g)].body == nullptr
                                 ? emit_attr_method(g, name, p)
                                 : emit_closure(g, ctx, p);
-      kvs.emplace_back(b.str_literal(std::string(1, kMethodPrefix) + name),
-                       method);
+      kvs.emplace_back(b.str_literal(program_key(name)), method);
     }
     const int32_t declv = decl_of.at(a.nodes[0].get());
     return write_var(declv, b.object_lit(kvs), ctx, p);
@@ -1934,8 +1920,7 @@ struct Binder {
             {b.assign(
                  VarKind::Local, mv,
                  rt.call("$mfind",
-                         {base, b.str_literal(std::string(1, kMethodPrefix) +
-                                              fi.method_name)},
+                         {base, b.str_literal(program_key(fi.method_name))},
                          p)),
              b.make_if(
                  b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
@@ -2368,8 +2353,7 @@ struct Binder {
                   b.object_lit({{b.str_literal(kClassKey), cls}})),
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
-                          {cls, b.str_literal(std::string(1, kMethodPrefix) +
-                                              "initialize")},
+                          {cls, b.str_literal(program_key("initialize"))},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
@@ -2439,7 +2423,7 @@ struct Binder {
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
                           {rt.call("$classof", {T}, p),
-                           b.str_literal(std::string(1, kMethodPrefix) + name)},
+                           b.str_literal(program_key(name))},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),

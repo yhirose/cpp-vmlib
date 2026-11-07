@@ -142,6 +142,11 @@ $clsfind(t, key):        # method lookup, used by getattr, super(), == and str()
   return nil
 ```
 
+The layout and this walk are
+[examples/common/runtime_parts.h](../common/runtime_parts.h)'s, shared
+with mini-ruby: `$clsfind` is its `find_in_chain`, and
+the walks below are its `walk_bases`, each asking its own question.
+
 `isinstance`, `isinstance(v, str)`-style checks against a builtin type
 name, and `except SomeClass` are the same walk asking a different
 question -- identity, a name match, or an exception's class -- of the same
