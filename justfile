@@ -49,6 +49,6 @@ sanitizers:
 gc-stress: build
     COREIR_GC_STRESS=1 ctest --test-dir build --output-on-failure --timeout 900 -E deep_calls
 
-# Remove both build directories.
+# Remove the build directories.
 clean:
-    rm -rf build build-asan
+    rm -rf build build-asan build-goldens
