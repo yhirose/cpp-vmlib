@@ -12,8 +12,9 @@ moved to `%whitespace`/`%word`, including its `no_ast_opt` annotations -- the
 binder calls `parser.optimize_ast()`, and those annotations only make sense
 together with that call. `binder.cc` is the only file in this front end that
 includes `peglib.h`; nothing in `vmlib.h` knows PL/0 or peglib exist.
-`main.cc` is this front end's one translation unit that defines
-`VMLIB_DEFAULT_RUNTIME`, taking the stdio host the header carries.
+`main.cc` hands the binder to the command line every front end here
+shares, `examples/common/driver.cc` -- the one translation unit that
+defines `VMLIB_DEFAULT_RUNTIME`, taking the stdio host the header carries.
 
 ## Running
 

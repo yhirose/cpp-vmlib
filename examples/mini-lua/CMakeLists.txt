@@ -3,7 +3,7 @@
 add_executable(mini-lua main.cc binder.cc)
 target_include_directories(mini-lua PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-lua SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-lua PRIVATE vmlib)
+target_link_libraries(mini-lua PRIVATE front-end-driver)
 
 # The goldens are `lua`'s output (samples/gen_golden.sh) -- whose language
 # specification *requires* the behaviour samples/tailcalls.lua checks.

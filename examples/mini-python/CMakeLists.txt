@@ -5,7 +5,7 @@
 add_executable(mini-python main.cc binder.cc)
 target_include_directories(mini-python PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-python SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-python PRIVATE vmlib)
+target_link_libraries(mini-python PRIVATE front-end-driver)
 
 # The goldens are `python3`'s output (samples/gen_golden.sh) -- whose
 # integers are unbounded by definition, which samples/bignums.py checks.

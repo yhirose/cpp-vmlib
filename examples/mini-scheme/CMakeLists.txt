@@ -3,7 +3,7 @@
 add_executable(mini-scheme main.cc binder.cc)
 target_include_directories(mini-scheme PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-scheme SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-scheme PRIVATE vmlib)
+target_link_libraries(mini-scheme PRIVATE front-end-driver)
 
 # The goldens are `guile`'s output (samples/gen_golden.sh).
 add_test(NAME mini-scheme-samples

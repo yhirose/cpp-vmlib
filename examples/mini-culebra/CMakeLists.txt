@@ -4,7 +4,7 @@
 add_executable(mini-culebra main.cc binder.cc)
 target_include_directories(mini-culebra PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-culebra SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-culebra PRIVATE vmlib)
+target_link_libraries(mini-culebra PRIVATE front-end-driver)
 
 # The goldens are `culebra`'s own output (samples/gen_golden.sh): the
 # language this front end is a slice of.

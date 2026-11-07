@@ -44,8 +44,10 @@ option(VMLIB_BUILD_BENCH "Build the benchmark harness" ON)
 enable_testing()
 
 # The PL/0 front end is an example, and also the test suite's oracle
-# harness: the sample and error transcripts run its binary.
+# harness: the sample and error transcripts run its binary. What every
+# front end shares (examples/common) comes first, wherever PL/0 is built.
 if(VMLIB_BUILD_EXAMPLES OR VMLIB_BUILD_TESTS)
+  add_subdirectory(examples/common)
   add_subdirectory(examples/pl0)
 endif()
 

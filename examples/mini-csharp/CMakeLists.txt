@@ -3,7 +3,7 @@
 add_executable(mini-csharp main.cc binder.cc)
 target_include_directories(mini-csharp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-csharp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-csharp PRIVATE vmlib)
+target_link_libraries(mini-csharp PRIVATE front-end-driver)
 
 # The goldens are `dotnet`'s output (samples/gen_golden.sh).
 add_test(NAME mini-csharp-samples
