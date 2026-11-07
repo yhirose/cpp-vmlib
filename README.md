@@ -648,33 +648,34 @@ for an object or map whose slot was never set and for every other value,
 which has none, so "the class of `v`" is one read whatever `v` is;
 `MetaSet` traps on anything but an object or a map, and answers the
 object, so an object built with its meta is one expression -- the lines
-Lua's `getmetatable` and `setmetatable` draw. The slot is a reference like any
-other: the collector traces it (a cycle through it is garbage, and the
-owned stack's analysis at a scope's exit sees through it), and a freed
-object releases it after everything else it held, the way an instance's
-type outlives its dict in CPython.
+Lua's `getmetatable` and `setmetatable` draw. The slot is a reference
+like any other: the collector traces it (a cycle through it is garbage,
+and the owned stack's analysis at a scope's exit sees through it), and a
+freed object releases it after its props, the way an instance's type
+outlives its dict in CPython.
 
-What goes in it is the front end's. Lua's metatable, CPython's
-`ob_type`, Ruby's `klass` and JavaScript's internal slots are each this
-one slot, and an object with more than one fact to hide keeps them
-together in what the slot holds: an array no program can reach, so its
-positions are names nobody else can spell.
+What goes in it is the front end's: what the object is, and whatever
+state the implementation keeps with that. Lua's metatable and Ruby's
+`klass` are this slot outright; CPython keeps the same two things as
+`ob_type` and the struct behind it, JavaScript as `[[Prototype]]` and
+the internal slots beside it. An object with more than its type to hide
+keeps them together in what the slot holds: an array no program can
+reach, so its positions are names nobody else can spell.
 [examples/common/runtime_parts.h](examples/common/runtime_parts.h) has the
-convention the front ends here share -- an instance's meta is its class,
-and anything else's a *kind record*, `["kind", state...]`.
+convention the front ends here share.
 
-An object's destructor is the library's own slot beside it,
-`ObjectObj::drop`, given with `DropSet(o, f)` and taken away with
-`DropSet(o, nil)`; like `MetaSet`, it answers the object. It used to be a
-key, `"\x01drop"`, and for the same reason as the meta it is not one
-now: a program that wrote that string -- a JavaScript property, a Python
-keyword argument, a culebra key -- gave any object a destructor, and
-every listing of keys had to skip it. Giving an object a destructor is
-what puts it on the owned stack, so the registration and the slot change
-together in one place, and an object's keys are never more than its
-properties. A front end whose language makes the destructor a property
--- culebra's `{drop: fn () {...}}` -- gives the property's value with
-`DropSet` where the literal is built.
+An object's destructor is the library's own, given with `DropSet(o, f)`
+and taken away with `DropSet(o, nil)`, which answers the object as
+`MetaSet` does. No key names it either, so no string forges or strips
+one, and it costs only the objects that have one: the runtime keeps
+destructors in a table of its own, found through a flag in the object's
+header -- Lua keeps finalizers off the table too, CPython in the type,
+Ruby in a table of its own. Giving an object a destructor is what puts
+it on the owned stack, so the two change together in one place. A freed
+object releases its props, then its meta, then its destructor. A front
+end whose language makes the destructor a property -- culebra's `{drop:
+fn () {...}}` -- gives the property's value with `DropSet` where the
+literal is built.
 
 ## Strings and slices
 

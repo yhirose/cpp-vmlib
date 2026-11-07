@@ -138,6 +138,10 @@ static_assert(ValueTag::Native > ValueTag::Str);
 
 struct HeapObj;
 struct ObjectObj;
+class Value;
+// The destructors of a runtime's objects (Runtime::set_drop), defined once
+// Value is.
+struct DropTable;
 
 // Everything a running program's heap consists of, owned by an object rather
 // than by file-scope state.
@@ -204,18 +208,17 @@ class Runtime {
     finalize_ = fn;
   }
 
-  // Deterministic destructors: an Object whose destructor (ObjectObj::drop,
-  // given with DropSet) is a callable gets it called -- with the object as
-  // its one argument -- at the moment
-  // its refcount reaches zero, before the object is freed; at the exit of
-  // the scope that owns the cycle it is in (owned_scope_exit); or, last,
-  // in the collection that condemns it. The hook is how: the executor
-  // installs one for the lifetime of a run (it is what can call a
-  // closure), and every one of those paths reaches it through run_drop.
-  // The hook runs over a pinned object; if it stores the object somewhere
-  // (a resurrection), the free is skipped. It runs inside a release, which
-  // cannot pass an exception on, so it must not throw: the executor's own
-  // reports and swallows whatever a destructor raises.
+  // Deterministic destructors: an Object given a callable destructor
+  // (set_drop, below; the DropSet intrinsic) gets it called -- with the
+  // object as its one argument -- at the moment its refcount reaches zero,
+  // before the object is freed; at the exit of the scope that owns the cycle
+  // it is in (owned_scope_exit); or, last, in the collection that condemns
+  // it. The hook is how: the executor installs one for the lifetime of a run
+  // (it is what can call a closure), and every one of those paths reaches it
+  // through run_drop. The hook runs over a pinned object; if it stores the
+  // object somewhere (a resurrection), the free is skipped. It runs inside a
+  // release, which cannot pass an exception on, so it must not throw: the
+  // executor's own reports and swallows whatever a destructor raises.
   void set_drop_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
     drop_ctx_ = ctx;
     drop_ = fn;
@@ -246,7 +249,19 @@ class Runtime {
   // nodes every candidate survives to the backstop.
   uint64_t owned_mark() const { return owned_next_id_; }
   void owned_scope_exit(uint64_t mark);
-  // ObjectObj::set_drop's chokepoints.
+  // Destructors. An object has one at most and most have none, so they are
+  // kept here, beside the objects rather than in each, found through the
+  // object's has_drop flag -- an object without one costs nothing, neither
+  // in its size nor to ask -- as Lua keeps its finalizers off the table,
+  // CPython in the type and Ruby in a table of its own. Giving one (nil
+  // takes it away) is what puts the object on the owned stack and taking
+  // it away what takes it off, in the one place. take_drop hands an
+  // object's destructor over to be released, the last thing strip_refs
+  // does with an Object.
+  void set_drop(ObjectObj* o, Value f);
+  const Value* drop_of(const ObjectObj* o) const;
+  Value take_drop(ObjectObj* o);
+  // set_drop's chokepoints for the owned stack.
   void owned_register(ObjectObj* o);
   void owned_unregister(ObjectObj* o);
   bool in_collect() const { return in_collect_; }
@@ -295,6 +310,7 @@ class Runtime {
   };
   std::vector<OwnedEntry> owned_;
   uint64_t owned_next_id_ = 0;
+  std::unique_ptr<DropTable> drops_;  // made at the first destructor
   void* finalize_ctx_ = nullptr;
   void (*finalize_)(void*, HeapObj*) = nullptr;
   void* drop_ctx_ = nullptr;
@@ -314,6 +330,19 @@ struct HeapObj {
   // rule is that nothing here has virtual functions or RTTI, because that is
   // what survives --gc-sections as residue in a binary that never uses it.
   ValueTag kind;
+  // An Object's own (ObjectObj), here because they fit in what would be
+  // padding after `kind`, so an Object is its header, its props and its
+  // meta and nothing more: the at-most-once flag Runtime::run_drop sets;
+  // the mark on the {message, line, col} object a trap carries
+  // (coreir::make_trap), and on nothing else -- a trap stays a trap
+  // however it is raised again, which is what lets an uncaught one report
+  // its own diagnostic (coreir::trap_diagnostic); whether it has a
+  // destructor (Runtime::set_drop); and its owned stack's back-pointer
+  // (-1: not on it).
+  bool dropped : 1 = false;
+  bool trap : 1 = false;
+  bool has_drop : 1 = false;
+  int32_t owned_idx = -1;
   // Intrusive links: enumerating the heap costs no side table, and allocating
   // costs no container growth.
   HeapObj* prev = nullptr;
@@ -609,35 +638,19 @@ struct ArrayObj : HeapObj {
 struct ObjectObj : HeapObj {
   ObjectObj() : HeapObj(ValueTag::Object) {}
   std::vector<std::pair<std::string, Value>> props;
-  // The owned stack's back-pointer (-1: not on it) and the at-most-once
-  // flag Runtime::run_drop sets.
-  int64_t owned_idx = -1;
-  bool dropped = false;
-  // Set on the {message, line, col} object a trap carries (coreir::
-  // make_trap), and on nothing else: a trap stays a trap however it is
-  // raised again, which is what lets an uncaught one report its own
-  // diagnostic (coreir::trap_diagnostic).
-  bool trap = false;
   // The implementation's own slot: one value no key names, so nothing a
   // program does with keys -- Index, ObjectHas, ObjectKeys, Len, printing,
   // a comparison -- reaches it. Only MetaGet and MetaSet do, and a front
   // end emits those for itself, never on a program's behalf. What it holds
-  // is the front end's to decide: an instance's class, the brand that says
-  // which of the language's kinds an object is, a builtin's internal state.
-  // Lua's metatable, CPython's ob_type, Ruby's klass and JavaScript's
-  // [[Prototype]] are each this one slot. A reference like any other:
-  // traced by the collector and released when the object is freed -- after
-  // the props, so it outlives what the object holds, as an instance's type
-  // outlives its dict in CPython's dealloc.
+  // is the front end's to decide: what the object is -- an instance's
+  // class, a builtin kind -- with whatever state the implementation keeps
+  // beside that. Lua's metatable and Ruby's klass are this one slot; it
+  // also holds what CPython keeps after ob_type in an object's struct, and
+  // JavaScript in internal slots beside [[Prototype]]. A reference like
+  // any other: traced by the collector and released when the object is
+  // freed -- after the props, so it outlives what the object holds, as an
+  // instance's type outlives its dict in CPython's dealloc.
   Value meta;
-  // The destructor, nil for none (Runtime::set_drop_fn has the contract).
-  // The library's own hidden slot, as meta is the front end's: no key
-  // names it, so a program spelling any key neither reads, forges nor
-  // strips one. Set only through set_drop -- the DropSet intrinsic --
-  // since giving an object a destructor is what puts it on the owned stack
-  // and taking it away what takes it off. Released after the props and
-  // before the meta.
-  Value drop;
 
   Value* find(const std::string& k) {
     for (auto& kv : props) {
@@ -656,18 +669,12 @@ struct ObjectObj : HeapObj {
     }
   }
 
-  // Gives the object its destructor, or takes it away with nil -- and puts
-  // it on the owned stack or takes it off, in the one place, so the two
-  // cannot drift apart. The old destructor dies last: its release can run
-  // a drop hook that reads this object.
+  // Gives the object its destructor, or takes it away with nil
+  // (Runtime::set_drop, where it is kept). No key names it, so a program
+  // spelling any key neither reads, forges nor strips one. An object no
+  // runtime owns has nothing to run one, and gets none.
   void set_drop(Value f) {
-    const Value old = std::exchange(drop, std::move(f));
-    if (!owner) return;
-    if (drop.is_nil()) {
-      owner->owned_unregister(this);
-    } else {
-      owner->owned_register(this);
-    }
+    if (owner) owner->set_drop(this, std::move(f));
   }
 
   // Erases the key if present; absent is a no-op. Order of the survivors
@@ -911,6 +918,37 @@ inline Value* meta_slot(const Value& v) {
   if (v.is_object()) return &v.as_object()->meta;
   if (v.is_map()) return &v.as_map()->meta;
   return nullptr;
+}
+
+struct DropTable {
+  std::unordered_map<const ObjectObj*, Value> fns;
+};
+
+inline void Runtime::set_drop(ObjectObj* o, Value f) {
+  Value old;  // dies last: its release can run a hook that reads `o`
+  if (f.is_nil()) {
+    if (!o->has_drop) return;
+    auto it = drops_->fns.find(o);
+    old = std::move(it->second);
+    drops_->fns.erase(it);
+    o->has_drop = false;
+    owned_unregister(o);
+    return;
+  }
+  if (!drops_) drops_ = std::make_unique<DropTable>();
+  old = std::exchange(drops_->fns[o], std::move(f));
+  o->has_drop = true;
+  owned_register(o);
+}
+
+inline const Value* Runtime::drop_of(const ObjectObj* o) const {
+  return o->has_drop ? &drops_->fns.find(o)->second : nullptr;
+}
+
+inline Value Runtime::take_drop(ObjectObj* o) {
+  if (!o->has_drop) return Value();
+  o->has_drop = false;
+  return std::move(drops_->fns.extract(o).mapped());
 }
 
 inline Value Value::make_array(std::vector<Value> items) {
@@ -1510,7 +1548,7 @@ enum class IntrinsicId : uint8_t {
   // setmetatable draw the same lines.
   MetaGet,      // (v) -> value | nil
   MetaSet,      // (object | map, value) -> the object
-  // Gives an Object its destructor (ObjectObj::drop), or takes it away
+  // Gives an Object its destructor (ObjectObj::set_drop), or takes it away
   // with nil: what the run calls, with the object as its one argument,
   // when the object dies (Runtime::set_drop_fn has the contract). Like the
   // meta it is no key, so nothing a program spells reaches it; and giving
@@ -3266,7 +3304,8 @@ class FuncWriter {
   NodeId set_meta(NodeId o, NodeId m) {
     return in(IntrinsicId::MetaSet, {o, m});
   }
-  // An object's destructor (ObjectObj::drop), given -- the object answered.
+  // An object's destructor (Runtime::set_drop), given -- the object
+  // answered.
   NodeId set_drop(NodeId o, NodeId f) {
     return in(IntrinsicId::DropSet, {o, f});
   }
@@ -4963,8 +5002,8 @@ void visit_children(HeapObj* o, Fn fn) {
       [&](ArrayObj& a) { for (const Value& v : a.items) visit(v); },
       [&](ObjectObj& x) {
         for (const auto& kv : x.props) visit(kv.second);
-        visit(x.drop);
         visit(x.meta);
+        if (x.has_drop) visit(*x.owner->drop_of(&x));
       },
       [&](CellObj& c) { visit(c.v); },
       [&](ClosureObj& c) { for (const Value& v : c.cells) visit(v); },
@@ -5052,7 +5091,7 @@ inline std::vector<char> owned_unreachable(const std::vector<ObjectObj*>& cand) 
 inline bool Runtime::run_drop(HeapObj* h) {
   if (h->kind != ValueTag::Object || !drop_) return false;
   auto* o = static_cast<ObjectObj*>(h);
-  if (o->dropped || o->drop.is_nil()) return false;
+  if (o->dropped || !o->has_drop) return false;
   o->dropped = true;  // before the call: re-entrant, and at most once
   drop_(drop_ctx_, h);
   return true;
@@ -5060,17 +5099,20 @@ inline bool Runtime::run_drop(HeapObj* h) {
 
 inline void Runtime::owned_register(ObjectObj* o) {
   if (o->owned_idx >= 0) return;
+  // The back-pointer is an int32_t, to fit the header (HeapObj): a stack
+  // that deep is an allocation refused, like any other.
+  if (owned_.size() >= static_cast<size_t>(INT32_MAX)) throw std::bad_alloc();
   // The entry first, its index after: a push that cannot allocate leaves
   // the object off the stack rather than pointing past its end.
   owned_.push_back({o, owned_next_id_});
-  o->owned_idx = static_cast<int64_t>(owned_.size() - 1);
+  o->owned_idx = static_cast<int32_t>(owned_.size() - 1);
   ++owned_next_id_;
   // Tombstones pile up under a scope that never exits (the entry frame's);
   // prune now and then, keeping every back-pointer right.
   if ((owned_next_id_ & 1023) == 0) {
     std::erase_if(owned_, [](const OwnedEntry& e) { return !e.obj; });
     for (size_t i = 0; i < owned_.size(); ++i) {
-      owned_[i].obj->owned_idx = static_cast<int64_t>(i);
+      owned_[i].obj->owned_idx = static_cast<int32_t>(i);
     }
   }
 }
@@ -5135,7 +5177,7 @@ inline void Runtime::owned_scope_exit(uint64_t mark) {
   for (size_t i = cand.size(); i-- > 0;) {
     if (gone[i]) continue;
     owned_.push_back(cand[i]);
-    cand[i].obj->owned_idx = static_cast<int64_t>(owned_.size() - 1);
+    cand[i].obj->owned_idx = static_cast<int32_t>(owned_.size() - 1);
   }
 
   // Destructors, newest first, each over a still-whole cycle.
@@ -5324,9 +5366,10 @@ inline int64_t Runtime::heap_bytes() const {
 // The refcount just hit zero. An Object with a destructor runs it first
 // (unless it already has), pinned so the closure can read the fields; a
 // destructor that stores the object somewhere resurrects it and the free
-// is skipped. Everything else -- and every non-Object -- frees directly.
+// is skipped. Everything else -- and every non-Object -- frees directly,
+// asking only the header's flag.
 inline void heap_release_to_zero(HeapObj* h) {
-  if (h->kind == ValueTag::Object && h->owner && !h->owner->sweeping()) {
+  if (h->has_drop && h->owner && !h->owner->sweeping()) {
     ++h->rc;  // pin across the destructor
     h->owner->run_drop(h);
     if (--h->rc != 0) return;  // resurrected
@@ -5337,10 +5380,7 @@ inline void heap_release_to_zero(HeapObj* h) {
   // time. Then stripped, then freed: the same order collect() and ~Runtime
   // use, so the children go in clear_heap_object_refs' order rather than in
   // whichever one the containers' own destructors pick.
-  if (h->owner) {
-    h->owner->unlink(h);
-    h->owner = nullptr;
-  }
+  if (h->owner) h->owner->unlink(h);
   free_heap_object(h);
 }
 
@@ -5391,15 +5431,15 @@ namespace detail {
 // container is detached and released after the object is already empty:
 // releasing a child can run its drop hook (owned_scope_exit strips with
 // sweeping_ off), and a hook may read or write this object -- which must not
-// be half-way through releasing its own elements. An object's destructor
-// goes after its props, and an object's or a map's meta last, after
-// everything else it holds (ObjectObj::meta).
+// be half-way through releasing its own elements. An object's meta goes
+// after its props (ObjectObj::meta), and its destructor, which its runtime
+// keeps, after both.
 inline constexpr Overloaded strip_refs{
     [](ArrayObj& a) { release_detached(a.items); },
     [](ObjectObj& x) {
       release_detached(x.props);
-      x.drop = Value();
       x.meta = Value();
+      if (x.has_drop) x.owner->take_drop(&x);
     },
     [](CellObj& c) { c.v = Value(); },
     [](ClosureObj& c) { release_detached(c.cells); },
@@ -5431,6 +5471,10 @@ inline void destroy_heap_object(HeapObj* o) {
 inline void free_heap_object(HeapObj* o) {
   detail::on_heap_kind(o, [](auto& obj) {
     detail::strip_refs(obj);
+    // Its runtime is let go of only now: an Object's destructor is the
+    // runtime's to hand back (Runtime::take_drop), and the strip reached it
+    // through here.
+    obj.owner = nullptr;
     delete &obj;
   });
 }
@@ -9119,7 +9163,7 @@ struct Exec {
   }
 
   // The drop-contract hook (see Runtime::set_drop_fn): run the object's
-  // destructor (ObjectObj::drop) with the object itself as the argument. A
+  // destructor (Runtime::drop_of) with the object itself as the argument. A
   // throwing destructor is reported on stderr as "drop: <value>" (a trap: its
   // own message) and swallowed -- an object going away must not fail the
   // program that let go of it. So is any other exception: an allocation that
@@ -9129,8 +9173,9 @@ struct Exec {
   static void drop_hook(void* ctx, HeapObj* h) noexcept {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
-    if (!o->drop.is_callable()) return;
-    Value closure = o->drop;
+    const Value* dv = o->owner->drop_of(o);
+    if (!dv || !dv->is_callable()) return;
+    Value closure = *dv;
     Value arg = Value::make_ref(h);
     ExitHeadroom room(*self);
     const size_t floor = self->frames.size();

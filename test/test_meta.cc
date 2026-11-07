@@ -270,6 +270,40 @@ int main() {
     check(rt.live_objects() == 0, what + " freed: nothing left");
   }
 
+  // --- 6b. An object's destructor, which its runtime keeps rather than
+  //         the object, is released after the meta: the props, then the
+  //         meta, then the destructor. (The destructor below is no
+  //         callable; what the hook records is each object it is handed,
+  //         the destructor among them when it dies.)
+  {
+    Runtime rt;
+    Runtime::Scope scope(rt);
+    std::string order;
+    rt.set_drop_fn(&order, record_name);
+    {
+      Value holder = named_resource("holder");
+      holder.as_object()->set_drop(named_resource("dtor"));
+      holder.as_object()->meta = named_resource("meta");
+      holder.as_object()->set("held", named_resource("held"));
+    }
+    rt.set_drop_fn(nullptr, nullptr);
+    check_eq(order, "holder|held|meta|dtor|",
+             "destructor released after the meta");
+    check(rt.live_objects() == 0, "destructor released: nothing left");
+  }
+
+  // --- 6c. Neither the meta nor a destructor makes an Object larger than
+  //         its header, its props and its meta: the destructor is its
+  //         runtime's, and an Object's flags share the header's padding.
+  {
+    struct Bare : HeapObj {
+      std::vector<std::pair<std::string, Value>> props;
+      Value meta;
+    };
+    check(sizeof(ObjectObj) == sizeof(Bare),
+          "an Object is its header, its props and its meta");
+  }
+
   // --- 7. The owned stack's analysis sees through the slot: a resource
   //        whose cycle closes through its own meta drops at the exit of
   //        the scope that bound it, not at some later collection.
