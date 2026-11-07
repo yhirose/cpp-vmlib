@@ -75,6 +75,11 @@ constexpr char kRootKey[] = "\x01" "x";
 // `type(t)` and `print(t)` honest: the IR has one sequence, and Python has
 // two that print and compare differently.
 constexpr char kTupKey[] = "\x01" "t";
+// What `type(v)` answers is an object with the program-visible `__name__`,
+// marked as a type by a key of the implementation's: marked by `__name__`
+// itself, as it was, an instance with an attribute of that name printed as
+// a class.
+constexpr char kTypeKey[] = "\x01" "y";
 
 // Base 10^9: a limb product plus two carries stays under 2^63, and
 // rendering is nine decimal digits per limb with no division at all.
@@ -1488,7 +1493,7 @@ struct Binder {
     // displays as its message, the way the builtin ones do.
     r.add(r.iff(r.has(r.L(v), r.S(kMsgKey)),
                 r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
-    r.add(r.iff(r.has(r.L(v), r.S("__name__")),
+    r.add(r.iff(r.has(r.L(v), r.S(kTypeKey)),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<class '"),
                                   r.idx(r.L(v), r.S("__name__"))),
@@ -1868,7 +1873,8 @@ struct Binder {
   void rt_type() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.ret(r.obj({{"__name__", r.call("$typename", {r.L(v)})}})));
+    r.add(r.ret(r.obj({{kTypeKey, r.Bo(true)},
+                       {"__name__", r.call("$typename", {r.L(v)})}})));
     r.finish("$type");
   }
 

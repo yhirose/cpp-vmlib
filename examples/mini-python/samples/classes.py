@@ -81,3 +81,12 @@ a = Accumulator()
 for i in range(1, 26):
     a.times(i)
 print(a.total)
+
+# An attribute named __name__ is the instance's own: it does not make the
+# instance a class.
+class Named:
+    def __init__(self):
+        self.__name__ = "fake"
+
+nm = Named()
+print(nm.__name__, type(nm).__name__, str(nm).startswith("<class"))
