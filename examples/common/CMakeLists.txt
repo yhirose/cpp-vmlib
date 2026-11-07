@@ -101,12 +101,8 @@ function(front_end_tests prefix target)
 
   add_test(NAME ${prefix}samples COMMAND ${run} ${samples})
   if(VMLIB_CHECK_GOLDENS)
-    # BIN is a list, the command and its first argument; $<SEMICOLON>
-    # keeps it one -D through add_test.
     add_test(NAME ${prefix}goldens
-             COMMAND ${CMAKE_COMMAND} -DEXT=${arg_EXT} -DORACLE=ON
-                     -DBIN=${scripts}/oracle.sh$<SEMICOLON>${arg_LANG}
-                     ${samples})
+             COMMAND ${CMAKE_COMMAND} -DEXT=${arg_EXT} -DORACLE=ON ${samples})
     set_tests_properties(${prefix}goldens PROPERTIES LABELS goldens)
   endif()
   if(EXISTS ${arg_DIR}/uncaught)

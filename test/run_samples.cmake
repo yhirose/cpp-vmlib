@@ -8,7 +8,8 @@
 # language itself.
 #
 #   cmake -DBIN=<command> -DDIR=<samples directory> -DEXT=<source extension>
-#         -DLANG=<language> [-DLEAD=<file>] [-DORACLE=ON]
+#         -DLANG=<language> [-DLEAD=<file>] -P run_samples.cmake
+#   cmake -DORACLE=ON -DDIR=... -DEXT=... -DLANG=... [-DLEAD=...]
 #         -P run_samples.cmake
 #
 # Every *.EXT under DIR is a case, run from its own directory by its file
@@ -21,16 +22,26 @@
 # (test/cases.cmake). A golden no case makes fails too.
 #
 # LANG is the key test/languages.sh knows the language by. BIN is the front
-# end's binary, or with ORACLE the language itself, `test/oracle.sh LANG`:
-# a front end's goldens test (front_end_tests), which checks the goldens
-# rather than the front end. Then, and only then, VMLIB_UPDATE_GOLDENS in
+# end's binary; with ORACLE, the script runs the language itself in its
+# place, `test/oracle.sh LANG`, and takes no BIN: a front end's goldens
+# test (front_end_tests), which checks the goldens rather than the front
+# end. Then, and only then, VMLIB_UPDATE_GOLDENS in
 # the environment makes the run rewrite each golden from what the language
 # printed, and remove one no case makes -- by hand, never from the build: a
 # golden the front end's own test could refresh would be evidence of
 # nothing.
 
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
-require_args(run_samples.cmake BIN DIR EXT LANG)
+if(ORACLE)
+  if(DEFINED BIN)
+    message(FATAL_ERROR "run_samples.cmake: -DORACLE runs the language "
+                        "itself, and takes no -DBIN")
+  endif()
+  require_args(run_samples.cmake DIR EXT LANG)
+  set(BIN ${CMAKE_CURRENT_LIST_DIR}/oracle.sh ${LANG})
+else()
+  require_args(run_samples.cmake BIN DIR EXT LANG)
+endif()
 
 set(update OFF)
 if(ORACLE AND "$ENV{VMLIB_UPDATE_GOLDENS}")
