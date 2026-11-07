@@ -41,7 +41,7 @@ using coreir::NodeId;
 // An object a front end builds holds names from two choosers, and two
 // prefixes keep them apart. The implementation's own names -- an instance's
 // class, a class's base and name, the runtime's destructor key (vmlib.h's
-// kDropKey) -- start with 0x01. The program's names that have to sit beside
+// kDropKey) -- start with vmlib.h's kImplPrefix, 0x01. The program's names that have to sit beside
 // them or beside its own fields -- its methods on a class table, the field
 // behind a C# auto property -- start with 0x02. Neither byte can begin a
 // name any of these languages lets a program write, so the program's own
@@ -53,7 +53,7 @@ using coreir::NodeId;
 // their name and constructor under the methods' prefix, had the bug from
 // the other side until it took the rule from here: a method named `name`
 // overwrote the class's name, and one named `ctor` was the constructor.
-inline constexpr char kImplPrefix = '\x01';
+using coreir::kImplPrefix;
 inline constexpr char kProgramPrefix = '\x02';
 
 // The key for a name the program chose, kept apart from the

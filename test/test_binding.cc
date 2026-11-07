@@ -423,6 +423,24 @@ int main() {
     }
   }
 
+  // --- 5c. tail_calls is the writer's to pass on, off unless asked for. ---
+  {
+    Module m;
+    m.funcs.resize(2);
+    for (const bool asked : {false, true}) {
+      FuncWriter w(m);
+      w.tail_calls = asked;
+      w.add(w.ret(w.Nil()));
+      Func& f = m.funcs[asked ? 1 : 0];
+      w.write(f, asked ? "asked" : "default");
+      if (f.tail_calls != asked) {
+        std::fprintf(stderr, "FAIL: FuncWriter wrote tail_calls=%d for %d\n",
+                     f.tail_calls ? 1 : 0, asked ? 1 : 0);
+        ++g_failures;
+      }
+    }
+  }
+
   // --- 10. HelperTable: two helpers calling each other by name. -----------
   // `$even` is written first and calls `$odd`, which has a slot but no body
   // yet -- the order a runtime library's mutual recursion needs. Each lands
@@ -449,7 +467,7 @@ int main() {
     parity("$even", "$odd", 1);
     parity("$odd", "$even", 0);
     if (m.funcs[1].name != "$even" || m.funcs[2].name != "$odd" ||
-        !m.funcs[2].singleton || m.funcs[2].tail_calls) {
+        !m.funcs[2].singleton) {
       std::fprintf(stderr, "FAIL: a helper missed its reserved slot\n");
       ++g_failures;
     }
@@ -459,19 +477,6 @@ int main() {
         {rt.call("$even", {Builder(m).literal(7, pos)}, pos)}, pos);
     run_module(m, "helper table mutual recursion");
     check_eq(joined(), "0|", "helper table mutual recursion output");
-
-    // tail_calls is the writer's to pass on, off unless asked for.
-    HelperWriter w(rt);
-    w.tail_calls = true;
-    w.add(w.ret(w.Nil()));
-    rt.reserve({"$tail"});
-    w.finish("$tail");
-    if (!m.funcs[static_cast<size_t>(rt.func("$tail"))].tail_calls ||
-        m.capture_maps.size() != 1) {
-      std::fprintf(stderr, "FAIL: a second reserve lost tail_calls or the "
-                           "capture map\n");
-      ++g_failures;
-    }
   }
 
   // --- 6. A closure built where its captures cannot be reached is refused.
@@ -757,8 +762,6 @@ int main() {
              "param after local");
 
     HelperTable rt(m);
-    check_eq(failure([&] { rt.empty_cmap(); }),
-             "HelperTable: nothing reserved yet", "empty_cmap before reserve");
     rt.reserve({"$a", "$closure"});
     check_eq(failure([&] { rt.reserve({"$a"}); }),
              "HelperTable: helper $a reserved twice", "reserve twice");

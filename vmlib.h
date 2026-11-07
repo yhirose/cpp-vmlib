@@ -120,10 +120,17 @@ static_assert(ValueTag::Native > ValueTag::Str);
 struct HeapObj;
 struct ObjectObj;
 
+// The first byte of a key the implementation chose rather than the
+// program: unspellable from a language whose identifiers are printable,
+// which is the point. kDropKey is the library's own such key; a front end
+// spells its own the same way (examples/common/runtime_parts.h has the
+// convention the examples share).
+inline constexpr char kImplPrefix = '\x01';
+
 // The key under which an Object carries its destructor (Runtime::set_drop_fn
-// has the contract). Unspellable from a language whose identifiers are
-// printable, which is the point.
+// has the contract).
 inline constexpr char kDropKey[] = "\x01" "drop";
+static_assert(kDropKey[0] == kImplPrefix);
 
 // Everything a running program's heap consists of, owned by an object rather
 // than by file-scope state.
@@ -3180,15 +3187,14 @@ class FuncWriter {
 // where its captures are, with HelperWriter::clos, and never called by name.
 class HelperTable {
  public:
-  explicit HelperTable(Module& m) : mod_(m) {}
+  // Adds the empty capture map every call by name uses.
+  explicit HelperTable(Module& m)
+      : mod_(m), empty_cmap_(static_cast<int32_t>(m.capture_maps.size())) {
+    mod_.capture_maps.push_back({});
+  }
 
-  // A slot per name, in order, at the end of Module::funcs -- and, the
-  // first time, the empty capture map every call by name uses.
+  // A slot per name, in order, at the end of Module::funcs.
   void reserve(const std::vector<std::string>& names) {
-    if (empty_cmap_ < 0) {
-      empty_cmap_ = static_cast<int32_t>(mod_.capture_maps.size());
-      mod_.capture_maps.push_back({});
-    }
     for (const std::string& n : names) {
       if (!funcs_.emplace(n, static_cast<int32_t>(mod_.funcs.size())).second) {
         coreir_rt::fail("HelperTable: helper " + n + " reserved twice", 0, 0);
@@ -3208,12 +3214,7 @@ class HelperTable {
 
   // The empty capture map. Any closure over no captures may share it -- a
   // front end's own functions as well as its helpers.
-  int32_t empty_cmap() const {
-    if (empty_cmap_ < 0) {
-      coreir_rt::fail("HelperTable: nothing reserved yet", 0, 0);
-    }
-    return empty_cmap_;
-  }
+  int32_t empty_cmap() const { return empty_cmap_; }
 
   Module& module() const { return mod_; }
 
@@ -3238,8 +3239,8 @@ class HelperTable {
 
  private:
   Module& mod_;
+  int32_t empty_cmap_;
   std::map<std::string, int32_t> funcs_;
-  int32_t empty_cmap_ = -1;
 };
 
 // A FuncWriter for one helper of a HelperTable: it reaches the others by
