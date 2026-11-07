@@ -10,8 +10,8 @@
 // coroutine whose two frames park and come back together; the job queue,
 // which runs after the entry frame has gone; a destructor and a defer,
 // which run inside the frame whose exit runs them; and a throw that
-// unwinds two frames. Then the table vm::to_string makes of a profile,
-// word for word.
+// unwinds two frames; and a Return of an If, which leaves from each arm.
+// Then the table vm::to_string makes of a profile, word for word.
 //
 // The counts are exact: an instruction count does not move with the
 // machine, which is the point of counting them. They are also the
@@ -500,6 +500,55 @@ int main() {
     const Profiled r = run_profiled(m, "throw", "boom|end|");
     expect(r, "throw", 17,
            {{"main", 1, 13, 17}, {"outer", 1, 2, 4}, {"inner", 1, 2, 2}});
+  }
+
+  // --- 9. A returned If leaves the frame from each arm, running what the
+  //        frame's exit runs -- the scope's destructor -- in its time.
+  // main { print(sum(3)) }   drop(self) { say "drop" }
+  // sum(n) { scope { o = dropset({}, drop);
+  //   return if n == 0 { 0 } else { n + sum(n - 1) } } }
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.capture_maps.push_back({{VarKind::Cell, 0}});
+    m.funcs.push_back({});
+    m.funcs.push_back({"drop", 1, 0, say(b, "drop"), {"self"}, {}});
+    m.funcs.back().num_params = 1;
+    const NodeId obj =
+        b.intrinsic(IntrinsicId::DropSet,
+                    {b.object_lit({}, p), b.make_closure(1, 0, p)}, p);
+    const NodeId ret = b.make_return(
+        b.make_if(b.binary(BinOp::Eq, loc(b, 0), lit(b, 0), p), lit(b, 0),
+                  b.binary(BinOp::Add, loc(b, 0),
+                           b.call_value(cap(b, 0),
+                                        {b.binary(BinOp::Sub, loc(b, 0),
+                                                  lit(b, 1), p)},
+                                        p),
+                           p),
+                  p),
+        p);
+    m.funcs.push_back(
+        {"sum", 2, 1,
+         b.scope(1, 2, b.block({b.assign(VarKind::Local, 1, obj, p), ret}, p),
+                 p),
+         {"n", "o"}, {"sum"}});
+    m.funcs.back().num_params = 1;
+    m.funcs[0] = {
+        "main", 0, 0,
+        b.block({b.assign(VarKind::Cell, 0, b.make_closure(2, 1, p), p),
+                 pr(b, b.call_value(b.varref(VarKind::Cell, 0, p),
+                                    {lit(b, 3)}, p)),
+                 b.assign(VarKind::Cell, 0, b.nil_literal(p), p)},
+                p),
+        {}, {}};
+    m.funcs[0].num_cells = 1;
+    const Profiled r =
+        run_profiled(m, "returned if", "drop|drop|drop|drop|6|");
+    // sum: 14 instructions for the arm that returns 0, 20 for each that
+    // recurses, its own exit's drop among its total each time.
+    expect(r, "returned if", 108,
+           {{"main", 1, 14, 108}, {"sum", 4, 74, 94}, {"drop", 4, 20, 20}});
   }
 
   return g_failures == 0 ? 0 : 1;

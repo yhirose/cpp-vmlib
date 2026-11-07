@@ -1,7 +1,8 @@
 // Return, Break, Continue: the three non-local exits, and what they owe the
-// regions they jump out of. Output order pins where control actually went;
-// the zero-live assert at the end of every case pins that leaving a Scope
-// sideways released the same locals leaving it normally would.
+// regions they jump out of -- a Return from each arm of the If it returns.
+// Output order pins where control actually went; the zero-live assert at
+// the end of every case pins that leaving a Scope sideways released the
+// same locals leaving it normally would.
 
 #include <cstdio>
 #include <stdexcept>
@@ -554,6 +555,101 @@ int main() {
     check(forever.find("\tjumpif") == std::string::npos &&
               forever.find(", true\t") == std::string::npos,
           "while (true): no test");
+  }
+
+  // --- 10. A returned If returns from each arm, and each arm leaves the
+  //         way the one Return did: the inner scope's defer, then its
+  //         local, then the outer scope's -- each local an object whose
+  //         destructor prints its name -- and a missing else returns nil.
+  //         A body that ends in an If returns from each arm too.
+  // f(x, y) { scope { a = obj "a"; scope { b = obj "b"; defer print "D";
+  //   return if x { 1 } else if y { print "y"; 2 }; print "past" } }; nil }
+  // g(x) { if x { 3 } else { print "g"; 4 } }
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    const auto say = [&](const char* t) {
+      return b.intrinsic(IntrinsicId::Print, {b.str_literal(t, p)}, p);
+    };
+    // A function whose first `params` locals are its parameters.
+    const auto func = [&](const char* name, std::vector<std::string> locals,
+                          int32_t params, NodeId body) {
+      const auto n = static_cast<int32_t>(locals.size());
+      m.funcs.push_back({name, n, 0, body, std::move(locals), {}});
+      m.funcs.back().num_params = params;
+      return b.make_closure(static_cast<int32_t>(m.funcs.size() - 1), 0, p);
+    };
+    m.funcs.push_back({});  // main, wired below
+    const auto owned = [&](const char* name) {
+      return b.intrinsic(IntrinsicId::DropSet,
+                         {b.object_lit({}, p), func(name, {"o"}, 1, say(name))},
+                         p);
+    };
+    const NodeId ret = b.make_return(
+        b.make_if(L(0), b.literal(1, p),
+                  b.make_if(L(1), b.block({say("y"), b.literal(2, p)}, p),
+                            NodeId{}, p),
+                  p),
+        p);
+    const NodeId inner = b.scope(
+        3, 4,
+        b.block({b.assign(VarKind::Local, 3, owned("b"), p),
+                 b.make_defer(func("D", {}, 0, say("D")), p), ret,
+                 say("past")},
+                p),
+        p);
+    const NodeId f = func(
+        "f", {"x", "y", "a", "b"}, 2,
+        b.block({b.scope(2, 3,
+                         b.block({b.assign(VarKind::Local, 2, owned("a"), p),
+                                  inner},
+                                 p),
+                         p),
+                 b.nil_literal(p)},
+                p));
+    const NodeId g = func(
+        "g", {"x"}, 1,
+        b.make_if(L(0), b.literal(3, p),
+                  b.block({say("g"), b.literal(4, p)}, p), p));
+    const auto call = [&](NodeId fn, std::vector<NodeId> args) {
+      return b.intrinsic(IntrinsicId::Print, {b.call_value(fn, args, p)}, p);
+    };
+    const NodeId T = b.bool_literal(true, p);
+    const NodeId F = b.bool_literal(false, p);
+    m.funcs[0] = {"main", 0, 0,
+                  b.block({call(f, {T, F}), call(f, {F, T}), call(f, {F, F}),
+                           call(g, {T}), call(g, {F})},
+                          p),
+                  {}, {}};
+    check_eq(run_module(m, "returned if"), "", "returned if: failure");
+    check_eq(joined(), "D|b|a|1|y|D|b|a|2|D|b|a|nil|3|g|4|",
+             "returned if: output");
+
+    // Nothing is moved into a register for one Ret: each arm has its own.
+    const std::string dump = vm::to_string(vm::compile(m));
+    const auto chunk = [&](const std::string& name) {
+      const size_t at = dump.find(" " + name + "  ");
+      const size_t end = dump.find("chunk #", at);
+      return dump.substr(at, end == std::string::npos ? end : end - at);
+    };
+    const auto count = [](const std::string& s, const std::string& what) {
+      size_t n = 0;
+      for (size_t at = s.find(what); at != std::string::npos;
+           at = s.find(what, at + 1)) {
+        ++n;
+      }
+      return n;
+    };
+    check(chunk("f").find("\tmove ") == std::string::npos,
+          "returned if: f moves no arm's value");
+    check_eq(std::to_string(count(chunk("f"), "\tret ")), "4",
+             "returned if: f returns from each of three arms, and its end");
+    check(chunk("g").find("\tmove ") == std::string::npos,
+          "returned if: g moves no arm's value");
+    check_eq(std::to_string(count(chunk("g"), "\tret ")), "2",
+             "returned if: g returns from each arm");
   }
 
   if (g_failures != 0) {

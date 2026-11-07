@@ -7202,6 +7202,40 @@ struct FnCompiler {
     top = base;
   }
 
+  // A value the function returns, returned where it is made: an If
+  // returns from each arm -- a missing else returns nil -- and a Block
+  // from its last value, past its statements (compile_leading),
+  // recursively, where compile_value would move
+  // every arm's value into one register for a single return. The arms of
+  // an If in tail position are in tail position too (R7RS's tail
+  // contexts), and a compiler for an expression language returns from
+  // each. `exit(r)` emits what follows the value in `r` -- a Return's
+  // scope exits and Ret, or a body's bare Ret -- once per arm, each the
+  // code the one return was.
+  template <class Exit>
+  void compile_tail(NodeId id, const Exit& exit) {
+    id = compile_leading(id);
+    const Node& n = m.at(id);
+    if (n.tag == Tag::If) {
+      const IfView v = view_if(m, id);
+      std::vector<size_t> to_else;
+      compile_branch(v.cond, false, to_else);
+      const int32_t base = top;
+      compile_tail(v.then_, exit);
+      top = base;
+      for (const size_t j : to_else) patch(j, here());
+      if (v.els.valid()) {
+        compile_tail(v.els, exit);
+      } else {
+        const int32_t r = alloc();
+        emit(Op::LoadNil, r, 0, 0, n.pos);
+        exit(r);
+      }
+      return;
+    }
+    exit(compile_value(id, /*tail=*/true));
+  }
+
   // The shape most expressions share: compile the operand (or two), free
   // their registers, and emit `op result, operand registers...` into a
   // fresh result register.
@@ -7423,8 +7457,8 @@ struct FnCompiler {
 
   // The statements a Block holds before its last child, run, and the
   // node its value comes from: the last child, or past a Block there, that
-  // Block's. The one walk to a Block's value, for compile_expr's value and
-  // compile_branch's condition.
+  // Block's. The one walk to a Block's value, for compile_expr's value,
+  // compile_branch's condition and compile_tail's return.
   NodeId compile_leading(NodeId id) {
     while (m.at(id).tag == Tag::Block && m.at(id).num_children > 0) {
       const uint32_t last = m.at(id).num_children - 1;
@@ -7906,16 +7940,19 @@ struct FnCompiler {
         // return value is computed, exactly as Break leaves the scopes it
         // crosses. The Ret could free the frame in one go, but then every
         // defer would precede every drop, and the locals would die in slot
-        // order rather than the scoped, last-declared-first order.
-        int32_t r;
+        // order rather than the scoped, last-declared-first order. A value
+        // that is an If leaves that way from each of its arms (compile_tail).
+        const auto leave = [&](int32_t r) {
+          leave_down_to(0, r + 1, n.pos);
+          emit(Op::Ret, r, 1, 0, n.pos);
+        };
         if (n.num_children == 1) {
-          r = compile_value(m.child(id, 0), /*tail=*/true);
+          compile_tail(m.child(id, 0), leave);
         } else {
-          r = alloc();
+          const int32_t r = alloc();
           emit(Op::LoadNil, r, 0, 0, n.pos);
+          leave(r);
         }
-        leave_down_to(0, r + 1, n.pos);
-        emit(Op::Ret, r, 1, 0, n.pos);
         break;
       }
 
@@ -8012,9 +8049,11 @@ inline Program compile(const coreir::Module& m) {
     // are blocks ending in statements, so they return nil and nothing reads
     // it -- one path rather than a "does this body produce a value" fork that
     // Block, now value-producing, no longer answers usefully anyway. The
-    // body is in tail position: a call it ends in may replace the frame.
-    const int32_t r = fc.compile_value(fn.body, /*tail=*/true);
-    fc.emit(Op::Ret, r, 1, 0, body_pos);
+    // body is in tail position: a call it ends in may replace the frame,
+    // and an If it ends in returns from each arm.
+    fc.compile_tail(fn.body, [&](int32_t r) {
+      fc.emit(Op::Ret, r, 1, 0, body_pos);
+    });
   }
   return p;
 }
