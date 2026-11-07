@@ -35,13 +35,17 @@ using coreir::NodeId;
 // prefixes keep them apart. The implementation's own names -- an instance's
 // class, a class's base and name, the runtime's destructor key (vmlib.h's
 // kDropKey) -- start with 0x01. The program's names that have to sit beside
-// them -- its methods, on a class table -- start with 0x02. Neither byte can
+// them or beside its own fields -- its methods on a class table, the field
+// behind a C# auto property -- start with 0x02. Neither byte can
 // begin a name any of these languages lets a program write, so the
 // program's own fields, unprefixed, meet neither; and the two never meet
 // each other, so a method named `drop`, `init`, `name` or `ctor` is not the
-// implementation's key of the same name. mini-culebra arrived at this rule:
-// its methods once sat under the runtime's own prefix, which made a class
-// with a `drop` method a resource.
+// implementation's key of the same name. mini-culebra arrived at this rule
+// (its methods once sat under the runtime's own prefix, which made a class
+// with a `drop` method a resource), and mini-csharp, whose class tables kept
+// their name and constructor under the methods' prefix, had the bug from
+// the other side until it took the rule from here: a method named `name`
+// overwrote the class's name, and one named `ctor` was the constructor.
 inline constexpr char kImplPrefix = '\x01';
 inline constexpr char kProgramPrefix = '\x02';
 

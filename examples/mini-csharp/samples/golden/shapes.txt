@@ -22,3 +22,6 @@ B ctor
 5
 A ctor A
 12
+tag4 40 4
+Label
+tag9 90 SubLabel

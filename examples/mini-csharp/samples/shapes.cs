@@ -96,6 +96,20 @@ class Bag {
   public void Add(int x) { Items.Add(x * 10); }
 }
 
+// Methods named like what a class keeps about itself -- its name, its
+// constructor -- and a derived class that inherits them: each is still
+// only a method, and the class still has its name.
+class Label {
+  public int N;
+  public Label(int n) { N = n; }
+  public string name() { return "tag" + N; }
+  public int ctor() { return N * 10; }
+}
+
+class SubLabel : Label {
+  public SubLabel() : base(9) { }
+}
+
 // Construction order: field initializers, then the base's constructor --
 // implicitly its parameterless one -- then the body. A's constructor makes
 // a virtual call, so B's override runs before B's own constructor does,
@@ -170,5 +184,11 @@ class Program {
     Console.WriteLine(b.X);
     C cc = new C();
     Console.WriteLine(cc.X + cc.Y);
+
+    Label t = new Label(4);
+    Console.WriteLine(t.name() + " " + t.ctor() + " " + t.N);
+    Console.WriteLine(t);
+    SubLabel st = new SubLabel();
+    Console.WriteLine(st.name() + " " + st.ctor() + " " + st);
   }
 }

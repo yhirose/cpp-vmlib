@@ -31,9 +31,9 @@ There is no class machinery in this IR, so a class here is an ordinary
 object built once at file scope:
 
 ```
-{ "\x02name": "Circle",
-  "\x02base": <the Shape table, or absent>,
-  "\x02ctor": <closure>,
+{ "\x01n": "Circle",
+  "\x01p": <the Shape table, or absent>,
+  "\x01ctor": <closure>,
   "\x02Area":  <closure>,          // one entry per method
   "\x02Describe": <closure>,
   <static fields, by name> }
@@ -41,7 +41,15 @@ object built once at file scope:
 
 An instance is an object with one hidden key, `"\x01c"`, pointing at its
 class's table; everything else in it is a field. `new Circle(2)` allocates
-that object and calls the table's `"\x02ctor"` with it as argument 0.
+that object and calls the table's `"\x01ctor"` with it as argument 0.
+
+This is the layout [examples/common/runtime_parts.h](../common/runtime_parts.h)
+describes, shared with mini-ruby and mini-python, and its two prefixes say
+who chose the name after them: `\x01` the implementation (the class's
+name, base and constructor), `\x02` the program (its methods). The class's
+own entries used to sit under `\x02` with the methods, and then a method
+named `name` overwrote the class's name and one named `ctor` was the
+constructor; `samples/shapes.cs` has both now.
 
 Method lookup is then five lines of IR (written into both `$mfind`, a
 call's, and `$mlookup`, which answers nil where `$mfind` fails), and it is
@@ -51,8 +59,8 @@ worth reading because *this is all virtual dispatch is*:
 t = recv["\x01c"]
 while typeof(t) == "object":
   if t has "\x02" + name: return t["\x02" + name]
-  if not (t has "\x02base"): break
-  t = t["\x02base"]
+  if not (t has "\x01p"): break
+  t = t["\x01p"]
 ```
 
 Because the walk starts at the *receiver's* table and not at the class
@@ -181,8 +189,9 @@ An **auto property** (`{ get; set; }`, both required -- one alone is a
 bind-time error, matching `get`/`set` bodies being required not to mix
 with `get;`/`set;` on the same property) gets no user-written accessor at
 all: its `get_Name`/`set_Name` are built by hand at class-table time, over
-a hidden field keyed the way a method already is (`\x02` for a method,
-`\x03` for this). Its `= 0` initializer follows the exact rule a plain
+a hidden field keyed the way a method already is, `\x02` and the
+property's name: the program's name, kept apart from the fields it
+declared as a method's is from the class's own entries. Its `= 0` initializer follows the exact rule a plain
 field's already does: it runs in the *constructor* -- the declared one,
 or the one a class without any gets, which is synthesized the same way
 (no parameters, an empty body) and so initializes and chains alike.

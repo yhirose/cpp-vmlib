@@ -101,7 +101,7 @@ $mfind(t, key):
 
 The layout and the walk are not this front end's alone: they are
 [examples/common/runtime_parts.h](../common/runtime_parts.h)'s, shared
-with mini-python -- `$mfind` is its `find_in_chain`, and
+with mini-python and mini-csharp -- `$mfind` is its `find_in_chain`, and
 `is_a?` its `walk_bases` asking for identity instead of a key.
 
 Every method call in this front end tries this walk *first* -- `$classof`

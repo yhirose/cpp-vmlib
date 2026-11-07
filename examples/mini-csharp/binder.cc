@@ -46,28 +46,32 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
+using namespace runtime_parts;
 
 namespace mini_csharp {
 namespace {
 
-constexpr char kClassKey[] = "\x01" "c";
+// Classes are runtime_parts.h's layout: a table holding its methods under
+// program_key(name), its base under kBaseKey and its name under kNameKey,
+// and an instance pointing back at it under kClassKey. The rest are names
+// this front end chose, under the implementation's prefix with them -- the
+// constructor on a class table, the kind and message on an exception --
+// where no method can be the same key.
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
-constexpr char kNameKey[] = "\x02" "name";
-constexpr char kBaseKey[] = "\x02" "base";
-constexpr char kCtorKey[] = "\x02" "ctor";
-constexpr char kMethodPrefix[] = "\x02";
-// An auto property's backing field: a key no source identifier can spell,
-// so it cannot collide with a field the source actually declared.
-constexpr char kAutoFieldPrefix[] = "\x03";
+constexpr char kCtorKey[] = "\x01" "ctor";
 
+// An auto property's backing field, on the instance: the property's name,
+// kept apart from the fields the source declared the way a method's is
+// kept apart on the class table.
 std::string auto_field_key(const std::string& name) {
-  return std::string(kAutoFieldPrefix) + name;
+  return program_key(name);
 }
 
 SrcPos pos_of(const Ast& a) {
@@ -853,14 +857,10 @@ struct Binder {
         r.is(r.typ(recv), "object"),
         r.blk(
             {r.set(cls, r.idx(r.L(recv), kClassKey)),  // nil: no instance
-             r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix), r.L(name))),
-             r.wh(r.is(r.typ(cls), "object"),
-                  r.blk({r.iff(r.has(r.L(cls), r.L(key)),
-                               r.ret(r.idx(r.L(cls), r.L(key)))),
-                         r.iff(r.bin(BinOp::Eq, r.has(r.L(cls), r.S(kBaseKey)),
-                                     r.Bo(false)),
-                               r.b.make_break()),
-                         r.set(cls, r.idx(r.L(cls), kBaseKey))}))})));
+             r.set(key, program_key(r, r.L(name))),
+             walk_bases(r, cls,
+                        r.iff(r.has(r.L(cls), r.L(key)),
+                              r.ret(r.idx(r.L(cls), r.L(key)))))})));
   }
 
   void rt_mlookup() {
@@ -2224,21 +2224,21 @@ struct Binder {
       out.push_back(b.cell_fresh(c));
     }
     // After the freshes above, which would otherwise reset it.
-    // The tables first, then their `\x02base` links, so a class may name
+    // The tables first, then their kBaseKey links, so a class may name
     // one declared after it.
     for (const ClassInfo& ci : classes) {
       std::vector<std::pair<NodeId, NodeId>> kvs{
           {b.str_literal(kNameKey), b.str_literal(ci.name)}};
       for (const auto& [name, g] : ci.methods) {
-        kvs.emplace_back(b.str_literal(std::string(kMethodPrefix) + name),
+        kvs.emplace_back(b.str_literal(program_key(name)),
                          emit_closure(g, ctx, p));
       }
       for (const auto& ap : ci.auto_props) {
         kvs.emplace_back(
-            b.str_literal(std::string(kMethodPrefix) + "get_" + ap.name),
+            b.str_literal(program_key("get_" + ap.name)),
             emit_auto_get(ap.name, p));
         kvs.emplace_back(
-            b.str_literal(std::string(kMethodPrefix) + "set_" + ap.name),
+            b.str_literal(program_key("set_" + ap.name)),
             emit_auto_set(ap.name, p));
       }
       // A static field starts at its type's default; its initializer, if

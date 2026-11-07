@@ -144,7 +144,7 @@ $clsfind(t, key):        # method lookup, used by getattr, super(), == and str()
 
 The layout and this walk are
 [examples/common/runtime_parts.h](../common/runtime_parts.h)'s, shared
-with mini-ruby: `$clsfind` is its `find_in_chain`, and
+with mini-ruby and mini-csharp: `$clsfind` is its `find_in_chain`, and
 the walks below are its `walk_bases`, each asking its own question.
 
 `isinstance`, `isinstance(v, str)`-style checks against a builtin type
