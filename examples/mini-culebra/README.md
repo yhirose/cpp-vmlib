@@ -124,24 +124,27 @@ instance is an object pointing back at it; `C.new(...)` is a constructor
 this binder synthesizes:
 
 ```
-C = { "\x01init": <new>, "\x01name": "C", "\x02m": <m>, "\x02drop": <drop> }
+C = { "\x01init": <new>, "\x01n": "C", "\x02m": <m>, "\x02drop": <drop> }
 C["new"] = MakeClosure(<synthesized ctor>, over the cell holding C)
 
 ctor(self, args...):
-  inst = { "\x01class": C }
+  inst = { "\x01c": C }
   inst["\x01drop"] = C["\x02drop"]        ; when the class declares one
   C["\x01init"](inst, args...)
   return inst
 ```
 
 Two prefixes, by who chose the name after them: `0x01` for the
-implementation's (`"\x01class"`, the runtime's `"\x01drop"`, and the class
-table's own `init` and `name`), `0x02` for the program's, its methods. The
-split matters: a method stored under the first would be the same key as
-those -- a method named `drop` would make the *class itself* a resource,
-one named `init` or `name` would overwrite the constructor or the name.
-`0x02` also keeps methods out of `keys()` and out of a printed object,
-which is what culebra shows -- a class value prints as `{new: [function]}`.
+implementation's (the instance's `"\x01c"`, the runtime's `"\x01drop"`,
+and the class table's own `init` and name), `0x02` for the program's, its
+methods. The split matters: a method stored under the first would be the
+same key as those -- a method named `drop` would make the *class itself* a
+resource, one named `init` would overwrite the constructor. `0x02` also
+keeps methods out of `keys()` and out of a printed object, which is what
+culebra shows -- a class value prints as `{new: [function]}`. The rule
+and the layout are [examples/common/runtime_parts.h](../common/runtime_parts.h)'s,
+which mini-ruby, mini-python and mini-csharp share, with a base link this
+front end has no use for.
 
 The class binding is forced into a cell because its own constructor
 captures it. That is the chicken-and-egg of building the table and the

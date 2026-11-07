@@ -57,33 +57,31 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
+using namespace runtime_parts;
 
 namespace mini_culebra {
 namespace {
 
-// Two prefixes, by who chose the name after them. 0x01 is a name the
-// implementation chose: an instance's class table and the runtime's
-// destructor key -- spelled with a leading 0x01 for the reason vmlib.h's
-// kDropKey is, unspellable from a language whose identifiers are
-// printable -- and, on the class table, the declared `new` the synthesized
-// constructor calls and the class's name. (Split across two string
-// literals because "\x01class" would lex as one hex escape.)
-constexpr char kClassKey[] = "\x01" "class";
+// Classes are runtime_parts.h's layout, less the base culebra does not
+// have, and its two prefixes by who chose the name after them. 0x01 is the
+// implementation's: an instance's class table (kClassKey), the runtime's
+// destructor key -- unspellable from a language whose identifiers are
+// printable, the reason vmlib.h's kDropKey starts with it -- and, on the
+// class table, its name (kNameKey) and the declared `new` the synthesized
+// constructor calls. 0x02 is the program's: its methods, program_key(name).
+// Not 0x01, where a method named `drop` would be the runtime's destructor
+// key and make the *class* a resource, and one named `init` the
+// constructor. 0x02 also keeps every method out of `keys()` and out
+// of a printed object, which is what culebra shows -- a class value prints
+// as `{new: [function]}`, its methods being no more enumerable than an
+// Error's fields are in JavaScript.
 constexpr char kInitKey[] = "\x01" "init";
-constexpr char kNameKey[] = "\x01" "name";
-// 0x02 is a name the program chose: its methods, on the class table. Not
-// 0x01, where a method named `drop` would be the runtime's destructor key
-// and make the *class* a resource, and a method named `init` or `name`
-// the class's own entries. 0x02 also keeps every method out of `keys()`
-// and out of a printed object, which is what culebra shows -- a class
-// value prints as `{new: [function]}`, its methods being no more
-// enumerable than an Error's fields are in JavaScript.
-constexpr char kMethodPrefix[] = "\x02";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -717,8 +715,7 @@ struct Binder {
                      r.ret(r.idx(r.L(recv), r.L(name)))),
                r.iff(r.in(IntrinsicId::ObjectHas, {r.L(recv), r.S(kClassKey)}),
                      r.blk({r.set(cls, r.idx(r.L(recv), kClassKey)),
-                            r.set(key, r.bin(BinOp::Add, r.S(kMethodPrefix),
-                                             r.L(name))),
+                            r.set(key, program_key(r, r.L(name))),
                             r.iff(r.in(IntrinsicId::ObjectHas,
                                        {r.L(cls), r.L(key)}),
                                   r.ret(r.idx(r.L(cls), r.L(key))))}))})));
@@ -750,8 +747,7 @@ struct Binder {
         r.is(r.typ(v), "object"),
         r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kClassKey)}),
               r.blk({r.set(cls, r.idx(r.L(v), kClassKey)),
-                     r.set(key,
-                           r.bin(BinOp::Add, r.S(kMethodPrefix), r.S("iter"))),
+                     r.set(key, r.S(program_key("iter"))),
                      r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.L(key)}),
                            r.ret(r.obj(
                                {{"k", r.S("c")},
@@ -1033,12 +1029,12 @@ struct Binder {
 
   // class C { new(...) {...} m(...) {...} drop() {...} }
   //
-  //   C = { "\x01init": <new>, "\x01name": "C", "\x02m": <m>,
+  //   C = { "\x01init": <new>, "\x01n": "C", "\x02m": <m>,
   //         "\x02drop": <drop> }   -- a cell
   //   C["new"] = MakeClosure(<synthesized constructor>, over C)
   //
   // The constructor is what turns the table into an instance: a fresh
-  // object carrying "\x01class" (so a method call can find the table) and,
+  // object carrying kClassKey (so a method call can find the table) and,
   // when the class declares one, the runtime's own drop key (so the object
   // *is* a resource). Binding that key is what puts it on the owned stack;
   // everything about when its destructor runs follows from that.
@@ -1060,7 +1056,7 @@ struct Binder {
       }
       if (name == "drop") has_drop = true;
       const std::string key =
-          name == "new" ? kInitKey : std::string(kMethodPrefix) + name;
+          name == "new" ? kInitKey : program_key(name);
       if (name == "new") {
         init_params =
             static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
@@ -1095,7 +1091,7 @@ struct Binder {
     if (has_drop) {
       body.push_back(b.set_index(
           O, b.str_literal(coreir::kDropKey, p),
-          b.index(C, b.str_literal(std::string(kMethodPrefix) + "drop", p), p),
+          b.index(C, b.str_literal(program_key("drop"), p), p),
           p));
     }
     std::vector<NodeId> init_args{O};
