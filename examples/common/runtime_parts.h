@@ -72,10 +72,12 @@ inline NodeId program_key(FuncWriter& w, NodeId name) {
 // Whether a key is one of these: a key the implementation keeps on an
 // object, under either prefix, which is none of the object's properties --
 // so listing an object's keys, counting them or printing them skips it.
-// (A key a program writes with an escape its language has, JavaScript's
-// "\0" say, begins with neither byte.) The C++ form is for a host
-// function; the IR form takes the key in a local, of any type, since a
-// value-keyed table's keys need not be strings.
+// The prefixes keep the implementation's names apart from the program's
+// names; they do not stop a program from spelling such a key as a string,
+// with a raw 0x01 byte or an escape for one, and a key it spells that way
+// is hidden too. The C++ form is for a host function; the IR form takes
+// the key in a local, of any type, since a value-keyed table's keys need
+// not be strings.
 inline bool hidden_key(std::string_view k) {
   return !k.empty() && (k[0] == kImplPrefix || k[0] == kProgramPrefix);
 }
