@@ -3,4 +3,4 @@
 # distinction (lenient_arity plus one ArgCount test).
 #
 # The goldens are `ruby`'s output (test/goldens.sh).
-add_front_end(mini-ruby EXT rb ORACLE ruby)
+add_front_end(mini-ruby EXT rb LANG ruby)

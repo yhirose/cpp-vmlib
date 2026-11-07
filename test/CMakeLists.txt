@@ -4,7 +4,7 @@
 # this repository does not contain -- culebra's own PL/0 interpreter -- and
 # `sharing`. Its diagnostics are checked against fixed transcripts below.
 front_end_tests("" pl0 DIR ${PROJECT_SOURCE_DIR}/examples/pl0 EXT pas
-                ORACLE "culebra's pl0.cul")
+                LANG pl0)
 
 # The errors are not golden-compared against culebra: the binder reports
 # undefined names, constant assignment and duplicate declarations at bind

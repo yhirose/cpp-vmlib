@@ -33,6 +33,12 @@ endif()
 option(VMLIB_BUILD_TESTS "Build cpp-vmlib tests" ON)
 option(VMLIB_BUILD_EXAMPLES "Build the example front ends" OFF)
 option(VMLIB_BUILD_BENCH "Build the benchmark harness" ON)
+# Each front end's goldens test (front_end_tests, examples/common): its
+# samples run through the real language rather than the front end, to
+# check the goldens themselves. Off by default, since it needs every
+# language installed at the version test/languages.sh pins; CI's goldens
+# job turns it on (test/goldens.sh), and builds nothing for it.
+option(VMLIB_CHECK_GOLDENS "Register the goldens tests (label: goldens)" OFF)
 
 # Unconditional, and up here before any add_subdirectory: a subdirectory's
 # own add_test only reaches `ctest` run from the top build directory if the

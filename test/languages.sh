@@ -114,6 +114,26 @@ lang_version() {
   esac
 }
 
+# The version gate: succeeds, naming the implementation and its version,
+# when the LANG that would run is the release LANG_VERSION pins; otherwise
+# says on stderr what it found instead, and fails. A goldens check refuses
+# rather than compares: another version's differences would be the
+# version's.
+lang_pinned() {
+  local lang=$1 want=${LANG_VERSION[$1]:-} have
+  if [ -z "$want" ]; then
+    echo "test/languages.sh: no language '$lang'" >&2
+    return 1
+  fi
+  have=$(lang_version "$lang") || have=
+  if [ "$have" != "$want" ] && [[ $have != "$want".* ]]; then
+    echo "$lang: the goldens are ${LANG_NAME[$lang]} $want's output, and" \
+         "this is ${have:-no ${LANG_NAME[$lang]} at all}" >&2
+    return 1
+  fi
+  echo "${LANG_NAME[$lang]} $have"
+}
+
 # Runs a compile step with its output kept out of the way, and shown only
 # if it fails.
 lang_build() {

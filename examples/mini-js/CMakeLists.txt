@@ -7,4 +7,4 @@
 # ahead of it, as test/goldens.sh runs it for `node`: the prelude is the
 # formatting the samples print through, written in the source language so
 # that both sides build their output with the same code (see README.md).
-add_front_end(mini-js EXT js ORACLE node LEAD samples/prelude.js)
+add_front_end(mini-js EXT js LANG js LEAD samples/prelude.js)

@@ -4,4 +4,4 @@
 # classes and inheritance included. Its oracle is `dotnet`.
 #
 # The goldens are `dotnet`'s output (test/goldens.sh).
-add_front_end(mini-csharp EXT cs ORACLE dotnet)
+add_front_end(mini-csharp EXT cs LANG csharp)

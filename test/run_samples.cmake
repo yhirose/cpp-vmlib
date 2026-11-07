@@ -1,27 +1,53 @@
-# Each sample's output must match its golden file, captured once from an
-# oracle this repository does not contain -- the real language, or for
-# PL/0 culebra's own PL/0 interpreter: an independent implementation, not
-# just a second run of this one. Self-consistency alone would not have
-# caught cpp-peglib's own ODD bug (pl0.cc's interpreter and JIT agree with
-# each other and are both wrong about it). Every front end's samples are
-# checked this way; its README says what its oracle is and how the goldens
-# were made.
+# Each sample's output must match its golden file, the output of an oracle
+# this repository does not contain -- the real language, or for PL/0
+# culebra's own PL/0 interpreter: an independent implementation, not just a
+# second run of this one. Self-consistency alone would not have caught
+# cpp-peglib's own ODD bug (pl0.cc's interpreter and JIT agree with each
+# other and are both wrong about it). Every front end's samples are
+# checked this way, and its goldens are checked in turn, against the
+# language itself.
 #
-#   cmake -DBIN=<binary> -DDIR=<samples directory> -DEXT=<source extension>
-#         -DORACLE=<what the goldens came from> [-DLEAD=<file>]
+#   cmake -DBIN=<command> -DDIR=<samples directory> -DEXT=<source extension>
+#         -DLANG=<language> [-DLEAD=<file>] [-DORACLE=ON]
 #         -P run_samples.cmake
 #
 # Every *.EXT under DIR is a case, run from its own directory by its file
-# name alone -- the name a position or a chunk name gives, the way the
-# golden was captured -- and must exit 0 having printed exactly
-# DIR/golden/<case>.txt. A case may sit in a subdirectory of its own
-# (mini-go's do: each is a standalone `package main`, and two side by side
-# would both declare `func main`, which `go build` rejects). <case>.stdin
-# beside it, when there is one, is its input. LEAD -- mini-js's prelude --
-# is bound ahead of each case and is not one (test/cases.cmake).
+# name alone -- the name a position or a chunk name gives -- and must exit
+# 0 having printed exactly DIR/golden/<case>.txt. A case may sit in a
+# subdirectory of its own (mini-go's do: each is a standalone `package
+# main`, and two side by side would both declare `func main`, which `go
+# build` rejects). <case>.stdin beside it, when there is one, is its input.
+# LEAD -- mini-js's prelude -- is bound ahead of each case and is not one
+# (test/cases.cmake). A golden no case makes fails too.
+#
+# LANG is the key test/languages.sh knows the language by. BIN is the front
+# end's binary, or with ORACLE the language itself, `test/oracle.sh LANG`:
+# a front end's goldens test (front_end_tests), which checks the goldens
+# rather than the front end. Then, and only then, VMLIB_UPDATE_GOLDENS in
+# the environment makes the run rewrite each golden from what the language
+# printed, and remove one no case makes -- by hand, never from the build: a
+# golden the front end's own test could refresh would be evidence of
+# nothing.
 
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
-require_args(run_samples.cmake BIN DIR EXT ORACLE)
+require_args(run_samples.cmake BIN DIR EXT LANG)
+
+set(update OFF)
+if(ORACLE AND "$ENV{VMLIB_UPDATE_GOLDENS}")
+  set(update ON)
+endif()
+
+# What printed the output: the front end, or the language at the version
+# the oracle accepts, which it names -- or refuses, once for every case.
+set(source "${BIN}")
+if(ORACLE)
+  execute_process(COMMAND ${BIN} --version
+                  OUTPUT_VARIABLE source ERROR_VARIABLE err
+                  RESULT_VARIABLE rc OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "${err}")
+  endif()
+endif()
 
 file(GLOB_RECURSE sources ${DIR}/*.${EXT})
 drop_lead(sources)
@@ -31,10 +57,12 @@ if(NOT sources)
 endif()
 
 set(failed 0)
+set(made)
 foreach(src ${sources})
   get_filename_component(dir ${src} DIRECTORY)
   get_filename_component(name ${src} NAME)
   get_filename_component(s ${src} NAME_WE)
+  list(APPEND made ${s})
   lead_for(lead ${src})
   set(input)
   if(EXISTS ${dir}/${s}.stdin)
@@ -53,7 +81,9 @@ foreach(src ${sources})
   endif()
 
   set(golden ${DIR}/golden/${s}.txt)
-  if(NOT EXISTS ${golden})
+  if(update)
+    file(WRITE ${golden} "${out}")
+  elseif(NOT EXISTS ${golden})
     message(SEND_ERROR "${s}: no golden file at ${golden}")
     set(failed 1)
   else()
@@ -67,8 +97,36 @@ foreach(src ${sources})
   endif()
 endforeach()
 
-if(failed)
-  message(FATAL_ERROR "sample output does not match ${ORACLE}")
-endif()
+# Only after the glob above found a case: an empty one stopped the script
+# before it could take every golden for an orphan.
+file(GLOB goldens ${DIR}/golden/*.txt)
+foreach(golden ${goldens})
+  get_filename_component(s ${golden} NAME_WE)
+  list(FIND made ${s} at)
+  if(at GREATER -1)
+    continue()
+  endif()
+  if(update)
+    file(REMOVE ${golden})
+    message(STATUS "${s}: removed ${golden}, which no sample makes")
+  else()
+    message(SEND_ERROR "${s}: no sample makes ${golden}")
+    set(failed 1)
+  endif()
+endforeach()
+
 list(LENGTH sources n)
-message(STATUS "${n} samples OK (matches ${ORACLE})")
+if(ORACLE)
+  if(failed)
+    message(FATAL_ERROR "the goldens are not what ${source} prints")
+  elseif(update)
+    message(STATUS "${n} goldens written by ${source}")
+  else()
+    message(STATUS "${n} goldens are what ${source} prints")
+  endif()
+elseif(failed)
+  message(FATAL_ERROR "sample output does not match the goldens, which are "
+                      "${LANG}'s output (test/languages.sh)")
+else()
+  message(STATUS "${n} samples OK (match ${LANG}'s output)")
+endif()
