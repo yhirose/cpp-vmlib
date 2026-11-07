@@ -4408,10 +4408,13 @@ struct Binder {
         return native("print", {b.array_lit(parts, p)}, p);
       });
     }
-    // A conversion called with nothing answers its type's empty value.
-    const auto convert = [&](const Takes& t, const char* fn, NodeId empty) {
-      return call_it(t, [&, fn, empty](Args a, Args) {
-        return a.empty() ? empty : rt.call(fn, {a[0]}, p);
+    // A conversion called with nothing answers its type's empty value, made
+    // only then: list's is a fresh array, which a call given an argument
+    // would build and drop.
+    const auto convert = [&](const Takes& t, const char* fn,
+                             const std::function<NodeId()>& empty) {
+      return call_it(t, [&, fn](Args a, Args) {
+        return a.empty() ? empty() : rt.call(fn, {a[0]}, p);
       });
     };
     if (g == "len") {
@@ -4422,16 +4425,25 @@ struct Binder {
     if (g == "str") {
       Takes t = old(0, 1, 3);
       t.py_kw = {"object", "encoding", "errors"};
-      return convert(t, "$str", b.str_literal("", p));
+      return convert(t, "$str", [&] { return b.str_literal("", p); });
     }
     if (g == "int") {
       Takes t = old(0, 1, 2);
       t.py_kw = {"base"};
-      return convert(t, "$toint", b.literal(0, p));
+      return convert(t, "$toint", [&] { return b.literal(0, p); });
     }
-    if (g == "float") return convert(clinic(0, 1, 1), "$tofloat", b.double_literal(0.0, p));
-    if (g == "list") return convert(clinic(0, 1, 1), "$tolist", b.array_lit({}, p));
-    if (g == "bool") return convert(clinic(0, 1, 1), "$truthy", b.bool_literal(false, p));
+    if (g == "float") {
+      return convert(clinic(0, 1, 1), "$tofloat",
+                     [&] { return b.double_literal(0.0, p); });
+    }
+    if (g == "list") {
+      return convert(clinic(0, 1, 1), "$tolist",
+                     [&] { return b.array_lit({}, p); });
+    }
+    if (g == "bool") {
+      return convert(clinic(0, 1, 1), "$truthy",
+                     [&] { return b.bool_literal(false, p); });
+    }
     if (g == "tuple") {
       return call_it(clinic(0, 1, 1), [&](Args a, Args) {
         return rt.call("$tuple",
