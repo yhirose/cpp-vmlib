@@ -48,9 +48,8 @@ if(ORACLE AND "$ENV{VMLIB_UPDATE_GOLDENS}")
   set(update ON)
 endif()
 
-# What printed the output: the front end, or the language at the version
-# the oracle accepts, which it names -- or refuses, once for every case.
-set(source "${BIN}")
+# The language at the version the oracle accepts, which it names -- or
+# refuses, once for every case.
 if(ORACLE)
   execute_process(COMMAND ${BIN} --version
                   OUTPUT_VARIABLE source ERROR_VARIABLE err
@@ -60,6 +59,9 @@ if(ORACLE)
   endif()
 endif()
 
+# Absolute, so that the goldens the cases name and the ones the orphan
+# check below globs are spelled alike.
+get_filename_component(DIR ${DIR} ABSOLUTE)
 file(GLOB_RECURSE sources ${DIR}/*.${EXT})
 drop_lead(sources)
 list(SORT sources)
@@ -73,7 +75,8 @@ foreach(src ${sources})
   get_filename_component(dir ${src} DIRECTORY)
   get_filename_component(name ${src} NAME)
   get_filename_component(s ${src} NAME_WE)
-  list(APPEND made ${s})
+  set(golden ${DIR}/golden/${s}.txt)
+  list(APPEND made ${golden})
   lead_for(lead ${src})
   set(input)
   if(EXISTS ${dir}/${s}.stdin)
@@ -91,7 +94,6 @@ foreach(src ${sources})
     continue()
   endif()
 
-  set(golden ${DIR}/golden/${s}.txt)
   if(update)
     file(WRITE ${golden} "${out}")
   elseif(NOT EXISTS ${golden})
@@ -108,20 +110,17 @@ foreach(src ${sources})
   endif()
 endforeach()
 
-# Only after the glob above found a case: an empty one stopped the script
-# before it could take every golden for an orphan.
-file(GLOB goldens ${DIR}/golden/*.txt)
-foreach(golden ${goldens})
-  get_filename_component(s ${golden} NAME_WE)
-  list(FIND made ${s} at)
-  if(at GREATER -1)
-    continue()
-  endif()
+# The goldens no case made. Only after the glob above found a case: an
+# empty one stopped the script before it could take every golden for an
+# orphan.
+file(GLOB orphans ${DIR}/golden/*.txt)
+list(REMOVE_ITEM orphans ${made})
+foreach(golden ${orphans})
   if(update)
     file(REMOVE ${golden})
-    message(STATUS "${s}: removed ${golden}, which no sample makes")
+    message(STATUS "removed ${golden}, which no sample makes")
   else()
-    message(SEND_ERROR "${s}: no sample makes ${golden}")
+    message(SEND_ERROR "no sample makes ${golden}")
     set(failed 1)
   endif()
 endforeach()
