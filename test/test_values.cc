@@ -762,6 +762,43 @@ int main() {
                           fb(b, kNilBool), p));
          },
          "f|0|nil|T|", "over a comparison with a fallback"},
+        // The same comparison where it answers for itself: its bool
+        // decides, with no call of either fallback, under Truth and Not,
+        // as a condition that jumps on false and on true -- and where it
+        // does not, the test's own fallback takes what the comparison's
+        // answered.
+        {[&](Builder& b) {
+           const auto lt = [&](NodeId x) {
+             return b.binary(BinOp::Lt, x, b.literal(1, p),
+                             {b.make_closure(2, 0, p), kInt}, p);
+           };
+           const auto test = [&](UnOp op, NodeId x) {
+             return b.unary(op, lt(x), fb(b, kNilBool), p);
+           };
+           const auto either = [&](NodeId c) {
+             return b.make_if(c, b.bool_literal(true, p),
+                              b.bool_literal(false, p), p);
+           };
+           std::vector<NodeId> out;
+           for (const NodeId x : {b.literal(0, p), b.literal(5, p),
+                                  b.str_literal("a", p)}) {
+             out.push_back(cond(b, test(UnOp::Truth, x)));
+             out.push_back(cond(b, test(UnOp::Not, x)));
+             out.push_back(cond(b, either(test(UnOp::Truth, x))));
+           }
+           // The comparison as the last child of a Block that stores its
+           // operand first, as Python's chained comparisons do.
+           out.push_back(cond(
+               b, b.unary(UnOp::Truth,
+                          b.block({b.assign(VarKind::Local, 0,
+                                            b.literal(7, p), p),
+                                   lt(local(b))},
+                                  p),
+                          fb(b, kNilBool), p)));
+           return b.block(out, p);
+         },
+         "T|F|T|F|T|F|f|0|nil|T|f|0|nil|T|f|0|nil|T|F|",
+         "over a comparison with a fallback that answers"},
     };
     for (const auto& c : truths) {
       Module m;
@@ -817,6 +854,36 @@ int main() {
           cond(b, b.unary(UnOp::Truth, lt(), fb(b, tags_named("nil")), p)));
       check(other.find("\ttryunary") != std::string::npos,
             "truth: without bool in the set, the fallback stays");
+      // Over a comparison with a fallback, the comparison's Try exits
+      // straight to a jump on its own register: the test's Try is on the
+      // fallback's path alone.
+      // So too a comparison a Block ends in.
+      const std::string tried = body(cond(
+          b, b.unary(UnOp::Truth,
+                     b.block({b.assign(VarKind::Local, 0, b.literal(7, p), p),
+                              b.binary(BinOp::Lt, local(b), b.literal(1, p),
+                                       fb(b, kInt), p)},
+                             p),
+                     fb(b, kNilBool), p)));
+      const size_t at = tried.find("\ttrybinary r");
+      bool straight = false;
+      if (at != std::string::npos) {
+        const std::string reg = tried.substr(
+            at + 11, tried.find(',', at) - at - 11);
+        const size_t exit = tried.find(", ", tried.find("}, ", at)) + 2;
+        const std::string pc =
+            tried.substr(exit, tried.find('\t', exit) - exit);
+        // The instruction at the exit: `\n  <pc>\tjumpif... <reg>,`.
+        const std::string head = "\n  " + pc + "\t";
+        const size_t line = tried.find(head);
+        const auto is = [&](const std::string& insn) {
+          return tried.compare(line + head.size(), insn.size(), insn) == 0;
+        };
+        straight = line != std::string::npos &&
+                   (is("jumpiffalse " + reg + ",") ||
+                    is("jumpiftrue " + reg + ","));
+      }
+      check(straight, "truth: a comparison's own answer goes to the jump");
     }
 
     // The code: the operands in the registers after the result's, the

@@ -7223,24 +7223,98 @@ struct FnCompiler {
   // stay in theirs, held until the statement ends as a call's arguments
   // are, whichever path ran.
   int32_t compile_or_call(NodeId id, bool tail) {
+    const int32_t base = top;
+    const int32_t dst = alloc();
+    compile_operands(id);
+    // Two statements: an assignment evaluates its right side first, and
+    // here() is to be read after the call is emitted.
+    const size_t at = emit_try(id, dst, tail);
+    ch.code[at].d = here();
+    top = base;
+    alloc();
+    return dst;
+  }
+
+  // An operation's operands, into the run of registers from `top` on.
+  void compile_operands(NodeId id) {
+    for (uint32_t i = 0; i < operands_of(m.at(id).tag); ++i) {
+      compile_operand(m.child(id, i));
+    }
+  }
+
+  // The Try and the fallback's call, its operands already in the registers
+  // after `dst`. Answers the Try's pc, whose exit -- where it continues
+  // when the operation answered for itself -- is the caller's to place.
+  size_t emit_try(NodeId id, int32_t dst, bool tail) {
     const Node& n = m.at(id);
     const Fallback f = fallback_of(m, id);
     const uint32_t k = operands_of(n.tag);
     const Op op = n.tag == Tag::Unary    ? Op::TryUnary
                   : n.tag == Tag::Binary ? Op::TryBinary
                                          : Op::TryIndex;
-    const int32_t base = top;
-    const int32_t dst = alloc();
-    for (uint32_t i = 0; i < k; ++i) compile_operand(m.child(id, i));
     const size_t at = emit(op, dst, try_mode(n.op, f.exact ? kExact : 0),
                            static_cast<int32_t>(f.tags), n.pos);
     const int32_t callee = compile_expr(f.callee);
     emit_call(dst, callee, dst + 1, static_cast<int32_t>(k), false, tail,
               n.pos);
-    ch.code[at].d = here();
+    return at;
+  }
+
+  // Whether `id` is a comparison with a fallback -- on the path where it
+  // answers for itself, its answer is a bool -- or a Block whose last child
+  // is one, after statements of its own: Python's comparisons store their
+  // operands first, so that a chain runs each once.
+  bool compares_or_calls(NodeId id) const {
+    const Node& n = m.at(id);
+    if (n.tag == Tag::Block) {
+      return n.num_children > 0 &&
+             compares_or_calls(m.child(id, n.num_children - 1));
+    }
+    if (n.tag != Tag::Binary) return false;
+    const auto v = view_binary(m, id);
+    return v.fallback.valid() && is_comparison(v.op);
+  }
+
+  // The statements Blocks hold before their last child, run, and the node
+  // that is left: a Block's value, reached the way compile_expr reaches
+  // it.
+  NodeId compile_leading(NodeId id) {
+    while (m.at(id).tag == Tag::Block && m.at(id).num_children > 0) {
+      const uint32_t last = m.at(id).num_children - 1;
+      for (uint32_t i = 0; i < last; ++i) compile_stmt(m.child(id, i));
+      id = m.child(id, last);
+    }
+    return id;
+  }
+
+  // A truth test with a fallback (`v`, at `id`) over a comparison with a
+  // fallback, as a condition: Python's `while i < n`, a language's
+  // truthiness over its own comparison. Where the comparison answers for
+  // itself its answer is a bool, whose truth the test would only repeat,
+  // so the comparison's Try exits straight to a jump on it; the test's own
+  // Try and fallback run on the comparison's fallback path alone, over
+  // whatever that answered. The comparison's own path is then a Try and a
+  // jump, as a plain comparison's is a comparison and a jump.
+  void compile_truth_of_try(NodeId id, const UnaryView& v, bool when,
+                            std::vector<size_t>& jumps) {
+    const uint32_t pos = m.at(id).pos;
+    const NodeId comparison = compile_leading(v.operand);
+    const int32_t base = top;
+    const int32_t test = alloc();
+    const int32_t cmp = alloc();  // the test's operand: test + 1
+    compile_operands(comparison);
+    const size_t answered = emit_try(comparison, cmp, false);
+    const size_t own = emit_try(id, test, false);
+    ch.code[own].d = here();
+    jumps.push_back(
+        emit(when ? Op::JumpIfTrue : Op::JumpIfFalse, test, 0, 0, pos));
+    const size_t past = emit(Op::Jump, 0, 0, 0, pos);
+    ch.code[answered].d = here();
+    const bool sense = v.op == UnOp::Not ? !when : when;
+    jumps.push_back(
+        emit(sense ? Op::JumpIfTrue : Op::JumpIfFalse, cmp, 0, 0, pos));
+    patch(past, here());
     top = base;
-    alloc();
-    return dst;
   }
 
   // Eq or Ne over TypeOf's answer, which asks about tags and nothing else,
@@ -7373,8 +7447,16 @@ struct FnCompiler {
         return;
       case Tag::Unary: {
         const auto v = view_unary(m, id);
-        if (!tests_truth(v.op) || calls_fallback(v)) break;
-        compile_branch(v.operand, v.op == UnOp::Not ? !when : when, jumps);
+        if (!tests_truth(v.op)) break;
+        if (!calls_fallback(v)) {
+          compile_branch(v.operand, v.op == UnOp::Not ? !when : when, jumps);
+          return;
+        }
+        if (!has_tag(v.fallback.tags, ValueTag::Bool) ||
+            !compares_or_calls(v.operand)) {
+          break;
+        }
+        compile_truth_of_try(id, v, when, jumps);
         return;
       }
       case Tag::Block:

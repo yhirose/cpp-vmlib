@@ -3031,8 +3031,8 @@ struct Binder {
   //
   // A value used as a condition: None, a bool and a number are false or
   // true as Value::truthy() says; a string, a list and a dict, false when
-  // empty, are $truthy's. A comparison is a bool already, and costs no
-  // test of its own.
+  // empty, are $truthy's. A comparison's own answer, a bool, goes straight
+  // to the jump, and only what $lt and the others answer meets the test.
   NodeId truthy(NodeId v, SrcPos p) {
     return truth(rt, v, tags_named({"nil", "bool", "int", "double"}), p);
   }

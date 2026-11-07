@@ -304,9 +304,11 @@ inline NodeId op_or_helper(HelperTable& rt, UnOp op, NodeId x, uint32_t tags,
 }
 
 // A value as a condition, by the language's truthiness helper: Truth,
-// the VM's truthiness as a bool, on `tags`, and `helper` elsewhere. A
-// comparison is a bool already, and the compiler tests it with no call
-// and no Truth (FnCompiler::answers_alone) when bool is in `tags`.
+// the VM's truthiness as a bool, on `tags`, and `helper` elsewhere. With
+// bool in `tags`, a plain comparison is tested as itself, with no Truth
+// at all (FnCompiler::answers_alone); a comparison with a fallback of its
+// own goes straight to the jump where it answers for itself, and only
+// what its fallback answers meets the Truth (compile_truth_of_try).
 inline NodeId truth(HelperTable& rt, NodeId v, uint32_t tags,
                     coreir::SrcPos p, const std::string& helper = "$truthy") {
   return op_or_helper(rt, UnOp::Truth, v, tags, helper, p);
