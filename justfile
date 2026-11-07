@@ -27,9 +27,9 @@ bench-lang *args: build
     bench/languages/run.sh {{args}}
 
 # Every front end's goldens against the real language they are the output
-# of, at the versions test/languages.sh pins (test/goldens.sh). `just
-# goldens --update mini-lua` rewrites one front end's from the language.
-# Needs no build.
+# of, at the versions test/languages.sh pins: the goldens tests, in
+# build-goldens (test/goldens.sh). `just goldens --update mini-lua`
+# rewrites one front end's from the language. Builds nothing.
 goldens *args:
     test/goldens.sh {{args}}
 

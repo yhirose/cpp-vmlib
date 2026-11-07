@@ -35,11 +35,12 @@ jobs:
       - run: ctest --test-dir build --output-on-failure
 
   # The other half of the build lanes' sample tests. Those hold each front
-  # end to its goldens; this holds the goldens to the real language
-  # (test/goldens.sh), the one thing a front end's own test cannot check --
-  # it passes for as long as the two agree, whatever the language prints.
-  # Nothing is compiled: the languages, at the versions test/languages.sh
-  # pins, and the files. The image is named rather than ubuntu-latest
+  # end to its goldens; this holds the goldens to the real language, the
+  # one thing a front end's own test cannot check -- it passes for as long
+  # as the two agree, whatever the language prints. test/goldens.sh
+  # configures with VMLIB_CHECK_GOLDENS and runs `ctest -L goldens`, the
+  # same samples through test/oracle.sh: nothing is compiled, only the
+  # languages, at the versions test/languages.sh pins, and the files. The image is named rather than ubuntu-latest
   # because lua and guile come from its archive, and a new image must not
   # move the answer under the goldens without a commit that says so.
   goldens:

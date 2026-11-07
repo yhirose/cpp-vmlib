@@ -1046,16 +1046,21 @@ Each front end owns its own samples, but the check is the same everywhere:
 golden transcript from an oracle this repository does not contain. Passing
 your own test suite is not the same as matching the language -- see a
 front end's own README for what its oracle is. The goldens are checked in
-turn: `test/goldens.sh` runs every front end's samples through the real
-language and requires its output to be the golden, which CI's goldens job
-does on every push, so a golden cannot drift from the language unnoticed.
-How each language runs, and at which version, is `test/languages.sh`'s to
-say -- the one place that knows, which CI installs from
-(`.github/actions/languages`) and `bench/languages` times against too --
-and a version other than its pin is refused rather than compared.
-`test/goldens.sh --update` rewrites goldens from the language, by hand and
-never from the build. A new front end gets the check by adding its
-language there, and its install to that action.
+turn, by the same script: configured with `VMLIB_CHECK_GOLDENS`, each
+front end also registers a goldens test (label `goldens`) that runs its
+samples through the real language, `test/oracle.sh`, in place of the
+front end, and requires its output to be the golden. `test/goldens.sh`
+(`just goldens`) runs them in a build directory of their own, with
+nothing to compile, and CI's goldens job does on every push, so a golden
+cannot drift from the language unnoticed. How each language runs, and at
+which version, is `test/languages.sh`'s to say -- the one place that
+knows, which CI installs from (`.github/actions/languages`) and
+`bench/languages` times against too -- and a version other than its pin
+is refused rather than compared, with the reason each version is pinned.
+`test/goldens.sh --update [FRONT_END...]` rewrites goldens from the
+language, by hand and never from the build. A new front end gets the
+check from `add_front_end`'s `LANG`, its language's key there, and its
+install in that action.
 A failing program is checked the same way from the other side:
 `test/run_errors.cmake` runs a directory of programs that each end in an
 error and requires each report -- message, position and exit code -- to
