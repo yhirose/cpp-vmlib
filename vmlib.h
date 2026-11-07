@@ -3520,11 +3520,11 @@ inline int64_t wrap_neg(int64_t a) {
 // wrap_add et al. give, is not the true one -- what kExact asks of an
 // operator with a fallback (Tag::Unary). Asked before the operation, by
 // comparing against the bounds, so no signed overflow happens in asking
-// (the CERT INT32-C checks).
+// (the CERT INT32-C checks). One arm per operator can_wrap names; verify
+// refuses kExact on any other, so no other reaches here.
 inline bool wraps(BinOp op, int64_t a, int64_t b) {
   constexpr int64_t lo = std::numeric_limits<int64_t>::min();
   constexpr int64_t hi = std::numeric_limits<int64_t>::max();
-  if (!can_wrap(op)) return false;
   switch (op) {
     case BinOp::Add: return b > 0 ? a > hi - b : a < lo - b;
     case BinOp::Sub: return b < 0 ? a > hi + b : a < lo + b;
@@ -3533,7 +3533,7 @@ inline bool wraps(BinOp op, int64_t a, int64_t b) {
       if (b > 0) return a < lo / b;
       return a != 0 && b < hi / a;
     default:
-      return false;  // !can_wrap(op), answered above
+      return false;
   }
 }
 inline bool wraps(UnOp op, int64_t a) {
