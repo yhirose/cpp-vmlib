@@ -3066,7 +3066,9 @@ class FuncWriter {
   NodeId iff(NodeId c, NodeId t, NodeId e) { return b.make_if(c, t, e); }
   NodeId wh(NodeId c, NodeId body_) { return b.make_while(c, body_); }
   // `x && y` and `x || y`, as the If each one is. Short-circuiting, because
-  // an If does not evaluate the arm it does not take.
+  // an If does not evaluate the arm it does not take; and as an If's or a
+  // While's condition, compiled to the jumps hand-nested ifs would be
+  // (vm's FnCompiler::compile_branch), so no bool is built to be tested.
   NodeId both(NodeId x, NodeId y) { return b.make_if(x, y, Bo(false)); }
   NodeId either(NodeId x, NodeId y) { return b.make_if(x, Bo(true), y); }
 
@@ -3859,6 +3861,10 @@ enum class Op : uint8_t {
   StoreLocal, StoreCapture, StoreCell,  // a = index, b = src
   Jump,         // a = target
   JumpIfFalse,  // a = cond reg, b = target
+  // JumpIfFalse's other sense, so a condition built of `&&` and `||` can
+  // jump to wherever its answer is decided without first being turned into
+  // a value to test (FnCompiler::compile_branch).
+  JumpIfTrue,   // a = cond reg, b = target
   // Looks the subject up in Chunk::switch_tables[b] and jumps to the
   // matching arm's pc; on no match it jumps to the table's default_pc if it
   // has one, and otherwise falls through to the next instruction (a LoadNil
@@ -6110,6 +6116,7 @@ inline const char* name_of(Op op) {
     case Op::StoreCapture: return "storecapture";
     case Op::Jump:        return "jump";
     case Op::JumpIfFalse: return "jumpiffalse";
+    case Op::JumpIfTrue:  return "jumpiftrue";
     case Op::Switch:      return "switch";
     case Op::Out:         return "out";
     case Op::OutRaw:      return "outraw";
@@ -6292,6 +6299,7 @@ inline std::string to_string(const Program& p) {
           out << " " << in.a;
           break;
         case Op::JumpIfFalse:
+        case Op::JumpIfTrue:
           out << " r" << in.a << ", " << in.b;
           break;
         case Op::Switch:
@@ -6901,6 +6909,117 @@ struct FnCompiler {
     return r;
   }
 
+  // A literal's truth, by Value::truthy's rule -- which a string, the one
+  // literal kind that would need a heap value to ask, passes by its
+  // default arm: every string is true.
+  bool literal_truthy(NodeId id) const {
+    switch (m.const_kind(id)) {
+      case ConstKind::Nil:    return Value().truthy();
+      case ConstKind::Bool:   return Value::make_bool(m.bool_const(id)).truthy();
+      case ConstKind::Int:    return Value::make_int(m.int_const(id)).truthy();
+      case ConstKind::Double:
+        return Value::make_double(m.double_const(id)).truthy();
+      case ConstKind::Str:    return true;
+    }
+    return true;
+  }
+
+  // A condition, compiled as the jumps it decides between rather than as a
+  // value tested once it is built: control jumps -- through the jumps
+  // appended to `jumps`, which the caller patches to its target -- when the
+  // condition's truth is `when`, and falls through when it is not. Every
+  // If and While condition comes here.
+  //
+  // What makes it worth a path of its own is `x && y` and `x || y`, which
+  // the IR spells as the If each one is -- If(x, y, false) and If(x, true,
+  // y), FuncWriter's both() and either() -- and which, compiled as values,
+  // moved a materialized bool into the If's register for JumpIfFalse to
+  // test again. Here an If arm that is a literal is no value at all, only a
+  // place the answer is already known: If(x, y, false) is "x false: jump
+  // false; else y decides", so each test jumps straight to the target and a
+  // nest of them costs what the hand-nested ifs would. Not flips `when`,
+  // and a Block runs its statements and lets its last child decide. The
+  // same scheme as CPython's compiler_jump_if and Lua's jump lists
+  // (luaK_goiftrue), on the IR's one conditional tag.
+  //
+  // Nothing is evaluated that the value path would not evaluate, in the
+  // same order: the arm a test skips is the arm the If would not have
+  // taken. Anything else is compiled as a value and tested.
+  void compile_branch(NodeId id, bool when, std::vector<size_t>& jumps) {
+    const Node& n = m.at(id);
+    if (!yields_value(n.tag)) {
+      // A statement in value position is nil (compile_value), which is
+      // false.
+      compile_stmt(id);
+      if (!when) jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+      return;
+    }
+    switch (n.tag) {
+      case Tag::Literal:
+        if (literal_truthy(id) == when) {
+          jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
+        }
+        return;
+      case Tag::Unary: {
+        const auto v = view_unary(m, id);
+        if (v.op != UnOp::Not) break;
+        compile_branch(v.operand, !when, jumps);
+        return;
+      }
+      case Tag::Block:
+        if (n.num_children == 0) break;
+        for (uint32_t i = 0; i + 1 < n.num_children; ++i) {
+          compile_stmt(m.child(id, i));
+        }
+        compile_branch(m.child(id, n.num_children - 1), when, jumps);
+        return;
+      case Tag::If:
+        compile_if_branch(id, when, jumps);
+        return;
+      default:
+        break;
+    }
+    const int32_t base = top;
+    const int32_t r = compile_value(id);
+    top = base;
+    jumps.push_back(
+        emit(when ? Op::JumpIfTrue : Op::JumpIfFalse, r, 0, 0, n.pos));
+  }
+
+  // An If as a condition. An arm whose truth is known -- a literal, or the
+  // nil a missing else yields -- is never evaluated: the condition's own
+  // answer either jumps to the target straight away (the arm's truth is
+  // `when`) or skips past the whole test (it is not).
+  void compile_if_branch(NodeId id, bool when, std::vector<size_t>& jumps) {
+    const IfView v = view_if(m, id);
+    const auto known = [&](NodeId arm) -> std::optional<bool> {
+      if (!arm.valid()) return false;  // no else: nil
+      if (m.at(arm).tag != Tag::Literal) return std::nullopt;
+      return literal_truthy(arm);
+    };
+    // One arm known: the condition's `taken` answer leads to it, the other
+    // arm decides the rest.
+    const auto one_known = [&](bool taken, bool truth, NodeId other) {
+      std::vector<size_t> past;
+      compile_branch(v.cond, taken, truth == when ? jumps : past);
+      compile_branch(other, when, jumps);
+      for (const size_t j : past) patch(j, here());
+    };
+    if (const auto e = known(v.els)) {
+      one_known(false, *e, v.then_);
+    } else if (const auto t = known(v.then_)) {
+      one_known(true, *t, v.els);
+    } else {
+      std::vector<size_t> to_else;
+      compile_branch(v.cond, false, to_else);
+      compile_branch(v.then_, when, jumps);
+      const size_t done = emit(Op::Jump, 0, 0, 0, m.at(id).pos);
+      for (const size_t j : to_else) patch(j, here());
+      compile_branch(v.els, when, jumps);
+      patch(done, here());
+    }
+  }
+
   // Every expression lands in a fresh register; a statement releases whatever
   // it used. PL/0 nests shallowly enough that nothing smarter earns its keep.
   int32_t compile_expr(NodeId id, bool tail = false) {
@@ -6956,14 +7075,12 @@ struct FnCompiler {
       // compile_expr calls. A missing else yields nil.
       case Tag::If: {
         auto v = view_if(m, id);
-        const int32_t base = top;
-        const int32_t c = compile_expr(v.cond);
-        top = base;
+        std::vector<size_t> to_else;
+        compile_branch(v.cond, false, to_else);
         const int32_t r = alloc();
-        const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
         branch_into(r, v.then_, n.pos, tail);
         const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
-        patch(jf, here());
+        for (const size_t j : to_else) patch(j, here());
         if (v.els.valid()) {
           branch_into(r, v.els, n.pos, tail);
         } else {
@@ -7091,17 +7208,16 @@ struct FnCompiler {
 
       case Tag::If: {
         auto v = view_if(m, id);
-        const int32_t c = compile_expr(v.cond);
-        top = base;
-        const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
+        std::vector<size_t> to_else;
+        compile_branch(v.cond, false, to_else);
         compile_stmt(v.then_);
         if (v.els.valid()) {
           const size_t jend = emit(Op::Jump, 0, 0, 0, n.pos);
-          patch(jf, here());
+          for (const size_t j : to_else) patch(j, here());
           compile_stmt(v.els);
           patch(jend, here());
         } else {
-          patch(jf, here());
+          for (const size_t j : to_else) patch(j, here());
         }
         break;
       }
@@ -7109,13 +7225,12 @@ struct FnCompiler {
       case Tag::While: {
         auto v = view_while(m, id);
         const int32_t start = here();
-        const int32_t c = compile_expr(v.cond);
-        top = base;
-        const size_t jf = emit(Op::JumpIfFalse, c, 0, 0, n.pos);
+        std::vector<size_t> exits;
+        compile_branch(v.cond, false, exits);
         open_loops.push_back({start, base, open_scopes.size(), {}});
         compile_stmt(v.body);
         emit(Op::Jump, start, 0, 0, n.pos);
-        patch(jf, here());
+        for (const size_t j : exits) patch(j, here());
         for (size_t j : open_loops.back().break_jumps) patch(j, here());
         open_loops.pop_back();
         break;
@@ -8922,6 +9037,12 @@ struct Exec {
           continue;
         case Op::JumpIfFalse:
           if (!f.regs[in.a].truthy()) {
+            f.pc = static_cast<size_t>(in.b);
+            continue;
+          }
+          break;
+        case Op::JumpIfTrue:
+          if (f.regs[in.a].truthy()) {
             f.pc = static_cast<size_t>(in.b);
             continue;
           }

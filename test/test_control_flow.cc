@@ -28,6 +28,13 @@ void check_eq(const std::string& got, const std::string& want,
   }
 }
 
+void check(bool ok, const std::string& what) {
+  if (!ok) {
+    std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+    ++g_failures;
+  }
+}
+
 std::string joined() {
   std::string s;
   for (const auto& line : g_out) {
@@ -361,6 +368,189 @@ int main() {
     const auto err = verify(m);
     check_eq(err ? *err : "", "Break names a loop that is not open",
              "labeled: verify");
+  }
+
+  // --- 9. A condition built of `&&`, `||` and `!` -- the If(x, y, false),
+  // If(x, true, y) and Not that FuncWriter's both()/either() and every
+  // front end's `!` write -- decides what the value it stands for would,
+  // evaluating exactly what that value would have evaluated, in the same
+  // order. Every shape compile_branch takes apart, over every pair of
+  // operands drawn from both sides of the VM's truthiness (0 and nil are
+  // false, "" is true), as an If statement, an If value and a While. ------
+  {
+    struct Operand {
+      const char* name;
+      bool truth;
+    };
+    const Operand ops[] = {{"false", false}, {"true", true}, {"0", false},
+                           {"0.0", false},   {"nil", false},  {"\"\"", true}};
+    for (const Operand& x : ops) {
+      for (const Operand& y : ops) {
+        Module m;
+        Builder b(m);
+        const auto lit = [&](const Operand& o) {
+          const std::string n = o.name;
+          if (n == "false" || n == "true") return b.bool_literal(n == "true", p);
+          if (n == "0") return b.literal(0, p);
+          if (n == "0.0") return b.double_literal(0.0, p);
+          if (n == "nil") return b.nil_literal(p);
+          return b.str_literal("", p);
+        };
+        const auto X = [&] { return b.varref(VarKind::Local, 0, p); };
+        const auto Y = [&] { return b.varref(VarKind::Local, 1, p); };
+        const auto I = [&] { return b.varref(VarKind::Local, 2, p); };
+        const auto say = [&](const char* s) {
+          return b.intrinsic(IntrinsicId::Print, {b.str_literal(s, p)}, p);
+        };
+        // `v`, once `s` has been printed: which operands ran, and when.
+        const auto seen = [&](const char* s, NodeId v) {
+          return b.block({say(s), v}, p);
+        };
+        const auto both = [&](NodeId l, NodeId r) {
+          return b.make_if(l, r, b.bool_literal(false, p), p);
+        };
+        const auto either = [&](NodeId l, NodeId r) {
+          return b.make_if(l, b.bool_literal(true, p), r, p);
+        };
+        const auto stmt = [&](NodeId c) {
+          return b.make_if(c, say("T"), say("F"), p);
+        };
+        const auto value = [&](NodeId c) {
+          return b.intrinsic(IntrinsicId::Print,
+                             {b.make_if(c, b.str_literal("T", p),
+                                        b.str_literal("F", p), p)},
+                             p);
+        };
+        const NodeId body = b.block(
+            {b.assign(VarKind::Local, 0, lit(x), p),
+             b.assign(VarKind::Local, 1, lit(y), p),
+             value(both(X(), seen("y", Y()))),
+             stmt(either(X(), seen("y", Y()))),
+             stmt(b.unary(UnOp::Not, both(X(), seen("y", Y())), p)),
+             // No else: nil when x is false.
+             stmt(b.make_if(X(), seen("y", Y()), NodeId{}, p)),
+             // Neither arm a literal.
+             value(b.make_if(X(), seen("y", Y()),
+                             seen("z", b.unary(UnOp::Not, Y(), p)), p)),
+             stmt(either(both(X(), Y()), b.unary(UnOp::Not, X(), p))),
+             // A literal condition, of each kind; an arm that is a
+             // statement (nil, false), and one that leaves; and a Block
+             // that decides by its last child.
+             stmt(both(lit(y), X())),
+             stmt(either(lit(y), X())),
+             stmt(either(X(), b.block({say("a"),
+                                       b.assign(VarKind::Local, 2,
+                                                b.literal(0, p), p)},
+                                      p))),
+             stmt(either(X(), b.block({say("s"), b.make_break(p)}, p))),
+             b.assign(VarKind::Local, 2, b.literal(0, p), p),
+             b.make_while(
+                 both(b.binary(BinOp::Lt, I(), b.literal(2, p), p), X()),
+                 b.assign(VarKind::Local, 2,
+                          b.binary(BinOp::Add, I(), b.literal(1, p), p), p),
+                 p),
+             b.intrinsic(IntrinsicId::Print, {I()}, p)},
+            p);
+        // The arm that is a statement is a Break, so it needs a loop to
+        // name: the whole body runs once inside one.
+        m.funcs.push_back(
+            {"main", 3, 0,
+             b.make_while(b.bool_literal(true, p),
+                          b.block({body, b.make_break(p)}, p), p),
+             {"x", "y", "i"}, {}});
+        const std::string what =
+            std::string("branch on ") + x.name + ", " + y.name;
+        check_eq(run_module(m, what), "", what + ": unexpected failure");
+        const auto tf = [](bool v) { return v ? "T|" : "F|"; };
+        std::string want;
+        if (x.truth) want += "y|";
+        want += tf(x.truth && y.truth);
+        if (!x.truth) want += "y|";
+        want += tf(x.truth || y.truth);
+        if (x.truth) want += "y|";
+        want += tf(!(x.truth && y.truth));
+        if (x.truth) want += "y|";
+        want += tf(x.truth && y.truth);
+        want += x.truth ? "y|" : "z|";
+        want += tf(x.truth ? y.truth : !y.truth);
+        want += tf((x.truth && y.truth) || !x.truth);
+        want += tf(y.truth && x.truth);
+        want += tf(y.truth || x.truth);
+        if (!x.truth) want += "a|";
+        want += tf(x.truth);
+        if (!x.truth) want += "s|";
+        else want += "T|";
+        if (x.truth) want += "2|";
+        check_eq(joined(), want, what + ": output");
+      }
+    }
+  }
+
+  // ... and costs what the hand-nested ifs would: each test jumps straight
+  // to where its answer is decided, so no bool is materialized for a
+  // second test, `||` jumps on true, `!` flips the jump rather than
+  // computing a Not, and a literal condition is no test at all.
+  {
+    Module m;
+    Builder b(m);
+    const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    const auto say = [&] {
+      return b.intrinsic(IntrinsicId::Print, {b.literal(1, p)}, p);
+    };
+    // Each shape as a statement, so that nothing moves its value anywhere.
+    const auto dump_of = [&](NodeId stmt) {
+      m.funcs.clear();
+      m.funcs.push_back({"main", 2, 0, b.block({stmt, b.nil_literal(p)}, p),
+                         {"a", "b"}, {}});
+      check_eq(verify(m).value_or(""), "", "branch shape: verify");
+      return vm::to_string(vm::compile(m));
+    };
+    const auto count = [](const std::string& s, const std::string& what) {
+      size_t n = 0;
+      for (size_t at = s.find(what); at != std::string::npos;
+           at = s.find(what, at + 1)) {
+        ++n;
+      }
+      return n;
+    };
+    const std::string both = dump_of(b.make_if(
+        b.make_if(L(0), L(1), b.bool_literal(false, p), p), say(), NodeId{},
+        p));
+    // Where each `jumpiffalse rN, T` goes.
+    const auto targets = [](const std::string& s) {
+      std::vector<std::string> out;
+      const std::string op = "\tjumpiffalse r";
+      for (size_t at = s.find(op); at != std::string::npos;
+           at = s.find(op, at + 1)) {
+        const size_t from = s.find(", ", at) + 2;
+        out.push_back(s.substr(from, s.find('\t', from) - from));
+      }
+      return out;
+    };
+    const std::vector<std::string> ends = targets(both);
+    check(ends.size() == 2 && ends[0] == ends[1],
+          "a && b: either operand false jumps past the body");
+    check(both.find("\tmove ") == std::string::npos &&
+              both.find(", false\t") == std::string::npos,
+          "a && b: no bool built between the tests");
+    const std::string either = dump_of(b.make_if(
+        b.make_if(L(0), b.bool_literal(true, p), L(1), p), say(), NodeId{},
+        p));
+    check_eq(std::to_string(count(either, "\tjumpiftrue ")), "1",
+             "a || b: a true jumps to the body");
+    check(either.find("\tmove ") == std::string::npos &&
+              either.find(", true\t") == std::string::npos,
+          "a || b: no bool built between the tests");
+    const std::string negated = dump_of(
+        b.make_if(b.unary(UnOp::Not, L(0), p), say(), NodeId{}, p));
+    check(negated.find("\tnot ") == std::string::npos &&
+              count(negated, "\tjumpiftrue ") == 1,
+          "!a: the jump flips, no Not");
+    const std::string forever = dump_of(b.make_while(
+        b.bool_literal(true, p), b.make_break(p), p));
+    check(forever.find("\tjumpif") == std::string::npos &&
+              forever.find(", true\t") == std::string::npos,
+          "while (true): no test");
   }
 
   if (g_failures != 0) {
