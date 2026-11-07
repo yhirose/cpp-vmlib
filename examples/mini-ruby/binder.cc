@@ -1423,8 +1423,41 @@ struct Binder {
     return rs.write(m, ctx.fn, v, value, p);
   }
 
+  // Three of Ruby's rules are the VM's own operator on some values, and
+  // the runtime's helper on the rest (runtime_parts.h's op_or_helper).
+  // Each set is where the two agree.
+  //
+  // A value used as a condition: nil and a bool are Value::truthy()'s,
+  // the rest $truthy's -- 0, which the VM calls false, is true in Ruby. A
+  // comparison is a bool already, and costs no test of its own.
   NodeId truthy(NodeId v, SrcPos p) {
-    return rt.call("$truthy", {v}, p);
+    return truth(rt, v, nil_false_tags(), p);
+  }
+
+  // A binary operator, by its runtime helper. `+`, `-` and `*` on two
+  // numbers are the VM's -- an Integer wrapping, as this subset's does --
+  // and `+` on two strings concatenates; anything else is the helper's,
+  // which repeats a string, joins two arrays or asks a class. The rest
+  // (`/` and `%` floor, `**`) are the helper's throughout.
+  NodeId arith(const char* helper, NodeId x, NodeId y, SrcPos p) {
+    const std::string h = helper;
+    const uint32_t num = tags_named({"int", "double"});
+    if (h == "$add") {
+      return op_or_helper(rt, BinOp::Add, x, y,
+                          num | tags_named("string"), h, p);
+    }
+    if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p);
+    if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p);
+    return rt.call(h, {x, y}, p);
+  }
+
+  // `==` on two values of these types is Eq's -- an Integer and a Float
+  // compare as numbers -- and on two of different types, which Eq refuses,
+  // $eq's, which also asks an object's own `==`.
+  NodeId equal(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(
+        rt, BinOp::Eq, x, y,
+        tags_named({"nil", "bool", "int", "double", "string"}), "$eq", p);
   }
 
   // The method a node sits in: the function itself when it is a `def`,
@@ -1712,7 +1745,7 @@ struct Binder {
                       : op == "*=" ? "$mul"
                       : op == "/=" ? "$div"
                                    : "$mod";
-      return rt.call(h, {cur, v}, p);
+      return arith(h, cur, v, p);
     };
     if (target.tag == "ident"_) {
       // ref_of first, not decl_of: a block *parameter* shadows an outer
@@ -1876,8 +1909,7 @@ struct Binder {
                  call_with(M, {blk, self}, args, p), no_super())});
       }
       case "notop"_:
-        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), p),
-                        b.bool_literal(false));
+        return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "negexp"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "rangeexp"_:
@@ -1923,10 +1955,9 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
           if (t == "==") {
-            acc = rt.call("$eq", {acc, rhs}, op_p);
+            acc = equal(acc, rhs, op_p);
           } else if (t == "!=") {
-            acc = b.at(op_p).binary(BinOp::Eq, rt.call("$eq", {acc, rhs}, op_p),
-                                    b.bool_literal(false));
+            acc = b.at(op_p).unary(UnOp::Not, equal(acc, rhs, op_p));
           } else {
             const BinOp o = t == "<"    ? BinOp::Lt
                             : t == "<=" ? BinOp::Le
@@ -1950,7 +1981,7 @@ struct Binder {
                           : t == "/"  ? "$div"
                           : t == "**" ? "$pow"
                                       : "$mod";
-          acc = rt.call(h, {acc, rhs}, pos_of(op));
+          acc = arith(h, acc, rhs, pos_of(op));
         }
         return acc;
       }
