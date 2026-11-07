@@ -975,7 +975,8 @@ int main() {
   //         it, an extra a lenient callee does not take or a native's,
   //         borrowed while it ran. So print(f(<t>)) prints t first. A tail
   //         call releases its extras with the frame's other temporaries,
-  //         before its locals. --------------------------------------------
+  //         before its locals. An array literal's items move into the array
+  //         the same way, so an array argument's items die with it. ------
   {
     // funcs[2] zero(x) = 0; funcs[3] rest(...xs) = 0; funcs[4] none() = 0,
     // lenient; funcs[5] tail() = { own = {own}; return none(<t>) }, a tail
@@ -1041,6 +1042,15 @@ int main() {
               g.p);
         },
         "t|0|after|", host);
+    // Two items: the array lands in the first one's register, so only the
+    // second would outlive it there.
+    run("args: array literal's items",
+        [](Prog& g) {
+          return g.b.call_value(
+              g.b.make_closure(2, 0, g.p),
+              {g.b.array_lit({g.obj("a"), g.obj("b")}, g.p)}, g.p);
+        },
+        "a|b|0|after|");
     run("args: tail call extra",
         [](Prog& g) {
           return g.b.call_value(g.b.make_closure(5, 0, g.p), {g.local(0)},

@@ -8556,9 +8556,14 @@ struct Exec {
           f.owned_marks.push_back({rt.owned_mark(), static_cast<int32_t>(f.pc)});
           break;
         case Op::NewArray: {
+          // The items are the instruction's own operand run, as a call's
+          // arguments are (compile_operand), so they move into the array
+          // the way those move into the callee.
           std::vector<Value> items;
           items.reserve(static_cast<size_t>(in.c));
-          for (int32_t i = 0; i < in.c; ++i) items.push_back(f.regs[in.b + i]);
+          for (int32_t i = 0; i < in.c; ++i) {
+            items.push_back(std::move(f.regs[in.b + i]));
+          }
           f.regs[in.a] = Value::make_array(std::move(items));
           break;
         }
