@@ -15,13 +15,36 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <new>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "vmlib.h"
+
+// Every allocation through operator new, counted: what 12e asks of a run.
+// GCC pairs operator new with the free() inside operator delete and calls
+// it a mismatch; here they are one allocator, malloc underneath both.
+long g_news = 0;
+
+void* counted_new(std::size_t n) {
+  ++g_news;
+  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+  throw std::bad_alloc();
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+void* operator new(std::size_t n) { return counted_new(n); }
+void* operator new[](std::size_t n) { return counted_new(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -849,6 +872,61 @@ int main() {
                std::to_string(call_pc + 1),
                "fallback: the Try jumps past the call");
     }
+  }
+
+  // --- 12e. A fallback is reached without the diagnostic of the trap it
+  // stands in for being built: a loop whose every operation traps and so
+  // falls back -- an Eq Eq refuses, an index out of range, a Neg of a
+  // string, each message longer than a short string holds -- allocates
+  // what the same loop does when every operand's tag is outside the set,
+  // which falls back without asking the operation at all. The calls of the
+  // fallback are the same in both. -------------------------------------
+  {
+    const auto allocations = [&](bool trap) {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+      const auto set = [&](int32_t i, NodeId v) {
+        return b.assign(VarKind::Local, i, v, p);
+      };
+      // The operands' own set when the operation is to be asked; nil's,
+      // which none of them is but Eq's left, when it is not.
+      const auto fb = [&](std::initializer_list<std::string_view> tags) {
+        return Fallback{b.make_closure(1, 0, p),
+                        trap ? tags_named(tags) : tags_named("bool")};
+      };
+      const NodeId body = b.block(
+          {set(1, b.binary(BinOp::Eq, b.nil_literal(p), b.literal(5, p),
+                           fb({"nil", "int"}), p)),
+           set(1, b.index(L(2), b.literal(2, p), fb({"array", "int"}), p)),
+           set(1, b.unary(UnOp::Neg, L(3), fb({"string"}), p)),
+           set(0, b.binary(BinOp::Add, L(0), b.literal(1, p), p))},
+          p);
+      m.funcs.push_back(
+          {"main", 4, 0,
+           b.block({set(0, b.literal(0, p)),
+                    set(2, b.array_lit({b.literal(1, p)}, p)),
+                    set(3, b.str_literal("s", p)),
+                    b.make_while(
+                        b.binary(BinOp::Lt, L(0), b.literal(100, p), p), body,
+                        p)},
+                   p),
+           {"i", "x", "a", "s"}, {}});
+      Func f{"fb", 2, 0, b.bool_literal(false, p), {"x", "y"}, {}};
+      f.num_params = 2;
+      f.lenient_arity = true;
+      m.funcs.push_back(f);
+      check_eq(verify(m).value_or(""), "", "fallback allocations: verify");
+      const vm::Program prog = vm::compile(m);
+      Runtime rt;
+      const long before = g_news;
+      vm::run(prog, rt);
+      return g_news - before;
+    };
+    check_eq(std::to_string(allocations(true)),
+             std::to_string(allocations(false)),
+             "a fallback builds no diagnostic");
   }
 
   // --- 13. Same: identity, where Eq refuses to answer. --------------------

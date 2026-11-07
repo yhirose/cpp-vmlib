@@ -3592,23 +3592,38 @@ inline int compare_int_double(int64_t i, double d) {
   return frac > 0 ? -1 : frac < 0 ? 1 : 0;
 }
 
+// Why an operation has no answer: the kinds its diagnostic is made from,
+// without making it. The fast paths -- an operation with a fallback, which
+// asks often and has the fallback answer instead -- ask only whether, and
+// only a trap, or a front end folding a constant, needs the words, which
+// fault_text, unop_error and index_error build from the kind and the
+// operands. A message built and thrown away cost a fallback more than the
+// operation it fell back from.
+enum class Fault : uint8_t {
+  None,
+  // A binary operator's.
+  DivideByZero, DivisionOverflow, ModDouble, Operands,
+  // A unary operator's: its operand is not one it takes.
+  Operand,
+  // An index's.
+  StrKeyType, StrRange, ArrayKeyType, ArrayRange, ObjectKeyType,
+  NotIndexable,
+};
+
 // The check and the arithmetic in one walk of the operand ladder: on
-// success `out` takes the result and the answer is empty, and on failure the
-// diagnostic comes back and `out` is untouched. Two failure kinds, where the
-// i64 IR had one: the arithmetic traps it always had, and type errors, which
-// only exist once values can disagree about what they are.
+// success `out` takes the result and the answer is Fault::None, and on
+// failure the fault comes back and `out` is untouched. Two failure kinds,
+// where the i64 IR had one: the arithmetic traps it always had, and type
+// errors, which only exist once values can disagree about what they are.
 //
 // One walk rather than two because this is the instruction a loop spends its
 // time in, and asking what the operands are and then asking again in order to
 // act on the answer was a type ladder per instruction more than the work
 // needs. binop_error and apply_binop below are this same function asked for
 // one half at a time, for a front end folding constants at compile time.
-//
-// Returning std::string rather than a const char* costs an allocation on the
-// failing path only, and buys operand types in the message -- most of what
-// makes a dynamic language's type error useful.
-inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
-                              Value& out) {
+inline Fault binop_fault(BinOp op, const Value& l, const Value& r,
+                         Value& out) {
+  constexpr Fault ok = Fault::None;
   // Two ints stay integers; anything else numeric widens to double. Mod on
   // doubles is deliberately absent -- fmod versus truncation is a language's
   // decision, and no front end here needs it yet.
@@ -3616,19 +3631,19 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
     const int64_t a = l.as_int();
     const int64_t b = r.as_int();
     switch (op) {
-      case BinOp::Add: out = Value::make_int(wrap_add(a, b)); return {};
-      case BinOp::Sub: out = Value::make_int(wrap_sub(a, b)); return {};
-      case BinOp::Mul: out = Value::make_int(wrap_mul(a, b)); return {};
+      case BinOp::Add: out = Value::make_int(wrap_add(a, b)); return ok;
+      case BinOp::Sub: out = Value::make_int(wrap_sub(a, b)); return ok;
+      case BinOp::Mul: out = Value::make_int(wrap_mul(a, b)); return ok;
       case BinOp::Div: case BinOp::Mod:
       case BinOp::UDiv: case BinOp::UMod:
       case BinOp::FloorDiv: case BinOp::FloorMod: {
         // Every division form traps on a zero divisor -- one statement of
         // that, since UDiv/UMod differ from the others only in the overflow
         // case they do not have (no negative dividend for -1 to misfire on).
-        if (b == 0) return "divide by zero";
+        if (b == 0) return Fault::DivideByZero;
         if (op != BinOp::UDiv && op != BinOp::UMod &&
             a == std::numeric_limits<int64_t>::min() && b == -1) {
-          return "division overflow";
+          return Fault::DivisionOverflow;
         }
         const uint64_t ua = static_cast<uint64_t>(a);
         const uint64_t ub = static_cast<uint64_t>(b);
@@ -3657,39 +3672,39 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
           case BinOp::UDiv: out = Value::make_int(static_cast<int64_t>(ua / ub)); break;
           default:          out = Value::make_int(static_cast<int64_t>(ua % ub)); break;
         }
-        return {};
+        return ok;
       }
-      case BinOp::BitAnd: out = Value::make_int(a & b); return {};
-      case BinOp::BitOr:  out = Value::make_int(a | b); return {};
-      case BinOp::BitXor: out = Value::make_int(a ^ b); return {};
+      case BinOp::BitAnd: out = Value::make_int(a & b); return ok;
+      case BinOp::BitOr:  out = Value::make_int(a | b); return ok;
+      case BinOp::BitXor: out = Value::make_int(a ^ b); return ok;
       // Through uint64_t like wrap_add: a left shift that overflows is
       // wrapping, not UB. Shr stays signed -- C++20 defines it arithmetic.
       case BinOp::Shl:
         out = Value::make_int(
             static_cast<int64_t>(static_cast<uint64_t>(a) << (b & 63)));
-        return {};
-      case BinOp::Shr: out = Value::make_int(a >> (b & 63)); return {};
+        return ok;
+      case BinOp::Shr: out = Value::make_int(a >> (b & 63)); return ok;
       case BinOp::UShr:
         out = Value::make_int(
             static_cast<int64_t>(static_cast<uint64_t>(a) >> (b & 63)));
-        return {};
+        return ok;
       case BinOp::ULt:
         out = Value::make_bool(static_cast<uint64_t>(a) <
                                static_cast<uint64_t>(b));
-        return {};
+        return ok;
       case BinOp::ULe:
         out = Value::make_bool(static_cast<uint64_t>(a) <=
                                static_cast<uint64_t>(b));
-        return {};
+        return ok;
       case BinOp::UGt:
         out = Value::make_bool(static_cast<uint64_t>(a) >
                                static_cast<uint64_t>(b));
-        return {};
+        return ok;
       case BinOp::UGe:
         out = Value::make_bool(static_cast<uint64_t>(a) >=
                                static_cast<uint64_t>(b));
-        return {};
-      default: out = compare(op, a, b); return {};  // Eq .. Ge
+        return ok;
+      default: out = compare(op, a, b); return ok;  // Eq .. Ge
     }
   }
   // A comparison of an int with a double is made on the numbers, not on the
@@ -3706,49 +3721,70 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
       // The double is on the left: ask the other way round and negate.
       out = compare(op, -compare_int_double(r.as_int(), d), 0);
     }
-    return {};
+    return ok;
   }
   if (l.is_number() && r.is_number() && !is_int_only(op)) {
-    if (op == BinOp::Mod) return "cannot mod double";
+    if (op == BinOp::Mod) return Fault::ModDouble;
     const double a = l.as_number();
     const double b = r.as_number();
     switch (op) {
-      case BinOp::Add: out = Value::make_double(a + b); return {};
-      case BinOp::Sub: out = Value::make_double(a - b); return {};
-      case BinOp::Mul: out = Value::make_double(a * b); return {};
+      case BinOp::Add: out = Value::make_double(a + b); return ok;
+      case BinOp::Sub: out = Value::make_double(a - b); return ok;
+      case BinOp::Mul: out = Value::make_double(a * b); return ok;
       // inf/nan, not a trap
-      case BinOp::Div: out = Value::make_double(a / b); return {};
-      default: out = compare(op, a, b); return {};
+      case BinOp::Div: out = Value::make_double(a / b); return ok;
+      default: out = compare(op, a, b); return ok;
     }
   }
   if (l.is_str() && r.is_str()) {
     // Strings concatenate and compare; they do not subtract or divide.
     if (op == BinOp::Add) {
       out = Value::make_str(l.as_str() + r.as_str());
-      return {};
+      return ok;
     }
     if (is_comparison(op)) {
       out = compare(op, l.as_str(), r.as_str());
-      return {};
+      return ok;
     }
   }
   if (l.is_bool() && r.is_bool()) {
     if (op == BinOp::Eq || op == BinOp::Ne) {
       out = compare(op, l.as_bool(), r.as_bool());
-      return {};
+      return ok;
     }
   }
   if (l.is_nil() && r.is_nil()) {
     if (op == BinOp::Eq || op == BinOp::Ne) {
       out = Value::make_bool(op == BinOp::Eq);
-      return {};
+      return ok;
     }
   }
   // Comparing across types is a question ("is 1 == '1'?", "is nil == false?")
   // a language answers, not the VM. Refusing it keeps the VM from baking in an
   // answer a front end would then have to work around.
-  return std::string("cannot ") + name_of(op) + " " + type_name(l.tag()) +
-         " and " + type_name(r.tag());
+  return Fault::Operands;
+}
+
+// A binary operator's diagnostic, from its fault and its operands: the
+// operand types are most of what makes a dynamic language's type error
+// useful.
+inline std::string fault_text(Fault e, BinOp op, const Value& l,
+                              const Value& r) {
+  switch (e) {
+    case Fault::DivideByZero:     return "divide by zero";
+    case Fault::DivisionOverflow: return "division overflow";
+    case Fault::ModDouble:        return "cannot mod double";
+    default:
+      return std::string("cannot ") + name_of(op) + " " +
+             type_name(l.tag()) + " and " + type_name(r.tag());
+  }
+}
+
+// Both: empty on success, the diagnostic on failure.
+inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
+                              Value& out) {
+  const Fault e = binop_fault(op, l, r, out);
+  return e == Fault::None ? std::string() : fault_text(e, op, l, r);
 }
 
 // Whether the operation is defined for these operands: empty when it is, the
@@ -3776,17 +3812,21 @@ inline bool is_wrap(UnOp op) {
   }
 }
 
+// Whether a unary operator takes `v`: Neg a number, BitNot and the Wraps
+// an int, Not and Truth anything. unop_error is the diagnostic.
+inline Fault unop_fault(UnOp op, const Value& v) {
+  if (op == UnOp::Neg && !v.is_number()) return Fault::Operand;
+  if ((op == UnOp::BitNot || is_wrap(op)) && !v.is_int()) {
+    return Fault::Operand;
+  }
+  return Fault::None;
+}
 inline std::string unop_error(UnOp op, const Value& v) {
-  if (op == UnOp::Neg && !v.is_number()) {
-    return std::string("cannot negate ") + type_name(v.tag());
-  }
-  if (op == UnOp::BitNot && !v.is_int()) {
-    return std::string("cannot bitwise-not ") + type_name(v.tag());
-  }
-  if (is_wrap(op) && !v.is_int()) {
-    return std::string("cannot truncate ") + type_name(v.tag());
-  }
-  return {};
+  if (unop_fault(op, v) == Fault::None) return {};
+  const char* verb = op == UnOp::Neg      ? "negate"
+                     : op == UnOp::BitNot ? "bitwise-not"
+                                          : "truncate";
+  return std::string("cannot ") + verb + " " + type_name(v.tag());
 }
 
 // Truncate-and-widen, stated once: the six Wrap ops differ only in the type
@@ -3843,45 +3883,54 @@ inline Value apply_unop(UnOp op, const Value& v) {
 // indexed by what" is answered once. An out-of-range or wrong-typed key
 // fails rather than yielding nil: a language that wants nil can ask the
 // length first, while one that wants the error cannot recover it from a nil.
-inline std::string index_error(const Value& recv, const Value& key) {
-  if (recv.is_str()) {
+// The length an index into `recv` must stay below, for a string or an
+// array.
+inline int64_t index_bound(const Value& recv) {
+  return recv.is_str()
+             ? static_cast<int64_t>(recv.as_str().size())
+             : static_cast<int64_t>(recv.as_array()->items.size());
+}
+
+inline Fault index_fault(const Value& recv, const Value& key) {
+  if (recv.is_str() || recv.is_array()) {
     if (!key.is_int()) {
-      return std::string("string index must be an int, not ") +
-             type_name(key.tag());
+      return recv.is_str() ? Fault::StrKeyType : Fault::ArrayKeyType;
     }
     const int64_t i = key.as_int();
-    const auto n = static_cast<int64_t>(recv.as_str().size());
-    if (i < 0 || i >= n) {
-      return "string index " + std::to_string(i) +
-             " out of range for length " + std::to_string(n);
+    if (i < 0 || i >= index_bound(recv)) {
+      return recv.is_str() ? Fault::StrRange : Fault::ArrayRange;
     }
-    return {};
-  }
-  if (recv.is_array()) {
-    if (!key.is_int()) {
-      return std::string("array index must be an int, not ") +
-             type_name(key.tag());
-    }
-    const int64_t i = key.as_int();
-    const auto n = static_cast<int64_t>(recv.as_array()->items.size());
-    if (i < 0 || i >= n) {
-      return "array index " + std::to_string(i) + " out of range for length " +
-             std::to_string(n);
-    }
-    return {};
+    return Fault::None;
   }
   if (recv.is_object()) {
-    if (!key.is_str()) {
-      return std::string("object key must be a string, not ") +
-             type_name(key.tag());
-    }
-    return {};
+    return key.is_str() ? Fault::None : Fault::ObjectKeyType;
   }
   // A map takes any value as a key (MapKeyRef's rule, value.h) -- what it is
   // for. Uninit is the one exception, and an unassigned local traps at its
   // read before it could get here, so nothing needs saying about it.
-  if (recv.is_map()) return {};
-  return std::string("cannot index ") + type_name(recv.tag());
+  if (recv.is_map()) return Fault::None;
+  return Fault::NotIndexable;
+}
+
+inline std::string index_error(const Value& recv, const Value& key) {
+  const char* kind = recv.is_str() ? "string" : "array";
+  switch (index_fault(recv, key)) {
+    case Fault::None:
+      return {};
+    case Fault::StrKeyType:
+    case Fault::ArrayKeyType:
+      return std::string(kind) + " index must be an int, not " +
+             type_name(key.tag());
+    case Fault::StrRange:
+    case Fault::ArrayRange:
+      return std::string(kind) + " index " + std::to_string(key.as_int()) +
+             " out of range for length " + std::to_string(index_bound(recv));
+    case Fault::ObjectKeyType:
+      return std::string("object key must be a string, not ") +
+             type_name(key.tag());
+    default:
+      return std::string("cannot index ") + type_name(recv.tag());
+  }
 }
 
 // A missing property reads as nil rather than failing, unlike a missing array
@@ -9331,7 +9380,7 @@ struct Exec {
     if (!in_set(x)) return false;
     if (in.op == Op::TryUnary) {
       const auto op = static_cast<UnOp>(try_op(in.b));
-      if (!unop_error(op, x).empty()) return false;
+      if (unop_fault(op, x) != Fault::None) return false;
       if (exact && x.is_int() && wraps(op, x.as_int())) return false;
       f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
       return true;
@@ -9339,7 +9388,7 @@ struct Exec {
     const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
     if (!in_set(y)) return false;
     if (in.op == Op::TryIndex) {
-      if (!index_error(x, y).empty()) return false;
+      if (index_fault(x, y) != Fault::None) return false;
       f.regs[static_cast<size_t>(in.a)] = index_get(x, y);
       return true;
     }
@@ -9348,7 +9397,8 @@ struct Exec {
         wraps(op, x.as_int(), y.as_int())) {
       return false;
     }
-    return eval_binop(op, x, y, f.regs[static_cast<size_t>(in.a)]).empty();
+    return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
+           Fault::None;
   }
 
   void dispatch(size_t floor) {
@@ -9378,7 +9428,7 @@ struct Exec {
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32: {
           const UnOp uop = unop_of(in.op);
           const Value& v = f.regs[in.b];
-          if (auto err = unop_error(uop, v); !err.empty()) fail(f, err);
+          if (unop_fault(uop, v) != Fault::None) fail(f, unop_error(uop, v));
           f.regs[in.a] = apply_unop(uop, v);
           break;
         }
@@ -9394,10 +9444,12 @@ struct Exec {
           // the whole result before it assigns, so the compiler reusing an
           // operand's register as the destination -- which it does freely --
           // needs no temporary here. A failure leaves the register alone.
-          if (auto err = eval_binop(binop_of(in.op), f.regs[in.b], f.regs[in.c],
-                                    f.regs[in.a]);
-              !err.empty()) {
-            fail(f, err);
+          const BinOp op = binop_of(in.op);
+          const Value& l = f.regs[in.b];
+          const Value& r = f.regs[in.c];
+          if (const Fault e = binop_fault(op, l, r, f.regs[in.a]);
+              e != Fault::None) {
+            fail(f, fault_text(e, op, l, r));
           }
           break;
         }
@@ -9609,7 +9661,9 @@ struct Exec {
         case Op::Index: {
           const Value& recv = f.regs[in.b];
           const Value& key = f.regs[in.c];
-          if (auto err = index_error(recv, key); !err.empty()) fail(f, err);
+          if (index_fault(recv, key) != Fault::None) {
+            fail(f, index_error(recv, key));
+          }
           f.regs[in.a] = index_get(recv, key);
           break;
         }
@@ -9619,7 +9673,9 @@ struct Exec {
           // Strings read through Index but do not write: they are immutable
           // values, not containers of cells.
           if (recv.is_str()) fail(f, "cannot assign into a string");
-          if (auto err = index_error(recv, key); !err.empty()) fail(f, err);
+          if (index_fault(recv, key) != Fault::None) {
+            fail(f, index_error(recv, key));
+          }
           index_set(recv, key, f.regs[in.c]);
           break;
         }
@@ -9819,7 +9875,7 @@ struct Exec {
           if (!s.is_str()) {
             fail(f, std::string("cannot read a byte of ") + type_name(s.tag()));
           }
-          if (auto err = index_error(s, k); !err.empty()) fail(f, err);
+          if (index_fault(s, k) != Fault::None) fail(f, index_error(s, k));
           const auto byte = static_cast<unsigned char>(
               s.as_str()[static_cast<size_t>(k.as_int())]);
           f.regs[in.a] = Value::make_int(byte);
