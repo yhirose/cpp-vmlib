@@ -3096,10 +3096,14 @@ class FuncWriter {
   // choice that comment reserves for the front end.
   bool lenient_arity = true;
   bool singleton = true;
-  // Not a decision this writer makes for anyone: off, the IR's own default.
+  // Not decisions this writer makes for anyone: off, the IR's own defaults.
   // A helper that collects its trailing arguments -- a `$select`, an
-  // `$apply` -- turns it on, and its last param() is then the rest param.
+  // `$apply` -- turns rest_param on, and its last param() is then the rest
+  // param. A front end whose language guarantees tail calls turns
+  // tail_calls on for the helpers written to rely on them, as it does for
+  // its own functions.
   bool rest_param = false;
+  bool tail_calls = false;
 
   // Writes everything added so far into `f` as its whole body, with the
   // parameter count, slot count and name table taken from param()/local().
@@ -3140,11 +3144,128 @@ class FuncWriter {
     // verify() refuses.
     f.singleton = singleton && ncaps == 0;
     f.rest_param = rest_param;
+    f.tail_calls = tail_calls;
     f.body = b.scope(0, nlocals, blk(body));
   }
 
   std::vector<std::string> names_;
   int32_t nparams_ = 0;
+};
+
+// The runtime library a front end writes with FuncWriter, as a table of
+// helpers by name. Optional, like FuncWriter. What it holds is the three
+// things every front end in examples/ with such a library kept beside it,
+// written the same way each time:
+//
+//   * a Module::funcs slot for every name, reserved before any body is
+//     built -- so a helper may call one written after it, and two may call
+//     each other (`$str` and `$join` do, in more than one language);
+//   * the one empty capture map a capture-free helper's closure is built
+//     over;
+//   * a call by name, which says what is wrong with a name rather than
+//     indexing past the table.
+//
+//   HelperTable rt(m);
+//   rt.reserve({"$str", "$join"});     // the next m.funcs slots, in order
+//   HelperWriter r(rt);                // one helper's body
+//   const auto [v] = r.params("v");
+//   r.add(r.ret(r.call("$join", {r.L(v), r.S(",")})));
+//   r.finish("$str");                  // into the slot "$str" reserved
+//   ...
+//   rt.call("$str", {x}, pos)          // from the emit pass
+//
+// A capture-free helper is a Func::singleton (FuncWriter's default), so
+// every call by name builds a MakeClosure that names the one closure the
+// executor made at the first of them. A helper that takes captures is built
+// where its captures are, with HelperWriter::clos, and never called by name.
+class HelperTable {
+ public:
+  explicit HelperTable(Module& m) : mod_(m) {}
+
+  // A slot per name, in order, at the end of Module::funcs -- and, the
+  // first time, the empty capture map every call by name uses.
+  void reserve(const std::vector<std::string>& names) {
+    if (empty_cmap_ < 0) {
+      empty_cmap_ = static_cast<int32_t>(mod_.capture_maps.size());
+      mod_.capture_maps.push_back({});
+    }
+    for (const std::string& n : names) {
+      if (!funcs_.emplace(n, static_cast<int32_t>(mod_.funcs.size())).second) {
+        coreir_rt::fail("HelperTable: helper " + n + " reserved twice", 0, 0);
+      }
+      mod_.funcs.push_back({});
+    }
+  }
+
+  // The Module::funcs index reserved for `name`.
+  int32_t func(const std::string& name) const {
+    const auto it = funcs_.find(name);
+    if (it == funcs_.end()) {
+      coreir_rt::fail("HelperTable: no runtime helper " + name, 0, 0);
+    }
+    return it->second;
+  }
+
+  // The empty capture map. Any closure over no captures may share it -- a
+  // front end's own functions as well as its helpers.
+  int32_t empty_cmap() const {
+    if (empty_cmap_ < 0) {
+      coreir_rt::fail("HelperTable: nothing reserved yet", 0, 0);
+    }
+    return empty_cmap_;
+  }
+
+  Module& module() const { return mod_; }
+
+  // A capture-free helper as a value, and a call of one. A helper that
+  // takes captures has nothing forwarded in here, and is refused by name
+  // -- verify()'s capture-map check would refuse it too, but cannot say
+  // which helper it was. (One not written yet shows no captures, and is
+  // left to verify().)
+  NodeId ref(const std::string& name, SrcPos p) {
+    const int32_t f = func(name);
+    if (mod_.funcs[static_cast<size_t>(f)].num_captures != 0) {
+      coreir_rt::fail("HelperTable: runtime helper " + name +
+                          " takes captures",
+                      0, 0);
+    }
+    return Builder(mod_).make_closure(f, empty_cmap(), p);
+  }
+  NodeId call(const std::string& name, const std::vector<NodeId>& args,
+              SrcPos p) {
+    return Builder(mod_).call_value(ref(name, p), args, p);
+  }
+
+ private:
+  Module& mod_;
+  std::map<std::string, int32_t> funcs_;
+  int32_t empty_cmap_ = -1;
+};
+
+// A FuncWriter for one helper of a HelperTable: it reaches the others by
+// name, and writes itself into the slot its own name reserved.
+class HelperWriter : public FuncWriter {
+ public:
+  explicit HelperWriter(HelperTable& t) : FuncWriter(t.module()), table(t) {}
+
+  HelperTable& table;
+
+  NodeId call(const std::string& name, const std::vector<NodeId>& args) {
+    return table.call(name, args, pos);
+  }
+  NodeId ref(const std::string& name) { return table.ref(name, pos); }
+  // A helper that takes captures, closed over this one's own cells.
+  using FuncWriter::clos;
+  NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
+    return FuncWriter::clos(table.func(name), cells);
+  }
+
+  // write(), into the slot reserve() gave `name`.
+  void finish(const std::string& name, int32_t ncells = 0,
+              int32_t ncaps = 0) {
+    write(mod.funcs[static_cast<size_t>(table.func(name))], name, ncells,
+          ncaps);
+  }
 };
 
 }  // namespace coreir

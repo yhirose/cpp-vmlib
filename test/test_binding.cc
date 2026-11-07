@@ -1,12 +1,13 @@
-// The two optional binder utilities: coreir::Resolver (closure conversion)
-// and coreir::FuncWriter (a whole function written directly in IR).
+// The optional binder utilities: coreir::Resolver (closure conversion),
+// coreir::FuncWriter (a whole function written directly in IR) and
+// coreir::HelperTable (a runtime library of such functions, by name).
 //
-// Neither is reachable from `vm`; a front end may ignore both. What they are
-// is the bookkeeping every front end in examples/ that nests functions
-// lexically was writing identically, and the terse builder each of them
-// arrived at independently for writing its own runtime library. So the
-// questions here are about the *rules* they encode, not about any one
-// language:
+// None is reachable from `vm`; a front end may ignore all three. What they
+// are is the bookkeeping every front end in examples/ that nests functions
+// lexically was writing identically, and the terse builder and the name
+// table each of them arrived at independently for writing its own runtime
+// library. So the questions here are about the *rules* they encode, not
+// about any one language:
 //
 //   1. Does a name resolve outward, and does reading it from two levels in
 //      make every function on the way carry it? (The propagation, which a
@@ -27,8 +28,10 @@
 //      a prelude -- names, call edges, parents -- and keep the prelude's?
 //   9. Does close_over_calls carry a callee's captures to every caller,
 //      self-recursion included?
-// And misuse -- a name operation with no scope open, an id out of range --
-// is reported rather than read out of bounds.
+//  10. Does a HelperTable let two helpers call each other by name whichever
+//      is written first, and land each in the slot its name reserved?
+// And misuse -- a name operation with no scope open, an id out of range, a
+// helper name never reserved -- is reported rather than read out of bounds.
 //
 // Tests 1-4 are checked by running the module they describe, not by reading
 // the tables back: a capture numbered right but emitted wrong would pass an
@@ -420,6 +423,57 @@ int main() {
     }
   }
 
+  // --- 10. HelperTable: two helpers calling each other by name. -----------
+  // `$even` is written first and calls `$odd`, which has a slot but no body
+  // yet -- the order a runtime library's mutual recursion needs. Each lands
+  // in the slot its name reserved, whatever order the bodies are written
+  // in, and both calls share the one empty capture map.
+  {
+    Module m;
+    m.funcs.resize(1);  // the entry point, ahead of the helpers
+    HelperTable rt(m);
+    rt.reserve({"$even", "$odd"});
+    if (rt.func("$even") != 1 || rt.func("$odd") != 2 ||
+        m.funcs.size() != 3 || m.capture_maps.size() != 1) {
+      std::fprintf(stderr, "FAIL: HelperTable reserved the wrong slots\n");
+      ++g_failures;
+    }
+    const auto parity = [&](const char* name, const char* other,
+                            int64_t at_zero) {
+      HelperWriter r(rt);
+      const auto [n] = r.params("n");
+      r.add(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)), r.ret(r.I(at_zero))));
+      r.add(r.ret(r.call(other, {r.bin(BinOp::Sub, r.L(n), r.I(1))})));
+      r.finish(name);
+    };
+    parity("$even", "$odd", 1);
+    parity("$odd", "$even", 0);
+    if (m.funcs[1].name != "$even" || m.funcs[2].name != "$odd" ||
+        !m.funcs[2].singleton || m.funcs[2].tail_calls) {
+      std::fprintf(stderr, "FAIL: a helper missed its reserved slot\n");
+      ++g_failures;
+    }
+    m.funcs[0].name = "main";
+    m.funcs[0].body = Builder(m).intrinsic(
+        IntrinsicId::Print,
+        {rt.call("$even", {Builder(m).literal(7, pos)}, pos)}, pos);
+    run_module(m, "helper table mutual recursion");
+    check_eq(joined(), "0|", "helper table mutual recursion output");
+
+    // tail_calls is the writer's to pass on, off unless asked for.
+    HelperWriter w(rt);
+    w.tail_calls = true;
+    w.add(w.ret(w.Nil()));
+    rt.reserve({"$tail"});
+    w.finish("$tail");
+    if (!m.funcs[static_cast<size_t>(rt.func("$tail"))].tail_calls ||
+        m.capture_maps.size() != 1) {
+      std::fprintf(stderr, "FAIL: a second reserve lost tail_calls or the "
+                           "capture map\n");
+      ++g_failures;
+    }
+  }
+
   // --- 6. A closure built where its captures cannot be reached is refused.
   // The rule the propagation rests on: resolve() records a free name in
   // every function between the reader and the owner, so the frame a
@@ -701,6 +755,20 @@ int main() {
     check_eq(failure([&] { w.param("a"); }),
              "FuncWriter: param 'a' after a local; parameters come first",
              "param after local");
+
+    HelperTable rt(m);
+    check_eq(failure([&] { rt.empty_cmap(); }),
+             "HelperTable: nothing reserved yet", "empty_cmap before reserve");
+    rt.reserve({"$a", "$closure"});
+    check_eq(failure([&] { rt.reserve({"$a"}); }),
+             "HelperTable: helper $a reserved twice", "reserve twice");
+    check_eq(failure([&] { rt.call("$b", {}, pos); }),
+             "HelperTable: no runtime helper $b", "call of an unknown name");
+    HelperWriter hw(rt);
+    hw.finish("$closure", 0, 1);
+    check_eq(failure([&] { rt.call("$closure", {}, pos); }),
+             "HelperTable: runtime helper $closure takes captures",
+             "call of a helper that takes captures");
   }
 
   if (g_failures != 0) {

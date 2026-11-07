@@ -136,11 +136,12 @@ The authoritative reference is the commentary in `vmlib.h` itself, in the
 ## Writing a binder
 
 `Builder` and `verify()` are all a binder strictly needs; `examples/pl0/`
-uses nothing else. Three optional utilities sit beside them: `Builder::at`
-on `Builder` itself, and `Resolver` (with `FrameLayout`) and `FuncWriter` in
-the `coreir/resolve.h` section of `vmlib.h`. Nothing in `coreir` or `vm`
-reads them, and each is there because every front end in `examples/` that
-got as far as closures had written the same thing.
+uses nothing else. Four optional utilities sit beside them: `Builder::at`
+on `Builder` itself, and `Resolver` (with `FrameLayout`), `FuncWriter` and
+`HelperTable` in the `coreir/resolve.h` section of `vmlib.h`. Nothing in
+`coreir` or `vm` reads them, and each is there because every front end in
+`examples/` that got as far as closures, or as a runtime library, had
+written the same thing.
 
 **`Builder::at(p)`** binds a source position once instead of at every node:
 
@@ -214,13 +215,27 @@ Its `lenient_arity` and `singleton` fields default to what a helper library
 wants and are the caller's to clear -- a function the *program* can get hold
 of as a value wants neither, and `singleton` especially is a decision
 [Static calls](#static-calls) reserves for the front end. Its `rest_param`
-is off, the IR's own default, until a helper that collects its trailing
-arguments turns it on (see [Variadic calls](#variadic-calls)).
+and `tail_calls` are off, the IR's own defaults, until a helper that
+collects its trailing arguments turns the first on (see
+[Variadic calls](#variadic-calls)), or one written to rely on
+[Tail calls](#tail-calls) the second.
 
 Written with bare slot numbers instead, a helper's body has its indices in
 one place and their names in another, and inserting a temporary in the
 middle renumbers everything after it -- which `verify()` catches only if the
 *count* changed too.
+
+**`HelperTable`** is the runtime library those helpers make up, by name.
+`reserve(names)` gives every helper its `Module::funcs` slot before any
+body is built, so a helper may call one written after it and two may call
+each other (`$str` and `$join` are mutually recursive in more than one
+language); a `HelperWriter` is a `FuncWriter` whose `call("$join", ...)`
+reaches another helper by name and whose `finish("$str")` lands in the
+slot that name reserved; and `call(name, args, p)` is the same call from
+the emit pass. Every capture-free helper is built over the one empty
+capture map the table keeps -- and, being a singleton, every call names
+the one closure the executor made first. A name never reserved, or a
+helper that takes captures called by name, is reported by name.
 
 `examples/pl0/` deliberately uses none of the three: it is the binder
 written against `Builder` and `verify()` alone, and short enough that its
@@ -1032,7 +1047,8 @@ each building its Core-IR by hand and supplying its own `coreir_rt` host.
 saves, a generator's per-call activation, and the one combination `verify()`
 refuses); `test_binding.cc` pins the optional binder utilities --
 `Resolver`'s propagation, cell/local decision, call-edge closure and
-`mark`/`rollback`, `FrameLayout`'s slot reuse, and `FuncWriter`'s name
-table. `just test` runs everything; `just sanitizers` runs it again under
+`mark`/`rollback`, `FrameLayout`'s slot reuse, `FuncWriter`'s name table,
+and `HelperTable`'s slots by name, mutual recursion included. `just test`
+runs everything; `just sanitizers` runs it again under
 ASan/UBSan/LSan, and `just gc-stress` with a collection at every
 allocation (`COREIR_GC_STRESS=1`), the two extra lanes CI also runs.
