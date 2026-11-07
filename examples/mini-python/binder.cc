@@ -301,6 +301,7 @@ struct Binder {
   std::map<int32_t, const Ast*> class_by_var;  // name binding -> its classdef
   std::vector<const Ast*> class_stack;
   HelperTable rt{m};  // the runtime helpers, by name
+  Operators ops{rt, operators()};  // the VM's operations standing in for them
   std::map<std::string, int32_t> builtin_fn;
 
   // ==== Pass A: scopes, declarations, captures =============================
@@ -801,6 +802,51 @@ struct Binder {
     return names;
   }
 
+  // Python's rules that are the VM's own operation on some values: the
+  // VM's answer where the two agree, the helper's on the rest
+  // (runtime_parts.h's Operators).
+  //
+  //   $truthy         a condition: None, a bool and a number are false or
+  //                   true as Value::truthy() says; a string, a list and a
+  //                   dict, false when empty, are $truthy's.
+  //   $add $sub $mul  `+`, `-` and `*` on two numbers, and `+` on two
+  //   $neg            strings, and `-x` on a number -- an int answer
+  //                   exactly, since one that would wrap goes to the limbs
+  //                   (the promotion rule, at rt_add).
+  //   $idiv $mod      `//` and `%` on two ints, Python's floor; a zero
+  //                   divisor (ZeroDivisionError), a float or a bignum is
+  //                   the helper's.
+  //   $lt $le $gt $ge an ordering of two ints or two strings; a float is
+  //                   not, as $cmp orders it through ToDouble beside an
+  //                   int, and a bignum, a tuple or an object are $cmp's.
+  //   $eq             `==` on None, bools, ints and strings; two types Eq
+  //                   refuses, a bignum, a float, a container or an
+  //                   object's own `__eq__` are $eq's.
+  //   $idx            `c[k]` on a list or a string and an index in range;
+  //                   a negative one, one out of range (IndexError), a
+  //                   tuple and a dict are $idx's.
+  static Operators::Table operators() {
+    const uint32_t ints = tags_named("int");
+    const uint32_t order = tags_named({"int", "string"});
+    return {
+        {"$truthy", VmOp::unary(UnOp::Truth,
+                                tags_named({"nil", "bool", "int", "double"}))},
+        {"$add", VmOp::binary(BinOp::Add, add_tags(), true)},
+        {"$sub", VmOp::binary(BinOp::Sub, number_tags(), true)},
+        {"$mul", VmOp::binary(BinOp::Mul, number_tags(), true)},
+        {"$neg", VmOp::unary(UnOp::Neg, number_tags(), true)},
+        {"$idiv", VmOp::binary(BinOp::FloorDiv, ints)},
+        {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
+        {"$lt", VmOp::binary(BinOp::Lt, order)},
+        {"$le", VmOp::binary(BinOp::Le, order)},
+        {"$gt", VmOp::binary(BinOp::Gt, order)},
+        {"$ge", VmOp::binary(BinOp::Ge, order)},
+        {"$eq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "int",
+                                                    "string"}))},
+        {"$idx", VmOp::index(tags_named({"array", "string", "int"}))},
+    };
+  }
+
   // One helper of the runtime above under construction.
   struct RT : HelperWriter {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
@@ -1119,8 +1165,8 @@ struct Binder {
   // the limbs. That is what keeps a loop counter a loop counter while
   // `2 ** 100` is exact. The rule is an exact operator with the limbs'
   // helper as its fallback (vmlib.h's Tag::Unary, kExact) -- the same
-  // operator a `+`, `-` or `*` in the program is (Binder::arith), so the
-  // two cannot disagree about where int64 ends.
+  // operator a `+`, `-` or `*` in the program is (Binder::operators), so
+  // the two cannot disagree about where int64 ends.
 
   NodeId int_pair(RT& r, NodeId ta, NodeId tb) {
     return r.both(r.is(ta, "int"), r.is(tb, "int"));
@@ -1128,8 +1174,8 @@ struct Binder {
 
   NodeId exact_or(RT& r, BinOp op, FuncWriter::Slot a, FuncWriter::Slot b,
                   const char* limbs) {
-    return r.b.binary(op, r.L(a), r.L(b),
-                      {r.ref(limbs), tags_named("int"), true});
+    return op_or_helper(r.table, op, r.L(a), r.L(b), tags_named("int"), limbs,
+                        r.pos, true);
   }
 
   void rt_add() {
@@ -3025,67 +3071,8 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
-  // Python's operators are the VM's own on some values, and the runtime's
-  // helper on the rest (runtime_parts.h's op_or_helper). Each set is where
-  // the two agree.
-  //
-  // A value used as a condition: None, a bool and a number are false or
-  // true as Value::truthy() says; a string, a list and a dict, false when
-  // empty, are $truthy's. A comparison's own answer, a bool, goes straight
-  // to the jump, and only what $lt and the others answer meets the test.
-  NodeId truthy(NodeId v, SrcPos p) {
-    return truth(rt, v, tags_named({"nil", "bool", "int", "double"}), p);
-  }
-
-  // `+`, `-` and `*` on two numbers, and `+` on two strings, are the VM's
-  // -- an int answer exactly, since an int that would wrap is $add's, and
-  // the limbs' (the promotion rule, at rt_add). `//` and `%` on two ints
-  // are FloorDiv and FloorMod, a zero divisor being the helper's
-  // ZeroDivisionError. The rest, and `/`, are the helpers' throughout.
-  NodeId arith(const char* helper, NodeId x, NodeId y, SrcPos p) {
-    const std::string h = helper;
-    const uint32_t num = tags_named({"int", "double"});
-    if (h == "$add") {
-      return op_or_helper(rt, BinOp::Add, x, y, num | tags_named("string"),
-                          h, p, true);
-    }
-    if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p, true);
-    if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p, true);
-    const uint32_t ints = tags_named("int");
-    if (h == "$idiv") {
-      return op_or_helper(rt, BinOp::FloorDiv, x, y, ints, h, p);
-    }
-    if (h == "$mod") return op_or_helper(rt, BinOp::FloorMod, x, y, ints, h, p);
-    return rt.call(h, {x, y}, p);
-  }
-
-  // An ordering on two ints or two strings is the VM's; a float is not, as
-  // $cmp orders it through ToDouble beside an int, and a bignum, a tuple or
-  // an object are $cmp's too.
-  NodeId order(BinOp op, NodeId x, NodeId y, SrcPos p) {
-    const char* h = op == BinOp::Lt   ? "$lt"
-                    : op == BinOp::Le ? "$le"
-                    : op == BinOp::Gt ? "$gt"
-                                      : "$ge";
-    return op_or_helper(rt, op, x, y, tags_named({"int", "string"}), h, p);
-  }
-
-  // `c[k]`: a list's or a string's element at an index in range is
-  // Index's; a negative index, one out of range (IndexError), a tuple and
-  // a dict are $idx's.
-  NodeId index(NodeId c, NodeId k, SrcPos p) {
-    return Builder(m).at(p).index(
-        c, k, {rt.ref("$idx", p), tags_named({"array", "string", "int"})});
-  }
-
-  // `==` on two values of these types is Eq's, and on two of different
-  // types, which Eq refuses, $eq's, which also asks a bignum, a float, a
-  // container or an object's own `__eq__`.
-  NodeId equal(NodeId x, NodeId y, SrcPos p) {
-    return op_or_helper(rt, BinOp::Eq, x, y,
-                        tags_named({"nil", "bool", "int", "string"}), "$eq",
-                        p);
-  }
+  // A value used as a condition: $truthy's entry in operators().
+  NodeId truthy(NodeId v, SrcPos p) { return ops.call("$truthy", {v}, p); }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
@@ -3741,13 +3728,13 @@ struct Binder {
                                     b.intrinsic(IntrinsicId::TypeOf, {now()}),
                                     b.str_literal("array")),
                            rt.call("$aext", {now(), v}, p),
-                           arith("$add", now(), v, p)));
+                           ops.call("$add", {now(), v}, p)));
       }
-      if (op == "-=") return arith("$sub", cur(), v, p);
-      if (op == "*=") return arith("$mul", cur(), v, p);
-      if (op == "//=") return arith("$idiv", cur(), v, p);
+      if (op == "-=") return ops.call("$sub", {cur(), v}, p);
+      if (op == "*=") return ops.call("$mul", {cur(), v}, p);
+      if (op == "//=") return ops.call("$idiv", {cur(), v}, p);
       if (op == "/=") return rt.call("$fdiv", {cur(), v}, p);
-      return arith("$mod", cur(), v, p);
+      return ops.call("$mod", {cur(), v}, p);
     };
 
     if (target.tag == "ident"_) {
@@ -3999,8 +3986,7 @@ struct Binder {
         return b.block(out);
       }
       case "negexp"_:
-        return op_or_helper(rt, UnOp::Neg, emit_expr(*a.nodes[0], ctx),
-                            tags_named({"int", "double"}), "$neg", p, true);
+        return ops.call("$neg", {emit_expr(*a.nodes[0], ctx)}, p);
       case "notop"_:
         return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "powexp"_:
@@ -4053,9 +4039,10 @@ struct Binder {
           const SrcPos op_p = pos_of(op);
           const NodeId lhs = b.varref(VarKind::Local, slots[k]);
           const NodeId rhs = b.varref(VarKind::Local, slots[k + 1]);
-          if (t == "==") return equal(lhs, rhs, op_p);
+          if (t == "==") return ops.call("$eq", {lhs, rhs}, op_p);
           if (t == "!=") {
-            return b.at(op_p).unary(UnOp::Not, equal(lhs, rhs, op_p));
+            return b.at(op_p).unary(UnOp::Not,
+                                    ops.call("$eq", {lhs, rhs}, op_p));
           }
           // `is` is identity, which `Same` answers.
           if (t == "is" || t == "is not") {
@@ -4071,11 +4058,11 @@ struct Binder {
                                      rt.call("$in", {lhs, rhs}, op_p),
                                      b.bool_literal(false));
           }
-          const BinOp o = t == "<"    ? BinOp::Lt
-                          : t == "<=" ? BinOp::Le
-                          : t == ">"  ? BinOp::Gt
-                                      : BinOp::Ge;
-          return order(o, lhs, rhs, op_p);
+          const char* h = t == "<"    ? "$lt"
+                          : t == "<=" ? "$le"
+                          : t == ">"  ? "$gt"
+                                      : "$ge";
+          return ops.call(h, {lhs, rhs}, op_p);
         };
         // Link k compares operands k and k+1; operand k+1 is set just
         // before it, except the first two, which run before anything.
@@ -4100,7 +4087,7 @@ struct Binder {
                           : t == "//" ? "$idiv"
                           : t == "/"  ? "$fdiv"
                                       : "$mod";
-          acc = arith(h, acc, rhs, op_p);
+          acc = ops.call(h, {acc, rhs}, op_p);
         }
         return acc;
       }
@@ -4239,7 +4226,7 @@ struct Binder {
                           {cur, b.nil_literal(p), b.nil_literal(p)}, p);
             break;
           }
-          cur = index(cur, emit_expr(sub, ctx), p);
+          cur = ops.call("$idx", {cur, emit_expr(sub, ctx)}, p);
           break;
         }
         default:  // callsfx

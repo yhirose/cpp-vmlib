@@ -176,7 +176,7 @@ const std::vector<Builtin>& builtins() {
 // The helpers that are one BinOp over their two arguments: Scheme's
 // arithmetic and ordering are eval_binop's on two numbers, two exact
 // integers staying exact. Each helper's body is written from here, and a
-// direct call of one is that BinOp on two numbers (Binder::apply2).
+// direct call of one is that BinOp on two numbers (Binder::operators).
 const std::map<std::string, BinOp>& binop_helpers() {
   static const std::map<std::string, BinOp> v = {
       {"$add", BinOp::Add}, {"$sub", BinOp::Sub}, {"$mul", BinOp::Mul},
@@ -270,6 +270,7 @@ struct Binder {
   std::map<const Ast*, int32_t> decl_of;
   std::map<const Ast*, int32_t> fn_of;
   HelperTable rt{m};  // the runtime helpers, by name
+  Operators ops{rt, operators()};  // the VM's operations standing in for them
 
   // `define-record-type`: the constructor's field order, and each field's
   // name paired with its accessor's (and optional mutator's) synthesized
@@ -547,6 +548,29 @@ struct Binder {
       }
     }
     return names;
+  }
+
+  // Scheme's rules that are the VM's own operation on some values: the
+  // VM's answer where the two agree, the helper's on the rest
+  // (runtime_parts.h's Operators). A direct call of one of these builtins
+  // is its operation, and anything else is refused by the helper as it
+  // always was, at the call.
+  //
+  //   binop_helpers  arithmetic and ordering on two numbers (number_tags),
+  //                  each helper that BinOp and nothing else.
+  //   $modulo        `modulo` on two exact integers, FloorMod -- its rule.
+  //   $true          a condition: only #f is false, which a bool's own
+  //                  truth answers; everything else is $true's, which says
+  //                  true -- '() and 0 included, where the VM's truth
+  //                  calls both false.
+  static Operators::Table operators() {
+    Operators::Table t;
+    for (const auto& h : binop_helpers()) {
+      t.emplace(h.first, VmOp::binary(h.second, number_tags()));
+    }
+    t.emplace("$modulo", VmOp::binary(BinOp::FloorMod, tags_named("int")));
+    t.emplace("$true", VmOp::unary(UnOp::Truth, tags_named("bool")));
+    return t;
   }
 
   // One helper of the runtime above, with the front end's own additions to
@@ -1062,31 +1086,8 @@ struct Binder {
     return b.assign(k, i, value);
   }
 
-  // A value as a condition: only #f is false, which a bool's own truth
-  // answers; everything else is $true's, which says true -- '() and 0
-  // included, where the VM's truth calls both false. A comparison is a
-  // bool already, and costs no test of its own (runtime_parts.h's truth).
-  NodeId truthy(NodeId v, SrcPos p) {
-    return truth(rt, v, tags_named("bool"), p, "$true");
-  }
-
-  // A two-argument helper's call -- or, for one that is a single BinOp
-  // (binop_helpers), that BinOp on two numbers, the helper behind it for
-  // anything else, which it refuses as it always did, at the call
-  // (runtime_parts.h's op_or_helper).
-  NodeId apply2(const std::string& helper, NodeId x, NodeId y, SrcPos p) {
-    const auto it = binop_helpers().find(helper);
-    if (it != binop_helpers().end()) {
-      return op_or_helper(rt, it->second, x, y,
-                          tags_named({"int", "double"}), helper, p);
-    }
-    // `modulo` on two exact integers is FloorMod, which is its rule.
-    if (helper == "$modulo") {
-      return op_or_helper(rt, BinOp::FloorMod, x, y, tags_named("int"),
-                          helper, p);
-    }
-    return rt.call(helper, {x, y}, p);
-  }
+  // A value as a condition: $true's entry in operators().
+  NodeId truthy(NodeId v, SrcPos p) { return ops.call("$true", {v}, p); }
 
   // A quoted datum, built at bind time: a list becomes a chain of pairs, a
   // symbol becomes a string (see README.md for what that costs), and every
@@ -1248,11 +1249,11 @@ struct Binder {
       }
       if (args.size() == 1) {
         if (bi.one_lhs == Unit::None) return args[0];
-        return apply2(bi.rt, unit_literal(bi.one_lhs, b), args[0], p);
+        return ops.call(bi.rt, {unit_literal(bi.one_lhs, b), args[0]}, p);
       }
       NodeId acc = args[0];
       for (size_t i = 1; i < args.size(); ++i) {
-        acc = apply2(bi.rt, acc, args[i], p);
+        acc = ops.call(bi.rt, {acc, args[i]}, p);
       }
       return acc;
     }
@@ -1264,7 +1265,7 @@ struct Binder {
       // comparisons read those.
       if (args.empty()) return b.bool_literal(true);
       if (args.size() == 1) return b.block({args[0], b.bool_literal(true)});
-      if (args.size() == 2) return apply2(bi.rt, args[0], args[1], p);
+      if (args.size() == 2) return ops.call(bi.rt, {args[0], args[1]}, p);
       std::vector<NodeId> out;
       std::vector<NodeId> vals;
       for (const NodeId v : args) {
@@ -1274,9 +1275,9 @@ struct Binder {
         out.push_back(b.assign(VarKind::Local, t, v));
         vals.push_back(b.varref(VarKind::Local, t));
       }
-      NodeId acc = apply2(bi.rt, vals[0], vals[1], p);
+      NodeId acc = ops.call(bi.rt, {vals[0], vals[1]}, p);
       for (size_t i = 2; i < vals.size(); ++i) {
-        acc = b.make_if(acc, apply2(bi.rt, vals[i - 1], vals[i], p),
+        acc = b.make_if(acc, ops.call(bi.rt, {vals[i - 1], vals[i]}, p),
                         b.bool_literal(false));
       }
       out.push_back(acc);
@@ -1285,7 +1286,7 @@ struct Binder {
     if (static_cast<int32_t>(args.size()) != bi.arity) {
       fail(at, name + " takes " + std::to_string(bi.arity) + " arguments");
     }
-    if (args.size() == 2) return apply2(bi.rt, args[0], args[1], p);
+    if (args.size() == 2) return ops.call(bi.rt, {args[0], args[1]}, p);
     return rt.call(bi.rt, args, p);
   }
 

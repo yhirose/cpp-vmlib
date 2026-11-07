@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -279,9 +280,9 @@ inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
 
 // ---- Operators -------------------------------------------------------------
 //
-// A dynamic language's `+`, `==` and truthiness are the VM's own operator
+// A dynamic language's `+`, `==` and truthiness are the VM's own operation
 // on some values and the language's own runtime helper on the rest, which
-// is what an operator with a fallback says (vmlib.h's Tag::Unary): the
+// is what an operation with a fallback says (vmlib.h's Tag::Unary): the
 // VM's answer when every operand's tag is in `tags` -- and, `exact`, an
 // int result did not wrap -- and the helper's, called with the operands,
 // otherwise. Which tags is each language's to say, beside the helper they
@@ -302,17 +303,98 @@ inline NodeId op_or_helper(HelperTable& rt, UnOp op, NodeId x, uint32_t tags,
       .at(p)
       .unary(op, x, Fallback{rt.ref(helper, p), tags, exact});
 }
-
-// A value as a condition, by the language's truthiness helper: Truth,
-// the VM's truthiness as a bool, on `tags`, and `helper` elsewhere. With
-// bool in `tags`, a plain comparison is tested as itself, with no Truth
-// at all (FnCompiler::answers_alone); a comparison with a fallback of its
-// own goes straight to the jump where it answers for itself, and only
-// what its fallback answers meets the Truth (compile_truth_of_try).
-inline NodeId truth(HelperTable& rt, NodeId v, uint32_t tags,
-                    coreir::SrcPos p, const std::string& helper = "$truthy") {
-  return op_or_helper(rt, UnOp::Truth, v, tags, helper, p);
+// Index's own, the receiver and the key its operands.
+inline NodeId index_or_helper(HelperTable& rt, NodeId recv, NodeId key,
+                              uint32_t tags, const std::string& helper,
+                              coreir::SrcPos p) {
+  return coreir::Builder(rt.module())
+      .at(p)
+      .index(recv, key, Fallback{rt.ref(helper, p), tags});
 }
+
+// The sets on which languages here draw the same line.
+//
+// Numbers: two of them add, subtract, multiply and compare as the VM's
+// operators do, an int and a double meeting as numbers.
+inline uint32_t number_tags() { return coreir::tags_named({"int", "double"}); }
+// `+`: two numbers add and two strings concatenate, which is Add -- in
+// JavaScript, C#, Ruby and Python; a string beside anything else is each
+// language's own.
+inline uint32_t add_tags() {
+  return coreir::tags_named({"int", "double", "string"});
+}
+// `==`: two values of these types compare as Eq compares them, an int
+// and a double as numbers; two types Eq refuses are unequal, which is the
+// helper's to say -- and `!=` is Not of `==`. Lua, Ruby, C# and culebra.
+inline uint32_t equality_tags() {
+  return coreir::tags_named({"nil", "bool", "int", "double", "string"});
+}
+
+// The VM's operation that stands in for a helper: which one -- a UnOp, a
+// BinOp, or Index -- the tags it answers on, and whether exactly.
+struct VmOp {
+  enum class Kind : uint8_t { Unary, Binary, Index };
+  Kind kind;
+  uint8_t op;  // the UnOp or the BinOp; nothing for Index
+  uint32_t tags;
+  bool exact;
+
+  static VmOp unary(UnOp op, uint32_t tags, bool exact = false) {
+    return {Kind::Unary, static_cast<uint8_t>(op), tags, exact};
+  }
+  static VmOp binary(BinOp op, uint32_t tags, bool exact = false) {
+    return {Kind::Binary, static_cast<uint8_t>(op), tags, exact};
+  }
+  static VmOp index(uint32_t tags) { return {Kind::Index, 0, tags, false}; }
+};
+
+// A front end's operations by the helper each stands in for: one table,
+// written once, so the line between the VM's answer and the helper's is
+// drawn once per helper rather than at each place a source operator maps
+// to it. A helper the table does not name is called; one it does is its
+// operation, with the helper as the fallback. Every name is checked
+// against the helpers reserved at the first call, so a misspelled one
+// fails the bind rather than quietly losing its operation.
+class Operators {
+ public:
+  using Table = std::map<std::string, VmOp>;
+
+  Operators(HelperTable& rt, Table table)
+      : rt_(rt), table_(std::move(table)) {}
+
+  NodeId call(const std::string& helper, const std::vector<NodeId>& args,
+              coreir::SrcPos p) {
+    if (!checked_) {
+      for (const auto& entry : table_) rt_.func(entry.first);
+      checked_ = true;
+    }
+    const auto it = table_.find(helper);
+    if (it == table_.end()) return rt_.call(helper, args, p);
+    const VmOp& o = it->second;
+    const size_t operands = o.kind == VmOp::Kind::Unary ? 1 : 2;
+    if (args.size() != operands) {
+      coreir_rt::fail("Operators: " + helper + " takes " +
+                          std::to_string(operands) + " operands",
+                      0, 0);
+    }
+    switch (o.kind) {
+      case VmOp::Kind::Unary:
+        return op_or_helper(rt_, static_cast<UnOp>(o.op), args[0], o.tags,
+                            helper, p, o.exact);
+      case VmOp::Kind::Binary:
+        return op_or_helper(rt_, static_cast<BinOp>(o.op), args[0], args[1],
+                            o.tags, helper, p, o.exact);
+      case VmOp::Kind::Index:
+        break;
+    }
+    return index_or_helper(rt_, args[0], args[1], o.tags, helper, p);
+  }
+
+ private:
+  HelperTable& rt_;
+  Table table_;
+  bool checked_ = false;
+};
 
 // ---- Truthiness ------------------------------------------------------------
 //

@@ -169,6 +169,7 @@ struct Binder {
   std::map<const Ast*, int32_t> fn_of;
   std::map<const Ast*, std::vector<int32_t>> block_decls;
   HelperTable rt{m};  // the runtime helpers, by name
+  Operators ops{rt, operators()};  // the VM's operations standing in for them
   // Lua's error messages name the chunk, which is the path as it was
   // given on the command line -- so the binder has to be told it.
   std::string chunk;
@@ -389,6 +390,36 @@ struct Binder {
         "$select", "$pack", "$unpack", "$insertat", "$calltable",
     };
     return names;
+  }
+
+  // Lua's rules that are the VM's own operation on some values: the VM's
+  // answer where the two agree, the helper's on the rest (runtime_parts.h's
+  // Operators).
+  //
+  //   $truthy        a condition: nil and a bool are Value::truthy()'s,
+  //                  the rest $truthy's -- 0, which the VM calls false, is
+  //                  true in Lua.
+  //   $add $subm     `+`, `-` and `*` on two numbers, integers wrapping
+  //   $mulm          and a float on either side making a float, as Lua's
+  //                  do; anything else looks for a metamethod.
+  //   $idiv $mod     `//` and `%` on two integers, Lua's own floor; a float
+  //                  or a zero divisor is the helper's.
+  //   $eq            `==` (equality_tags), a table's being the helper's,
+  //                  for __eq.
+  //   $one           the first of a call's results, Index's on an array
+  //                  that has one and $one's nil on an empty one.
+  static Operators::Table operators() {
+    const uint32_t ints = tags_named("int");
+    return {
+        {"$truthy", VmOp::unary(UnOp::Truth, nil_false_tags())},
+        {"$add", VmOp::binary(BinOp::Add, number_tags())},
+        {"$subm", VmOp::binary(BinOp::Sub, number_tags())},
+        {"$mulm", VmOp::binary(BinOp::Mul, number_tags())},
+        {"$idiv", VmOp::binary(BinOp::FloorDiv, ints)},
+        {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
+        {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
+        {"$one", VmOp::index(tags_named({"array", "int"}))},
+    };
   }
 
   // One helper of the runtime above, with the front end's own addition to
@@ -968,46 +999,13 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
-  // Three of Lua's rules are the VM's own operator on some values, and the
-  // runtime's helper on the rest (runtime_parts.h's op_or_helper). Each set
-  // is where the two agree.
-  //
-  // A value used as a condition: nil and a bool are Value::truthy()'s,
-  // the rest $truthy's -- 0, which the VM calls false, is true in Lua. A
-  // comparison is a bool already, and costs no test of its own.
-  NodeId truthy(NodeId v, SrcPos p) {
-    return truth(rt, v, nil_false_tags(), p);
-  }
+  // A value used as a condition: $truthy's entry in operators().
+  NodeId truthy(NodeId v, SrcPos p) { return ops.call("$truthy", {v}, p); }
 
-  // `+`, `-` and `*` on two numbers are the VM's, integers wrapping and a
-  // float on either side making a float, as Lua's do; anything else is the
-  // helper's, which looks for a metamethod.
-  NodeId arith(BinOp op, const char* helper, NodeId x, NodeId y, SrcPos p) {
-    return op_or_helper(rt, op, x, y, tags_named({"int", "double"}), helper,
-                        p);
-  }
-
-  // `//` and `%` on two integers are FloorDiv and FloorMod, Lua's own
-  // floor; on a float, or by zero, the helper's.
-  NodeId floor(BinOp op, const char* helper, NodeId x, NodeId y, SrcPos p) {
-    return op_or_helper(rt, op, x, y, tags_named("int"), helper, p);
-  }
-
-  // The first of a call's results, which come as an array: Index's on one
-  // that has any, and $one's nil on an empty one, where Index traps.
+  // The first of a call's results, which come as an array: $one's entry in
+  // operators(), indexing it at 0.
   NodeId one(NodeId results, SrcPos p) {
-    return Builder(m).at(p).index(
-        results, Builder(m).at(p).literal(0),
-        {rt.ref("$one", p), tags_named({"array", "int"})});
-  }
-
-  // `==` on two values of these types is Eq's -- an integer and a float
-  // compare as numbers -- and on two of different types, which Eq refuses,
-  // $eq's, which says they differ. A table is $eq's, for __eq.
-  NodeId equal(NodeId x, NodeId y, SrcPos p) {
-    return op_or_helper(
-        rt, BinOp::Eq, x, y,
-        tags_named({"nil", "bool", "int", "double", "string"}), "$eq", p);
+    return ops.call("$one", {results, Builder(m).at(p).literal(0)}, p);
   }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
@@ -1238,10 +1236,10 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           if (t == "==") {
-            acc = equal(acc, rhs, pos_of(op));
+            acc = ops.call("$eq", {acc, rhs}, pos_of(op));
           } else if (t == "~=") {
-            acc = b.at(pos_of(op)).unary(UnOp::Not,
-                                         equal(acc, rhs, pos_of(op)));
+            const NodeId eq = ops.call("$eq", {acc, rhs}, pos_of(op));
+            acc = b.at(pos_of(op)).unary(UnOp::Not, eq);
           } else {
             const BinOp o = t == "<"    ? BinOp::Lt
                             : t == "<=" ? BinOp::Le
@@ -1267,13 +1265,13 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
-          if (t == "+") acc = arith(BinOp::Add, "$add", acc, rhs, op_p);
-          else if (t == "-") acc = arith(BinOp::Sub, "$subm", acc, rhs, op_p);
-          else if (t == "*") acc = arith(BinOp::Mul, "$mulm", acc, rhs, op_p);
+          if (t == "+") acc = ops.call("$add", {acc, rhs}, op_p);
+          else if (t == "-") acc = ops.call("$subm", {acc, rhs}, op_p);
+          else if (t == "*") acc = ops.call("$mulm", {acc, rhs}, op_p);
           else if (t == "/") acc = rt.call("$div", {acc, rhs}, op_p);
           else if (t == "//")
-            acc = floor(BinOp::FloorDiv, "$idiv", acc, rhs, op_p);
-          else acc = floor(BinOp::FloorMod, "$mod", acc, rhs, op_p);
+            acc = ops.call("$idiv", {acc, rhs}, op_p);
+          else acc = ops.call("$mod", {acc, rhs}, op_p);
         }
         return {acc};
       }
