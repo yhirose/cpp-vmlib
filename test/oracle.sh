@@ -11,7 +11,9 @@
 #
 # LANG is a key of test/languages.sh, which says how the language runs and
 # at which version. Any other version is refused (lang_pinned); --version
-# names the one that would run, or refuses the same way.
+# names the one that would run, or refuses the same way. run_samples.cmake
+# asks that once per test, and says it did in VMLIB_ORACLE_CHECKED, which
+# spares each case the same question; run by hand, a case asks it itself.
 set -euo pipefail
 . "$(dirname "$0")/languages.sh"
 
@@ -21,9 +23,10 @@ if [ "${1:-}" = --version ]; then
   lang_pinned "$lang"
   exit
 fi
-lang_pinned "$lang" >/dev/null
+if [ "${VMLIB_ORACLE_CHECKED:-}" != "$lang" ]; then
+  lang_pinned "$lang" >/dev/null
+fi
 
-scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
-lang_command "$lang" "$scratch" "$@"
+trap 'rm -rf "${LANG_SCRATCH:-}"' EXIT
+lang_command "$lang" "" "$@"
 "${CMD[@]}"

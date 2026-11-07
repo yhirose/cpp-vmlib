@@ -57,6 +57,8 @@ if(ORACLE)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "${err}")
   endif()
+  # Each case's oracle.sh need not ask again (test/oracle.sh).
+  set(ENV{VMLIB_ORACLE_CHECKED} "${LANG}")
 endif()
 
 # Absolute, so that the goldens the cases name and the ones the orphan

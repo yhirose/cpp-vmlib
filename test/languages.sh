@@ -24,10 +24,13 @@
 #                        More than one FILE is one program, concatenated in
 #                        order into SCRATCH under the last one's name --
 #                        what mini-js's own CLI does with the prelude its
-#                        samples share. Fails, with the reason on stderr,
-#                        when the compile does. Running CMD starts nothing
-#                        but the program itself, so bench/languages times
-#                        the language rather than this file.
+#                        samples share. An empty SCRATCH makes a directory
+#                        only where one is needed, a compile or files to
+#                        join, and names it in LANG_SCRATCH for the caller
+#                        to remove. Fails, with the reason on stderr, when
+#                        the compile does. Running CMD starts nothing but
+#                        the program itself, so bench/languages times the
+#                        language rather than this file.
 #
 # Each implementation's command is resolved once, into LANG_BIN, and the
 # environment overrides any of them by the variable named there, the way
@@ -154,12 +157,24 @@ lang_build() {
   fi
 }
 
+# Makes lang_command's `scratch` (its local, which this sees) a directory
+# to write into: the caller's, or for a caller that gave none, a new one,
+# named in LANG_SCRATCH.
+lang_room() {
+  if [ -z "$scratch" ]; then
+    scratch=$(mktemp -d)
+    LANG_SCRATCH=$scratch
+  fi
+  mkdir -p "$scratch"
+}
+
 lang_command() {
   lang_known "$1" || return
   local lang=$1 scratch=$2; shift 2
-  mkdir -p "$scratch"
+  LANG_SCRATCH=
   local file=$1
   if [ $# -gt 1 ]; then
+    lang_room
     local last=${*: -1}
     file=$scratch/${last##*/}
     cat "$@" >"$file"
@@ -175,12 +190,14 @@ lang_command() {
     # Built once, not `go run`: that compiles and links on every run.
     # `go build prog.go` names its file, which works outside a module.
     go)
+      lang_room
       lang_build "$scratch/build.log" \
         "${LANG_BIN[go]}" build -o "$scratch/prog" "$file" || return
       CMD=("$scratch/prog") ;;
     # A project of its own: the SDK compiles every .cs in a project's
     # directory, so two programs side by side would both declare Main.
     csharp)
+      lang_room
       cp "$file" "$scratch/Program.cs"
       cat >"$scratch/prog.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
