@@ -31,11 +31,10 @@
 #                        the language rather than this file.
 #
 # Each implementation is the command in a variable of its own -- PYTHON,
-# RUBY, LUA, GUILE, CULEBRA, NODE, DOTNET, GO, and for PL/0 PL0_CULEBRA
-# running the file PL0_CUL -- and the environment overrides any of them,
-# the way CC names a C compiler: to run a version installed under another
-# name (PYTHON=python3.14), or two releases of one implementation side by
-# side (PL0_CULEBRA).
+# RUBY, LUA, GUILE, CULEBRA, NODE, DOTNET, GO; PL/0's is CULEBRA running
+# the file PL0_CUL -- and the environment overrides any of them, the way
+# CC names a C compiler: to run a version installed under another name
+# (PYTHON=python3.14) or not on PATH at all.
 
 if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -67,9 +66,10 @@ declare -A LANG_NAME=(
 #   printing a class value with its name -- and even between the commits
 #   in between, so mini-culebra follows one release, and moves with the
 #   pin.
-# pl0 0.8.0: culebra 0.8.0 running pl0.cul from the same release tag.
-#   pl0.cul is written against its own release's PEG API, which keeps
-#   changing (0.8.0 runs no earlier release's pl0.cul).
+# pl0, culebra's: the same culebra running pl0.cul from that release's
+#   tag. pl0.cul is written against its own release's PEG API, which keeps
+#   changing (0.8.0 runs no earlier release's pl0.cul), so the two move
+#   together.
 # csharp 8.0 is .NET's: the program is built for net8.0, and the newest
 #   8.0.x runtime is what runs it.
 # The rest are pinned at the release the language is named by (Lua 5.4,
@@ -77,11 +77,12 @@ declare -A LANG_NAME=(
 # checks the goldens does not move under them when a newer one comes out.
 declare -A LANG_VERSION=(
   [python]=3.14 [ruby]=3.3 [lua]=5.4 [scheme]=3.0 [culebra]=0.8.0 [js]=24
-  [csharp]=8.0 [go]=1.27 [pl0]=0.8.0
+  [csharp]=8.0 [go]=1.27
 )
+LANG_VERSION[pl0]=${LANG_VERSION[culebra]}
 
 : "${PYTHON:=python3}" "${RUBY:=ruby}" "${GUILE:=guile}" "${CULEBRA:=culebra}"
-: "${NODE:=node}" "${DOTNET:=dotnet}" "${GO:=go}" "${PL0_CULEBRA:=$CULEBRA}"
+: "${NODE:=node}" "${DOTNET:=dotnet}" "${GO:=go}"
 # Debian and Ubuntu name Lua's binary by its version (lua5.4); elsewhere it
 # is plain `lua`.
 : "${LUA:=$(command -v "lua${LANG_VERSION[lua]}" || echo lua)}"
@@ -103,7 +104,7 @@ lang_version() {
     lua) "$LUA" -v | awk '{print $2}' ;;
     scheme) "$GUILE" -c '(display (version)) (newline)' ;;
     culebra) "$CULEBRA" --version | awk '{print $2}' ;;
-    pl0) lang_pl0_cul >/dev/null && "$PL0_CULEBRA" --version | awk '{print $2}' ;;
+    pl0) lang_pl0_cul >/dev/null && lang_version culebra ;;
     js) "$NODE" -p process.versions.node ;;
     csharp)
       "$DOTNET" --list-runtimes | awk -v want="${LANG_VERSION[csharp]}." \
@@ -143,7 +144,7 @@ lang_command() {
     pl0)
       local pl0_cul
       pl0_cul=$(lang_pl0_cul) || return
-      CMD=("$PL0_CULEBRA" "$pl0_cul" "$file") ;;
+      CMD=("$CULEBRA" "$pl0_cul" "$file") ;;
     js) CMD=("$NODE" "$file") ;;
     # Built once, not `go run`: that compiles and links on every run.
     # `go build prog.go` names its file, which works outside a module.

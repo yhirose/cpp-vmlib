@@ -46,22 +46,17 @@ runs:
     # culebra has no package; its own docs point at the tagged release's
     # prebuilt binary rather than building from source (see
     # https://github.com/yhirose/culebra/blob/master/docs/handbook.ja.md#1-%E5%B0%8E%E5%85%A5).
-    # Two releases of it: mini-culebra's on PATH, and PL/0's beside the
-    # pl0.cul from its tag, which the release itself does not ship.
+    # PL/0's oracle is culebra running pl0.cul, which the release does not
+    # ship, so it comes from the same tag's source.
     - shell: bash
       env:
         CULEBRA_VERSION: ${{ steps.pin.outputs.culebra }}
-        PL0_VERSION: ${{ steps.pin.outputs.pl0 }}
       run: |
-        release() {
-          mkdir -p "$2"
-          curl -fsSL "https://github.com/yhirose/culebra/releases/download/v$1/culebra-linux-x64.tar.gz" |
-            tar xz -C "$2" --strip-components=1
-        }
-        release "$CULEBRA_VERSION" "$RUNNER_TEMP/culebra"
-        release "$PL0_VERSION" "$RUNNER_TEMP/pl0"
-        curl -fsSL -o "$RUNNER_TEMP/pl0/pl0.cul" \
-          "https://raw.githubusercontent.com/yhirose/culebra/v$PL0_VERSION/examples/languages/pl0/pl0.cul"
-        echo "$RUNNER_TEMP/culebra" >>"$GITHUB_PATH"
-        echo "PL0_CULEBRA=$RUNNER_TEMP/pl0/culebra" >>"$GITHUB_ENV"
-        echo "PL0_CUL=$RUNNER_TEMP/pl0/pl0.cul" >>"$GITHUB_ENV"
+        dir=$RUNNER_TEMP/culebra
+        mkdir -p "$dir"
+        curl -fsSL "https://github.com/yhirose/culebra/releases/download/v$CULEBRA_VERSION/culebra-linux-x64.tar.gz" |
+          tar xz -C "$dir" --strip-components=1
+        curl -fsSL -o "$dir/pl0.cul" \
+          "https://raw.githubusercontent.com/yhirose/culebra/v$CULEBRA_VERSION/examples/languages/pl0/pl0.cul"
+        echo "$dir" >>"$GITHUB_PATH"
+        echo "PL0_CUL=$dir/pl0.cul" >>"$GITHUB_ENV"
