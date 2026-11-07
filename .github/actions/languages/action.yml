@@ -10,15 +10,18 @@ description: >-
 runs:
   using: composite
   steps:
-    # The versions, read from the one place that pins them; test/goldens.sh
-    # refuses any other.
+    # The versions, read from the one place that pins them (test/goldens.sh
+    # refuses any other), and where pl0.cul is in culebra's repository.
     - id: pin
       shell: bash
       run: |
         . test/languages.sh
-        for lang in "${!LANG_VERSION[@]}"; do
-          echo "$lang=${LANG_VERSION[$lang]}"
-        done >>"$GITHUB_OUTPUT"
+        {
+          for lang in "${!LANG_VERSION[@]}"; do
+            echo "$lang=${LANG_VERSION[$lang]}"
+          done
+          echo "pl0_cul=$LANG_PL0_CUL"
+        } >>"$GITHUB_OUTPUT"
     - uses: actions/setup-python@v7
       with:
         python-version: ${{ steps.pin.outputs.python }}
@@ -57,12 +60,13 @@ runs:
     - shell: bash
       env:
         CULEBRA_VERSION: ${{ steps.pin.outputs.culebra }}
+        PL0_CUL_PATH: ${{ steps.pin.outputs.pl0_cul }}
       run: |
         dir=$RUNNER_TEMP/culebra
         mkdir -p "$dir"
         curl -fsSL "https://github.com/yhirose/culebra/releases/download/v$CULEBRA_VERSION/culebra-linux-x64.tar.gz" |
           tar xz -C "$dir" --strip-components=1
         curl -fsSL -o "$dir/pl0.cul" \
-          "https://raw.githubusercontent.com/yhirose/culebra/v$CULEBRA_VERSION/examples/languages/pl0/pl0.cul"
+          "https://raw.githubusercontent.com/yhirose/culebra/v$CULEBRA_VERSION/$PL0_CUL_PATH"
         echo "$dir" >>"$GITHUB_PATH"
         echo "PL0_CUL=$dir/pl0.cul" >>"$GITHUB_ENV"

@@ -14,6 +14,7 @@
 #                        only one lang_pinned accepts (CI installs exactly
 #                        these). Below is why each is pinned as tightly as
 #                        it is.
+#   LANG_PL0_CUL         where pl0.cul sits in culebra's repository.
 #   lang_name LANG       prints what its implementation is called.
 #   lang_pinned LANG     the version gate test/oracle.sh runs behind.
 #   lang_command LANG SCRATCH FILE...
@@ -98,11 +99,14 @@ lang_known() {
   fi
 }
 
-# PL/0's interpreter is a culebra program from culebra's own repository.
+# PL/0's interpreter is a culebra program from culebra's own repository,
+# at this path in it; PL0_CUL names a copy of it from the pinned release's
+# tag.
+LANG_PL0_CUL=examples/languages/pl0/pl0.cul
 lang_pl0_cul() {
   if [ ! -f "${PL0_CUL:-}" ]; then
-    echo "PL0_CUL must name pl0.cul (examples/languages/pl0/ in culebra's" \
-         "repository) from its v${LANG_VERSION[pl0]} tag" >&2
+    echo "PL0_CUL must name culebra's $LANG_PL0_CUL, from its" \
+         "v${LANG_VERSION[pl0]} tag" >&2
     return 1
   fi
   echo "$PL0_CUL"
