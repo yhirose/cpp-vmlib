@@ -471,7 +471,7 @@ struct Binder {
   // ToStr is the answer verbatim.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, "nan");
+    float_str(r, {"nan", "inf", "-inf"});
     r.finish("$fstr");
   }
 

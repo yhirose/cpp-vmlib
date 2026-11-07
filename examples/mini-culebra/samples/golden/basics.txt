@@ -19,3 +19,8 @@ listed
 101 7
 shown runs
 refused
+inf
+-inf
+nan
+[inf, -inf, nan]
+inf -inf

@@ -61,3 +61,11 @@ println("{n} {assigned()}")
 # fails.
 fn shown() { println("shown runs"); 2 }
 try { println('one', shown()) } catch e { println("refused") }
+
+# The doubles that are no number print the way culebra spells them.
+let big = 1e308 * 10.0
+println(big)
+println(-big)
+println(big - big)
+println([big, -big, big - big])
+println("{big} {-big}")

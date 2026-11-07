@@ -65,3 +65,8 @@ noisy [3, 1, 2]
 [1, 2, 3]
 noisy abc
 3
+Infinity
+-Infinity
+NaN
+[Infinity, -Infinity, NaN]
+Infinity -Infinity

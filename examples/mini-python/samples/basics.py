@@ -82,3 +82,8 @@ try:
 except TypeError:
     print("TypeError")
 print(repr(str()), int(), float(), list(), bool(), tuple())
+
+# The doubles that are no number print the way Python spells them.
+big = 1e308 * 10.0
+print(big, -big, big - big)
+print([big, -big, big - big], str(big), repr(-big))

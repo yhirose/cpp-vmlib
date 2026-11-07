@@ -37,3 +37,5 @@ noisy [1]
 noisy [2]
 TypeError
 '' 0 0.0 [] False ()
+inf -inf nan
+[inf, -inf, nan] inf -inf

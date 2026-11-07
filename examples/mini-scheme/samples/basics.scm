@@ -67,3 +67,10 @@
 ; earlier ones' temporaries alone.
 (define (cc-chain) (< 0 (call/cc (lambda (k) (k 5))) 10))
 (display (cc-chain)) (newline)
+; The doubles that are no number print the way Guile spells them.
+(define (pow10 n) (if (= n 0) 1.0 (* 10.0 (pow10 (- n 1)))))
+(define big (pow10 400))
+(display big) (newline)
+(display (- big)) (newline)
+(display (- big big)) (newline)
+(display (list big (- big) (- big big))) (newline)

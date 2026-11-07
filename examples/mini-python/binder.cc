@@ -1419,7 +1419,7 @@ struct Binder {
   // rule runtime_parts.h's float_str writes for Ruby, Guile and culebra too.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, "nan");
+    float_str(r, {"nan", "inf", "-inf"});
     r.finish("$fstr");
   }
 

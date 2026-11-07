@@ -81,3 +81,16 @@ y = p noisy(1), noisy(2)
 puts y.inspect
 puts noisy([3, 1, 2]).sort.inspect
 puts noisy("abc").length
+
+# The doubles that are no number print the way Ruby spells them.
+big = 1.0
+i = 0
+while i < 400
+  big = big * 10.0
+  i = i + 1
+end
+puts big
+puts(-big)
+puts(big - big)
+puts [big, -big, big - big].inspect
+puts "#{big} #{-big}"

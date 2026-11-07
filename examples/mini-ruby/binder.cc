@@ -747,7 +747,7 @@ struct Binder {
   // Float#to_s: shortest round trip, ".0" on a whole one.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, "NaN");
+    float_str(r, {"NaN", "Infinity", "-Infinity"});
     r.finish("$fstr");
   }
 

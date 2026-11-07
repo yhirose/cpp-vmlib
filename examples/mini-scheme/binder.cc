@@ -964,7 +964,7 @@ struct Binder {
   // float_str does for Python, Ruby and culebra.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, "+nan.0");
+    float_str(r, {"+nan.0", "+inf.0", "-inf.0"});
     r.finish("$fstr");
   }
 
