@@ -128,6 +128,11 @@ rather than contradicts:
   that question. C#'s answer is: numbers compare numerically, different
   types are unequal, `null == null`, and two references are equal when
   they are the same object -- which is `Same`.
+
+  Both are called only where the VM's own operator would not give the
+  same answer: `+` on two numbers or two strings, and `==` on null,
+  bools, numbers and strings, are the VM's `Add` and `Eq`, with the
+  helper behind them as the fallback (vmlib.h's `Tag::Unary`).
 * `$str`, because C# prints a `bool` as `True`/`False` and `null` as
   nothing, where `to_display` prints `true`/`false`/`nil`, and because a
   class's own `ToString` overrides all of it -- the number rows above

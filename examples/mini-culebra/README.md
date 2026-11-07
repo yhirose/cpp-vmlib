@@ -53,7 +53,9 @@ predicts:
 **`==`.** `eval_binop` refuses two values of different types -- *"a
 question a language answers, not the VM"* -- where culebra answers `false`;
 and culebra compares arrays and objects *structurally*, which no intrinsic
-does. `$eq` is that, recursively.
+does. `$eq` is that, recursively -- called only past the values where
+`Eq` is culebra's own (null, bools, numbers, strings), as the fallback of
+an `Eq` (vmlib.h's `Tag::Unary`).
 
 **Float display.** `to_display` is shortest round-trip, and its comment
 names this case: *"4.0 is '4' -- whether a whole double should show a
