@@ -273,12 +273,13 @@ made the same decision and wrote it the same way, it is kept once, outside
 -- the class layout and the walk up its bases, a for-each loop and the
 cursor it steps, the nil-and-false truthiness, a float printed with its ".0",
 two containers compared by what they hold, a promise settled once and
-awaited -- and the end of that file lists what each front end still
-writes for itself, and why. Its
-key convention is worth taking even without the rest: the
-implementation's own object keys start with `0x01` (`vmlib.h`'s `kDropKey`
-is one), and a program's names kept beside them, its methods on a class
-table, with `0x02`, so that neither can meet the other or a field.
+awaited, an operator that is the VM's where the language agrees with it
+and the language's helper elsewhere -- and the end of that file lists
+what each front end still writes for itself, and why. Its key convention
+is worth taking even without the rest: the implementation's own object
+keys start with `0x01` (`vmlib.h`'s `kDropKey` is one), and a program's
+names kept beside them, its methods on a class table, with `0x02`, so
+that neither can meet the other or a field.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.

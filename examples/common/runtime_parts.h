@@ -32,11 +32,13 @@
 namespace runtime_parts {
 
 using coreir::BinOp;
+using coreir::Fallback;
 using coreir::FuncWriter;
 using coreir::HelperTable;
 using coreir::HelperWriter;
 using coreir::IntrinsicId;
 using coreir::NodeId;
+using coreir::UnOp;
 
 // ---- Keys, by who chose the name -------------------------------------------
 //
@@ -273,6 +275,41 @@ inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
       detail::for_each(r.table, r.pos, it.i, st.i, cursor, body);
   r.add(start);
   r.add(loop);
+}
+
+// ---- Operators -------------------------------------------------------------
+//
+// A dynamic language's `+`, `==` and truthiness are the VM's own operator
+// on some values and the language's own runtime helper on the rest, which
+// is what an operator with a fallback says (vmlib.h's Tag::Unary): the
+// VM's answer when every operand's tag is in `tags` -- and, `exact`, an
+// int result did not wrap -- and the helper's, called with the operands,
+// otherwise. Which tags is each language's to say, beside the helper they
+// stand in for: where the two give the same answer. The helper is the one
+// the front end called before, so no rule changes, and the call is made
+// only where it is needed.
+inline NodeId op_or_helper(HelperTable& rt, BinOp op, NodeId x, NodeId y,
+                           uint32_t tags, const std::string& helper,
+                           coreir::SrcPos p, bool exact = false) {
+  return coreir::Builder(rt.module())
+      .at(p)
+      .binary(op, x, y, Fallback{rt.ref(helper, p), tags, exact});
+}
+inline NodeId op_or_helper(HelperTable& rt, UnOp op, NodeId x, uint32_t tags,
+                           const std::string& helper, coreir::SrcPos p,
+                           bool exact = false) {
+  return coreir::Builder(rt.module())
+      .at(p)
+      .unary(op, x, Fallback{rt.ref(helper, p), tags, exact});
+}
+
+// A value as a condition, by the language's truthiness helper: Truth,
+// the VM's truthiness as a bool, on `tags`, and `helper` elsewhere. A
+// comparison is a bool already, and the compiler tests it with no call
+// and no Truth (FnCompiler::answers_alone) when bool is in `tags`.
+inline NodeId truth(HelperTable& rt, NodeId v, uint32_t tags,
+                    coreir::SrcPos p, const std::string& helper = "$truthy") {
+  return op_or_helper(rt, UnOp::Truth, v, tags, helper, p);
 }
 
 // ---- Truthiness ------------------------------------------------------------

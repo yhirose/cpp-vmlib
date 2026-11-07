@@ -37,15 +37,20 @@ like they belong to a runtime and do not:
 and its own comment says why: *"JavaScript calls both falsy, Lua calls
 neither, and that disagreement is what makes it a language's decision
 rather than the VM's."* So `$truthy` is a func this binder writes in IR,
-and every condition, `!`, `&&` and `||` goes through it. (Not quite every
-one: a comparison already produced a bool and ToBoolean is the identity on
-those, so `i < n` skips the call -- see `Binder::truthy`.)
+and every condition, `!`, `&&` and `||` is decided by it -- though it is
+called only where the VM's answer is not JavaScript's: on undefined, a
+bool or an int the two agree, and a condition on one of those is the
+VM's own test, a comparison costing nothing beyond itself (an operator
+with a fallback, vmlib.h's `Tag::Unary`; see `Binder::truthy`). `+` and
+`===` below are arranged the same way.
 
 **What is equal.** `BinOp::Eq` refuses two values of different types --
 *"a question a language answers, not the VM"* -- which is a trap where
 JavaScript wants `false`. `$seq` is `===`: different types are unequal,
 `nil` equals `nil`, scalars compare by value, and everything else is
-`IntrinsicId::Same`, reference identity.
+`IntrinsicId::Same`, reference identity. Two values of one type other
+than an int are compared by `Eq` itself, which agrees, and only the rest
+reach `$seq`.
 
 **How a number prints.** `ToStr` is shortest-round-trip, which agrees with
 ES `Number::toString` on `0.1 + 0.2` and on `3.5` but has no reason to

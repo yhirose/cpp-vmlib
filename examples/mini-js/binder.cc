@@ -1140,16 +1140,33 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
-  // A value used as a condition. A comparison already produced a bool, and
-  // JavaScript's ToBoolean is the identity on those, so the call is
-  // skipped there -- which covers `i < n`, the condition most loops have.
+  // Three of JavaScript's rules are the VM's own operator on some values,
+  // and $truthy, $add and $seq on the rest (runtime_parts.h's
+  // op_or_helper). Each set is where the two agree.
+  //
+  // A value used as a condition, ToBoolean: undefined, a bool and an int
+  // are false or true as Value::truthy() says; "" and NaN, false here and
+  // true to the VM, are $truthy's. A comparison is a bool already, and
+  // costs no test of its own -- `i < n`, the condition most loops have.
   NodeId truthy(NodeId v, SrcPos p) {
-    const Node& n = m.at(v);
-    if (n.tag == Tag::Binary && is_comparison(static_cast<BinOp>(n.op))) {
-      return v;
-    }
-    if (n.tag == Tag::Literal && m.const_kind(v) == ConstKind::Bool) return v;
-    return rt.call("$truthy", {v}, p);
+    return truth(rt, v, tags_named({"nil", "bool", "int"}), p);
+  }
+
+  // `+`: two numbers add and two strings concatenate, as Add does; a
+  // string beside anything else makes the other a string first, which is
+  // $add's.
+  NodeId add(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, BinOp::Add, x, y,
+                        tags_named({"int", "double", "string"}), "$add", p);
+  }
+
+  // `===`: two values of one type compare as Eq does, but for an int
+  // beside a double -- Eq says 1 == 1.0, and $seq, which compares the
+  // types first, says not -- so an int is $seq's, as two types are.
+  NodeId strict_eq(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, BinOp::Eq, x, y,
+                        tags_named({"nil", "bool", "double", "string"}),
+                        "$seq", p);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
@@ -1417,7 +1434,7 @@ struct Binder {
     auto b = Builder(m).at(p);
     const bool up = a.nodes.back()->token == "++";
     return emit_store(a, a.nodes.size() - 1, ctx, p, false, [&](auto&& cur) {
-      return up ? rt.call("$add", {cur(), b.double_literal(1.0)}, p)
+      return up ? add(cur(), b.double_literal(1.0), p)
                 : b.binary(BinOp::Sub, cur(), b.double_literal(1.0));
     });
   }
@@ -1591,8 +1608,7 @@ struct Binder {
                                                : b.nil_literal());
       }
       case "notexpr"_:
-        return b.binary(BinOp::Eq, truthy(emit_expr(*a.nodes[0], ctx), p),
-                        b.bool_literal(false));
+        return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "negexpr"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "typeofexpr"_:
@@ -1635,10 +1651,8 @@ struct Binder {
                          "==' -- see README.md");
           }
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = rt.call("$seq", {acc, rhs}, pos_of(op));
-          acc = t == "===" ? eq
-                           : b.at(pos_of(op))
-                                 .binary(BinOp::Eq, eq, b.bool_literal(false));
+          const NodeId eq = strict_eq(acc, rhs, pos_of(op));
+          acc = t == "===" ? eq : b.at(pos_of(op)).unary(UnOp::Not, eq);
         }
         return acc;
       }
@@ -1661,7 +1675,7 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          acc = op.token == "+" ? rt.call("$add", {acc, rhs}, pos_of(op))
+          acc = op.token == "+" ? add(acc, rhs, pos_of(op))
                                 : b.at(pos_of(op)).binary(BinOp::Sub, acc, rhs);
         }
         return acc;
@@ -2207,7 +2221,7 @@ struct Binder {
                       [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(rhs, ctx);
       if (op == "=") return v;
-      if (op == "+=") return rt.call("$add", {cur(), v}, p);
+      if (op == "+=") return add(cur(), v, p);
       if (op == "-=") return b.binary(BinOp::Sub, cur(), v);
       if (op == "*=") return b.binary(BinOp::Mul, cur(), v);
       if (op == "/=") return b.binary(BinOp::Div, cur(), v);
