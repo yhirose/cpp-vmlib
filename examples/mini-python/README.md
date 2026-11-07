@@ -44,11 +44,18 @@ sign beside it. Base 10^9 because a limb product plus two carries stays
 under 2^63, and because rendering is nine decimal digits per limb with no
 division at all -- `$bstr` is a loop over `ToStr` and a zero-pad.
 
-**The promotion rule.** `$add` and `$mul` do the arithmetic with `BinOp`
-when both operands are machine integers small enough that the operation
-*cannot* leave int64 -- under 2^62 for a sum, under 2^31 for a product --
-and go to the limbs otherwise. That is what keeps a loop counter a loop
-counter.
+**The promotion rule.** `+`, `-` and `*` on two machine integers are the
+VM's `Add`, `Sub` and `Mul` when the answer fits an int64, and go to the
+limbs when it would wrap: each is an operator with a fallback (vmlib.h's
+`Tag::Unary`) marked exact, which takes the VM's answer only when it is
+the true one, with `$add`, `$sub` or `$mul` behind it -- and inside `$add`
+and `$mul` the same exact operator stands before `$bigadd` and `$bigmul`.
+That is what keeps a loop counter a loop counter, at the cost of one
+instruction rather than a call. The VM answers the same way for two floats
+or a float and an int, for `+` on two strings, for an ordering of two ints
+or two strings, for `==` on None, bools, ints and strings, for `-x`, and
+for the truth of None, a bool or a number; everything else is the
+helper's, as it always was.
 
 **The demotion rule.** `$mkbig` strips leading zero limbs and, at two limbs
 or fewer, hands back an ordinary `Int` -- 10^18 fits an int64 with room to

@@ -84,10 +84,6 @@ constexpr char kTypeKey[] = "\x01" "y";
 // Base 10^9: a limb product plus two carries stays under 2^63, and
 // rendering is nine decimal digits per limb with no division at all.
 constexpr int64_t kBase = 1000000000;
-// Below these, a machine integer cannot overflow: two addends under 2^62
-// sum under 2^63, and two factors under 2^31 multiply under 2^62.
-constexpr int64_t kAddSafe = int64_t{1} << 62;
-constexpr int64_t kMulSafe = int64_t{1} << 31;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -773,7 +769,7 @@ struct Binder {
         "$tofloat", "$neg", "$pyabs",
         // Arithmetic and comparison, dispatching on what the operands are.
         "$add", "$sub", "$mul", "$fdiv", "$idiv", "$mod", "$pow", "$cmp",
-        "$eq", "$truthy",
+        "$lt", "$le", "$gt", "$ge", "$eq", "$truthy",
         // Display.
         "$fstr", "$str", "$strrepr", "$repr", "$liststr", "$dictstr",
         // Containers, attributes, iteration, exceptions.
@@ -1118,13 +1114,22 @@ struct Binder {
 
   // -- Arithmetic, dispatching on what the operands turn out to be --------
   //
-  // The promotion rule lives here: two machine integers small enough that
-  // the operation cannot leave int64 are done with BinOp, and everything
-  // else goes to the limbs. That is what keeps a loop counter a loop
-  // counter while `2 ** 100` is exact.
+  // The promotion rule lives here: an operation on two machine integers
+  // whose answer fits int64 is done with BinOp, and everything else goes to
+  // the limbs. That is what keeps a loop counter a loop counter while
+  // `2 ** 100` is exact. The rule is an exact operator with the limbs'
+  // helper as its fallback (vmlib.h's Tag::Unary, kExact) -- the same
+  // operator a `+`, `-` or `*` in the program is (Binder::arith), so the
+  // two cannot disagree about where int64 ends.
 
   NodeId int_pair(RT& r, NodeId ta, NodeId tb) {
     return r.both(r.is(ta, "int"), r.is(tb, "int"));
+  }
+
+  NodeId exact_or(RT& r, BinOp op, FuncWriter::Slot a, FuncWriter::Slot b,
+                  const char* limbs) {
+    return r.b.binary(op, r.L(a), r.L(b),
+                      {r.ref(limbs), tags_named("int"), true});
   }
 
   void rt_add() {
@@ -1141,11 +1146,8 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
-    r.add(r.iff(
-        int_pair(r, r.typ(a), r.typ(b)),
-        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kAddSafe)),
-                     r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kAddSafe))),
-              r.ret(r.bin(BinOp::Add, r.L(a), r.L(b))))));
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(exact_or(r, BinOp::Add, a, b, "$bigadd"))));
     r.add(r.ret(r.call("$bigadd", {r.L(a), r.L(b)})));
     r.finish("$add");
   }
@@ -1167,11 +1169,8 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
-    r.add(r.iff(
-        int_pair(r, r.typ(a), r.typ(b)),
-        r.iff(r.both(r.bin(BinOp::Lt, r.call("$abs", {r.L(a)}), r.I(kMulSafe)),
-                     r.bin(BinOp::Lt, r.call("$abs", {r.L(b)}), r.I(kMulSafe))),
-              r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b))))));
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(exact_or(r, BinOp::Mul, a, b, "$bigmul"))));
     r.add(r.ret(r.call("$bigmul", {r.L(a), r.L(b)})));
     r.finish("$mul");
   }
@@ -1353,6 +1352,15 @@ struct Binder {
                                     r.call("$biglimbs", {r.L(b)})})));
     r.add(r.ret(r.bin(BinOp::Mul, r.L(c), r.L(sa))));
     r.finish("$cmp");
+  }
+
+  // `<`, `<=`, `>` and `>=` by $cmp, each the fallback of the operator a
+  // comparison in the program is (Binder::order).
+  void rt_order(const char* name, BinOp op) {
+    RT r(*this);
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.ret(r.bin(op, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0))));
+    r.finish(name);
   }
 
   void rt_eq() {
@@ -2994,6 +3002,8 @@ struct Binder {
     rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
     rt_add(); rt_sub(); rt_mul(); rt_fdiv(); rt_idiv(); rt_mod(); rt_pow();
     rt_cmp(); rt_eq(); rt_truthy();
+    rt_order("$lt", BinOp::Lt); rt_order("$le", BinOp::Le);
+    rt_order("$gt", BinOp::Gt); rt_order("$ge", BinOp::Ge);
     rt_fstr(); rt_str(); rt_strrepr(); rt_repr(); rt_liststr(); rt_dictstr();
     rt_len(); rt_idx(); rt_setidx(); rt_slice(); rt_in(); rt_getattr();
     rt_setattr(); rt_iter(); rt_iternext(); rt_exc(); rt_isexc(); rt_range();
@@ -3012,6 +3022,54 @@ struct Binder {
   }
 
   // ==== Pass B: emit ======================================================
+
+  // Python's operators are the VM's own on some values, and the runtime's
+  // helper on the rest (runtime_parts.h's op_or_helper). Each set is where
+  // the two agree.
+  //
+  // A value used as a condition: None, a bool and a number are false or
+  // true as Value::truthy() says; a string, a list and a dict, false when
+  // empty, are $truthy's. A comparison is a bool already, and costs no
+  // test of its own.
+  NodeId truthy(NodeId v, SrcPos p) {
+    return truth(rt, v, tags_named({"nil", "bool", "int", "double"}), p);
+  }
+
+  // `+`, `-` and `*` on two numbers, and `+` on two strings, are the VM's
+  // -- an int answer exactly, since an int that would wrap is $add's, and
+  // the limbs' (the promotion rule, at rt_add). The rest, and `/`, `//`,
+  // `%`, are the helpers' throughout.
+  NodeId arith(const char* helper, NodeId x, NodeId y, SrcPos p) {
+    const std::string h = helper;
+    const uint32_t num = tags_named({"int", "double"});
+    if (h == "$add") {
+      return op_or_helper(rt, BinOp::Add, x, y, num | tags_named("string"),
+                          h, p, true);
+    }
+    if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p, true);
+    if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p, true);
+    return rt.call(h, {x, y}, p);
+  }
+
+  // An ordering on two ints or two strings is the VM's; a float is not, as
+  // $cmp orders it through ToDouble beside an int, and a bignum, a tuple or
+  // an object are $cmp's too.
+  NodeId order(BinOp op, NodeId x, NodeId y, SrcPos p) {
+    const char* h = op == BinOp::Lt   ? "$lt"
+                    : op == BinOp::Le ? "$le"
+                    : op == BinOp::Gt ? "$gt"
+                                      : "$ge";
+    return op_or_helper(rt, op, x, y, tags_named({"int", "string"}), h, p);
+  }
+
+  // `==` on two values of these types is Eq's, and on two of different
+  // types, which Eq refuses, $eq's, which also asks a bignum, a float, a
+  // container or an object's own `__eq__`.
+  NodeId equal(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, BinOp::Eq, x, y,
+                        tags_named({"nil", "bool", "int", "string"}), "$eq",
+                        p);
+  }
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
@@ -3377,9 +3435,7 @@ struct Binder {
       }
       case "assertstmt"_:
         return b.make_if(
-            b.binary(BinOp::Eq,
-                     rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-                     b.bool_literal(false)),
+            b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p)),
             rt.call("$exc",
                     {b.str_literal("AssertionError"),
                      a.nodes.size() > 1
@@ -3393,7 +3449,7 @@ struct Binder {
         return emit_if(a, ctx);
       case "whilestmt"_:
         return b.make_while(
-            rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+            truthy(emit_expr(*a.nodes[0], ctx), p),
             emit_block(*a.nodes[1], ctx));
       case "forstmt"_:
         return emit_for(a, ctx);
@@ -3431,14 +3487,14 @@ struct Binder {
     auto b = Builder(m).at(p);
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
-        rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+        truthy(emit_expr(*a.nodes[0], ctx), p),
         emit_block(*a.nodes[1], ctx));
     NodeId els;
     for (size_t i = 2; i < a.nodes.size(); ++i) {
       const Ast& c = *a.nodes[i];
       if (c.tag == "elifpart"_) {
         arms.emplace_back(
-            rt.call("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+            truthy(emit_expr(*c.nodes[0], ctx), p),
             emit_block(*c.nodes[1], ctx));
       } else {
         els = emit_block(*c.nodes[0], ctx);
@@ -3669,10 +3725,10 @@ struct Binder {
                                     b.intrinsic(IntrinsicId::TypeOf, {now()}),
                                     b.str_literal("array")),
                            rt.call("$aext", {now(), v}, p),
-                           rt.call("$add", {now(), v}, p)));
+                           arith("$add", now(), v, p)));
       }
-      if (op == "-=") return rt.call("$sub", {cur(), v}, p);
-      if (op == "*=") return rt.call("$mul", {cur(), v}, p);
+      if (op == "-=") return arith("$sub", cur(), v, p);
+      if (op == "*=") return arith("$mul", cur(), v, p);
       if (op == "//=") return rt.call("$idiv", {cur(), v}, p);
       if (op == "/=") return rt.call("$fdiv", {cur(), v}, p);
       return rt.call("$mod", {cur(), v}, p);
@@ -3927,11 +3983,10 @@ struct Binder {
         return b.block(out);
       }
       case "negexp"_:
-        return rt.call("$neg", {emit_expr(*a.nodes[0], ctx)}, p);
+        return op_or_helper(rt, UnOp::Neg, emit_expr(*a.nodes[0], ctx),
+                            tags_named({"int", "double"}), "$neg", p, true);
       case "notop"_:
-        return b.binary(BinOp::Eq,
-                        rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-                        b.bool_literal(false));
+        return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "powexp"_:
         return rt.call("$pow",
                        {emit_expr(*a.nodes[0], ctx),
@@ -3939,7 +3994,7 @@ struct Binder {
                        p);
       case "ternary"_:
         // `a if c else b`: the condition is the middle child.
-        return b.make_if(rt.call("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
+        return b.make_if(truthy(emit_expr(*a.nodes[1], ctx), p),
                          emit_expr(*a.nodes[0], ctx),
                          emit_expr(*a.nodes[2], ctx));
       case "orexp"_:
@@ -3951,7 +4006,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
           const NodeId keep = b.varref(VarKind::Local, t);
           acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(rt.call("$truthy", {keep}, p),
+                         b.make_if(truthy(keep, p),
                                    is_or ? keep : rhs, is_or ? rhs : keep)});
         }
         return acc;
@@ -3982,11 +4037,9 @@ struct Binder {
           const SrcPos op_p = pos_of(op);
           const NodeId lhs = b.varref(VarKind::Local, slots[k]);
           const NodeId rhs = b.varref(VarKind::Local, slots[k + 1]);
-          if (t == "==") return rt.call("$eq", {lhs, rhs}, op_p);
+          if (t == "==") return equal(lhs, rhs, op_p);
           if (t == "!=") {
-            return b.at(op_p).binary(BinOp::Eq,
-                                     rt.call("$eq", {lhs, rhs}, op_p),
-                                     b.bool_literal(false));
+            return b.at(op_p).unary(UnOp::Not, equal(lhs, rhs, op_p));
           }
           // `is` is identity, which `Same` answers.
           if (t == "is" || t == "is not") {
@@ -4006,8 +4059,7 @@ struct Binder {
                           : t == "<=" ? BinOp::Le
                           : t == ">"  ? BinOp::Gt
                                       : BinOp::Ge;
-          return b.at(op_p).binary(o, rt.call("$cmp", {lhs, rhs}, op_p),
-                                   b.literal(0));
+          return order(o, lhs, rhs, op_p);
         };
         // Link k compares operands k and k+1; operand k+1 is set just
         // before it, except the first two, which run before anything.
@@ -4032,7 +4084,7 @@ struct Binder {
                           : t == "//" ? "$idiv"
                           : t == "/"  ? "$fdiv"
                                       : "$mod";
-          acc = rt.call(h, {acc, rhs}, op_p);
+          acc = arith(h, acc, rhs, op_p);
         }
         return acc;
       }
@@ -4813,7 +4865,7 @@ struct Binder {
     for (size_t k = clauses.size(); k-- > 0;) {
       const Ast& c = *clauses[k];
       if (c.tag == "compif"_) {
-        inner = b.make_if(rt.call("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+        inner = b.make_if(truthy(emit_expr(*c.nodes[0], ctx), p),
                           inner, NodeId{});
         continue;
       }
