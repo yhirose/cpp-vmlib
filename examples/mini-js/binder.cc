@@ -701,7 +701,7 @@ struct Binder {
   // Reading a property, member or indexed -- the same operation in
   // JavaScript, so the same func here. What the library will not do on its
   // own: an out-of-range array or string index is `undefined` rather than
-  // the trap index_error() raises, `.length` is a property rather than an
+  // the trap Index raises, `.length` is a property rather than an
   // intrinsic, and a key that is not an integral number in range is simply
   // absent.
   void rt_index() {

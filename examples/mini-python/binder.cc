@@ -1657,7 +1657,7 @@ struct Binder {
   }
 
   // A negative index counts from the end, and out of range raises rather
-  // than trapping -- Python's rules, written here because index_error()'s
+  // than trapping -- Python's rules, written here because index_fault()'s
   // own comment says a language that wants them normalizes first.
   void rt_idx() {
     RT r(*this);

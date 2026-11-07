@@ -3601,22 +3601,22 @@ inline int compare_int_double(int64_t i, double d) {
   return frac > 0 ? -1 : frac < 0 ? 1 : 0;
 }
 
-// Why an operation has no answer: the kinds its diagnostic is made from,
-// without making it. The fast paths -- an operation with a fallback, which
-// asks often and has the fallback answer instead -- ask only whether, and
-// only a trap, or a front end folding a constant, needs the words, which
-// fault_text, unop_error and index_error build from the kind and the
-// operands. A message built and thrown away cost a fallback more than the
-// operation it fell back from.
+// Why an operation has no answer, without the words: binop_fault,
+// unop_fault and index_fault answer with the kind, and only a trap, or a
+// front end folding a constant, asks fault_text to build the diagnostic
+// from it, the operation and the operands. The fast paths -- an operation
+// with a fallback, which asks often and has the fallback answer instead --
+// ask only whether, and a message built and thrown away cost a fallback
+// more than the operation it fell back from.
 enum class Fault : uint8_t {
   None,
-  // A binary operator's.
-  DivideByZero, DivisionOverflow, ModDouble, Operands,
-  // A unary operator's: its operand is not one it takes.
-  Operand,
-  // An index's.
-  StrKeyType, StrRange, ArrayKeyType, ArrayRange, ObjectKeyType,
-  NotIndexable,
+  // The operation does not take operands of these types.
+  Operands,
+  // Integer arithmetic's own, and Mod's on doubles.
+  DivideByZero, DivisionOverflow, ModDouble,
+  // An index's: a string or an array takes an int, an object a string, and
+  // the int must be in range.
+  IntKey, StrKey, Range,
 };
 
 // The check and the arithmetic in one walk of the operand ladder: on
@@ -3822,16 +3822,17 @@ inline bool is_wrap(UnOp op) {
 }
 
 // Whether a unary operator takes `v`: Neg a number, BitNot and the Wraps
-// an int, Not and Truth anything. unop_error is the diagnostic.
+// an int, Not and Truth anything.
 VMLIB_INLINE Fault unop_fault(UnOp op, const Value& v) {
-  if (op == UnOp::Neg && !v.is_number()) return Fault::Operand;
+  if (op == UnOp::Neg && !v.is_number()) return Fault::Operands;
   if ((op == UnOp::BitNot || is_wrap(op)) && !v.is_int()) {
-    return Fault::Operand;
+    return Fault::Operands;
   }
   return Fault::None;
 }
-inline std::string unop_error(UnOp op, const Value& v) {
-  if (unop_fault(op, v) == Fault::None) return {};
+
+// Its diagnostic. Operands is the one fault a unary operator has.
+inline std::string fault_text(Fault, UnOp op, const Value& v) {
   const char* verb = op == UnOp::Neg      ? "negate"
                      : op == UnOp::BitNot ? "bitwise-not"
                                           : "truncate";
@@ -3902,43 +3903,32 @@ inline int64_t index_bound(const Value& recv) {
 
 VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key) {
   if (recv.is_str() || recv.is_array()) {
-    if (!key.is_int()) {
-      return recv.is_str() ? Fault::StrKeyType : Fault::ArrayKeyType;
-    }
+    if (!key.is_int()) return Fault::IntKey;
     const int64_t i = key.as_int();
-    if (i < 0 || i >= index_bound(recv)) {
-      return recv.is_str() ? Fault::StrRange : Fault::ArrayRange;
-    }
+    if (i < 0 || i >= index_bound(recv)) return Fault::Range;
     return Fault::None;
   }
-  if (recv.is_object()) {
-    return key.is_str() ? Fault::None : Fault::ObjectKeyType;
-  }
+  if (recv.is_object()) return key.is_str() ? Fault::None : Fault::StrKey;
   // A map takes any value as a key (MapKeyRef's rule, value.h) -- what it is
   // for. Uninit is the one exception, and an unassigned local traps at its
   // read before it could get here, so nothing needs saying about it.
   if (recv.is_map()) return Fault::None;
-  return Fault::NotIndexable;
+  return Fault::Operands;
 }
 
-inline std::string index_error(const Value& recv, const Value& key) {
-  const char* kind = recv.is_str() ? "string" : "array";
-  switch (index_fault(recv, key)) {
-    case Fault::None:
-      return {};
-    case Fault::StrKeyType:
-    case Fault::ArrayKeyType:
-      return std::string(kind) + " index must be an int, not " +
-             type_name(key.tag());
-    case Fault::StrRange:
-    case Fault::ArrayRange:
-      return std::string(kind) + " index " + std::to_string(key.as_int()) +
+// Its diagnostic, from the fault and the receiver and key it was found in.
+inline std::string fault_text(Fault e, const Value& recv, const Value& key) {
+  const std::string what = type_name(recv.tag());
+  switch (e) {
+    case Fault::IntKey:
+      return what + " index must be an int, not " + type_name(key.tag());
+    case Fault::StrKey:
+      return what + " key must be a string, not " + type_name(key.tag());
+    case Fault::Range:
+      return what + " index " + std::to_string(key.as_int()) +
              " out of range for length " + std::to_string(index_bound(recv));
-    case Fault::ObjectKeyType:
-      return std::string("object key must be a string, not ") +
-             type_name(key.tag());
     default:
-      return std::string("cannot index ") + type_name(recv.tag());
+      return "cannot index " + what;
   }
 }
 
@@ -9519,7 +9509,9 @@ struct Exec {
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32: {
           const UnOp uop = unop_of(in.op);
           const Value& v = f.regs[in.b];
-          if (unop_fault(uop, v) != Fault::None) fail(f, unop_error(uop, v));
+          if (const Fault e = unop_fault(uop, v); e != Fault::None) {
+            fail(f, fault_text(e, uop, v));
+          }
           f.regs[in.a] = apply_unop(uop, v);
           break;
         }
@@ -9752,8 +9744,8 @@ struct Exec {
         case Op::Index: {
           const Value& recv = f.regs[in.b];
           const Value& key = f.regs[in.c];
-          if (index_fault(recv, key) != Fault::None) {
-            fail(f, index_error(recv, key));
+          if (const Fault e = index_fault(recv, key); e != Fault::None) {
+            fail(f, fault_text(e, recv, key));
           }
           f.regs[in.a] = index_get(recv, key);
           break;
@@ -9764,8 +9756,8 @@ struct Exec {
           // Strings read through Index but do not write: they are immutable
           // values, not containers of cells.
           if (recv.is_str()) fail(f, "cannot assign into a string");
-          if (index_fault(recv, key) != Fault::None) {
-            fail(f, index_error(recv, key));
+          if (const Fault e = index_fault(recv, key); e != Fault::None) {
+            fail(f, fault_text(e, recv, key));
           }
           index_set(recv, key, f.regs[in.c]);
           break;
@@ -9966,7 +9958,9 @@ struct Exec {
           if (!s.is_str()) {
             fail(f, std::string("cannot read a byte of ") + type_name(s.tag()));
           }
-          if (index_fault(s, k) != Fault::None) fail(f, index_error(s, k));
+          if (const Fault e = index_fault(s, k); e != Fault::None) {
+            fail(f, fault_text(e, s, k));
+          }
           const auto byte = static_cast<unsigned char>(
               s.as_str()[static_cast<size_t>(k.as_int())]);
           f.regs[in.a] = Value::make_int(byte);
