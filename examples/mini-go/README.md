@@ -7,12 +7,12 @@ See the top-level README's **Fixed-width integers**, **`float`**,
 **Static calls**, **Struct fields**, **Switch** and **Strings and slices**
 sections, plus **Coroutines** and **Scheduler** (see Goroutines below), for
 what each recipe says a front end should do; this front end is those
-sections turned into running code, checked against `go run`.
+sections turned into running code, checked against real Go.
 
 A source file here is real Go -- every sample in `samples/` also runs
-unmodified under `go run`, and each sample's `golden/` output was captured
-that way, the same relationship PL/0's samples have to culebra's own PL/0
-interpreter. What is covered: top-level `func`s with typed params and an
+unmodified under `go run`, and each sample's `golden/` output is what it
+prints built by `go build` (`test/languages.sh`), the same relationship
+PL/0's samples have to culebra's own PL/0 interpreter. What is covered: top-level `func`s with typed params and an
 optional return type, `var` with an explicit `int32`/`int64`/`uint32`/
 `float32`/`float64`/`bool`/`string` or `[]T` type, assignment, `return`,
 `fmt.Println`, arithmetic (`+ - * / %`), comparison (`== != < <= > >=`) and
@@ -246,8 +246,8 @@ first costs nothing and is the only order that parses both.
 
 `ctest -R mini-go-samples` runs
 `samples/{ints,floats,structs,switch,goroutines,slices,strings}/*.go`
-and requires the output to match a golden file (`samples/golden/`)
-captured from `go run` -- see PL/0's own README for why an external,
+and requires the output to match a golden file (`samples/golden/`), what
+real Go prints for it -- see PL/0's own README for why an external,
 independent oracle is what "passing" means here, not just this binary
 agreeing with itself. Each
 sample lives in its own subdirectory because it is a real, standalone `go
