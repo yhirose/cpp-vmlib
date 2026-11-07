@@ -76,9 +76,11 @@ endfunction()
 #                     nothing catches is reported in the language's own
 #                     words (RunOptions::describe), as uncaught/expected/
 #                     holds each case's report (test/run_errors.cmake).
-#   <prefix>sharing   Nothing a program could observe is evaluated twice
-#                     (coreir::shared_effects): every sample, uncaught case
-#                     and bench/languages program (test/run_sharing.cmake).
+#   <prefix>effects   Nothing a program could observe is evaluated twice
+#                     (coreir::shared_effects) or built and dropped
+#                     (coreir::dropped_effects): every sample, uncaught
+#                     case and bench/languages program
+#                     (test/run_effects.cmake).
 function(front_end_tests prefix target)
   cmake_parse_arguments(PARSE_ARGV 2 arg "" "DIR;EXT;LANG;LEAD" "")
   if(DEFINED arg_UNPARSED_ARGUMENTS OR DEFINED arg_KEYWORDS_MISSING_VALUES
@@ -112,7 +114,7 @@ function(front_end_tests prefix target)
              COMMAND ${run} -DDIR=${arg_DIR}/uncaught
                      -P ${scripts}/run_errors.cmake)
   endif()
-  add_test(NAME ${prefix}sharing
+  add_test(NAME ${prefix}effects
            COMMAND ${run} -DSRC=${arg_DIR} ${lead}
-                   -P ${scripts}/run_sharing.cmake)
+                   -P ${scripts}/run_effects.cmake)
 endfunction()

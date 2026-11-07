@@ -2233,9 +2233,7 @@ std::optional<std::string> verify(const Module& m);
 // audits kept finding. Of the control flow, only If and Switch are
 // followed -- they run one arm -- so two runs a return or a throw keeps
 // apart still count as two. shared_effects lists each such node once, with
-// `at`, the innermost node one run of which evaluates it twice; a front
-// end's test runs it over every program it ships (--check-sharing,
-// test/run_sharing.cmake).
+// `at`, the innermost node one run of which evaluates it twice.
 struct SharedEffect {
   NodeId node;
   NodeId at;
@@ -2251,7 +2249,8 @@ std::string to_string(const Module& m, const SharedEffect& e);
 // library function lowered by name never reads, which the audits found in
 // six front ends. dropped_effects lists the top of each subtree so dropped,
 // a node nothing holds, whose subtree has an observable node no body
-// reaches.
+// reaches. A front end's test runs both over every program it ships
+// (--check-effects, test/run_effects.cmake).
 struct DroppedEffect {
   NodeId node;
 };

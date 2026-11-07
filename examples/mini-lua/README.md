@@ -34,7 +34,7 @@ captured that way.
 ## Running
 
 ```
-build/examples/mini-lua/mini-lua [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.lua
+build/examples/mini-lua/mini-lua [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.lua
 ```
 
 ## A calling convention written over a calling convention

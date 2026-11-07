@@ -38,7 +38,7 @@ is mostly made of too, under the parsing.
 ## Running
 
 ```
-build/examples/mini-scheme/mini-scheme [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.scm
+build/examples/mini-scheme/mini-scheme [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.scm
 ```
 
 ## The half that works

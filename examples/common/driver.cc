@@ -23,7 +23,7 @@ namespace {
 
 void usage(const FrontEnd& fe) {
   std::cerr << "usage: " << fe.name
-            << " [--dump-ir] [--dump-bc] [--check-sharing] " << fe.program;
+            << " [--dump-ir] [--dump-bc] [--check-effects] " << fe.program;
   if (fe.concatenate) std::cerr << " [" << fe.program << " ...]";
   std::cerr << "\n";
 }
@@ -32,14 +32,14 @@ void usage(const FrontEnd& fe) {
 
 int main(int argc, char** argv, const FrontEnd& fe) {
   std::vector<std::string> paths;
-  bool dump_ir = false, dump_bc = false, check_sharing = false;
+  bool dump_ir = false, dump_bc = false, check_effects = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--dump-ir") {
       dump_ir = true;
-    } else if (a == "--check-sharing") {
-      check_sharing = true;
+    } else if (a == "--check-effects") {
+      check_effects = true;
     } else if (a == "--dump-bc") {
       dump_bc = true;
     } else if (a.rfind("--", 0) == 0) {
@@ -82,14 +82,20 @@ int main(int argc, char** argv, const FrontEnd& fe) {
 
   // Whether anything the program could observe -- a call, a store, a fresh
   // object -- is reached twice on one path, and so would run twice
-  // (coreir::shared_effects): what test/run_sharing.cmake asks of every
-  // program a front end ships.
-  if (check_sharing) {
-    const auto found = coreir::shared_effects(m);
-    for (const auto& e : found) {
-      std::cerr << path << ":" << coreir::to_string(m, e) << "\n";
-    }
-    return found.empty() ? 0 : 1;
+  // (coreir::shared_effects), or was built and is reached by no function
+  // body, and so would never run (coreir::dropped_effects): what
+  // test/run_effects.cmake asks of every program a front end ships.
+  if (check_effects) {
+    size_t found = 0;
+    const auto report = [&](const auto& effects) {
+      for (const auto& e : effects) {
+        std::cerr << path << ":" << coreir::to_string(m, e) << "\n";
+      }
+      found += effects.size();
+    };
+    report(coreir::shared_effects(m));
+    report(coreir::dropped_effects(m));
+    return found == 0 ? 0 : 1;
   }
 
   const vm::Program p = vm::compile(m);

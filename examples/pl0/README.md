@@ -19,7 +19,7 @@ defines `VMLIB_DEFAULT_RUNTIME`, taking the stdio host the header carries.
 ## Running
 
 ```
-build/examples/pl0/pl0 [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.pas
+build/examples/pl0/pl0 [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.pas
 ```
 
 ## A worked example: captures across a call

@@ -2,14 +2,14 @@
 
 // The command line every front end under examples/ shares:
 //
-//   <name> [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM
+//   <name> [--dump-ir] [--dump-bc] [--check-effects] PROGRAM
 //
 // It reads the program, binds it, compiles it and runs it -- or stops at
 // the bound module (--dump-ir), at the compiled program (--dump-bc), or at
-// the list of what one run would evaluate twice (--check-sharing). It
-// exits 0 when the program ran (or a dump was printed), 1 when the program
-// failed or --check-sharing found something, and 2 when the command line
-// names no program it can read.
+// the list of what one run would evaluate twice and what was built and
+// dropped (--check-effects). It exits 0 when the program ran (or a dump
+// was printed), 1 when the program failed or --check-effects found
+// something, and 2 when the command line names no program it can read.
 //
 // A front end's main.cc says only what is its own -- its name, its binder,
 // what its programs run with and why -- and hands the rest to

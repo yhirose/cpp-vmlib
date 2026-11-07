@@ -34,7 +34,7 @@ rather than being several features.
 ## Running
 
 ```
-build/examples/mini-ruby/mini-ruby [--dump-ir] [--dump-bc] [--check-sharing] PROGRAM.rb
+build/examples/mini-ruby/mini-ruby [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.rb
 ```
 
 ## Blocks, and the one convention that carries them

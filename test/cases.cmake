@@ -1,5 +1,5 @@
 # What the three case scripts -- run_samples.cmake, run_errors.cmake and
-# run_sharing.cmake, each run with `cmake -P` -- share, include()d by each.
+# run_effects.cmake, each run with `cmake -P` -- share, include()d by each.
 
 # Stops the script unless every named -D argument was given. Each script's
 # cases are a glob of a directory it was handed, and a directory left out

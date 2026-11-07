@@ -191,9 +191,7 @@ function body evaluates twice, and the innermost node that does it. Of the
 control flow it follows only `If` and `Switch`, which run one arm, so a
 node under both arms of one `If` is fine and two runs a `return` keeps
 apart are still two -- build that node once for each place instead, which
-compiles to the very code the sharing did. Every front end here takes
-`--check-sharing` to print them, and its tests ask it of every program it
-ships.
+compiles to the very code the sharing did.
 
 `dropped_effects(m)` is the mirror image: a node of that kind which no
 function body reaches, built and then left out of the tree, so it never
@@ -202,7 +200,9 @@ dropped costs nothing but its space -- but a call dropped is how an
 argument a library function never reads goes missing. Each finding is the
 top of what was dropped, a node nothing holds. A node built on the chance
 it is needed and then discarded is reported the same way, though it loses
-nothing; build it on the path that uses it instead.
+nothing; build it on the path that uses it instead. Every front end here
+takes `--check-effects` to print both lists, and its tests ask it of every
+program it ships.
 
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
@@ -272,17 +272,19 @@ table, with `0x02`, so that neither can meet the other or a field.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.
-Only the second has a check that runs over a new front end's programs; the
+The first two have a check that runs over a new front end's programs; the
 rest are caught by a sample written against the real language, its output
 kept as the golden (see [Testing](#testing)).
 
 - *An argument the callee never reads still runs* -- every argument, in
   order, when a library function lowered by name reads fewer, and before a
   call on a nil receiver fails. `spill_unread` and `Builder::sequence`,
-  above, are for this.
+  above, are for this. An argument built and then left out of the call is
+  one no function body reaches, and `--check-effects`, above, reports it;
+  the order is the samples' to pin.
 - *Each operand runs once.* A `NodeId` used twice -- a receiver for its
   lookup and again for its call, the target of a desugared `x op= y` --
-  runs twice, and `--check-sharing`, above, reports it.
+  runs twice, and `--check-effects`, above, reports it.
 - *Evaluation order is the language's, not the tree's.* lua5.4 evaluates a
   multiple assignment's targets left to right, then its values, then
   stores right to left; Python's `t[k] = v` evaluates `v` before `t` and
@@ -916,7 +918,7 @@ the command line every front end here runs (`examples/common/driver.h`);
 its `CMakeLists.txt` is one `add_front_end()` call
 (`examples/common/CMakeLists.txt`), which builds it and registers its
 tests -- `samples/` against their `golden/` transcripts, `uncaught/` if
-there is one, and `--check-sharing` over every program -- and its name
+there is one, and `--check-effects` over every program -- and its name
 joins the list of front ends in the top-level `CMakeLists.txt`. A front end
 outside this repository brings its own CLI, and its own implementation of
 the `coreir_rt_*` contract if the stdio host does not suit it. Nothing in
@@ -1076,10 +1078,10 @@ error and requires each report -- message, position and exit code -- to
 match its transcript, for PL/0's diagnostics (`test/errors/`) and for the
 uncaught exceptions of the five front ends that word their own
 (`RunOptions::describe`, `examples/mini-*/uncaught/`). And
-`test/run_sharing.cmake` binds every sample, uncaught case and
-`bench/languages` program of a front end with `--check-sharing`, so a node
-evaluated twice fails a test rather than waiting for a probe to notice its
-output.
+`test/run_effects.cmake` binds every sample, uncaught case and
+`bench/languages` program of a front end with `--check-effects`, so a node
+evaluated twice, or built and dropped, fails a test rather than waiting
+for a probe to notice its output.
 
 `test/` holds what the samples cannot reach: one executable per property,
 each building its Core-IR by hand and supplying its own `coreir_rt` host.

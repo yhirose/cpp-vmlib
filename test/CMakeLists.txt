@@ -2,7 +2,7 @@
 # (front_end_tests, examples/common/CMakeLists.txt) but as the main suite's
 # own, unprefixed: `samples`, each against a golden captured from an oracle
 # this repository does not contain -- culebra's own PL/0 interpreter -- and
-# `sharing`. Its diagnostics are checked against fixed transcripts below.
+# `effects`. Its diagnostics are checked against fixed transcripts below.
 front_end_tests("" pl0 DIR ${PROJECT_SOURCE_DIR}/examples/pl0 EXT pas
                 LANG pl0)
 
