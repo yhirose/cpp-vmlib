@@ -76,3 +76,16 @@ print(holder:twice(21))
 -- A table is equal to itself without consulting __eq.
 local loud = setmetatable({}, {__eq = function() io.write("<eq>") return false end})
 print(loud == loud, loud ~= loud)
+
+-- A key is the program's whatever its bytes. The one below starts with
+-- byte 1, written raw (this subset has no decimal escapes): it is no way
+-- into the metatable -- assigning nil under it strips nothing -- and
+-- pairs lists it like any other key.
+local guarded = setmetatable({}, {__index = function() return "fallback" end})
+local odd = "mt"
+guarded[odd] = nil
+print(guarded.anything)
+guarded[odd] = "kept"
+local count = 0
+for k, v in pairs(guarded) do count = count + 1 end
+print(count, guarded[odd], getmetatable(guarded) ~= nil)

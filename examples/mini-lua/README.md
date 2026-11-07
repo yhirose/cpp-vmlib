@@ -136,9 +136,10 @@ Three rules the binder writes on top of it:
 * **`#` is a border**, found by walking from 1 -- not `Len`, which answers
   how many keys a Map has and would count the hash part too.
 
-The metatable hangs on the same map under a key whose first byte no Lua
-source can produce, the trick `vmlib.h`'s own `kDropKey` uses. `pairs` has
-to step over it, which is the one place that choice shows.
+The metatable is the map's meta, the slot no key reaches (`MetaGet`/
+`MetaSet`, the README's [Hidden state](../../README.md#hidden-state)):
+`pairs`, `#`, `rawget` and `rawset` see the table's keys and nothing
+else, and a key the program spells, whatever its bytes, is only a key.
 
 ## The rest of the metamethods, and the walk they all share
 

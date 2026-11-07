@@ -37,7 +37,8 @@
 //
 // A table is a value-keyed Map (IntrinsicId::MapNew), which is what a Lua
 // table is: one container with an array part and a hash part, keyed by
-// anything. Its metatable hangs under a key no source program can spell.
+// anything. Its metatable is the map's meta (MetaGet/MetaSet), the slot no
+// key reaches: Lua's metatable is the model that slot was made after.
 
 #include "binder.h"
 
@@ -63,10 +64,6 @@ using namespace runtime_parts;
 
 namespace mini_lua {
 namespace {
-
-// A table's metatable, under a key whose first byte no Lua source can
-// produce -- the same trick vmlib.h's own kDropKey uses.
-constexpr char kMetaKey[] = "\x01" "mt";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -539,10 +536,9 @@ struct Binder {
   void rt_mt() {
     RT r(*this);
     const auto [t] = r.params("t");
-    r.add(r.iff(r.isnt(r.typ(t), "map"), r.ret(r.Nil())));
-    // A missing key already reads as nil (vmlib.h's own rule for a map),
-    // so no metatable is the same case as one with nothing at this key.
-    r.add(r.ret(r.idx(r.L(t), kMetaKey)));
+    // MetaGet answers nil for a value that is no table, and for a table
+    // with no metatable.
+    r.add(r.ret(r.meta(r.L(t))));
     r.finish("$mt");
   }
 
@@ -641,17 +637,16 @@ struct Binder {
                 r.b.make_throw(r.S("attempt to index a non-table value"))));
     r.add(r.set(key, r.call("$key", {r.L(k)})));
     r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
+    r.add(r.set(mt, r.meta(r.L(t))));
     r.add(r.iff(
-        r.has(r.L(t), r.S(kMetaKey)),
-        r.blk({r.set(mt, r.idx(r.L(t), kMetaKey)),
-               r.iff(r.has(r.L(mt), r.S("__index")),
-                     r.blk({r.set(idx, r.idx(r.L(mt), r.S("__index"))),
-                            r.iff(r.is(r.typ(idx), "map"),
-                                  r.ret(r.call("$get", {r.L(idx), r.L(key)}))),
-                            r.ret(r.call(
-                                "$one",
-                                {r.b.call_value(r.L(idx),
-                                                {r.L(t), r.L(key)})}))}))})));
+        r.isnt(r.typ(mt), "nil"),
+        r.iff(r.has(r.L(mt), r.S("__index")),
+              r.blk({r.set(idx, r.idx(r.L(mt), r.S("__index"))),
+                     r.iff(r.is(r.typ(idx), "map"),
+                           r.ret(r.call("$get", {r.L(idx), r.L(key)}))),
+                     r.ret(r.call("$one",
+                                  {r.b.call_value(r.L(idx),
+                                                  {r.L(t), r.L(key)})}))}))));
     r.add(r.ret(r.Nil()));
     r.finish("$get");
   }
@@ -887,16 +882,14 @@ struct Binder {
   void rt_setmt() {
     RT r(*this);
     const auto [t, mt] = r.params("t", "mt");
-    r.add(r.b.set_index(r.L(t), r.S(kMetaKey), r.L(mt)));
-    r.add(r.ret(r.L(t)));
+    r.add(r.ret(r.set_meta(r.L(t), r.L(mt))));
     r.finish("$setmt");
   }
 
   void rt_getmt() {
     RT r(*this);
     const auto [t] = r.params("t");
-    r.add(r.iff(r.has(r.L(t), r.S(kMetaKey)), r.ret(r.idx(r.L(t), kMetaKey))));
-    r.add(r.ret(r.Nil()));
+    r.add(r.ret(r.meta(r.L(t))));
     r.finish("$getmt");
   }
 
@@ -1850,11 +1843,6 @@ struct Binder {
       body.push_back(b.assign(VarKind::Local, cur, b.index(K, X)));
       body.push_back(
           b.assign(VarKind::Local, ix, b.binary(BinOp::Add, X, b.literal(1))));
-      // The metatable hangs on the same map, under a key no program can
-      // spell -- so `pairs` has to step over it (runtime_parts.h's
-      // hidden_key, which any key, of any type, can be asked about).
-      body.push_back(
-          b.make_if(hidden_key(b, cur), b.make_continue(), NodeId{}));
       const int32_t bmark = ctx.mark();
       std::vector<NodeId> inner;
       fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}
@@ -2161,9 +2149,9 @@ std::string lua_tostring(const Value& v) {
 // it answers its results as an array (the calling convention above).
 std::string lua_tostring_mm(NativeCall& c, const Value& v) {
   if (v.tag() == ValueTag::Map) {
-    const Value* mt = v.as_map()->find(Value::make_str(kMetaKey));
-    if (mt && mt->tag() == ValueTag::Map) {
-      const Value* mm = mt->as_map()->find(Value::make_str("__tostring"));
+    const Value& mt = v.as_map()->meta;
+    if (mt.tag() == ValueTag::Map) {
+      const Value* mm = mt.as_map()->find(Value::make_str("__tostring"));
       if (mm && mm->is_callable()) {
         const Value fn = *mm;  // the call may rewrite the metatable
         const Value self = v;

@@ -11,3 +11,5 @@ a derived	derived
 new 1
 42
 true	false
+fallback
+1	kept	true
