@@ -28,7 +28,7 @@ from underneath. Lua
 hands `coroutine.create` / `resume` / `yield` / `status` / `wrap` to the
 program, which is the other half.
 
-Every sample runs unmodified under `lua` (5.4), and each `golden/` file was
+Every sample runs unmodified under `lua`, and each `golden/` file was
 captured that way.
 
 ## Running
@@ -279,10 +279,8 @@ Quietly different:
 output to match a golden file captured from `lua` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
-`test/goldens.sh mini-lua` checks the goldens against `lua`, and
-`--update` regenerates them -- by hand, never from the build. Both sides
-are run from the samples directory with a bare filename, because Lua's
-error messages name the chunk as it was given.
+Both sides run each sample from the samples directory by its bare
+filename, because Lua's error messages name the chunk as it was given.
 
 All nine samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.lua`

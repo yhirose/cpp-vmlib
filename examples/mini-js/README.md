@@ -403,11 +403,6 @@ about what the program computes. (The prelude is also its own first test:
 mutual recursion between two hoisted declarations, closures, `for` over
 arrays, and `typeof`.)
 
-`test/goldens.sh mini-js` checks the goldens against `node`, and
-`--update` regenerates them. That is done by hand, never by the build: a
-golden file the tests could refresh themselves is not evidence of
-anything.
-
 Beyond the sample check, all nine samples are clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --
 ASan/UBSan/LeakSanitizer, and `COREIR_GC_STRESS=1` (a full collection at

@@ -287,14 +287,12 @@ one's output to match a golden file captured from `culebra` -- see PL/0's
 own README for why an external, independent oracle is what "passing" means
 here.
 
-`test/goldens.sh mini-culebra` checks the goldens against `culebra`, and
-`--update` regenerates them -- by hand, never from the build, for the
-reason that script states. They are culebra 0.8.0's output, the release
-`test/languages.sh` pins, and this front end is a slice of that release:
-culebra is not at 1.0 and its output moves, so a new pin is a new
-comparison, and whatever it shows is this front end's to follow.
-(`iterators.cul` names its class `Span`: 0.8.0 takes a class named
-`Range` for its own built-in range.)
+The goldens are the output of the culebra release `test/languages.sh`
+pins, and this front end is a slice of that release: culebra's output
+still moves between releases, so a new pin is a new comparison, and
+whatever it shows is this front end's to follow. (`iterators.cul` names
+its class `Span`: culebra takes a class named `Range` for its own
+built-in range.)
 
 All eight samples are also clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --

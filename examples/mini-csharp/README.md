@@ -267,11 +267,9 @@ one's output to match a golden file captured from `dotnet` -- see PL/0's
 own README for why an external, independent oracle is what "passing"
 means here.
 
-`test/goldens.sh mini-csharp` checks the goldens against `dotnet`, and
-`--update` regenerates them -- by hand, never from the build. Each sample
-is compiled in a scratch project of its own (`test/languages.sh`),
-because the SDK builds every `.cs` in a directory and two samples in one
-would both declare `Main`.
+Under `dotnet`, each sample is compiled in a scratch project of its own
+(`test/languages.sh`), because the SDK builds every `.cs` in a directory
+and two samples in one would both declare `Main`.
 
 All six samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1`.

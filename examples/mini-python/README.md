@@ -395,15 +395,12 @@ one's output to match a golden file captured from `python3` -- see PL/0's
 own README for why an external, independent oracle is what "passing" means
 here.
 
-`test/goldens.sh mini-python` checks the goldens against `python3`, and
-`--update` regenerates them -- by hand, never from the build, and only with
-Python 3.14, the version `test/languages.sh` pins (`PYTHON=python3.14`
-names one installed beside another). CPython rewords its messages between
-releases -- 3.14 made every division by zero "division by zero" and gave
-"too many values to unpack" its count -- and the words this front end
-raises are 3.14's, so a golden from another version would differ in wording
-rather than catch a bug. The script checks the version and refuses any
-other.
+The goldens are the output of the CPython release `test/languages.sh`
+pins, and the words this front end raises are that release's: CPython
+rewords its messages between releases (that file says how), so a golden
+from another would differ in wording rather than catch a bug, and any
+other release is refused. `PYTHON=python3.x` names the pinned one where it
+is installed beside another.
 
 All fourteen samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (a full collection at every single allocation) --
