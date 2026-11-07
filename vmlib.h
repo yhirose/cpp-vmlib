@@ -5791,10 +5791,8 @@ inline bool observable(const Node& x) {
 }
 
 // Which nodes run: the ones a function body reaches. A node built and then
-// left unused is reached by nothing. `edge(parent, child)` hears of each
-// use on the way, once per parent reached.
-template <class Edge>
-std::vector<char> reached(const Module& m, Edge edge) {
+// left unused is reached by nothing.
+inline std::vector<char> reached(const Module& m) {
   std::vector<char> live(m.nodes.size(), 0);
   std::vector<uint32_t> work;
   for (const Func& f : m.funcs) {
@@ -5806,9 +5804,7 @@ std::vector<char> reached(const Module& m, Edge edge) {
     if (live[x]) continue;
     live[x] = 1;
     for (uint32_t i = 0; i < m.nodes[x].num_children; ++i) {
-      const uint32_t c = m.child(NodeId{x}, i).v;
-      edge(x, c);
-      work.push_back(c);
+      work.push_back(m.child(NodeId{x}, i).v);
     }
   }
   return live;
@@ -5822,7 +5818,13 @@ struct SharingScan {
   explicit SharingScan(const Module& mod)
       : m(mod), parents(mod.nodes.size()), effect(mod.nodes.size(), -1) {
     // Only what a function body reaches runs, so only its uses count.
-    reached(m, [&](uint32_t p, uint32_t c) { parents[c].push_back(p); });
+    const std::vector<char> live = reached(m);
+    for (uint32_t n = 0; n < m.nodes.size(); ++n) {
+      if (!live[n]) continue;
+      for (uint32_t i = 0; i < m.nodes[n].num_children; ++i) {
+        parents[m.child(NodeId{n}, i).v].push_back(n);
+      }
+    }
   }
 
   // Whether running `n` can be told from not running it.
@@ -5900,7 +5902,7 @@ struct DropScan {
 
   explicit DropScan(const Module& mod)
       : m(mod),
-        live(reached(mod, [](uint32_t, uint32_t) {})),
+        live(reached(mod)),
         loss(mod.nodes.size(), -1) {}
 
   // Whether a node no body reaches can be read through. verify() looks
