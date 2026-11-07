@@ -110,6 +110,69 @@ inline NodeId hidden_key(FuncWriter& w, FuncWriter::Slot k) {
   return hidden_key(w.b, k.i);
 }
 
+// ---- Hidden state ----------------------------------------------------------
+//
+// What the implementation keeps on an object a program holds -- the mark
+// that makes an object a tuple or a range, a promise's state, a record's
+// type -- is the object's meta (vmlib.h's MetaGet/MetaSet), the slot no
+// key reaches: a program can neither read, forge nor strip it by spelling
+// a key, and nothing that lists, counts or compares keys has anything to
+// step over. Such an object's meta is its *kind record*: an Array whose
+// element 0 names the kind and whose other elements are the kind's state,
+// at positions the front end numbers. No program holds one, so a position
+// needs no prefix to keep it apart from anything.
+
+// `obj` with a kind record of `kind` over `state` as its meta -- the
+// object, answered, as MetaSet answers it.
+inline NodeId of_kind(coreir::Builder::At& b, NodeId obj,
+                      const std::string& kind,
+                      const std::vector<NodeId>& state) {
+  std::vector<NodeId> rec{b.str_literal(kind)};
+  rec.insert(rec.end(), state.begin(), state.end());
+  return b.intrinsic(IntrinsicId::MetaSet, {obj, b.array_lit(rec)});
+}
+inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
+                      const std::vector<NodeId>& state) {
+  return of_kind(w.b, obj, kind, state);
+}
+
+// Whether `v` carries a kind record of `kind`: any value can be asked, and
+// one with no meta, or with a meta that is no kind record, is of none. A
+// kind record is an object's, so anything else is answered by the one
+// test of its type that answered it before there was a meta to read --
+// on the paths that ask of every number, `$add`'s "is this a tuple", it
+// is the whole cost. `v` is a read, and runs more than once.
+inline NodeId is_kind(coreir::Builder::At& b, NodeId v,
+                      const std::string& kind) {
+  const auto is = [&](NodeId x, const char* type) {
+    return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {x}),
+                    b.str_literal(type));
+  };
+  const auto meta = [&] { return b.intrinsic(IntrinsicId::MetaGet, {v}); };
+  return b.make_if(
+      is(v, "object"),
+      b.make_if(is(meta(), "array"),
+                b.binary(BinOp::Eq, b.index(meta(), b.literal(0)),
+                         b.str_literal(kind)),
+                b.bool_literal(false)),
+      b.bool_literal(false));
+}
+inline NodeId is_kind(FuncWriter& w, FuncWriter::Slot v,
+                      const std::string& kind) {
+  return is_kind(w.b, w.L(v), kind);
+}
+
+// Element `i` of the kind record `v` carries, read and written.
+inline NodeId kind_field(coreir::Builder::At& b, NodeId v, int64_t i) {
+  return b.index(b.intrinsic(IntrinsicId::MetaGet, {v}), b.literal(i));
+}
+inline NodeId kind_field(FuncWriter& w, NodeId v, int64_t i) {
+  return kind_field(w.b, v, i);
+}
+inline NodeId set_kind_field(FuncWriter& w, NodeId v, int64_t i, NodeId x) {
+  return w.sidx(w.meta(v), w.I(i), x);
+}
+
 // ---- Classes ---------------------------------------------------------------
 //
 // There is no class in the IR, and none was needed. A class is an object --

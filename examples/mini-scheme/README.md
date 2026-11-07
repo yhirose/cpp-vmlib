@@ -56,7 +56,9 @@ Scope {
 }
 ```
 
-Invoking the escape throws a value tagged with that identity; the throw
+Invoking the escape throws a token whose kind record carries that
+identity and the value, out of reach of anything a program can name; the
+throw
 unwinds to the `call/cc` and the handler answers with it. Nested `call/cc`s
 each name their own activation, which is why the inner one leaves only the
 inner. `samples/continuations.scm` uses it for the four things programs
@@ -200,7 +202,9 @@ shape `emit_cond` already builds, just comparing instead of testing.
 
 `define-record-type` needed nothing from the IR that classes elsewhere in
 this repository did not already ask for: a record instance is a plain
-object under a key no Scheme symbol can start with, and the constructor,
+object of its fields, with its type named in its kind record (the slot no
+field can reach, `examples/common/runtime_parts.h`'s Hidden state), and
+the constructor,
 predicate, and every accessor and mutator the form names are built
 directly rather than compiled from a body -- there is no source to
 compile, the way examples/mini-python's constructor and

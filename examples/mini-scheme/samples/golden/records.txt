@@ -12,3 +12,4 @@ small x
 large x
 #f
 #<node val: 1 next: #<node val: 2 next: #f>>
+#t 5

@@ -4,9 +4,9 @@
 
 ; case, and define-record-type -- R7RS's answer to "a class", built the
 ; same way examples/mini-python's and examples/mini-ruby's classes are: an
-; object under a hidden key, and each accessor a func with no source body
-; of its own. Neither needed anything from the IR that was not already
-; here.
+; object whose hidden state names its type, and each accessor a func with
+; no source body of its own. Neither needed anything from the IR that was
+; not already here.
 
 (define (weekday n)
   (case n
@@ -79,3 +79,10 @@
 (display (node-next nd)) (newline)
 (set-node-next! nd (make-node 2))
 (display nd) (newline)
+
+; A field is the program's whatever its name. The one below starts with
+; byte 1, written raw: the type a record was made by is kept where no
+; field can reach it, so the predicate still knows its own.
+(define-record-type tagged (make-tagged rec) tagged? (rec tagged-rec))
+(define tg (make-tagged 5))
+(display (tagged? tg)) (display " ") (display (tagged-rec tg)) (newline)

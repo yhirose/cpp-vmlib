@@ -60,12 +60,15 @@ using namespace runtime_parts;
 namespace mini_scheme {
 namespace {
 
-// An escape continuation's two fields, under keys no Scheme symbol can be.
-constexpr char kTagKey[] = "\x01" "k";
-constexpr char kValKey[] = "\x01" "v";
-// A record instance: a plain object under a key no Scheme symbol can
-// start with, naming the record type it was made by.
-constexpr char kRecKey[] = "\x01" "rec";
+// What the implementation keeps on an object is its kind record
+// (runtime_parts.h's Hidden state), where no field name can reach it. A
+// record instance's names the record type it was made by; the token an
+// escape continuation throws carries its call/cc's tag and the value.
+constexpr char kRecordKind[] = "record";
+constexpr int64_t kRecordType = 1;
+constexpr char kEscapeKind[] = "escape";
+constexpr int64_t kEscapeTag = 1;
+constexpr int64_t kEscapeValue = 2;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -1017,13 +1020,12 @@ struct Binder {
                       r.call("$disp", {r.idx(r.L(v), r.L(k))})));
       const NodeId each =
           r.blk({r.set(k, r.idx(r.L(keys), r.L(i))),
-                 r.iff(r.b.unary(UnOp::Not, hidden_key(r, k)),
-                       r.set(out, r.bin(BinOp::Add, r.L(out), field))),
+                 r.set(out, r.bin(BinOp::Add, r.L(out), field)),
                  r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))});
       r.add(r.iff(
-          r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRecKey))),
+          is_kind(r, v, kRecordKind),
           r.blk({r.set(out, r.bin(BinOp::Add, r.S("#<"),
-                                  r.idx(r.L(v), kRecKey))),
+                                  kind_field(r, r.L(v), kRecordType))),
                  r.set(keys, r.in(IntrinsicId::ObjectKeys, {r.L(v)})),
                  r.set(i, r.I(0)),
                  r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(keys))), each),
@@ -1062,7 +1064,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     r.add(r.b.make_throw(
-        r.b.object_lit({{r.S(kTagKey), r.P(0)}, {r.S(kValKey), r.L(v)}})));
+        of_kind(r, r.obj({}), kEscapeKind, {r.P(0), r.L(v)})));
     r.finish("$escape", 0, 1);
   }
 
@@ -1352,8 +1354,7 @@ struct Binder {
       // Every field, in the order the form declares them -- the order
       // display shows them in -- with #f for one the constructor does not
       // take, which is what guile's accessor and printer answer for it.
-      std::vector<std::pair<NodeId, NodeId>> kvs{
-          {b.str_literal(kRecKey), b.str_literal(ri.type_name)}};
+      std::vector<std::pair<NodeId, NodeId>> kvs;
       for (const RecordField& rf : ri.fields) {
         const auto at = std::find(ri.ctor_fields.begin(), ri.ctor_fields.end(),
                                   rf.name);
@@ -1364,7 +1365,9 @@ struct Binder {
                 : b.varref(VarKind::Local, static_cast<int32_t>(
                                                at - ri.ctor_fields.begin())));
       }
-      f.body = b.scope(0, f.num_params, b.make_return(b.object_lit(kvs)));
+      f.body = b.scope(0, f.num_params,
+                       b.make_return(of_kind(b, b.object_lit(kvs), kRecordKind,
+                                             {b.str_literal(ri.type_name)})));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(f));
       out.push_back(
@@ -1381,13 +1384,9 @@ struct Binder {
       f.lenient_arity = true;
       const NodeId V = b.varref(VarKind::Local, 0);
       const NodeId cond = b.make_if(
-          b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {V}),
-                   b.str_literal("object")),
-          b.make_if(
-              b.intrinsic(IntrinsicId::ObjectHas, {V, b.str_literal(kRecKey)}),
-              b.binary(BinOp::Eq, b.index(V, b.str_literal(kRecKey)),
-                       b.str_literal(ri.type_name)),
-              b.bool_literal(false)),
+          is_kind(b, V, kRecordKind),
+          b.binary(BinOp::Eq, kind_field(b, V, kRecordType),
+                   b.str_literal(ri.type_name)),
           b.bool_literal(false));
       f.body = b.scope(0, 1, b.make_return(cond));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
@@ -1552,16 +1551,11 @@ struct Binder {
     const NodeId body = b.call_value(emit_form(*a.nodes[1], ctx),
                                      {b.make_closure(rt.func("$escape"), cm)});
     const NodeId mine = b.make_if(
-        b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}),
-                 b.str_literal("object")),
-        b.make_if(
-            b.intrinsic(IntrinsicId::ObjectHas, {E, b.str_literal(kTagKey)}),
-            b.intrinsic(IntrinsicId::Same,
-                        {b.index(E, b.str_literal(kTagKey)), TAG}),
-            b.bool_literal(false)),
+        is_kind(b, E, kEscapeKind),
+        b.intrinsic(IntrinsicId::Same, {kind_field(b, E, kEscapeTag), TAG}),
         b.bool_literal(false));
-    const NodeId handler =
-        b.make_if(mine, b.index(E, b.str_literal(kValKey)), b.make_throw(E));
+    const NodeId handler = b.make_if(mine, kind_field(b, E, kEscapeValue),
+                                     b.make_throw(E));
     const NodeId out = b.block({b.cell_fresh(cell),
                                 b.assign(VarKind::Cell, cell, b.array_lit({})),
                                 b.make_try(exc, body, handler)});
@@ -1631,12 +1625,7 @@ struct Binder {
       const NodeId E = b.varref(VarKind::Local, slot);
       stmts.push_back(b.make_try(
           slot, value,
-          b.make_if(b.make_if(b.binary(BinOp::Eq,
-                                       b.intrinsic(IntrinsicId::TypeOf, {E}),
-                                       b.str_literal("object")),
-                              b.intrinsic(IntrinsicId::ObjectHas,
-                                          {E, b.str_literal(kTagKey)}),
-                              b.bool_literal(false)),
+          b.make_if(is_kind(b, E, kEscapeKind),
                     b.make_throw(b.str_literal(
                         "call/cc: a continuation was invoked after the "
                         "call/cc that made it had already returned. This "
