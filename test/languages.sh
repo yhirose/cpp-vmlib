@@ -10,7 +10,6 @@
 # culebra running its own PL/0 interpreter, pl0.cul, which this repository
 # does not contain.
 #
-#   LANG_EXT[lang]       its programs' file extension.
 #   LANG_BIN[lang]       the variable holding its implementation's command
 #                        (below).
 #   LANG_VERSION[lang]   the version whose output the goldens are, and the
@@ -43,10 +42,6 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
   return 1
 fi
 
-declare -A LANG_EXT=(
-  [python]=py [ruby]=rb [lua]=lua [scheme]=scm [culebra]=cul [js]=js
-  [csharp]=cs [go]=go [pl0]=pas
-)
 declare -A LANG_BIN=(
   [python]=PYTHON [ruby]=RUBY [lua]=LUA [scheme]=GUILE [culebra]=CULEBRA
   [js]=NODE [csharp]=DOTNET [go]=GO [pl0]=CULEBRA

@@ -69,6 +69,9 @@
 # which is why its `startup` row is the floor everything else here is
 # measured against.
 #
+# The front ends are the ones the build registered (front-ends.txt, which
+# CMake writes into the build directory): every one with a program here.
+#
 # Usage: bench/languages/run.sh [--reps N]
 # BUILD_DIR overrides where the mini-* binaries are looked for (default:
 # the repository's own build/ directory).
@@ -82,6 +85,12 @@ cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
 . "$ROOT/test/languages.sh"
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build"}
+FRONT_ENDS=$BUILD_DIR/front-ends.txt
+if [ ! -f "$FRONT_ENDS" ]; then
+  echo "$0: no $FRONT_ENDS -- configure $BUILD_DIR with" \
+       "-DVMLIB_BUILD_EXAMPLES=ON" >&2
+  exit 1
+fi
 REPS=3
 if [ "${1:-}" = "--reps" ]; then REPS=$2; fi
 
@@ -91,7 +100,6 @@ SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
 WORKLOADS=(startup fib loop array strings)
-LANGS=(python ruby lua scheme culebra js csharp go)
 declare -A EXPECT=(
   [startup]=1
   [fib]=317811
@@ -141,12 +149,13 @@ best_ms() {
   echo $(((best + 500) / 1000))
 }
 
-# One workload through one language: its front end's own binary, then the
-# real language -- compiled first, outside the timed runs, where it has a
-# compile step, and "-" where that compile fails or it is not installed.
+# One workload through one front end, FRONT_END EXT LANG as front-ends.txt
+# lists it: its own binary, then the real language -- compiled first,
+# outside the timed runs, where it has a compile step, and "-" where that
+# compile fails or it is not installed.
 row() {
-  local workload=$1 lang=$2 file=$1.${LANG_EXT[$2]} mini_ms real_ms=-
-  mini_ms=$(best_ms "$workload" "$BUILD_DIR/examples/mini-$lang/mini-$lang" "$file")
+  local workload=$1 fe=$2 lang=$4 file=$1.$3 mini_ms real_ms=-
+  mini_ms=$(best_ms "$workload" "$BUILD_DIR/examples/$fe/$fe" "$file")
   if lang_command "$lang" "$SCRATCH/$lang-$workload" "$file" 2>/dev/null; then
     real_ms=$(best_ms "$workload" "${CMD[@]}")
   fi
@@ -155,8 +164,10 @@ row() {
 }
 
 printf 'task\tlang\tmini\treal\treal_ms\n'
+# The list is read on its own descriptor, so that no timed program
+# inherits it as its stdin.
 for w in "${WORKLOADS[@]}"; do
-  for lang in "${LANGS[@]}"; do
-    row "$w" "$lang"
-  done
+  while read -r fe ext lang <&3; do
+    if [ -f "$w.$ext" ]; then row "$w" "$fe" "$ext" "$lang"; fi
+  done 3<"$FRONT_ENDS"
 done

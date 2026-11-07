@@ -78,4 +78,11 @@ if(VMLIB_BUILD_BENCH)
   add_subdirectory(bench)
 endif()
 
+# Every front end front_end_tests registered, one per line -- its target,
+# source extension and language (test/languages.sh) -- for what runs them
+# outside ctest: bench/languages/run.sh reads it from the build directory.
+get_property(front_ends GLOBAL PROPERTY VMLIB_FRONT_ENDS)
+list(JOIN front_ends "\n" front_ends)
+file(WRITE ${CMAKE_BINARY_DIR}/front-ends.txt "${front_ends}\n")
+
 install(FILES vmlib.h DESTINATION include)
