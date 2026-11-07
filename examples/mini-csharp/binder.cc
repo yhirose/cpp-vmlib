@@ -67,13 +67,6 @@ constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
 constexpr char kCtorKey[] = "\x01" "ctor";
 
-// An auto property's backing field, on the instance: the property's name,
-// kept apart from the fields the source declared the way a method's is
-// kept apart on the class table.
-std::string auto_field_key(const std::string& name) {
-  return program_key(name);
-}
-
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
 }
@@ -534,7 +527,7 @@ struct Binder {
   // at run time. `is_field`/`is_method`/`is_property`/`static_field_owner`
   // are this one walk, aimed at whichever per-class name set the caller
   // cares about.
-  int32_t find_in_chain(int32_t cls, const std::string& name,
+  int32_t declared_in_chain(int32_t cls, const std::string& name,
                         std::set<std::string> ClassInfo::* member) const {
     for (int32_t c = cls; c >= 0;) {
       const ClassInfo& ci = classes[static_cast<size_t>(c)];
@@ -548,19 +541,19 @@ struct Binder {
   }
 
   bool is_field(int32_t cls, const std::string& name) const {
-    return find_in_chain(cls, name, &ClassInfo::field_names) >= 0;
+    return declared_in_chain(cls, name, &ClassInfo::field_names) >= 0;
   }
 
   int32_t static_field_owner(int32_t cls, const std::string& name) const {
-    return find_in_chain(cls, name, &ClassInfo::static_field_names);
+    return declared_in_chain(cls, name, &ClassInfo::static_field_names);
   }
 
   bool is_method(int32_t cls, const std::string& name) const {
-    return find_in_chain(cls, name, &ClassInfo::method_names) >= 0;
+    return declared_in_chain(cls, name, &ClassInfo::method_names) >= 0;
   }
 
   bool is_property(int32_t cls, const std::string& name) const {
-    return find_in_chain(cls, name, &ClassInfo::property_names) >= 0;
+    return declared_in_chain(cls, name, &ClassInfo::property_names) >= 0;
   }
 
   static const Ast* find_child(const Ast& a, std::string_view name) {
@@ -1966,7 +1959,7 @@ struct Binder {
     for (const auto& ap : ci.auto_props) {
       out.push_back(rt.call(
           "$setf",
-          {this_of(ctx, p), b.str_literal(auto_field_key(ap.name)),
+          {this_of(ctx, p), b.str_literal(program_key(ap.name)),
            ap.init != nullptr ? emit_expr(*ap.init, ctx)
                               : default_of(ap.type, p)},
           p));
@@ -2128,7 +2121,9 @@ struct Binder {
 
   // An auto property's accessors touch nothing but their own parameters,
   // so unlike a source method they need no capture at all -- built once
-  // per property, directly in IR.
+  // per property, directly in IR. The field behind it is program_key(name)
+  // on the instance: the property's name, kept apart from the fields the
+  // source declared as a method's is on the class table.
   NodeId emit_auto_get(const std::string& name, SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t idx = static_cast<int32_t>(m.funcs.size());
@@ -2142,7 +2137,7 @@ struct Binder {
     f.body =
         b.scope(0, 1,
                 b.make_return(b.index(b.varref(VarKind::Local, 0),
-                                      b.str_literal(auto_field_key(name)))));
+                                      b.str_literal(program_key(name)))));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);
     return b.make_closure(idx, rt.empty_cmap());
   }
@@ -2159,7 +2154,7 @@ struct Binder {
     f.lenient_arity = true;
     f.body = b.scope(0, 2,
                      b.block({b.set_index(b.varref(VarKind::Local, 0),
-                                          b.str_literal(auto_field_key(name)),
+                                          b.str_literal(program_key(name)),
                                           b.varref(VarKind::Local, 1)),
                               b.make_return(b.nil_literal())}));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);

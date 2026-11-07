@@ -1728,10 +1728,10 @@ struct Binder {
   // function is not constructible here: without `this` there is nothing
   // for a constructor body to write into -- see README.md.
   // `class Name { constructor(...) {...} m(...) {...} }` -- a plain
-  // object whose `$methods` table holds one closure per member
-  // (`constructor` included, under that name). The table is what `new`
-  // reads, apart from the class's own properties: `C.m = f` is a static
-  // in JavaScript, and leaves what an instance's `m` calls alone.
+  // object whose table of methods, under kMethodsKey, holds one closure per
+  // member (`constructor` included, under that name). The table is what
+  // `new` reads, apart from the class's own properties: `C.m = f` is a
+  // static in JavaScript, and leaves what an instance's `m` calls alone.
   // The closures are built *here*, at the declaration's own lexical
   // position, which is what a class needs from the capture machinery:
   // every other front end's version of this (examples/mini-python's,

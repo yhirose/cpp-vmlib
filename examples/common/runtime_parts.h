@@ -648,6 +648,12 @@ inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
 // * `$add`. JavaScript and C# agree that a string on either side makes `+`
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.
+// * mini-js's classes. A class is an object holding its table of methods
+//   under one key, and `new` copies them onto the instance as wrappers
+//   that supply `this` -- not runtime_parts' layout, where an instance
+//   points back at its class and a call walks to it. JavaScript reads a
+//   method off the instance like any property, and this subset's classes
+//   have no `extends` for a walk to climb.
 // * mini-ruby's iteration. Its cursor walks a Hash too, and a Hash's step
 //   answers a key beside the value; it has no generator to step. Its
 //   $iternext builds its cursors and its steps with the shared parts, but
