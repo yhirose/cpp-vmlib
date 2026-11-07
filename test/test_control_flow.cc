@@ -408,11 +408,11 @@ int main() {
         const auto seen = [&](const char* s, NodeId v) {
           return b.block({say(s), v}, p);
         };
-        const auto both = [&](NodeId l, NodeId r) {
-          return b.make_if(l, r, b.bool_literal(false, p), p);
-        };
+        // `&&` and `||` as every front end writes them.
+        FuncWriter w(m, p);
+        const auto both = [&](NodeId l, NodeId r) { return w.both(l, r); };
         const auto either = [&](NodeId l, NodeId r) {
-          return b.make_if(l, b.bool_literal(true, p), r, p);
+          return w.either(l, r);
         };
         const auto stmt = [&](NodeId c) {
           return b.make_if(c, say("T"), say("F"), p);
@@ -515,9 +515,9 @@ int main() {
       }
       return n;
     };
-    const std::string both = dump_of(b.make_if(
-        b.make_if(L(0), L(1), b.bool_literal(false, p), p), say(), NodeId{},
-        p));
+    FuncWriter w(m, p);
+    const std::string both =
+        dump_of(b.make_if(w.both(L(0), L(1)), say(), NodeId{}, p));
     // Where each `jumpiffalse rN, T` goes.
     const auto targets = [](const std::string& s) {
       std::vector<std::string> out;
@@ -535,9 +535,8 @@ int main() {
     check(both.find("\tmove ") == std::string::npos &&
               both.find(", false\t") == std::string::npos,
           "a && b: no bool built between the tests");
-    const std::string either = dump_of(b.make_if(
-        b.make_if(L(0), b.bool_literal(true, p), L(1), p), say(), NodeId{},
-        p));
+    const std::string either =
+        dump_of(b.make_if(w.either(L(0), L(1)), say(), NodeId{}, p));
     check_eq(std::to_string(count(either, "\tjumpiftrue ")), "1",
              "a || b: a true jumps to the body");
     check(either.find("\tmove ") == std::string::npos &&

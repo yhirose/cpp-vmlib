@@ -567,7 +567,9 @@ int main() {
     const uint32_t kInt = tags_named("int");
     const uint32_t kDbl = tags_named("double");
     const uint32_t kStr = tags_named("string");
-    // The module: main prints what `make` builds, over the fallback #1.
+    // The module: main, with a local `x`, runs what `make` builds, over
+    // the fallback #1 -- which prints "f" and what it was handed, and
+    // answers -1 -- and #2, which answers 0.
     const auto run = [&](const std::function<NodeId(Builder&)>& make,
                          const std::string& what) {
       Module m;
@@ -576,7 +578,7 @@ int main() {
       const auto print = [&](NodeId v) {
         return b.intrinsic(IntrinsicId::Print, {v}, p);
       };
-      m.funcs.push_back({"main", 0, 0, make(b), {}, {}});
+      m.funcs.push_back({"main", 1, 0, make(b), {"x"}, {}});
       Func fb{"fb", 2, 0,
               b.block({print(b.str_literal("f", p)),
                        print(b.varref(VarKind::Local, 0, p)),
@@ -587,6 +589,9 @@ int main() {
       fb.num_params = 2;
       fb.lenient_arity = true;
       m.funcs.push_back(fb);
+      Func zero{"zero", 2, 0, b.literal(0, p), {"x", "y"}, {}};
+      zero.num_params = 2;
+      m.funcs.push_back(zero);
       check_eq(run_module(m, what), "", what + ": unexpected failure");
       return joined();
     };
@@ -801,25 +806,7 @@ int main() {
          "over a comparison with a fallback that answers"},
     };
     for (const auto& c : truths) {
-      Module m;
-      Builder b(m);
-      m.capture_maps.push_back({});
-      m.funcs.push_back({"main", 1, 0, c.make(b), {"x"}, {}});
-      Func f{"fb", 2, 0,
-             b.block({print(b, b.str_literal("f", p)),
-                      print(b, b.varref(VarKind::Local, 0, p)),
-                      print(b, b.varref(VarKind::Local, 1, p)),
-                      b.make_return(b.literal(-1, p), p)},
-                     p),
-             {"x", "y"}, {}};
-      f.num_params = 2;
-      f.lenient_arity = true;
-      m.funcs.push_back(f);
-      Func zero{"zero", 2, 0, b.literal(0, p), {"x", "y"}, {}};
-      zero.num_params = 2;
-      m.funcs.push_back(zero);
-      check_eq(run_module(m, c.what), "", std::string(c.what) + ": failed");
-      check_eq(joined(), c.want, std::string("truth: ") + c.what);
+      check_eq(run(c.make, c.what), c.want, std::string("truth: ") + c.what);
     }
 
     // A comparison handed to a language's truthiness is the comparison

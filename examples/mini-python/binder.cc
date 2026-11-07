@@ -1194,9 +1194,9 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
-    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
-                r.ret(exact_or(r, BinOp::Add, a, b, "$bigadd"))));
-    r.add(r.ret(r.call("$bigadd", {r.L(a), r.L(b)})));
+    // Two ints the exact Add answers; anything else, and an int sum past
+    // int64, is the limbs'.
+    r.add(r.ret(exact_or(r, BinOp::Add, a, b, "$bigadd")));
     r.finish("$add");
   }
 
@@ -1217,9 +1217,7 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
-    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
-                r.ret(exact_or(r, BinOp::Mul, a, b, "$bigmul"))));
-    r.add(r.ret(r.call("$bigmul", {r.L(a), r.L(b)})));
+    r.add(r.ret(exact_or(r, BinOp::Mul, a, b, "$bigmul")));
     r.finish("$mul");
   }
 
