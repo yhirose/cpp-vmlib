@@ -341,7 +341,7 @@ int main() {
              m.nodes[n.v].num_children = 4;
              return n;
            }),
-           "Binary takes 2 or 3 children", "a Binary with two fallbacks");
+           "binary takes 2 or 3 children", "a Binary with two fallbacks");
   check_eq(verdict([&](Module&, Builder& b) {
              return add(b, {b.make_break(p), 1});
            }),
@@ -367,7 +367,7 @@ int main() {
              m.nodes[n.v].num_children = 4;
              return n;
            }),
-           "Index takes 2 or 3 children", "an Index with two fallbacks");
+           "index takes 2 or 3 children", "an Index with two fallbacks");
 
   // An operator with a fallback may call it, so it runs twice as a call
   // would -- even over operands and a callee that are only reads.

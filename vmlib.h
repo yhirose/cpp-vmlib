@@ -5568,10 +5568,9 @@ struct Verifier {
   bool check_fallback(const Node& n, bool wrappable) {
     const uint32_t k = operands_of(n.tag);
     if (n.num_children != k && n.num_children != k + 1) {
-      std::string what = name_of(n.tag);
-      what[0] = static_cast<char>(what[0] - 'a' + 'A');
-      return fail(what + " takes " + std::to_string(k) + " or " +
-                  std::to_string(k + 1) + " children");
+      return fail(std::string(name_of(n.tag)) + " takes " +
+                  std::to_string(k) + " or " + std::to_string(k + 1) +
+                  " children");
     }
     if (!names_fallback(n)) {
       if (n.a == 0 && n.b == 0) return true;
