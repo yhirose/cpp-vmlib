@@ -530,6 +530,34 @@ int main() {
     }
   }
 
+  // --- 10b. A collection something does leave -- here a finalize hook that
+  //          throws; an allocation that fails is the other way -- leaves
+  //          the Runtime able to collect: the pins and in_collect_ come
+  //          off, and the cycle it was about to free is still there. -----
+  {
+    Runtime rt;
+    Runtime::Scope scope(rt);
+    {
+      Value a = Value::make_array({});
+      a.as_array()->items.push_back(a);
+    }
+    rt.set_finalize_fn(nullptr, [](void*, HeapObj*) {
+      throw std::runtime_error("host error");
+    });
+    bool threw = false;
+    try {
+      rt.collect();
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    check(threw, "finalize throw: the host exception left collect");
+    check(!rt.in_collect(), "finalize throw: in_collect_ was reset");
+    check(rt.live_objects() == 1, "finalize throw: the cycle is still there");
+    rt.set_finalize_fn(nullptr, nullptr);
+    check(rt.collect() == 1, "finalize throw: a later collect frees it");
+    check(rt.live_objects() == 0, "finalize throw: and nothing is left");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "gc: %d failure(s)\n", g_failures);
     return 1;

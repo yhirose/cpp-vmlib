@@ -4606,18 +4606,46 @@ inline int64_t Runtime::collect() {
   if (in_collect_) return 0;
   in_collect_ = true;
 
+  // A collection left early -- an allocation that failed, or a host's own
+  // hook that threw (a finalize hook, or a drop hook of its own) -- is
+  // abandoned: the pins and flags come off, and the Runtime collects again
+  // later. Whatever the unpinning
+  // left at zero nothing else holds, so it is freed, with nested
+  // collections still refused: one could free another of them first.
+  // Those are moved to the front of `dead` in place, since this may be
+  // running because nothing could be allocated; none of them is another's
+  // child (a child's count is not zero), so the order is free.
+  std::vector<HeapObj*> dead;
+  struct Abandon {
+    Runtime& rt;
+    std::vector<HeapObj*>& dead;
+    bool swept = false;
+    ~Abandon() {
+      if (!swept) {
+        for (HeapObj* o : dead) {
+          o->gc_condemned = false;
+          --o->rc;
+        }
+        const auto zero = std::partition(dead.begin(), dead.end(),
+                                         [](HeapObj* o) { return o->rc == 0; });
+        for (auto it = dead.begin(); it != zero; ++it) heap_release_to_zero(*it);
+      }
+      rt.in_collect_ = false;
+    }
+  } abandon{*this, dead};
+
   // Condemn what nothing reaches, and pin it: a destructor about to run
   // may drop the last reference between two condemned objects, and that
   // must not free one of them out from under the sweep. Called again after
-  // the destructors, for what they allocated.
+  // the destructors, for what they allocated. Listed before it is pinned,
+  // so a list that cannot grow leaves nothing pinned behind.
   mark();
-  std::vector<HeapObj*> dead;
   const auto condemn_unmarked = [&] {
     for (HeapObj* o = head_; o; o = o->next) {
       if (!o->gc_marked && !o->gc_condemned) {
+        dead.push_back(o);
         o->gc_condemned = true;
         ++o->rc;
-        dead.push_back(o);
       }
     }
   };
@@ -4632,56 +4660,38 @@ inline int64_t Runtime::collect() {
   // destructor before the sweep, as it would had it died by refcount.
   // Allocation here is ordinary: a nested collect is refused by
   // in_collect_.
-  //
-  // A destructor that throws (a host function can) abandons the collection:
-  // the pins and flags come off, and the Runtime collects again later.
-  try {
-    for (;;) {
-      bool ran = false;
-      for (HeapObj* o : dead) {
-        if (run_drop(o)) ran = true;
-      }
-      if (!ran) break;
-      mark();
-      std::vector<HeapObj*> still;
-      for (HeapObj* o : dead) {
-        if (o->gc_marked) {
-          o->gc_condemned = false;
-          --o->rc;  // the pin; a reachable object holds at least one more
-        } else {
-          still.push_back(o);
-        }
-      }
-      dead.swap(still);
-      condemn_unmarked();
-    }
-
-    // The host's last look, while every member is still whole.
-    if (finalize_) {
-      for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
-    }
-  } catch (...) {
-    in_collect_ = false;
+  for (;;) {
+    bool ran = false;
     for (HeapObj* o : dead) {
-      o->gc_condemned = false;
-      --o->rc;
+      if (run_drop(o)) ran = true;
     }
-    // Whatever the unpinning left at zero nothing else holds, so it is
-    // gathered first: freeing one releases its children, which may be
-    // other members of `dead`.
-    std::vector<HeapObj*> orphans;
-    for (HeapObj* o : dead) {
-      if (o->rc == 0) orphans.push_back(o);
+    if (!ran) break;
+    mark();
+    // The resurrected are unpinned in place, keeping the rest in order:
+    // no second list to allocate while `dead` holds pins.
+    const auto kept = std::stable_partition(
+        dead.begin(), dead.end(), [](HeapObj* o) { return !o->gc_marked; });
+    for (auto it = kept; it != dead.end(); ++it) {
+      (*it)->gc_condemned = false;
+      --(*it)->rc;  // the pin; a reachable object holds at least one more
     }
-    for (HeapObj* o : orphans) heap_release_to_zero(o);
-    throw;
+    dead.erase(kept, dead.end());
+    condemn_unmarked();
   }
+
+  // The host's last look, while every member is still whole.
+  if (finalize_) {
+    for (HeapObj* o : dead) finalize_(finalize_ctx_, o);
+  }
+
+  // Past here nothing can fail: the sweep allocates nothing and runs no
+  // destructor.
+  abandon.swept = true;
   strip_and_free([&](auto&& f) {
     for (HeapObj* o : dead) f(o);
   });
 
   next_gc_ = live_ < 2048 ? 4096 : live_ * 2;
-  in_collect_ = false;
   return static_cast<int64_t>(dead.size());
 }
 
