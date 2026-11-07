@@ -28,6 +28,7 @@ namespace runtime_parts {
 
 using coreir::BinOp;
 using coreir::FuncWriter;
+using coreir::HelperWriter;
 using coreir::IntrinsicId;
 using coreir::NodeId;
 
@@ -210,6 +211,56 @@ inline void float_str(FuncWriter& w, const std::string& nan) {
   w.add(w.ret(w.in(IntrinsicId::ToStr, {w.L(d)})));
 }
 
+// ---- Equality, of containers -----------------------------------------------
+//
+// Ruby, Python and culebra compare containers by what they hold: two
+// arrays are equal when they are as long and equal element by element, two
+// keyed containers when they hold the same keys with equal values -- equal
+// by the language's own `==`, the helper `eq` names, which is how nested
+// containers compare. What each `$eq` asks first, of numbers and of
+// objects, and in which order, is its own (see below); these are the two
+// loops all three wrote, as the block each case returns from. `a` and `b`
+// are the operands, already known to be the same kind; the rest are locals
+// the loop may use.
+inline NodeId equal_elements(HelperWriter& r, FuncWriter::Slot a,
+                             FuncWriter::Slot b, FuncWriter::Slot i,
+                             const std::string& eq) {
+  return r.blk(
+      {r.iff(r.bin(BinOp::Ne, r.len(r.L(a)), r.len(r.L(b))),
+             r.ret(r.Bo(false))),
+       r.set(i, r.I(0)),
+       r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
+            r.blk({r.iff(r.bin(BinOp::Eq,
+                               r.call(eq, {r.idx(r.L(a), r.L(i)),
+                                           r.idx(r.L(b), r.L(i))}),
+                               r.Bo(false)),
+                         r.ret(r.Bo(false))),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+       r.ret(r.Bo(true))});
+}
+inline NodeId equal_entries(HelperWriter& r, FuncWriter::Slot a,
+                            FuncWriter::Slot b, FuncWriter::Slot i,
+                            FuncWriter::Slot ks, FuncWriter::Slot k,
+                            const std::string& eq) {
+  return r.blk(
+      {r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
+       r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
+                   r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
+             r.ret(r.Bo(false))),
+       r.set(i, r.I(0)),
+       r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+            r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
+                   r.iff(r.bin(BinOp::Eq, r.has(r.L(b), r.L(k)), r.Bo(false)),
+                         r.ret(r.Bo(false))),
+                   r.iff(r.bin(BinOp::Eq,
+                               r.call(eq, {r.idx(r.L(a), r.L(k)),
+                                           r.idx(r.L(b), r.L(k))}),
+                               r.Bo(false)),
+                         r.ret(r.Bo(false))),
+                   r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
+       r.ret(r.Bo(true))});
+}
+
 // ---- Left per language, and why -------------------------------------------
 //
 // * `$truthy` past nil and false. JavaScript's falsy set has "" and NaN and
@@ -220,9 +271,11 @@ inline void float_str(FuncWriter& w, const std::string& nan) {
 // * `$str`. Every front end spells nil, a bool and a container its own way
 //   ("None", "nil", "", "undefined"; "True", "true"), and finds a class's own
 //   to_s/__str__/ToString/__tostring by its own protocol.
-// * `$eq` as a whole. Where numbers meet (Python's bignums), what an object
-//   is asked (Ruby's ==, Python's __eq__, Lua's __eq, C# identity, culebra's
-//   structural comparison) and in which order differ in every language.
+// * `$eq` as a whole, past the container loops above. Where numbers meet
+//   (Python's bignums), what an object is asked (Ruby's ==, Python's
+//   __eq__, Lua's __eq, C# identity, culebra's structural comparison) and
+//   in which order differ in every language; the scalar cases they share
+//   are four short tests, arranged differently in each.
 // * `$add`. JavaScript and C# agree that a string on either side makes `+`
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.

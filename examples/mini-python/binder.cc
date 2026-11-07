@@ -1370,38 +1370,9 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
     r.add(r.iff(r.either(r.is(r.typ(a), "bool"), r.is(r.typ(a), "string")),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
-    r.add(r.iff(
-        r.is(r.typ(a), "array"),
-        r.blk({r.iff(r.bin(BinOp::Ne, r.len(r.L(a)), r.len(r.L(b))),
-                     r.ret(r.Bo(false))),
-               r.set(i, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
-                    r.blk({r.iff(r.bin(BinOp::Eq,
-                                       r.call("$eq", {r.idx(r.L(a), r.L(i)),
-                                                      r.idx(r.L(b), r.L(i))}),
-                                       r.Bo(false)),
-                                 r.ret(r.Bo(false))),
-                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
-               r.ret(r.Bo(true))})));
-    r.add(r.iff(
-        r.is(r.typ(a), "map"),
-        r.blk({r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
-               r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
-                           r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
-                     r.ret(r.Bo(false))),
-               r.set(i, r.I(0)),
-               r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
-                    r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
-                           r.iff(r.bin(BinOp::Eq, r.has(r.L(b), r.L(k)),
-                                       r.Bo(false)),
-                                 r.ret(r.Bo(false))),
-                           r.iff(r.bin(BinOp::Eq,
-                                       r.call("$eq", {r.idx(r.L(a), r.L(k)),
-                                                      r.idx(r.L(b), r.L(k))}),
-                                       r.Bo(false)),
-                                 r.ret(r.Bo(false))),
-                           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
-               r.ret(r.Bo(true))})));
+    r.add(r.iff(r.is(r.typ(a), "array"), equal_elements(r, a, b, i, "$eq")));
+    r.add(r.iff(r.is(r.typ(a), "map"),
+                equal_entries(r, a, b, i, ks, k, "$eq")));
     r.add(
         r.iff(r.either(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
               r.blk({r.iff(r.bin(BinOp::Eq,

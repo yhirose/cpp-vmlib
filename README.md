@@ -252,9 +252,9 @@ finds a method, what is false, how a value prints. Where front ends here
 made the same decision and wrote it the same way, it is kept once, outside
 `vmlib.h`, in [examples/common/runtime_parts.h](examples/common/runtime_parts.h)
 -- the class layout and the walk up its bases, the cursor a for-each
-loop steps, the nil-and-false truthiness, a float printed with its ".0"
--- and the end of that file lists what each front end still writes for
-itself, and why. Its
+loop steps, the nil-and-false truthiness, a float printed with its ".0",
+two containers compared by what they hold -- and the end of that file
+lists what each front end still writes for itself, and why. Its
 key convention is worth taking even without the rest: the
 implementation's own object keys start with `0x01` (`vmlib.h`'s `kDropKey`
 is one), and a program's names kept beside them, its methods on a class

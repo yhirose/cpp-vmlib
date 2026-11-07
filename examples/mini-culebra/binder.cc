@@ -451,45 +451,11 @@ struct Binder {
     const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)));
     arms.emplace_back(r.S("bool"), scalar);
     arms.emplace_back(r.S("string"), scalar);
-    // Arrays: same length, and equal element by element.
-    arms.emplace_back(
-        r.S("array"),
-        r.blk({r.iff(r.bin(BinOp::Ne, r.len(r.L(a)), r.len(r.L(b))),
-                     r.ret(r.Bo(false))),
-               r.set(i, r.I(0)),
-               r.b.make_while(
-                   r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
-                   r.blk({r.iff(r.bin(BinOp::Eq,
-                                      r.call("$eq", {r.idx(r.L(a), r.L(i)),
-                                                     r.idx(r.L(b), r.L(i))}),
-                                      r.Bo(false)),
-                                r.ret(r.Bo(false))),
-                          r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
-               r.ret(r.Bo(true))}));
-    // Objects: same key count, and every key of the left present in the
-    // right with an equal value.
-    arms.emplace_back(
-        r.S("object"),
-        r.blk({r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
-               r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
-                           r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
-                     r.ret(r.Bo(false))),
-               r.set(i, r.I(0)),
-               r.b.make_while(
-                   r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
-                   r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
-                          r.iff(r.bin(BinOp::Eq,
-                                      r.in(IntrinsicId::ObjectHas,
-                                           {r.L(b), r.L(k)}),
-                                      r.Bo(false)),
-                                r.ret(r.Bo(false))),
-                          r.iff(r.bin(BinOp::Eq,
-                                      r.call("$eq", {r.idx(r.L(a), r.L(k)),
-                                                     r.idx(r.L(b), r.L(k))}),
-                                      r.Bo(false)),
-                                r.ret(r.Bo(false))),
-                          r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
-               r.ret(r.Bo(true))}));
+    // Arrays: same length, and equal element by element. Objects: same
+    // key count, and every key of the left present in the right with an
+    // equal value.
+    arms.emplace_back(r.S("array"), equal_elements(r, a, b, i, "$eq"));
+    arms.emplace_back(r.S("object"), equal_entries(r, a, b, i, ks, k, "$eq"));
     r.add(r.b.make_switch(r.typ(a), arms,
                           r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}))));
     r.finish("$eq");
