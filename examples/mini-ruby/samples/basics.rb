@@ -4,8 +4,10 @@
 puts 1 + 2 * 3
 puts 10 - 4, 3 * 4, 2 ** 10
 # `/` and `%` on two Integers floor, where BinOp::Div truncates and
-# BinOp::Mod is C's.
+# BinOp::Mod is C's -- and which way to round is the signs' to say, not
+# their product's, which wraps past 2^63.
 puts 7 / 2, -7 / 2, 7 % 3, -7 % 3, 7 % -3
+puts -3 % 4611686018427387904, -3 / 4611686018427387904
 puts 7 / 2.0, 1 + 2.0, 1.0 * 3
 
 # A whole Float prints with a point, which is to_display's output plus the

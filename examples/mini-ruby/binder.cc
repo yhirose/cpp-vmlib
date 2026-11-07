@@ -654,7 +654,9 @@ struct Binder {
   }
 
   // `+` concatenates strings and arrays; `/` and `%` on two Integers floor,
-  // where BinOp::Div truncates and BinOp::Mod is C's.
+  // where BinOp::Div truncates and BinOp::Mod is C's -- which is FloorDiv
+  // and FloorMod, and the operators in the program are those, with these
+  // behind them (Binder::arith).
   void rt_add() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
@@ -699,31 +701,25 @@ struct Binder {
   void rt_div() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [q] = r.locals("q");
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Div, r.L(a), r.L(b)))));
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call(
                     "$exc", {r.S("ZeroDivisionError"), r.S("divided by 0")}))));
-    r.add(r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
-               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(a), r.L(b)), r.I(0))),
-        r.set(q, r.bin(BinOp::Sub, r.L(q), r.I(1)))));
-    r.add(r.ret(r.L(q)));
+    r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
+                r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
+    // Anything else Div refuses, in its own words.
+    r.add(r.ret(r.bin(BinOp::Div, r.L(a), r.L(b))));
     r.finish("$div");
   }
 
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [m] = r.locals("m");
-    r.add(r.set(m, r.bin(BinOp::Mod, r.L(a), r.L(b))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Ne, r.L(m), r.I(0)),
-               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(m), r.L(b)), r.I(0))),
-        r.set(m, r.bin(BinOp::Add, r.L(m), r.L(b)))));
-    r.add(r.ret(r.L(m)));
+    r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
+                r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
+    // Anything else Mod refuses, in its own words.
+    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
     r.finish("$mod");
   }
 
@@ -1437,8 +1433,10 @@ struct Binder {
   // A binary operator, by its runtime helper. `+`, `-` and `*` on two
   // numbers are the VM's -- an Integer wrapping, as this subset's does --
   // and `+` on two strings concatenates; anything else is the helper's,
-  // which repeats a string, joins two arrays or asks a class. The rest
-  // (`/` and `%` floor, `**`) are the helper's throughout.
+  // which repeats a string, joins two arrays or asks a class. `/` and `%`
+  // on two Integers are FloorDiv and FloorMod, Ruby's floor, a zero
+  // divisor being the helper's ZeroDivisionError; `**` is the helper's
+  // throughout.
   NodeId arith(const char* helper, NodeId x, NodeId y, SrcPos p) {
     const std::string h = helper;
     const uint32_t num = tags_named({"int", "double"});
@@ -1448,6 +1446,9 @@ struct Binder {
     }
     if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p);
     if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p);
+    const uint32_t ints = tags_named("int");
+    if (h == "$div") return op_or_helper(rt, BinOp::FloorDiv, x, y, ints, h, p);
+    if (h == "$mod") return op_or_helper(rt, BinOp::FloorMod, x, y, ints, h, p);
     return rt.call(h, {x, y}, p);
   }
 
