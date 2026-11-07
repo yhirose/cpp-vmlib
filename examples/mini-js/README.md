@@ -247,49 +247,41 @@ The arguments go into fresh cells at the call (JavaScript's own rule --
 they are evaluated at the call, not at the first resume), so two calls in
 flight at once do not share them.
 
-## `class`, without a prototype in the IR
+## `class`, and its prototype
 
-A class is a plain object whose table of methods holds one closure per
-member -- `constructor` under that name too -- built at the class
-declaration's own lexical position. That last part is load-bearing, not
-a style choice: `emit_classdecl` is what a method's free variables were
-resolved *against* (`resolve_fn`'s `is_method` flag just prepends a
-synthetic `this` to the same machinery every other function here uses),
-so its closures have to be minted from that exact spot, the way
+A class is two objects: its prototype, a method table holding one
+closure per member, and its value, the object its name evaluates to,
+which holds its statics. The methods are built at the class
+declaration's own lexical position. That is load-bearing, not a style
+choice: `emit_classdecl` is what a method's free variables were resolved
+*against* (`resolve_fn`'s `is_method` flag just prepends a synthetic
+`this` to the same machinery every other function here uses), so its
+closures have to be minted from that exact spot, the way
 examples/mini-python's constructor and examples/mini-ruby's method table
 are built at their own `class`/`def` rather than wherever `new` happens
-to run. The table is apart from the class's own properties, so
-`ClassName.m = f`, a static in JavaScript, leaves what an instance's `m`
-calls alone, while `instance.constructor === ClassName` still reads true
-the way real JavaScript's does. The table itself is in the class's kind
-record, which no property reaches -- the
-[shared convention](../common/runtime_parts.h) for what the
-implementation keeps on an object, which the collection a Map or a Set
-wraps and a promise's state follow too -- so a static of any name, and a
-property spelled with whatever bytes, is only a property.
+to run.
 
-`new ClassName(args)` copies every member onto a fresh instance and calls
-whichever one is named `constructor`. What it copies is not quite the raw
-closure, though: a method's own signature is `(this, ...declared)`, since
-that is what a call *through the class table* would need, but
-`instance.method(args)` -- the call this front end already knows how to
-make, `emit_method`'s generic fallback -- calls with just `(...declared)`.
-So each instance gets a small per-member wrapper instead, closing over
-the class table and itself, that supplies `this` and forwards the rest.
-It is built once per `new` expression (a `Func` and capture map shared
-across however many times that expression runs, fresh cells and a fresh
-closure per instance), the
-same shape `new Promise(...)` above already uses for its own per-
-occurrence state.
+This is [the shared layout](../common/runtime_parts.h) as JavaScript has
+it. An instance's meta -- the slot no property reaches, `MetaGet`/
+`MetaSet` -- is the prototype, and an instance holds its fields and
+nothing else, so `Object.keys` and a printed instance show its fields
+alone, as node does. The prototype's own meta is the class's record,
+which keeps the constructor, and the value carries the same record,
+which is how `new` reaches the prototype and the constructor from
+whatever the class is handed through. The prototype's `constructor` is
+the value, so `instance.constructor === ClassName` reads true. A static
+is the value's own property, and leaves what an instance's method is
+alone; a property spelled with whatever bytes is only a property.
 
-`new` needs the class *by name*, at the call site: `ref_of` on the
-identifier has to land on a binding `class_by_var` recognizes, because
-building each wrapper needs a method's exact declared parameter count,
-known only from the class's own `ClassInfo`. `new Alias(...)`, where
-`Alias` is a variable a function *returned* a class through rather than
-the class's own name, is a compile-time error naming so -- `samples/
-classes.js`'s `makeAdder` instantiates where the class is declared for
-exactly this reason.
+A method's signature is `(this, ...declared)`. A call `o.m(args)` asks
+`$method` for the method o's class has under `m`, up the prototype
+chain (runtime_parts' `find_in_chain`), and calls it with `o` in front;
+when `o` has a property `m` of its own, that is what the call reaches,
+as any value is called -- an object literal's function, or one assigned
+over a method on one instance. Reading `o.m` without calling it finds
+the same method through `$index`. `new` reads the class when it runs,
+so a class reached through any name constructs, one a function returned
+included, and a value that is no class is a `TypeError`.
 
 An arrow function written inside a method closes over `this` lexically,
 through the ordinary capture machinery (`this` is a scoped variable,
@@ -318,11 +310,10 @@ array and copying it are the executor's own work, with its own words for
 a value that is not one. Array literals build `[a, ...xs]` from the same
 pieces.
 
-Two of this front end's functions forward their arguments to another:
-an async function's launcher hands them to its body, and `new` gives each
-instance a wrapper per method that adds `this`. Both take a rest param
-where the function they forward to has one, and spread it back out, so
-the callee's own rest param collects it afresh.
+One of this front end's functions forwards its arguments to another: an
+async function's launcher hands them to its body. It takes a rest param
+where the body has one, and spreads it back out, so the body's own rest
+param collects it afresh.
 
 `console.log` and `push` take any number of arguments, and a spread among
 them; `a.push(1, 2)` used to push only the first. Every other builtin
@@ -363,9 +354,9 @@ Quietly different, and therefore worth knowing:
 * **A builtin method name wins over a property.** `x.push(...)`,
   `.slice`, `.join`, `.pop`, `.next`, `.return`, `.throw`, `.get`, `.set`,
   `.has`, `.delete`, `.add`, `.then` and `.catch` are resolved at bind time
-  -- a subset without prototypes has no runtime lookup to do it with -- so
-  an object of your own, or a class's own method table, must not put a
-  function under one of those names. They are also not readable as
+  -- before any lookup through an object or its prototype -- so an
+  object of your own, or a class's prototype, must not put a function
+  under one of those names. They are also not readable as
   properties: `typeof p.then` is
   `"undefined"`.
 * **Numbers outside the samples' range print differently.** `1e21`,

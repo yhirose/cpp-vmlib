@@ -65,17 +65,19 @@ using namespace runtime_parts;
 namespace mini_js {
 namespace {
 
-// What this implementation keeps on objects a program can hold -- the
-// collection a Map or a Set wraps, a class's table of methods -- is their
-// kind record (runtime_parts.h's Hidden state), which no property reaches.
-// Kept under keys, as `$map` and later as "\x01map", `{$map: 5}` was a Map
-// to `.size`, a static `C.$methods` replaced the class's methods, and a
-// key written with a raw 0x01 byte still made an object a Map.
+// What this implementation keeps on objects a program can hold is their
+// meta (runtime_parts.h's Hidden state), which no property reaches: the
+// collection a Map or a Set wraps, in its kind record, and an instance's
+// class. A class is runtime_parts.h's layout as JavaScript has it: its
+// methods are a method table -- C.prototype -- which is what an
+// instance's meta is, and the class's value, which holds its statics, is
+// a second object; both carry the class's record, which keeps the
+// constructor and, for the value, the way to the prototype.
 constexpr char kMapKind[] = "Map";
 constexpr char kSetKind[] = "Set";
 constexpr int64_t kCollection = 1;  // the value-keyed map either wraps
-constexpr char kClassKind[] = "class";
-constexpr int64_t kClassMethods = 1;
+constexpr int64_t kClassCtor = kClassOwn;
+constexpr int64_t kClassProto = kClassOwn + 1;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -290,17 +292,11 @@ struct Binder {
   // temporal dead zone until its declaration runs), and simpler besides --
   // a plain `declare` in place is all `resolve_stmt` needs.
   std::map<const Ast*, ClassInfo> classes;
-  // `new` only reaches a class it can see statically -- the identifier
-  // resolves to a binding this map knows -- which is what lets `emit_new`
-  // build a `this`-bound wrapper per method with an exact parameter count,
-  // rather than a name it would have to trust at run time.
-  std::map<int32_t, const Ast*> class_by_var;
 
   void resolve_classdecl(const Ast& a, int32_t fn) {
     const std::string cname(a.nodes[0]->token);
     const int32_t declv = declare(cname, fn, false, *a.nodes[0]);
     decl_of[a.nodes[0].get()] = declv;
-    class_by_var[declv] = &a;
     ClassInfo ci;
     for (size_t i = 1; i < a.nodes.size(); ++i) {
       const Ast& mem = *a.nodes[i];  // classmember: ident, params, block
@@ -507,9 +503,9 @@ struct Binder {
         "$join",   "$add",     "$index",   "$setidx",   "$slice",
         "$push",   "$iter",    "$iternext", "$throwtype", "$minner",
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
-        "$mfill",  "$sfill",   "$newresult",
+        "$mfill",  "$sfill",   "$newresult", "$method", "$noctor",
         "$then",    "$react",    "$presolve1", "$preject1", "$prejected",
-        "$arrayof", "$pushall", "$logjoin", "$keys",
+        "$arrayof", "$pushall", "$logjoin",
     };
     return names;
   }
@@ -709,7 +705,7 @@ struct Binder {
   void rt_index() {
     RT r(*this);
     const auto [recv, key] = r.params("recv", "key");
-    const auto [i, n, k] = r.locals("i", "n", "k");
+    const auto [i, n, k, v, cls] = r.locals("i", "n", "k", "v", "cls");
     std::vector<std::pair<NodeId, NodeId>> arms;
     const NodeId seq = r.blk({
         r.iff(r.is(r.typ(key), "string"),
@@ -744,7 +740,14 @@ struct Binder {
                         r.ret(r.in(IntrinsicId::ToDouble,
                                    {r.len(kind_field(r, r.L(recv),
                                                      kCollection))})))),
-            r.ret(r.idx(r.L(recv), r.L(k))),
+            // An own property, then the class's: the prototype chain. An
+            // own property set to undefined shadows the class's still.
+            r.set(v, r.idx(r.L(recv), r.L(k))),
+            r.iff(r.isnt(r.typ(v), "nil"), r.ret(r.L(v))),
+            r.iff(r.has(r.L(recv), r.L(k)), r.ret(r.Nil())),
+            r.set(cls, instance_class(r, recv)),
+            find_in_chain(r, cls, k),
+            r.ret(r.Nil()),
         }));
     arms.emplace_back(
         r.S("nil"),
@@ -983,13 +986,30 @@ struct Binder {
     r.finish(name);
   }
 
-  // Object.keys: an object's own keys, every one of them -- what this
-  // implementation keeps on it is in its kind record, which is no key.
-  void rt_keys() {
+  // The method a call `o.name(...)` reaches through o's class -- found up
+  // its prototype chain -- or nil when it reaches none: o is no instance,
+  // or has a property of that name of its own, which a call reaches as
+  // any property, with no `this`. A method takes `this` as its first
+  // parameter, so the call site passes the receiver to what this answers.
+  void rt_method() {
     RT r(*this);
-    const auto [o] = r.params("o");
-    r.add(r.ret(r.in(IntrinsicId::ObjectKeys, {r.L(o)})));
-    r.finish("$keys");
+    const auto [o, name] = r.params("o", "name");
+    const auto [cls] = r.locals("cls");
+    r.add(r.iff(r.isnt(r.typ(o), "object"), r.ret(r.Nil())));
+    r.add(r.iff(r.has(r.L(o), r.L(name)), r.ret(r.Nil())));
+    r.add(r.set(cls, instance_class(r, o)));
+    r.add(find_in_chain(r, cls, name));
+    r.add(r.ret(r.Nil()));
+    r.finish("$method");
+  }
+
+  // The constructor of a class that declares none: `new` calls it like
+  // any other, and the arguments it is handed still run, as JavaScript's
+  // default constructor takes and drops them.
+  void rt_noctor() {
+    RT r(*this);
+    r.add(r.ret(r.Nil()));
+    r.finish("$noctor");
   }
 
   // What `new` evaluates to, ES2023 10.2.2 [[Construct]]: what the
@@ -1137,7 +1157,8 @@ struct Binder {
     rt_fill("$mfill", true);
     rt_fill("$sfill", false);
     rt_newresult();
-    rt_keys();
+    rt_method();
+    rt_noctor();
     write_promise_helpers(rt);
     rt_then();
     rt_react();
@@ -1319,13 +1340,22 @@ struct Binder {
     NodeId spread;
   };
 
+  // How many of a call's arguments come before its spread, if it has one.
+  static size_t fixed_args(const Ast& args) {
+    size_t k = 0;
+    while (k < args.nodes.size() && args.nodes[k]->tag != "spread"_) ++k;
+    return k;
+  }
+
   Args emit_call_args(const Ast& args, FnCtx& ctx) {
     Args out;
-    size_t k = 0;
-    for (; k < args.nodes.size() && args.nodes[k]->tag != "spread"_; ++k) {
+    const size_t fixed = fixed_args(args);
+    for (size_t k = 0; k < fixed; ++k) {
       out.fixed.push_back(emit_expr(*args.nodes[k], ctx));
     }
-    if (k < args.nodes.size()) out.spread = emit_items(args, k, ctx, false);
+    if (fixed < args.nodes.size()) {
+      out.spread = emit_items(args, fixed, ctx, false);
+    }
     return out;
   }
 
@@ -1741,17 +1771,29 @@ struct Binder {
     auto b = Builder(m).at(p);
     const ClassInfo& ci = classes.at(&a);
     std::vector<std::pair<NodeId, NodeId>> kvs;
-    if (ci.ctor_fn >= 0) {
-      kvs.emplace_back(b.str_literal("constructor"),
-                       emit_closure(ci.ctor_fn, ctx, p));
-    }
     for (const auto& [name, g] : ci.methods) {
       kvs.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
     }
-    return bind_decl(
-        decl_of.at(a.nodes[0].get()),
-        of_kind(b, b.object_lit({}), kClassKind, {b.object_lit(kvs)}), ctx, p,
-        false);
+    const NodeId ctor =
+        ci.ctor_fn >= 0 ? emit_closure(ci.ctor_fn, ctx, p)
+                        : b.make_closure(rt.func("$noctor"), rt.empty_cmap());
+    // The class's value first, its record holding the prototype; then the
+    // prototype's meta, the same record, and its `constructor`, the value.
+    const int32_t v = decl_of.at(a.nodes[0].get());
+    const auto proto = [&] {
+      return kind_field(b, read_var(v, ctx, p), kClassProto);
+    };
+    return b.block(
+        {bind_decl(v,
+                   of_kind(b, b.object_lit({}), kClassKind,
+                           {b.str_literal(std::string(a.nodes[0]->token)),
+                            b.nil_literal(), ctor, b.object_lit(kvs)}),
+                   ctx, p, false),
+         b.intrinsic(IntrinsicId::MetaSet,
+                     {proto(), b.intrinsic(IntrinsicId::MetaGet,
+                                           {read_var(v, ctx, p)})}),
+         b.set_index(proto(), b.str_literal("constructor"),
+                     read_var(v, ctx, p))});
   }
 
   // `new Foo(x).bar()`: `new` binds to the *nearest* constructor call in
@@ -1815,94 +1857,39 @@ struct Binder {
                         {b.str_literal("message"),
                          rt.call("$str", {arg_or_nil(xs.args, 0, p)}, p)}})));
     }
-    // `new SomeClass(...)`: not a builtin, so it has to be a class -- and
-    // one this call site can see statically, because binding `this` needs
-    // to know each method's exact parameter count. A method's own closure
-    // does not take `this` as an argument the way `obj.method()` calls
-    // it; it *is* one (params[0], from `resolve_fn`'s `is_method`), so
-    // what an instance actually holds under each name is a small wrapper
-    // -- captures the class table and this instance, takes the method's
-    // declared parameters, and calls the real one with `this` in front.
-    // Built once per `new` expression, not per method table: the wrapper
-    // itself is a plain closure with a fresh capture map, the same trick
-    // `new Promise` above uses for its own per-occurrence state.
-    if (!ref_of.count(a.nodes[0].get()) ||
-        !class_by_var.count(ref_of.at(a.nodes[0].get()))) {
+    // `new SomeClass(...)`: not a builtin, so it has to be a class, which
+    // is a value like any other -- read at run time, through whatever name
+    // reaches it -- and answers for its own prototype and constructor. A
+    // method takes `this` as its first parameter, and the call that reaches
+    // it through an instance passes the instance (emit_method), so an
+    // instance holds its fields and nothing else.
+    if (!ref_of.count(a.nodes[0].get())) {
       fail(*a.nodes[0], "'" + n + "' is not a class known here");
     }
-    const ClassInfo& ci = classes.at(class_by_var.at(ref_of.at(a.nodes[0].get())));
-    // The class itself in a slot, for `instance.constructor`; its method
-    // table in a cell, for the wrappers below.
+    const int32_t mark = ctx.mark();
     const int32_t kv = ctx.alloc_local("$cls");
-    const NodeId K = b.varref(VarKind::Local, kv);
-    const int32_t ccell = ctx.next_cell++;
-    const int32_t tcell = ctx.next_cell++;
     const int32_t tv = ctx.alloc_local("$this");
+    const int32_t meta = ctx.alloc_local("$meta");
+    const int32_t type = ctx.alloc_local("$type");
+    const NodeId K = b.varref(VarKind::Local, kv);
     const NodeId T = b.varref(VarKind::Local, tv);
-    std::vector<NodeId> steps{
-        b.assign(VarKind::Local, kv,
-                 read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
-        b.cell_fresh(ccell),
-        b.assign(VarKind::Cell, ccell, kind_field(b, K, kClassMethods)),
-        b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
-        b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
-    for (const auto& [name, g] : ci.methods) {
-      const FnInfo& gi = fns[static_cast<size_t>(g)];
-      const int32_t nparams = static_cast<int32_t>(gi.params.size()) - 1;
-      Func wf;
-      wf.name = name + ".bound";
-      wf.num_params = nparams;
-      wf.num_locals = nparams;
-      wf.local_names.assign(static_cast<size_t>(nparams), "arg");
-      wf.num_captures = 2;
-      wf.capture_names = {"cls", "self"};
-      wf.lenient_arity = true;
-      // A method's rest param is the wrapper's too, spread back out to the
-      // method, whose own collects it afresh.
-      wf.rest_param = gi.rest;
-      std::vector<NodeId> wargs{b.varref(VarKind::Capture, 1)};
-      for (int32_t k = 0; k < nparams; ++k) {
-        wargs.push_back(b.varref(VarKind::Local, k));
-      }
-      const NodeId method =
-          b.index(b.varref(VarKind::Capture, 0), b.str_literal(name));
-      NodeId call;
-      if (gi.rest) {
-        const NodeId rest = wargs.back();
-        wargs.pop_back();
-        call = b.call_spread(method, wargs, rest);
-      } else {
-        call = b.call_value(method, wargs);
-      }
-      wf.body = b.scope(0, nparams, b.make_return(call));
-      const int32_t widx = static_cast<int32_t>(m.funcs.size());
-      m.funcs.push_back(std::move(wf));
-      const int32_t wcm = static_cast<int32_t>(m.capture_maps.size());
-      m.capture_maps.push_back(
-          {{VarKind::Cell, ccell}, {VarKind::Cell, tcell}});
-      steps.push_back(rt.call(
-          "$setidx", {T, b.str_literal(name), b.make_closure(widx, wcm)}, p));
-    }
-    steps.push_back(rt.call(
-        "$setidx",
-        {T, b.str_literal("constructor"), K}, p));
-    if (ci.ctor_fn >= 0) {
-      const NodeId ctorClosure = rt.call(
-          "$index",
-          {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
-      steps.push_back(rt.call(
-          "$newresult",
-          {call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p), T},
-          p));
-      return chain(b.block(steps));
-    }
-    if (!arglist.nodes.empty()) {
-      // No constructor to take them, but the arguments are a call's, and
-      // run all the same -- a spread among them refused as anywhere else.
-      steps.push_back(emit_items(arglist, 0, ctx, true));
-    }
-    steps.push_back(T);
-    return chain(b.block(steps));
+    const NodeId built = b.block(
+        {b.assign(VarKind::Local, kv,
+                  read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
+         b.make_if(b.binary(BinOp::Eq, is_kind(b, K, meta, type, kClassKind),
+                            b.bool_literal(false)),
+                   rt.call("$throwtype",
+                           {b.str_literal(n + " is not a constructor")}, p),
+                   NodeId{}),
+         b.assign(VarKind::Local, tv,
+                  new_instance(b, kind_field(b, K, kClassProto))),
+         rt.call("$newresult",
+                 {call_with(kind_field(b, K, kClassCtor), {T},
+                            emit_call_args(arglist, ctx), p),
+                  T},
+                 p)});
+    const int32_t end = ctx.release(mark);
+    return chain(b.scope(mark, end, built));
   }
 
   // A primary followed by `limit - 1` suffixes. The limit is what lets an
@@ -2021,7 +2008,8 @@ struct Binder {
       }
       if (g == "Object" && mem == "keys") {
         return builtin(1, [&](Args a) {
-          return rt.call("$keys", {arg_or_nil(a, 0, p)}, p);
+          return b.intrinsic(IntrinsicId::ObjectKeys, {arg_or_nil(a, 0, p)},
+                             p);
         });
       }
       if (g == "Promise" && mem == "resolve") {
@@ -2130,8 +2118,53 @@ struct Binder {
       });
     }
 
-    return call_with(rt.call("$index", {recv, b.str_literal(name)}, p), {},
-                     emit_call_args(arglist, ctx), p);
+    // A method of the program's own: the receiver's class's, given the
+    // receiver as `this` -- or, when the receiver has a property of the
+    // name itself, that property, called as any value is. JavaScript
+    // reads the callee before it runs the arguments, and so does this:
+    // the receiver, its method or else its property are settled first;
+    // then each argument runs once, into a slot of its own; then the call
+    // is made, with `this` when it is a method. The two calls differ in
+    // what they pass, so each reads the arguments from the slots, which
+    // -- like the receiver's and the callee's -- belong to a scope around
+    // the call alone, claimed before the arguments run.
+    const int32_t mark = ctx.mark();
+    const int32_t t = ctx.alloc_local("$recv");
+    const int32_t mt = ctx.alloc_local("$method");
+    const int32_t pr = ctx.alloc_local("$property");
+    const auto L = [&](int32_t slot) { return b.varref(VarKind::Local, slot); };
+    const size_t fixed = fixed_args(arglist);
+    std::vector<int32_t> slots;
+    for (size_t k = 0; k < fixed; ++k) slots.push_back(ctx.alloc_local("$arg"));
+    const bool spread = fixed < arglist.nodes.size();
+    const int32_t rest = spread ? ctx.alloc_local("$spread") : -1;
+    const Args args = emit_call_args(arglist, ctx);
+    const auto no_method = [&] {
+      return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {L(mt)}),
+                      b.str_literal("nil"));
+    };
+    std::vector<NodeId> body{
+        b.assign(VarKind::Local, t, recv),
+        b.assign(VarKind::Local, mt,
+                 rt.call("$method", {L(t), b.str_literal(name)}, p)),
+        b.make_if(no_method(),
+                  b.assign(VarKind::Local, pr,
+                           rt.call("$index", {L(t), b.str_literal(name)}, p)),
+                  NodeId{})};
+    for (size_t k = 0; k < fixed; ++k) {
+      body.push_back(b.assign(VarKind::Local, slots[k], args.fixed[k]));
+    }
+    if (spread) body.push_back(b.assign(VarKind::Local, rest, args.spread));
+    const auto slotted = [&] {
+      Args a;
+      for (const int32_t slot : slots) a.fixed.push_back(L(slot));
+      if (spread) a.spread = L(rest);
+      return a;
+    };
+    body.push_back(b.make_if(no_method(), call_with(L(pr), {}, slotted(), p),
+                             call_with(L(mt), {L(t)}, slotted(), p)));
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, b.block(body));
   }
 
   // Assignment, in the one shape both a variable and a property need: let

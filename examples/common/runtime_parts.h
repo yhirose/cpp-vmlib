@@ -153,20 +153,25 @@ inline const std::vector<coreir::Value>* kind_record(const coreir::Value& v,
 
 // ---- Classes ---------------------------------------------------------------
 //
-// There is no class in the IR, and none was needed. A class is an object --
-// its table -- holding its methods by name, with its name and its base's
-// table in its kind record; an instance is an object of the program's
-// fields whose meta is its class:
+// There is no class in the IR, and none was needed. A class's methods are
+// an object -- its method table, JavaScript's C.prototype -- holding them
+// by name, with the class's name and its base's table in the table's kind
+// record; an instance is an object of the program's fields whose meta is
+// the method table:
 //
-//   table:    { m: <m>, ... }       ["class", "C", <the base's table>, ...]
-//   instance: { <fields> }          meta: <table>
+//   method table: { m: <m>, ... }    ["class", "C", <the base's table>, ...]
+//   instance:     { <fields> }       meta: <the method table>
 //
-// So the meta of an instance is an Object and every kind record is an
-// Array: nothing is taken for a class that is not one. A front end adds
-// what else its classes need to the record, from kClassOwn on -- a
-// constructor, an identity to compare -- and every question a class system
-// asks is a walk up kClassBase: which method a name means, whether a value
-// is an instance of a class.
+// A front end adds what else its classes need to the record, from
+// kClassOwn on -- a constructor, an identity to compare -- and every
+// question a class system asks is a walk up kClassBase: which method a
+// name means (find_in_chain), whether a value is an instance of a class.
+// The class's value, what its name evaluates to, is the program's: where
+// a class holds nothing else it is the method table itself (mini-ruby's),
+// or no object at all (mini-python's, its constructor), and where it holds
+// what the program puts on it -- JavaScript's statics, C#'s static fields,
+// culebra's `new` and `name` -- it is an object of its own, so that none
+// of that meets a method.
 inline constexpr char kClassKind[] = "class";
 inline constexpr int64_t kClassName = 1;
 inline constexpr int64_t kClassBase = 2;
@@ -922,12 +927,6 @@ inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
 // * `$add`. JavaScript and C# agree that a string on either side makes `+`
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.
-// * mini-js's classes. A class is an object holding its table of methods
-//   in its kind record, and `new` copies them onto the instance as wrappers
-//   that supply `this` -- not runtime_parts' layout, where an instance
-//   points back at its class and a call walks to it. JavaScript reads a
-//   method off the instance like any property, and this subset's classes
-//   have no `extends` for a walk to climb.
 // * mini-ruby's iteration. Its cursor walks a Hash too, and a Hash's step
 //   answers a key beside the value; it has no generator to step. Its
 //   $iternext builds its cursors and its steps with the shared parts, but

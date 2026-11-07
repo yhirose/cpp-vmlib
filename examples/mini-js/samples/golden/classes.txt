@@ -13,3 +13,6 @@ static apart: ['hi', 'hi', 'static']
 static named like the table: ['hi']
 class keys: ['hello', '$methods']
 constructor result: [1, 1, true, true, true]
+instance keys: ['x', 'y']
+instance: { x: 1, y: 2 }
+new through a returned class: 16

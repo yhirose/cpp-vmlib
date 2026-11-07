@@ -1,11 +1,10 @@
-// `class`, `this` and `new`. A class here is a plain object holding one
-// closure per member (`constructor` included, under that name), built at
-// the class declaration's own lexical position -- the same reason
-// examples/mini-python's and examples/mini-ruby's method tables are built
-// where the `class`/`def` stands rather than at `new`. `new ClassName(...)`
-// copies every key the table has onto a fresh object and calls whichever
-// one landed under `constructor`, so it never needs to know in advance
-// what a class declares.
+// `class`, `this` and `new`. A class's methods are its prototype, one
+// closure per member, built at the class declaration's own lexical
+// position -- the same reason examples/mini-python's and
+// examples/mini-ruby's method tables are built where the `class`/`def`
+// stands rather than at `new`. An instance holds its fields; a call
+// through it finds the method on its class and hands it the instance as
+// `this`.
 
 class Point {
   constructor(x, y) {
@@ -30,8 +29,8 @@ show('label', p.label('P'));
 show('chained', p.scaled(2).norm2());
 show('constructor property', p.constructor === Point);
 
-// A method reassigned on one instance does not touch another -- each
-// instance got its own copy of the closures at construction time.
+// A method reassigned on one instance does not touch another -- the one
+// instance's own property shadows its class's method, and only there.
 const q = new Point(1, 1);
 q.norm2 = function () { return 'shadowed'; };
 show('shadowed vs plain', [q.norm2(), p.norm2()]);
@@ -71,10 +70,7 @@ for (const one of pts) {
 }
 show('array of instances', norms);
 
-// A class closing over what was around it when it was declared. `new`
-// needs a class it can see by name at the call site (see README.md), so
-// this instantiates `Adder` where it is declared rather than through an
-// alias a function returned.
+// A class closing over what was around it when it was declared.
 function makeAdder(base, step) {
   class Adder {
     constructor(step) {
@@ -109,7 +105,7 @@ Greeter.hello = function () { return 'static'; };
 const late = new Greeter();
 show('static apart', [early.hello(), late.hello(), Greeter.hello()]);
 
-// Even one named like where the class keeps its methods.
+// Even one named like where the class once kept its methods.
 Greeter.$methods = {};
 show('static named like the table', [new Greeter().hello()]);
 // A class's own keys are its statics, and nothing it keeps for itself.
@@ -123,3 +119,25 @@ class Swap {
 show('constructor result', [new Swap({ other: 1 }).other,
                             new Swap([7]).length, new Swap(5).mine,
                             new Swap('s').mine, new Swap().mine]);
+
+// An instance holds its fields and nothing else -- its methods are its
+// class's, reached through it -- so Object.keys lists the fields alone,
+// and a printed instance shows them alone.
+show('instance keys', Object.keys(new Point(1, 2)));
+show('instance', new Point(1, 2));
+
+// `new` reads the class it is handed when it runs, so a class reached
+// through any name constructs, one a function returned included.
+function makeAdderClass(base) {
+  class Adder {
+    constructor(step) {
+      this.step = step;
+    }
+    apply(v) {
+      return v + base + this.step;
+    }
+  }
+  return Adder;
+}
+const Add10 = makeAdderClass(10);
+show('new through a returned class', new Add10(5).apply(1));
