@@ -12,11 +12,15 @@ target_link_libraries(mini-go PRIVATE vmlib)
 # than in test/. (enable_testing() is called once, at the top level, ahead
 # of every add_subdirectory -- see the comment there for why it has to run
 # that early for this add_test to be found by a plain `ctest` at the top.)
+#
+# The goldens are `go run`'s output (samples/gen_golden.sh).
 add_test(NAME mini-go-samples
         COMMAND ${CMAKE_COMMAND}
-                -DMINI_GO=$<TARGET_FILE:mini-go>
-                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+                -DBIN=$<TARGET_FILE:mini-go>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/samples
+                -DEXT=go
+                "-DORACLE=go run"
+                -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
 
 # Nothing a program could observe is evaluated twice
 # (coreir::shared_effects): every sample, uncaught case and bench program.

@@ -5,11 +5,15 @@ target_include_directories(mini-lua PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-lua SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
 target_link_libraries(mini-lua PRIVATE vmlib)
 
+# The goldens are `lua`'s output (samples/gen_golden.sh) -- whose language
+# specification *requires* the behaviour samples/tailcalls.lua checks.
 add_test(NAME mini-lua-samples
         COMMAND ${CMAKE_COMMAND}
-                -DMINI_LUA=$<TARGET_FILE:mini-lua>
-                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+                -DBIN=$<TARGET_FILE:mini-lua>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/samples
+                -DEXT=lua
+                -DORACLE=lua
+                -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
 
 # An exception nothing catches is reported in the language's own words
 # (RunOptions::describe): uncaught/expected/ holds each case's report.

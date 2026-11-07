@@ -3,8 +3,10 @@
 # PL/0 interpreter for samples, a fixed expected/ transcript for errors.
 add_test(NAME samples
          COMMAND ${CMAKE_COMMAND}
-                 -DPL0=$<TARGET_FILE:pl0>
-                 -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/..
+                 -DBIN=$<TARGET_FILE:pl0>
+                 -DDIR=${PROJECT_SOURCE_DIR}/examples/pl0/samples
+                 -DEXT=pas
+                 "-DORACLE=culebra's pl0.cul"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
 
 # The errors are not golden-compared against culebra: the binder reports

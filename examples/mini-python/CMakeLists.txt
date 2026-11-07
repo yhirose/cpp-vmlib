@@ -7,11 +7,15 @@ target_include_directories(mini-python PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-python SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
 target_link_libraries(mini-python PRIVATE vmlib)
 
+# The goldens are `python3`'s output (samples/gen_golden.sh) -- whose
+# integers are unbounded by definition, which samples/bignums.py checks.
 add_test(NAME mini-python-samples
         COMMAND ${CMAKE_COMMAND}
-                -DMINI_PYTHON=$<TARGET_FILE:mini-python>
-                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+                -DBIN=$<TARGET_FILE:mini-python>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/samples
+                -DEXT=py
+                -DORACLE=python3
+                -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
 
 # An exception nothing catches is reported in the language's own words
 # (RunOptions::describe): uncaught/expected/ holds each case's report.

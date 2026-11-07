@@ -10,11 +10,19 @@ target_link_libraries(mini-js PRIVATE vmlib)
 # depends on this front end, so its own sample check lives here rather than
 # in test/. (enable_testing() runs once at the top level, ahead of every
 # add_subdirectory -- see the comment there for why that timing matters.)
+#
+# The goldens are `node`'s output, each sample run with samples/prelude.js
+# ahead of it, as gen_golden.sh ran it for `node`: the prelude is the
+# formatting the samples print through, written in the source language so
+# that both sides build their output with the same code (see README.md).
 add_test(NAME mini-js-samples
         COMMAND ${CMAKE_COMMAND}
-                -DMINI_JS=$<TARGET_FILE:mini-js>
-                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+                -DBIN=$<TARGET_FILE:mini-js>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/samples
+                -DEXT=js
+                -DORACLE=node
+                -DLEAD=${CMAKE_CURRENT_SOURCE_DIR}/samples/prelude.js
+                -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
 
 # An exception nothing catches is reported in the language's own words
 # (RunOptions::describe): uncaught/expected/ holds each case's report.

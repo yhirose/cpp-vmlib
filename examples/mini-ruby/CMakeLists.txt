@@ -5,11 +5,14 @@ target_include_directories(mini-ruby PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-ruby SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
 target_link_libraries(mini-ruby PRIVATE vmlib)
 
+# The goldens are `ruby`'s output (samples/gen_golden.sh).
 add_test(NAME mini-ruby-samples
         COMMAND ${CMAKE_COMMAND}
-                -DMINI_RUBY=$<TARGET_FILE:mini-ruby>
-                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+                -DBIN=$<TARGET_FILE:mini-ruby>
+                -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/samples
+                -DEXT=rb
+                -DORACLE=ruby
+                -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
 
 # An exception nothing catches is reported in the language's own words
 # (RunOptions::describe): uncaught/expected/ holds each case's report.
