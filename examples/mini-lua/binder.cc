@@ -108,10 +108,11 @@ bool is_global(const std::string& n) {
          n == "rawset" || n == "rawget";
 }
 
-// How many arguments a library function reads, one value each; npos for
-// one that takes every value (print, io.write, select, pcall, table.pack)
-// or reads its own (the string natives). The arguments past those still
-// run -- FrameLayout::spill_unread.
+// How many arguments a library function that takes one value each reads;
+// npos for one that reads its own (the string natives). The arguments past
+// those still run -- FrameLayout::spill_unread. One that takes every value
+// as one array (print, io.write, select, pcall, table.pack) has none past
+// them, and is not asked.
 size_t library_reads(const std::string& g, const std::string& mem) {
   static const std::map<std::string, size_t> reads = {
       {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
@@ -1409,30 +1410,40 @@ struct Binder {
       fail(prim, "'" + g + "' is only supported as a call here");
     }
     // The arguments are read once, the way any call reads them, and each
-    // library function takes them in the shape it needs: one value each
-    // (a0, the expanding last argument cut to its first), or all of them
-    // as one array (all), which is how `print(f())` prints every result.
+    // library function takes them in the shape it needs: all of them as
+    // one array (all), which is how `print(f())` prints every result, or
+    // one value each (a0, below).
     const Ast* arglist =
         callsfx->nodes.empty() ? nullptr : callsfx->nodes[0].get();
     const Values vals = emit_args(arglist, ctx);
-    std::vector<NodeId> args = vals.firsts;
-    if (vals.rest.valid()) args.push_back(rt.call("$one", {vals.rest}, p));
-    const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal(p);
-    };
     const auto all = [&] {
       return values_array(vals, arglist != nullptr ? pos_of(*arglist) : p);
     };
     i = after;
-    // Lua runs every argument of a call, whether the function reads it or
-    // not: `type(1, f())` still calls f, after the 1 and before type.
+    if (mem.empty()) {
+      if (g == "print") return {native("print", {all()}, p), false};
+      if (g == "pcall") return {emit_pcall(vals, ctx, p), true};
+      if (g == "select") return {rt.call("$select", {all()}, p), true};
+    }
+    if (g == "table" && mem == "pack") {
+      return {rt.call("$pack", {all()}, p), false};
+    }
+    if (g == "io" && mem == "write") {
+      return {native("write", {all()}, p), false};
+    }
+    // The rest take one value each, the expanding last argument cut to its
+    // first. Lua runs every argument of a call, whether the function reads
+    // it or not: `type(1, f())` still calls f, after the 1 and before type.
+    std::vector<NodeId> args = vals.firsts;
+    if (vals.rest.valid()) args.push_back(rt.call("$one", {vals.rest}, p));
     auto bp = b.at(p);
     const std::vector<NodeId> pre =
         ctx.spill_unread(bp, args, library_reads(g, mem));
+    const auto a0 = [&](size_t k) {
+      return k < args.size() ? args[k] : b.nil_literal(p);
+    };
     const auto dispatch = [&]() -> Val {
-
       if (mem.empty()) {
-        if (g == "print") return {native("print", {all()}, p), false};
         if (g == "type") return {native("type", {a0(0)}, p), false};
         if (g == "tostring") return {rt.call("$str", {a0(0)}, p), false};
         if (g == "setmetatable") {
@@ -1449,8 +1460,6 @@ struct Binder {
                           p),
                   false};
         }
-        if (g == "pcall") return {emit_pcall(vals, ctx, p), true};
-        if (g == "select") return {rt.call("$select", {all()}, p), true};
         // rawset/rawget: `$set`/`$get` without the metamethod detour --
         // `__newindex`'s own thunk needs one, on pain of calling itself.
         if (g == "rawset") {
@@ -1505,7 +1514,6 @@ struct Binder {
           }
           return {rt.call("$insert", {a0(0), a0(1)}, p), false};
         }
-        if (mem == "pack") return {rt.call("$pack", {all()}, p), false};
         if (mem == "unpack") {
           return {rt.call("$unpack", {a0(0), a0(1), a0(2)}, p), true};
         }
@@ -1516,9 +1524,6 @@ struct Binder {
       if (g == "math") {
         if (mem == "floor") return {native("floor", {a0(0)}, p), false};
         if (mem == "type") return {native("mathtype", {a0(0)}, p), false};
-      }
-      if (g == "io" && mem == "write") {
-        return {native("write", {all()}, p), false};
       }
       fail(prim, "'" + g + "." + mem + "' is not supported here");
     };
