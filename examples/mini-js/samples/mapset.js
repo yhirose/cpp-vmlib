@@ -57,3 +57,13 @@ copied.set('c', 3);
 const fromStr = new Set('abca');
 show('built', [fromPairs.get('b'), fromPairs.size, copied.size,
                fromStr.size, new Set([1, 1, 2]).size, new Map().size]);
+
+// An ordinary object is neither, whatever its own keys are called.
+const lookalike = {$map: 5, $set: [1, 2]};
+let walked = 'no';
+try {
+  for (const x of lookalike) walked = 'walked ' + x;
+} catch (e) {
+  walked = e.name;
+}
+show('lookalike', [lookalike.size, walked, lookalike.$map]);

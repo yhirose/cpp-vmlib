@@ -10,4 +10,5 @@ array of instances: [2, 8, 18]
 class over an outer variable: 16
 plain object method: [1, 2]
 static apart: ['hi', 'hi', 'static']
+static named like the table: ['hi']
 constructor result: [1, 1, true, true, true]

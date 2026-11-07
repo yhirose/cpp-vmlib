@@ -236,7 +236,7 @@ flight at once do not share them.
 
 ## `class`, without a prototype in the IR
 
-A class is a plain object whose `$methods` table holds one closure per
+A class is a plain object whose table of methods holds one closure per
 member -- `constructor` under that name too -- built at the class
 declaration's own lexical position. That last part is load-bearing, not
 a style choice: `emit_classdecl` is what a method's free variables were
@@ -248,7 +248,11 @@ are built at their own `class`/`def` rather than wherever `new` happens
 to run. The table is apart from the class's own properties, so
 `ClassName.m = f`, a static in JavaScript, leaves what an instance's `m`
 calls alone, while `instance.constructor === ClassName` still reads true
-the way real JavaScript's does.
+the way real JavaScript's does. The table itself sits under
+`"\x01methods"`, a key no property name a program writes can be -- the
+[shared convention](../common/runtime_parts.h) for the implementation's
+own keys, which the collection a Map or a Set wraps follows too -- so
+even a static named `$methods` is only a static.
 
 `new ClassName(args)` copies every member onto a fresh instance and calls
 whichever one is named `constructor`. What it copies is not quite the raw

@@ -53,6 +53,7 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
@@ -61,6 +62,16 @@ using namespace coreir;
 
 namespace mini_js {
 namespace {
+
+// The keys this implementation keeps on objects a program can hold -- the
+// collection a Map or a Set wraps, a class's table of methods -- under
+// runtime_parts.h's kImplPrefix, which no property name a program writes
+// begins with. Spelled `$map` and the like, as they were, `{$map: 5}` was a
+// Map to `.size`, `{$set: [1, 2]}` one `for...of` would walk, and a static
+// `C.$methods` replaced the class's methods.
+constexpr char kMapKey[] = "\x01" "map";
+constexpr char kSetKey[] = "\x01" "set";
+constexpr char kMethodsKey[] = "\x01" "methods";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -701,13 +712,13 @@ struct Binder {
             r.iff(
                 r.is(r.L(k), "size"),
                 r.blk({r.iff(r.in(IntrinsicId::ObjectHas,
-                                  {r.L(recv), r.S("$map")}),
+                                  {r.L(recv), r.S(kMapKey)}),
                              r.ret(r.in(IntrinsicId::ToDouble,
-                                        {r.len(r.idx(r.L(recv), "$map"))}))),
+                                        {r.len(r.idx(r.L(recv), kMapKey))}))),
                        r.iff(r.in(IntrinsicId::ObjectHas,
-                                  {r.L(recv), r.S("$set")}),
+                                  {r.L(recv), r.S(kSetKey)}),
                              r.ret(r.in(IntrinsicId::ToDouble,
-                                        {r.len(r.idx(r.L(recv), "$set"))})))})),
+                                        {r.len(r.idx(r.L(recv), kSetKey))})))})),
             r.ret(r.idx(r.L(recv), r.L(k))),
         }));
     arms.emplace_back(
@@ -844,16 +855,16 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "object"),
         r.blk({
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$set")}),
+            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kSetKey)}),
                   r.ret(r.obj({{"k", r.S("a")},
                                {"v", r.in(IntrinsicId::ObjectKeys,
-                                          {r.idx(r.L(v), "$set")})},
+                                          {r.idx(r.L(v), kSetKey)})},
                                {"i", r.I(0)}}))),
             // A Map iterates [key, value] pairs; materializing them up
             // front keeps $iternext one shape rather than three.
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$map")}),
+            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kMapKey)}),
                   r.blk({
-                      r.set(mm, r.idx(r.L(v), "$map")),
+                      r.set(mm, r.idx(r.L(v), kMapKey)),
                       r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(mm)})),
                       r.set(out, r.b.array_lit({})),
                       r.set(i, r.I(0)),
@@ -900,10 +911,10 @@ struct Binder {
     const auto [o] = r.params("o");
     r.add(
         r.iff(r.is(r.typ(o), "object"),
-              r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$map")}),
-                           r.ret(r.idx(r.L(o), "$map"))),
-                     r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S("$set")}),
-                           r.ret(r.idx(r.L(o), "$set")))})));
+              r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S(kMapKey)}),
+                           r.ret(r.idx(r.L(o), kMapKey))),
+                     r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S(kSetKey)}),
+                           r.ret(r.idx(r.L(o), kSetKey)))})));
     r.add(r.ret(r.call("$throwtype", {r.S("not a Map or a Set")})));
     r.finish("$minner");
   }
@@ -1849,7 +1860,7 @@ struct Binder {
     }
     return bind_decl(
         decl_of.at(a.nodes[0].get()),
-        b.object_lit({{b.str_literal("$methods"), b.object_lit(kvs)}}), ctx, p,
+        b.object_lit({{b.str_literal(kMethodsKey), b.object_lit(kvs)}}), ctx, p,
         false);
   }
 
@@ -1875,7 +1886,7 @@ struct Binder {
     if (n == "Map" || n == "Set") {
       const BuiltinArgs xs = emit_args(arglist, 1, ctx);
       const NodeId empty = b.object_lit(
-          {{b.str_literal(n == "Map" ? "$map" : "$set"),
+          {{b.str_literal(n == "Map" ? kMapKey : kSetKey),
             b.intrinsic(IntrinsicId::MapNew, {})}});
       const NodeId made =
           xs.args.empty()
@@ -1942,7 +1953,7 @@ struct Binder {
         b.assign(VarKind::Local, kv,
                  read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
         b.cell_fresh(ccell),
-        b.assign(VarKind::Cell, ccell, b.index(K, b.str_literal("$methods"))),
+        b.assign(VarKind::Cell, ccell, b.index(K, b.str_literal(kMethodsKey))),
         b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
         b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
     for (const auto& [name, g] : ci.methods) {
