@@ -206,21 +206,24 @@ itself, this works from inside a call the async body makes, not only at the
 body's own top level -- which is what an `await` in a helper function needs
 and what a generator's single-frame `Yield` could not do.
 
-**An async function is three funcs.** `--dump-ir` on
+**An async function is three funcs**, written by
+[examples/common/runtime_parts.h](../common/runtime_parts.h)'s
+`write_async`, which mini-csharp's async methods are lowered by too.
+`--dump-ir` on
 `async function twice(v) { return (await v) * 2; }`:
 
 ```
-func #39 twice  locals=1 captures=0
+func #40 twice  locals=1 captures=0
   cellfresh cell[0]; assign cell[0] <- $pnew()          ; the promise
-  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #40
+  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #41
   cellfresh cell[2]; assign cell[2] <- varref local[0]  ; the argument
   cororesume
     corocreate
-      makeclosure twice$run #41 cmap=5
+      makeclosure twice$run #42 cmap=5
     literal nil
   return varref cell[0]                                  ; the promise
-func #40 twice$body   ; the body you wrote, with twice's own captures
-func #41 twice$run    ; calls the body, settles the promise with the
+func #41 twice$body   ; the body you wrote, with twice's own captures
+func #42 twice$run    ; calls the body, settles the promise with the
                       ; value it returned or the value it threw
 ```
 

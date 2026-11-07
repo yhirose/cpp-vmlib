@@ -509,6 +509,127 @@ inline void write_promise_helpers(HelperTable& rt) {
   }
 }
 
+// An async function, lowered over the promise above. Calling one has to
+// return its promise before its body has finished, so it is three funcs:
+//
+//   f       what the source declared. Builds the promise, packages the
+//           arguments and the body closure into cells, starts the body's
+//           coroutine, and answers the promise.
+//   f$body  the body as the front end built it, with f's own captures.
+//   f$run   the coroutine's entry: calls f$body and settles the promise
+//           with what it returned ($presolve, which adopts a promise it is
+//           handed) or with what it threw.
+//
+// The coroutine is started with CoroResume, not Enqueue: JavaScript's and
+// C#'s async bodies alike run synchronously up to their first `await`, so
+// the call returns only once the body has suspended or finished, and from
+// then on whoever settles what it awaits enqueues it. The arguments are
+// copied into fresh cells at the call, so two calls in flight do not share
+// them.
+//
+// `body` is the function the front end built for the source's declaration
+// -- its name, parameters, cells and captures already set -- and `params`
+// names its parameters, one per num_params. A rest parameter
+// (body.rest_param) arrives as the array and is spread back out to f$body,
+// whose own rest parameter collects it afresh. `index` is the
+// Module::funcs slot f takes; the other two are added.
+inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
+                        std::vector<std::string> params, coreir::SrcPos p) {
+  using coreir::CaptureSrc;
+  using coreir::Func;
+  using coreir::VarKind;
+  coreir::Module& m = rt.module();
+  auto b = coreir::Builder(m).at(p);
+  const std::string name = body.name;
+  const int32_t nparams = body.num_params;
+  const int32_t ncaps = body.num_captures;
+  const bool rest = body.rest_param;
+  const std::vector<std::string> capnames = body.capture_names;
+  body.name = name + "$body";
+  const int32_t body_idx = static_cast<int32_t>(m.funcs.size());
+  m.funcs.push_back(std::move(body));
+  const int32_t run_idx = static_cast<int32_t>(m.funcs.size());
+  m.funcs.push_back({});
+
+  // f: cells 0 = the promise, 1 = the body closure, 2.. = the arguments.
+  std::vector<NodeId> launch;
+  launch.push_back(b.cell_fresh(0));
+  launch.push_back(b.assign(VarKind::Cell, 0, rt.call("$pnew", {}, p)));
+  std::vector<CaptureSrc> fwd;
+  fwd.reserve(static_cast<size_t>(ncaps));
+  for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
+  const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
+  m.capture_maps.push_back(fwd);
+  launch.push_back(b.cell_fresh(1));
+  launch.push_back(
+      b.assign(VarKind::Cell, 1, b.make_closure(body_idx, fwd_cmap)));
+  std::vector<CaptureSrc> runcap{{VarKind::Cell, 1}, {VarKind::Cell, 0}};
+  for (int32_t i = 0; i < nparams; ++i) {
+    launch.push_back(b.cell_fresh(2 + i));
+    launch.push_back(
+        b.assign(VarKind::Cell, 2 + i, b.varref(VarKind::Local, i)));
+    runcap.push_back({VarKind::Cell, 2 + i});
+  }
+  const int32_t run_cmap = static_cast<int32_t>(m.capture_maps.size());
+  m.capture_maps.push_back(runcap);
+  launch.push_back(
+      b.intrinsic(IntrinsicId::CoroResume,
+                  {b.intrinsic(IntrinsicId::CoroCreate,
+                               {b.make_closure(run_idx, run_cmap)}),
+                   b.nil_literal()}));
+  launch.push_back(b.make_return(b.varref(VarKind::Cell, 0)));
+
+  Func f;
+  f.name = name;
+  f.num_params = nparams;
+  f.num_locals = nparams;
+  f.local_names = params;
+  f.num_cells = 2 + nparams;
+  f.num_captures = ncaps;
+  f.capture_names = capnames;
+  f.lenient_arity = true;
+  f.rest_param = rest;
+  f.body = b.scope(0, nparams, b.block(launch));
+  m.funcs[static_cast<size_t>(index)] = std::move(f);
+
+  // f$run: captures 0 = the body closure, 1 = the promise, 2.. = the
+  // arguments; local 0 = what the body threw.
+  std::vector<NodeId> callargs;
+  callargs.reserve(static_cast<size_t>(nparams));
+  for (int32_t i = 0; i < nparams; ++i) {
+    callargs.push_back(b.varref(VarKind::Capture, 2 + i));
+  }
+  NodeId call_body;
+  if (rest) {
+    const NodeId spread = callargs.back();
+    callargs.pop_back();
+    call_body = b.call_spread(b.varref(VarKind::Capture, 0), callargs, spread);
+  } else {
+    call_body = b.call_value(b.varref(VarKind::Capture, 0), callargs);
+  }
+  Func run;
+  run.name = name + "$run";
+  run.num_params = 0;
+  run.num_locals = 1;
+  run.local_names = {"$exc"};
+  run.num_captures = 2 + nparams;
+  run.capture_names = {"$body", "$promise"};
+  run.capture_names.insert(run.capture_names.end(), params.begin(),
+                           params.end());
+  run.lenient_arity = true;  // the scheduler resumes it as f(nil)
+  run.body = b.scope(
+      0, 1,
+      b.make_try(0,
+                 rt.call("$presolve", {b.varref(VarKind::Capture, 1),
+                                       call_body},
+                         p),
+                 rt.call("$psettle", {b.varref(VarKind::Capture, 1),
+                                      b.literal(kRejected),
+                                      b.varref(VarKind::Local, 0)},
+                         p)));
+  m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
+}
+
 // ---- Left per language, and why -------------------------------------------
 //
 // * `$truthy` past nil and false. JavaScript's falsy set has "" and NaN and
@@ -532,8 +653,5 @@ inline void write_promise_helpers(HelperTable& rt) {
 //   $iternext builds its cursors and its steps with the shared parts, but
 //   runs its own step: iter_step would add a generator test to every
 //   `.each`, a hot path, for a kind Ruby does not have.
-// * An `async` function's lowering into three funcs (mini-js, mini-csharp):
-//   it is the emit pass's, built from each binder's own frames and
-//   captures, not a helper.
 
 }  // namespace runtime_parts

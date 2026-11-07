@@ -1946,7 +1946,7 @@ struct Binder {
       m.funcs[static_cast<size_t>(rf.index)] = std::move(fn);
       return;
     }
-    emit_async(fi, rf.index, std::move(fn), nparams, p);
+    emit_async(fi, rf.index, std::move(fn), p);
   }
 
   void emit_ctor_prologue(const ClassInfo& ci, FnCtx& ctx,
@@ -1987,89 +1987,16 @@ struct Binder {
         args));
   }
 
-  // An async method is three funcs, exactly as in examples/mini-js: the
-  // one the source declared (which builds a Task, spawns and returns it),
-  // the body, and the coroutine entry that settles the Task.
-  void emit_async(const FnInfo& fi, int32_t index, Func body,
-                  int32_t nparams, SrcPos p) {
-    auto b = Builder(m).at(p);
-    body.name = fi.name + "$body";
-    const int32_t ncaps = body.num_captures;
-    const std::vector<std::string> capnames = body.capture_names;
-    const int32_t body_idx = static_cast<int32_t>(m.funcs.size());
-    m.funcs.push_back(std::move(body));
-    const int32_t run_idx = static_cast<int32_t>(m.funcs.size());
-    m.funcs.push_back({});
-
-    std::vector<NodeId> launch{
-        b.cell_fresh(0), b.assign(VarKind::Cell, 0, rt.call("$pnew", {}, p))};
-    std::vector<CaptureSrc> fwd;
-    for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
-    const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(fwd);
-    launch.push_back(b.cell_fresh(1));
-    launch.push_back(
-        b.assign(VarKind::Cell, 1, b.make_closure(body_idx, fwd_cmap)));
-    std::vector<CaptureSrc> runcap{{VarKind::Cell, 1}, {VarKind::Cell, 0}};
-    for (int32_t i = 0; i < nparams; ++i) {
-      launch.push_back(b.cell_fresh(2 + i));
-      launch.push_back(
-          b.assign(VarKind::Cell, 2 + i, b.varref(VarKind::Local, i)));
-      runcap.push_back({VarKind::Cell, 2 + i});
-    }
-    const int32_t run_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(runcap);
-    // CoroResume, not Enqueue: an async method runs synchronously up to
-    // its first `await`, which is C#'s rule as well as JavaScript's.
-    launch.push_back(
-        b.intrinsic(IntrinsicId::CoroResume,
-                    {b.intrinsic(IntrinsicId::CoroCreate,
-                                 {b.make_closure(run_idx, run_cmap)}),
-                     b.nil_literal()}));
-    launch.push_back(b.make_return(b.varref(VarKind::Cell, 0)));
-
-    Func f;
-    f.name = fi.name;
-    f.num_params = nparams;
-    f.num_locals = nparams;
+  // An async method is runtime_parts.h's three funcs (write_async), as an
+  // async function is in examples/mini-js: C# too runs the body
+  // synchronously up to its first `await`.
+  void emit_async(const FnInfo& fi, int32_t index, Func body, SrcPos p) {
+    std::vector<std::string> params;
     for (const int32_t v : fi.params) {
-      f.local_names.push_back(rs.vars[static_cast<size_t>(v)].name);
+      params.push_back(rs.vars[static_cast<size_t>(v)].name);
     }
-    f.local_names.resize(static_cast<size_t>(nparams), "arg");
-    f.num_cells = 2 + nparams;
-    f.num_captures = ncaps;
-    f.capture_names = capnames;
-    f.lenient_arity = true;
-    f.body = b.scope(0, nparams, b.block(launch));
-    m.funcs[static_cast<size_t>(index)] = std::move(f);
-
-    std::vector<NodeId> callargs;
-    for (int32_t i = 0; i < nparams; ++i) {
-      callargs.push_back(b.varref(VarKind::Capture, 2 + i));
-    }
-    Func run;
-    run.name = fi.name + "$run";
-    run.num_params = 0;
-    run.num_locals = 1;
-    run.local_names = {"$exc"};
-    run.num_captures = 2 + nparams;
-    run.capture_names.push_back("$body");
-    run.capture_names.push_back("$task");
-    for (int32_t i = 0; i < nparams; ++i) run.capture_names.push_back("arg");
-    run.lenient_arity = true;
-    run.body = b.scope(
-        0, 1,
-        b.make_try(
-            0,
-            rt.call("$presolve",
-                    {b.varref(VarKind::Capture, 1),
-                     b.call_value(b.varref(VarKind::Capture, 0), callargs)},
-                    p),
-            rt.call("$psettle", {b.varref(VarKind::Capture, 1),
-                                 b.literal(kRejected),
-                                 b.varref(VarKind::Local, 0)},
-                    p)));
-    m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
+    params.resize(static_cast<size_t>(body.num_params), "arg");
+    write_async(rt, index, std::move(body), std::move(params), p);
   }
 
   Module build(const Ast& program) {

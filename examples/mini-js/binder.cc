@@ -2275,130 +2275,21 @@ struct Binder {
       m.funcs[static_cast<size_t>(rf.index)] = std::move(built);
       return;
     }
-    emit_async(fi, rf.index, std::move(built), nparams, ncaps,
-               std::move(capnames), p);
+    emit_async(fi, rf.index, std::move(built), p);
   }
 
-  // An async function is three funcs, because calling one has to *return*
-  // before its body has finished:
-  //
-  //   f       what the source declared. Builds the promise, packages the
-  //           arguments and the body closure into cells, spawns the
-  //           coroutine, and answers the promise -- all of it before the
-  //           body has run a single statement.
-  //   f$body  the body you wrote, unchanged, with f's own captures.
-  //   f$run   the coroutine's entry: calls f$body and settles the promise
-  //           with what it returned, or with what it threw.
-  //
-  // CoroResume(CoroCreate(...)) is the start -- next to the
-  // Enqueue(CoroCreate(...)) examples/mini-go's `go` statement uses, because
-  // a goroutine and an async call are the same primitive with different
-  // rules layered on top. The rules are the difference: a goroutine's
-  // result goes nowhere, where this one settles a promise somebody may be
-  // awaiting.
-  void emit_async(const FnInfo& fi, int32_t index, Func body,
-                  int32_t nparams, int32_t ncaps,
-                  std::vector<std::string> capnames, SrcPos p) {
-    auto b = Builder(m).at(p);
-    body.name = fi.name + "$body";
-    const int32_t body_idx = static_cast<int32_t>(m.funcs.size());
-    m.funcs.push_back(std::move(body));
-    const int32_t run_idx = static_cast<int32_t>(m.funcs.size());
-    m.funcs.push_back({});
-
-    // f: cells 0 = the promise, 1 = the body closure, 2.. = the arguments.
-    // The arguments are copied out at the call, JavaScript's own rule, and
-    // into fresh cells so that two calls in flight at once do not share.
-    std::vector<NodeId> launch;
-    launch.push_back(b.cell_fresh(0));
-    launch.push_back(b.assign(VarKind::Cell, 0, rt.call("$pnew", {}, p)));
-    std::vector<CaptureSrc> fwd;
-    fwd.reserve(static_cast<size_t>(ncaps));
-    for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
-    const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(fwd);
-    launch.push_back(b.cell_fresh(1));
-    launch.push_back(
-        b.assign(VarKind::Cell, 1, b.make_closure(body_idx, fwd_cmap)));
-    std::vector<CaptureSrc> runcap{{VarKind::Cell, 1}, {VarKind::Cell, 0}};
-    for (int32_t i = 0; i < nparams; ++i) {
-      launch.push_back(b.cell_fresh(2 + i));
-      launch.push_back(
-          b.assign(VarKind::Cell, 2 + i, b.varref(VarKind::Local, i)));
-      runcap.push_back({VarKind::Cell, 2 + i});
-    }
-    const int32_t run_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back(runcap);
-    // CoroResume, not Enqueue: an async function's body runs *synchronously*
-    // up to its first `await` (ES2023 27.7.5.1 -- the call only returns to
-    // the caller once the body suspends or finishes), so the coroutine is
-    // resumed here and now rather than handed to the scheduler. It is
-    // $await's CoroYield that ends this resume and hands control back, and
-    // from then on the scheduler owns the coroutine: whoever settles the
-    // promise it parked on enqueues it. A body with no `await` at all never
-    // yields, so this resume runs it to its end and the promise is already
-    // settled when the call returns -- which is what JavaScript does too.
-    launch.push_back(
-        b.intrinsic(IntrinsicId::CoroResume,
-                    {b.intrinsic(IntrinsicId::CoroCreate,
-                                 {b.make_closure(run_idx, run_cmap)}),
-                     b.nil_literal()}));
-    launch.push_back(b.make_return(b.varref(VarKind::Cell, 0)));
-
-    Func f;
-    f.name = fi.name;
-    f.num_params = nparams;
-    f.num_locals = nparams;
+  // An async function is runtime_parts.h's three funcs (write_async). The
+  // one rule that is JavaScript's is when the body starts: the call runs it
+  // synchronously up to its first `await` (ES2023 27.7.5.1), which is what
+  // write_async's CoroResume does -- an Enqueue, mini-go's `go`, put the
+  // body's first line after the caller's next one, and samples/async.js
+  // caught it as an ordering diff against node.
+  void emit_async(const FnInfo& fi, int32_t index, Func body, SrcPos p) {
+    std::vector<std::string> params;
     for (const int32_t v : fi.params) {
-      f.local_names.push_back(rs.vars[static_cast<size_t>(v)].name);
+      params.push_back(rs.vars[static_cast<size_t>(v)].name);
     }
-    f.num_cells = 2 + nparams;
-    f.num_captures = ncaps;
-    f.capture_names = capnames;
-    f.lenient_arity = true;
-    // A rest param arrives here as the array, and is spread back out to
-    // f$body below, whose own rest param collects it afresh.
-    f.rest_param = fi.rest;
-    f.body = b.scope(0, nparams, b.block(launch));
-    m.funcs[static_cast<size_t>(index)] = std::move(f);
-
-    // f$run: captures 0 = the body closure, 1 = the promise, 2.. = args.
-    std::vector<NodeId> callargs;
-    callargs.reserve(static_cast<size_t>(nparams));
-    for (int32_t i = 0; i < nparams; ++i) {
-      callargs.push_back(b.varref(VarKind::Capture, 2 + i));
-    }
-    NodeId call_body;
-    if (fi.rest) {
-      const NodeId rest = callargs.back();
-      callargs.pop_back();
-      call_body = b.call_spread(b.varref(VarKind::Capture, 0), callargs, rest);
-    } else {
-      call_body = b.call_value(b.varref(VarKind::Capture, 0), callargs);
-    }
-    Func run;
-    run.name = fi.name + "$run";
-    run.num_params = 0;
-    run.num_locals = 1;  // the caught value
-    run.local_names = {"$exc"};
-    run.num_captures = 2 + nparams;
-    run.capture_names.push_back("$body");
-    run.capture_names.push_back("$promise");
-    for (const int32_t v : fi.params) {
-      run.capture_names.push_back(rs.vars[static_cast<size_t>(v)].name);
-    }
-    run.lenient_arity = true;  // the scheduler resumes it as f(nil)
-    run.body = b.scope(
-        0, 1,
-        b.make_try(
-            0,
-            rt.call("$presolve", {b.varref(VarKind::Capture, 1), call_body},
-                    p),
-            rt.call("$psettle", {b.varref(VarKind::Capture, 1),
-                                 b.literal(kRejected),
-                                 b.varref(VarKind::Local, 0)},
-                    p)));
-    m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
+    write_async(rt, index, std::move(body), std::move(params), p);
   }
 
   Module build(const Ast& program) {

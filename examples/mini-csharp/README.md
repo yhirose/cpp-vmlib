@@ -161,7 +161,7 @@ statically-typed language and the dynamic one wanted exactly the same
 thing from `CoroCreate`, `CoroYield` and `Enqueue` -- so much so that the
 Task and the Promise are now one promise, settled and awaited by the
 helpers [examples/common/runtime_parts.h](../common/runtime_parts.h)
-writes for both.
+writes for both, and the three funcs are its `write_async`.
 
 `Main` itself is wrapped in a coroutine and enqueued, because `.Wait()`
 and `.Result` have to be able to suspend the caller, and only a coroutine
