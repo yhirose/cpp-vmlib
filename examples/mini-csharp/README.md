@@ -27,40 +27,43 @@ build/examples/mini-csharp/mini-csharp [--dump-ir] [--dump-bc] [--check-effects]
 
 ## A class is an object, and dispatch is a walk
 
-There is no class machinery in this IR, so a class here is an ordinary
-object built once at file scope:
+There is no class machinery in this IR, so a class here is two ordinary
+objects built once at file scope: its method table, which no name of the
+program's reaches, and its value, the object `Circle` evaluates to, which
+holds its static fields:
 
 ```
-{ "\x02Area":  <closure>,          // one entry per method
-  "\x02Describe": <closure>,
-  <static fields, by name> }
-kind record: ["class", "Circle", <the Shape table, or nil>, <constructor>]
+method table: { Area: <closure>, Describe: <closure>, ... }
+  kind record: ["class", "Circle", <Shape's method table, or nil>,
+                <constructor>]
+class value:  { <static fields, by name> }
 ```
 
 An instance is an object of its fields whose meta -- the slot no key
-reaches, `MetaGet`/`MetaSet` -- is its class's table. `new Circle(2)`
-allocates that object and calls the constructor in the table's kind
-record with it as argument 0.
+reaches, `MetaGet`/`MetaSet` -- is its class's method table. `new
+Circle(2)` allocates that object and calls the constructor in the
+table's kind record with it as argument 0.
 
 This is the layout [examples/common/runtime_parts.h](../common/runtime_parts.h)
-describes, shared with mini-ruby and mini-python: what the implementation
-keeps -- the class's name, base and constructor, an instance's class -- is
-where no name of the program's can reach it. What the table holds is two
-namespaces of the program's, its methods and its static fields, and that
-is what the `\x02` before every method keeps apart: a static field and a
-method of one name, in one class or across a base, never meet. The
-class's own entries once sat under `\x02` with the methods, and then a
-method named `name` overwrote the class's name and one named `ctor` was
-the constructor; `samples/shapes.cs` has both now.
+describes, shared with mini-ruby, mini-python, mini-culebra and mini-js:
+what the implementation keeps -- the class's name, base and constructor,
+an instance's class -- is where no name of the program's can reach it,
+and the program's two namespaces on a class, its methods and its static
+fields, are two objects, so a static field and a method of one name, in
+one class or across a base, never meet. A class's own entries once sat
+beside its methods, and then a method named `name` overwrote the class's
+name and one named `ctor` was the constructor; `samples/shapes.cs` has
+both now.
 
-Method lookup is then five lines of IR (written into both `$mfind`, a
-call's, and `$mlookup`, which answers nil where `$mfind` fails), and it is
+Method lookup is then a few lines of IR (written into both `$mfind`, a
+call's, and `$mlookup`, which answers nil where `$mfind` fails) --
+runtime_parts' `find_in_chain`, from the receiver's class -- and it is
 worth reading because *this is all virtual dispatch is*:
 
 ```
-t = meta(recv)
+t = class(recv)
 while typeof(t) == "object":
-  if t has "\x02" + name: return t["\x02" + name]
+  if t has name: return t[name]
   t = record(t).base
 ```
 
@@ -197,12 +200,12 @@ An **auto property** (`{ get; set; }`, both required -- one alone is a
 bind-time error, matching `get`/`set` bodies being required not to mix
 with `get;`/`set;` on the same property) gets no user-written accessor at
 all: its `get_Name`/`set_Name` are built by hand at class-table time, over
-a hidden field keyed the way a method already is, `\x02` and the
-property's name: the program's name, kept apart from the fields it
-declared as a method's is from the class's own entries. Its `= 0` initializer follows the exact rule a plain
-field's already does: it runs in the *constructor* -- the declared one,
-or the one a class without any gets, which is synthesized the same way
-(no parameters, an empty body) and so initializes and chains alike.
+a hidden field named the way Roslyn names it, `<Name>k__BackingField`: the
+property's name, in a shape no identifier can take, so it never meets a
+field the source declared. Its `= 0` initializer follows the exact rule a
+plain field's already does: it runs in the *constructor* -- the declared
+one, or the one a class without any gets, which is synthesized the same
+way (no parameters, an empty body) and so initializes and chains alike.
 
 ## What is absent, and what quietly differs
 

@@ -42,32 +42,6 @@ using coreir::IntrinsicId;
 using coreir::NodeId;
 using coreir::UnOp;
 
-// ---- Keys, by who chose the name -------------------------------------------
-//
-// What the implementation keeps on an object is in its meta (Hidden state,
-// below) and its destructor in its own slot (vmlib.h's DropSet), under no
-// key, so every key of an object is the program's: nothing a program
-// spells, with whatever bytes, reaches the implementation's state, and
-// nothing that lists, counts or prints keys has any to skip. Most objects
-// hold one namespace of the program's -- an instance's fields, a class's
-// methods -- under the names themselves. One that holds two keeps the
-// second under program_key, a prefix no identifier can start with, so
-// that a name in one never meets the same name in the other: mini-csharp's
-// class table holds its static fields bare and its methods prefixed, and
-// an instance the field behind an auto property prefixed beside the fields
-// the source declared. A program that spells a prefixed key reaches a name
-// of its own and nothing more. mini-csharp's class tables once kept their
-// name and constructor beside the methods, under the same prefix: a method
-// named `name` overwrote the class's name, and one named `ctor` was the
-// constructor.
-inline constexpr char kProgramPrefix = '\x02';
-
-// The key for a name the program chose in a second namespace of one
-// object.
-inline std::string program_key(const std::string& name) {
-  return kProgramPrefix + name;
-}
-
 // ---- Hidden state ----------------------------------------------------------
 //
 // What the implementation keeps on an object a program holds -- an
@@ -90,7 +64,13 @@ inline std::string program_key(const std::string& name) {
 // So a meta is never taken for what it is not: a class is an Object, and a
 // kind record an Array. Only an Object carries a kind record. No program
 // holds a meta, so a position in one needs no prefix to keep it apart
-// from anything.
+// from anything -- and nothing of the implementation's is under a key,
+// so every key of an object is the program's own name. A namespace of the
+// program's that would share an object with another gets an object of its
+// own: a class's methods and its static fields are two (Classes, below).
+// mini-csharp once kept a class's name and constructor beside its methods,
+// and then a method named `name` overwrote the class's name and one named
+// `ctor` was the constructor.
 
 // `obj` with [type, state...] as its meta -- the object, answered, as
 // MetaSet answers it; of_kind for a kind of the implementation's own.
@@ -186,9 +166,7 @@ inline const std::vector<coreir::Value>* kind_record(const coreir::Value& v,
 // what else its classes need to the record, from kClassOwn on -- a
 // constructor, an identity to compare -- and every question a class system
 // asks is a walk up kClassBase: which method a name means, whether a value
-// is an instance of a class. A table that holds a second namespace of the
-// program's beside its methods (mini-csharp's static fields) keeps its
-// methods under program_key, so that neither meets the other.
+// is an instance of a class.
 inline constexpr char kClassKind[] = "class";
 inline constexpr int64_t kClassName = 1;
 inline constexpr int64_t kClassBase = 2;
@@ -266,15 +244,20 @@ inline NodeId walk_bases(FuncWriter& w, FuncWriter::Slot c, NodeId visit) {
               w.blk({visit, w.set(c, kind_field(w, w.L(c), kClassBase))}));
 }
 
-// `(t, key)`: what `key` names in the table `t` or in its nearest ancestor
-// that has it, or nil -- method lookup.
+// Method lookup: what `key` names in the table in `c` or in its nearest
+// ancestor that has it, returned from the helper -- one has() per table
+// walked -- or nothing, when the walk falls off the end. As a helper of
+// its own, `(t, key)` answering nil for a miss, or a statement in one
+// that does something else on a miss.
+inline NodeId find_in_chain(FuncWriter& w, FuncWriter::Slot c,
+                            FuncWriter::Slot key) {
+  return walk_bases(w, c,
+                    w.iff(w.has(w.L(c), w.L(key)),
+                          w.ret(w.idx(w.L(c), w.L(key)))));
+}
 inline void find_in_chain(FuncWriter& w) {
   const auto [t, key] = w.params("t", "key");
-  const auto [c] = w.locals("c");
-  w.add(w.set(c, w.L(t)));
-  w.add(walk_bases(w, c,
-                   w.iff(w.has(w.L(c), w.L(key)),
-                         w.ret(w.idx(w.L(c), w.L(key))))));
+  w.add(find_in_chain(w, t, key));
   w.add(w.ret(w.Nil()));
 }
 

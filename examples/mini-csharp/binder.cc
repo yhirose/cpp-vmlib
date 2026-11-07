@@ -57,16 +57,27 @@ using namespace runtime_parts;
 namespace mini_csharp {
 namespace {
 
-// Classes are runtime_parts.h's layout: a table holding its methods, with
-// its name, its base and -- this front end's own -- its constructor in its
-// kind record, and an instance whose meta is its class. The table holds a
-// second namespace of the program's beside the methods, its static fields,
-// so the methods are under program_key(name) and the statics bare: a
-// static field and a method of one name, in one class or across a base,
-// never meet. An exception is runtime_parts.h's, named for .NET's only
-// one here, there being no hierarchy.
+// Classes are runtime_parts.h's layout: a method table holding a class's
+// methods, its properties' accessors among them, by name, with its name,
+// its base and -- this front end's own -- its constructor in its kind
+// record; and an instance whose meta is that table. A class's static
+// fields are on the class's value, the object its name evaluates to, a
+// second object, so that a static field and a method of one name, in one
+// class or across a base, never meet. An exception is runtime_parts.h's,
+// named for .NET's only one here, there being no hierarchy.
 constexpr int64_t kClassCtor = kClassOwn;
 constexpr char kExceptionName[] = "System.Exception";
+
+// The binding that holds a class's method table: in a shape no
+// identifier can take, so that no name of the program's resolves to it.
+std::string methods_name(const std::string& cls) { return "$methods." + cls; }
+
+// The field behind an auto property, named as Roslyn names it: in a shape
+// no identifier can take, so the source's own fields, a second namespace
+// on the same instance, never meet it.
+std::string backing_field(const std::string& name) {
+  return "<" + name + ">k__BackingField";
+}
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -118,7 +129,8 @@ struct FnInfo {
 struct ClassInfo {
   std::string name;
   std::string base;
-  int32_t var = -1;                       // the file-scope binding
+  int32_t var = -1;      // the file-scope binding: the class's statics
+  int32_t mt_var = -1;   // and its method table's, which no name reaches
   const Ast* node = nullptr;
   std::vector<const Ast*> fields;
   std::set<std::string> field_names;
@@ -359,6 +371,7 @@ struct Binder {
         if (n->tag == "basespec"_) ci.base = std::string(n->nodes[0]->token);
       }
       ci.var = declare(cname, top);
+      ci.mt_var = declare(methods_name(cname), top);
       for (const auto& mem : c->nodes) {
         if (mem->tag == "methoddecl"_ && !has_mod(*mem, "static")) {
           const Ast* id = find_method_name(*mem);
@@ -502,11 +515,13 @@ struct Binder {
       const int32_t v = fns[static_cast<size_t>(f)].params[i];
       rs.alias(rs.vars[static_cast<size_t>(v)].name, v);
     }
-    // The base class's table is read by `: base(...)`, so naming it in a
-    // base initializer is a reference like any other -- without this the
-    // constructor has no capture for it and the lookup fails a long way
+    // The base class's method table is read by `: base(...)`, so naming it
+    // in a base initializer is a reference like any other -- without this
+    // the constructor has no capture for it and the lookup fails a long way
     // from here.
-    if (!ci.base.empty() && class_by_name.count(ci.base)) rs.resolve(ci.base, f);
+    if (!ci.base.empty() && class_by_name.count(ci.base)) {
+      rs.resolve(methods_name(ci.base), f);
+    }
     for (const Ast* fd : ci.fields) {
       for (const auto& n : fd->nodes) {
         if (n->tag == "fieldinit"_) resolve_expr(*n->nodes[0], f);
@@ -711,16 +726,16 @@ struct Binder {
         fail(a, "the name '" + n + "' does not exist in this context");
       }
       case "newexp"_: {
-        // The type names a class or a library container. A class *is* a
-        // value here -- the table `new` reads its constructor out of --
-        // so naming one has to register the same capture any other
-        // reference would, or the class table would be unreachable from
-        // inside a method. (It was, on this binder's first pass, and the
-        // symptom was a missing capture index three functions away.)
+        // The type names a class or a library container. A class's method
+        // table is what `new` reads the constructor out of, so naming one
+        // has to register the same capture any other reference would, or
+        // the table would be unreachable from inside a method. (The class
+        // table was, on this binder's first pass, and the symptom was a
+        // missing capture index three functions away.)
         std::string tn(a.nodes[0]->token);
         const size_t lt = tn.find('<');
         if (lt != std::string::npos) tn = tn.substr(0, lt);
-        if (class_by_name.count(tn)) rs.resolve(tn, fn);
+        if (class_by_name.count(tn)) rs.resolve(methods_name(tn), fn);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           resolve_expr(*a.nodes[i], fn);
         }
@@ -820,7 +835,7 @@ struct Binder {
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
     r.add(r.iff(is_kind(r, v, kExcKind),
                 r.ret(kind_field(r, r.L(v), kExcMessage))));
-    r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S(program_key("ToString"))})));
+    r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S("ToString")})));
     r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(r.meta(r.L(v))), "object"),
@@ -867,14 +882,11 @@ struct Binder {
   // $mlookup answers nil (a receiver that is not a class instance, or a
   // chain without the name), $mfind -- a call's -- fails. Inlined rather
   // than one calling the other, since every dispatch takes $mfind. Both
-  // take the method's key, program_key(name), built where the call is
-  // bound rather than at every call.
+  // take the method's name.
   void method_walk(RT& r, FuncWriter::Slot recv, FuncWriter::Slot key) {
     const auto [cls] = r.locals("cls");
     r.add(r.set(cls, instance_class(r, recv)));
-    r.add(walk_bases(r, cls,
-                     r.iff(r.has(r.L(cls), r.L(key)),
-                           r.ret(r.idx(r.L(cls), r.L(key))))));
+    r.add(find_in_chain(r, cls, key));
   }
 
   void rt_mlookup() {
@@ -897,9 +909,7 @@ struct Binder {
     r.add(r.iff(r.isnt(r.typ(r.meta(r.L(recv))), "object"),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
-        "$exc", {r.bin(BinOp::Add, r.S("no such method: "),
-                       r.in(IntrinsicId::StrSlice,
-                            {r.L(key), r.I(1), r.len(r.L(key))}))})));
+        "$exc", {r.bin(BinOp::Add, r.S("no such method: "), r.L(key))})));
     r.finish("$mfind");
   }
 
@@ -1320,7 +1330,7 @@ struct Binder {
     f.body = b.scope(
         0, 1,
         b.call_value(
-            rt.call("$mfind", {C, b.str_literal(program_key("Dispose"), p)}, p),
+            rt.call("$mfind", {C, b.str_literal("Dispose", p)}, p),
             {C}, p),
         p);
     m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
@@ -1575,8 +1585,8 @@ struct Binder {
     std::vector<NodeId> callargs{T};
     callargs.insert(callargs.end(), args.begin(), args.end());
     return b.block({b.assign(VarKind::Local, t,
-                             new_instance(b, read_var(ci.var, ctx, p))),
-                    b.call_value(kind_field(b, read_var(ci.var, ctx, p),
+                             new_instance(b, read_var(ci.mt_var, ctx, p))),
+                    b.call_value(kind_field(b, read_var(ci.mt_var, ctx, p),
                                             kClassCtor),
                                  callargs),
                     T});
@@ -1672,7 +1682,7 @@ struct Binder {
     std::vector<NodeId> callargs{T};
     callargs.insert(callargs.end(), args.begin(), args.end());
     const NodeId method =
-        rt.call("$mfind", {T, b.str_literal(program_key(name))}, p);
+        rt.call("$mfind", {T, b.str_literal(name)}, p);
     return b.block(
         {b.assign(VarKind::Local, t, recv), b.call_value(method, callargs)});
   }
@@ -1704,7 +1714,7 @@ struct Binder {
                                  : rt.call("$await", {T}, p);
       NodeId call = b.block(
           {b.assign(VarKind::Local, mt,
-                    rt.call("$mlookup", {T, b.str_literal(program_key(name))}, p)),
+                    rt.call("$mlookup", {T, b.str_literal(name)}, p)),
            b.make_if(b.binary(BinOp::Ne,
                               b.intrinsic(IntrinsicId::TypeOf, {M}),
                               b.str_literal("nil")),
@@ -1979,7 +1989,7 @@ struct Binder {
     for (const auto& ap : ci.auto_props) {
       out.push_back(rt.call(
           "$setf",
-          {this_of(ctx, p), b.str_literal(program_key(ap.name)),
+          {this_of(ctx, p), b.str_literal(backing_field(ap.name)),
            ap.init != nullptr ? emit_expr(*ap.init, ctx)
                               : default_of(ap.type, p)},
           p));
@@ -1996,7 +2006,7 @@ struct Binder {
     }
     out.push_back(b.call_value(
         kind_field(b,
-                   read_var(classes[static_cast<size_t>(it->second)].var,
+                   read_var(classes[static_cast<size_t>(it->second)].mt_var,
                             ctx, p),
                    kClassCtor),
         args));
@@ -2042,7 +2052,10 @@ struct Binder {
     // functions that are not lexically inside the file scope's own body --
     // so it has to be a cell whether or not the free-variable walk found
     // it.
-    for (const ClassInfo& ci : classes) rs.force_cell(ci.var);
+    for (const ClassInfo& ci : classes) {
+      rs.force_cell(ci.var);
+      rs.force_cell(ci.mt_var);
+    }
     rs.number_captures(m);
     emit_runtime();
 
@@ -2073,40 +2086,39 @@ struct Binder {
     // The tables first, then their links to their bases, so a class may
     // name one declared after it.
     for (const ClassInfo& ci : classes) {
-      std::vector<std::pair<NodeId, NodeId>> kvs;
+      std::vector<std::pair<NodeId, NodeId>> methods;
       for (const auto& [name, g] : ci.methods) {
-        kvs.emplace_back(b.str_literal(program_key(name)),
-                         emit_closure(g, ctx, p));
+        methods.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
       }
       for (const auto& ap : ci.auto_props) {
-        kvs.emplace_back(
-            b.str_literal(program_key("get_" + ap.name)),
-            emit_auto_get(ap.name, p));
-        kvs.emplace_back(
-            b.str_literal(program_key("set_" + ap.name)),
-            emit_auto_set(ap.name, p));
+        methods.emplace_back(b.str_literal("get_" + ap.name),
+                             emit_auto_get(ap.name, p));
+        methods.emplace_back(b.str_literal("set_" + ap.name),
+                             emit_auto_set(ap.name, p));
       }
+      out.push_back(write_var(
+          ci.mt_var,
+          class_table(b, b.object_lit(methods), ci.name, b.nil_literal(),
+                      {emit_closure(ci.ctor_fn, ctx, p)}),
+          ctx, p));
       // A static field starts at its type's default; its initializer, if
       // any, runs in the class's static constructor below.
+      std::vector<std::pair<NodeId, NodeId>> statics;
       for (const Ast* fd : ci.static_fields) {
         const FieldParts sf = field_parts(*fd);
         if (sf.name == nullptr) continue;
-        kvs.emplace_back(b.str_literal(std::string(sf.name->token)),
-                         default_of(sf.type, p));
+        statics.emplace_back(b.str_literal(std::string(sf.name->token)),
+                             default_of(sf.type, p));
       }
-      out.push_back(write_var(
-          ci.var,
-          class_table(b, b.object_lit(kvs), ci.name, b.nil_literal(),
-                      {emit_closure(ci.ctor_fn, ctx, p)}),
-          ctx, p));
+      out.push_back(write_var(ci.var, b.object_lit(statics), ctx, p));
     }
     for (const ClassInfo& ci : classes) {
       if (ci.base.empty()) continue;
       const auto it = class_by_name.find(ci.base);
       if (it == class_by_name.end()) continue;
       out.push_back(set_kind_field(
-          b, read_var(ci.var, ctx, p), kClassBase,
-          read_var(classes[static_cast<size_t>(it->second)].var, ctx, p)));
+          b, read_var(ci.mt_var, ctx, p), kClassBase,
+          read_var(classes[static_cast<size_t>(it->second)].mt_var, ctx, p)));
     }
     for (const auto& [name, v] : static_by_name) {
       (void)name;
@@ -2144,9 +2156,9 @@ struct Binder {
 
   // An auto property's accessors touch nothing but their own parameters,
   // so unlike a source method they need no capture at all -- built once
-  // per property, directly in IR. The field behind it is program_key(name)
-  // on the instance: the property's name, kept apart from the fields the
-  // source declared as a method's is on the class table.
+  // per property, directly in IR. The field behind it is
+  // backing_field(name) on the instance: the property's name, kept apart
+  // from the fields the source declared.
   NodeId emit_auto_get(const std::string& name, SrcPos p) {
     auto b = Builder(m).at(p);
     const int32_t idx = static_cast<int32_t>(m.funcs.size());
@@ -2160,7 +2172,7 @@ struct Binder {
     f.body =
         b.scope(0, 1,
                 b.make_return(b.index(b.varref(VarKind::Local, 0),
-                                      b.str_literal(program_key(name)))));
+                                      b.str_literal(backing_field(name)))));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);
     return b.make_closure(idx, rt.empty_cmap());
   }
@@ -2177,7 +2189,7 @@ struct Binder {
     f.lenient_arity = true;
     f.body = b.scope(0, 2,
                      b.block({b.set_index(b.varref(VarKind::Local, 0),
-                                          b.str_literal(program_key(name)),
+                                          b.str_literal(backing_field(name)),
                                           b.varref(VarKind::Local, 1)),
                               b.make_return(b.nil_literal())}));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);
