@@ -993,6 +993,14 @@ struct Binder {
     return op_or_helper(rt, op, x, y, tags_named("int"), helper, p);
   }
 
+  // The first of a call's results, which come as an array: Index's on one
+  // that has any, and $one's nil on an empty one, where Index traps.
+  NodeId one(NodeId results, SrcPos p) {
+    return Builder(m).at(p).index(
+        results, Builder(m).at(p).literal(0),
+        {rt.ref("$one", p), tags_named({"array", "int"})});
+  }
+
   // `==` on two values of these types is Eq's -- an integer and a float
   // compare as numbers -- and on two of different types, which Eq refuses,
   // $eq's, which says they differ. A table is $eq's, for __eq.
@@ -1079,7 +1087,7 @@ struct Binder {
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
     const Val v = emit_val(a, ctx);
     if (!v.multi) return v.n;
-    return rt.call("$one", {v.n}, pos_of(a));
+    return one(v.n, pos_of(a));
   }
 
   bool is_call_expr(const Ast& a) {
@@ -1330,7 +1338,7 @@ struct Binder {
       const Ast& sfx = *a.nodes[i];
       const SrcPos p = pos_of(sfx);
       const NodeId recv =
-          cur.multi ? rt.call("$one", {cur.n}, p) : cur.n;
+          cur.multi ? one(cur.n, p) : cur.n;
       switch (sfx.tag) {
         case "dotsfx"_:
           cur = {rt.call("$get",
@@ -1361,7 +1369,7 @@ struct Binder {
             one_each.insert(one_each.end(), args.firsts.begin(),
                             args.firsts.end());
             if (args.rest.valid()) {
-              one_each.push_back(rt.call("$one", {args.rest}, p));
+              one_each.push_back(one(args.rest, p));
             }
             // Every argument runs, read or not (FrameLayout::spill_unread).
             auto bp = b.at(p);
@@ -1460,7 +1468,7 @@ struct Binder {
     const std::optional<size_t> reads = library_reads(name);
     if (!reads) fail(prim, "'" + name + "' is not supported here");
     std::vector<NodeId> args = vals.firsts;
-    if (vals.rest.valid()) args.push_back(rt.call("$one", {vals.rest}, p));
+    if (vals.rest.valid()) args.push_back(one(vals.rest, p));
     auto bp = b.at(p);
     const std::vector<NodeId> pre = ctx.spill_unread(bp, args, *reads);
     const auto a0 = [&](size_t k) {
@@ -1583,7 +1591,7 @@ struct Binder {
     } else if (args.rest.valid()) {
       // `pcall(...)`: f is the first of the expanding argument's values.
       out.push_back(b.assign(VarKind::Local, av, args.rest));
-      out.push_back(b.assign(VarKind::Local, fv, rt.call("$one", {A}, p)));
+      out.push_back(b.assign(VarKind::Local, fv, one(A, p)));
       out.push_back(b.assign(
           VarKind::Local, av,
           rt.call("$select", {values_array({{b.literal(2)}, A}, p)}, p)));
@@ -1903,7 +1911,7 @@ struct Binder {
     const NodeId FI = b.varref(VarKind::Local, first);
     std::vector<NodeId> body{
         b.assign(VarKind::Local, rv, b.call_value(F, {S, C})),
-        b.assign(VarKind::Local, first, rt.call("$one", {R}, p)),
+        b.assign(VarKind::Local, first, one(R, p)),
         b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {FI}),
                            b.str_literal("nil")),
                   b.make_break(), NodeId{}),
@@ -1998,7 +2006,7 @@ struct Binder {
       fail(target, "cannot assign to this expression");
     }
     const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
-    const NodeId R = recv.multi ? rt.call("$one", {recv.n}, p) : recv.n;
+    const NodeId R = recv.multi ? one(recv.n, p) : recv.n;
     const int32_t tt = ctx.alloc_local("$table");
     out.push_back(b.assign(VarKind::Local, tt, R));
     const Ast& last = *target.nodes.back();
@@ -2044,7 +2052,7 @@ struct Binder {
     }
     const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
     const NodeId R =
-        recv.multi ? rt.call("$one", {recv.n}, p) : recv.n;
+        recv.multi ? one(recv.n, p) : recv.n;
     return rt.call("$set", {R, key, value}, p);
   }
 
