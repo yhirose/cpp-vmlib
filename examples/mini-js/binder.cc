@@ -1998,40 +1998,52 @@ struct Binder {
           p);
     }
     if (!mem.empty() && c != nullptr) {
-      // console.log reads every argument; the rest read one.
-      const BuiltinArgs xs = emit_args(
-          *c->nodes[0],
-          g == "console" && mem == "log" ? std::string::npos : 1, ctx);
-      const std::vector<NodeId>& args = xs.args;
-      const auto done = [&](NodeId n) { return b.sequence(xs.pre, n, p); };
       i = 3;
+      // Each says beside its lowering how many arguments it reads, one
+      // value each, and any past those still run first (emit_args).
+      using Args = const std::vector<NodeId>&;
+      const auto builtin = [&](size_t reads, const auto& make) {
+        const BuiltinArgs xs = emit_args(*c->nodes[0], reads, ctx);
+        return b.sequence(xs.pre, make(xs.args), p);
+      };
       // console.log(a, b): JavaScript joins its arguments with a space,
       // and this subset's samples hand it a string the program built
       // itself (see samples/prelude.js), so Print's own formatting of a
       // non-string never has to agree with Node's util.inspect.
       if (g == "console" && mem == "log") {
-        NodeId msg = b.str_literal("", p);
-        for (size_t k = 0; k < args.size(); ++k) {
-          if (k > 0) msg = b.binary(BinOp::Add, msg, b.str_literal(" ", p), p);
-          msg = b.binary(BinOp::Add, msg,
-                         rt.call("$str", {args[k]}, p), p);
-        }
-        return b.intrinsic(IntrinsicId::Print, {msg}, p);
+        return builtin(std::string::npos, [&](Args args) {
+          NodeId msg = b.str_literal("", p);
+          for (size_t k = 0; k < args.size(); ++k) {
+            if (k > 0) {
+              msg = b.binary(BinOp::Add, msg, b.str_literal(" ", p), p);
+            }
+            msg = b.binary(BinOp::Add, msg, rt.call("$str", {args[k]}, p), p);
+          }
+          return b.intrinsic(IntrinsicId::Print, {msg}, p);
+        });
       }
       if (g == "Object" && mem == "keys") {
-        return done(rt.call("$keys", {arg_or_nil(args, 0, p)}, p));
+        return builtin(1, [&](Args a) {
+          return rt.call("$keys", {arg_or_nil(a, 0, p)}, p);
+        });
       }
       if (g == "Promise" && mem == "resolve") {
-        return done(rt.call("$topromise", {arg_or_nil(args, 0, p)}, p));
+        return builtin(1, [&](Args a) {
+          return rt.call("$topromise", {arg_or_nil(a, 0, p)}, p);
+        });
       }
       if (g == "Promise" && mem == "reject") {
-        return done(rt.call("$prejected", {arg_or_nil(args, 0, p)}, p));
+        return builtin(1, [&](Args a) {
+          return rt.call("$prejected", {arg_or_nil(a, 0, p)}, p);
+        });
       }
       if (g == "Array" && mem == "isArray") {
-        return done(b.binary(BinOp::Eq,
-                             b.intrinsic(IntrinsicId::TypeOf,
-                                         {arg_or_nil(args, 0, p)}, p),
-                             b.str_literal("array", p), p));
+        return builtin(1, [&](Args a) {
+          return b.binary(
+              BinOp::Eq,
+              b.intrinsic(IntrinsicId::TypeOf, {arg_or_nil(a, 0, p)}, p),
+              b.str_literal("array", p), p);
+        });
       }
     }
     fail(prim, "'" + g + "' is not supported in this shape here");
