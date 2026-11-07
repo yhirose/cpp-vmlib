@@ -942,7 +942,7 @@ time the run ends (`test/test_profile.cc` pins each).
 
 Counting costs the run that asks for it up to a sixth more time (on
 `bench/languages`' fib and loop, through three front ends), and a run
-that does not, nothing. The executor is a template over what watches it
+that does not, nothing. The executor is a template over its profiler
 (`vm::detail::Exec`), and every report it makes sits under
 `if constexpr`, so the executor the other `vm::run` overloads instantiate
 compiles none of them -- its dispatch loop is the one there was before the

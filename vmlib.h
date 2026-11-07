@@ -4290,8 +4290,8 @@ namespace coreir {
 // The executor running a host function, as NativeCall reaches back into
 // it: an interface rather than the executor's own type, so that a native
 // need not know which executor is running it -- vm::detail::Exec is a
-// template over what watches the run, and a profiling run's is a
-// different type from vm::run's -- and a translation unit holding a native
+// template over its profiler, and a profiling run's is a different type
+// from vm::run's -- and a translation unit holding a native
 // that calls back does not compile an executor along with it.
 class NativeExec {
  public:
@@ -7408,22 +7408,22 @@ struct FrameDeleter {
 
 using FramePtr = std::unique_ptr<Frame, FrameDeleter>;
 
-// What watches a run. The executor is compiled once per kind of watcher --
-// Exec's template parameter -- and, when the watcher is on, tells it of
-// every frame that comes onto the stack or leaves it, every call it makes
-// and every instruction it dispatches. This one, vm::run's, is off. Each
-// report sits under `if constexpr (Prof::kOn)`, so with this watcher not one
-// of them is compiled -- not even the reading of its arguments, which an
-// empty inline hook would still leave to the optimizer to discard -- and
-// the executor is the one there was before there were reports, instruction
-// for instruction. CPython 3.12 gets the same property by swapping
-// instrumented opcodes in only while a tool is listening (PEP 669); a
-// second instantiation is that, decided at compile time.
+// The profiler a run is compiled with. The executor is compiled once per
+// profiler -- Exec's template parameter, Prof -- and, when the profiler is
+// on, tells it of every frame that comes onto the stack or leaves it, every
+// call it makes and every instruction it dispatches. This one, vm::run's,
+// is off. Each report sits under `if constexpr (Prof::kOn)`, so with it not
+// one of them is compiled -- not even the reading of its arguments, which
+// an empty inline hook would still leave to the optimizer to discard --
+// and the executor is the one there was before there were reports,
+// instruction for instruction. CPython 3.12 gets the same property by
+// swapping instrumented opcodes in only while a tool is listening (PEP
+// 669); a second instantiation is that, decided at compile time.
 struct NoProfiler {
   static constexpr bool kOn = false;
 };
 
-// The profiling run's watcher (vm::run's Profile overload): it keeps the
+// The profiler that counts (vm::run's Profile overload): it keeps the
 // counts in the run's Profile as the executor reports them. A function's
 // total is counted from the moment its first frame comes onto the stack to
 // the moment its last one leaves, so a recursion is not counted once per
@@ -7433,7 +7433,6 @@ class Profiler {
  public:
   static constexpr bool kOn = true;
 
-  Profiler() = default;
   Profiler(Profile& out, const Program& p)
       : out_(&out),
         p_(&p),
@@ -7468,6 +7467,10 @@ class Profiler {
   ~Profiler() {
     for ([[maybe_unused]] const size_t d : depth_) assert(d == 0);
   }
+  // Built in place in its FrameStack, and never copied or moved: one
+  // profiler counts one run into one Profile.
+  Profiler(const Profiler&) = delete;
+  Profiler& operator=(const Profiler&) = delete;
 
  private:
   size_t index(const Chunk& c) const {
@@ -7487,7 +7490,7 @@ class Profiler {
 // elements would be written to under it. With no pop_back or erase to reach
 // for, no call site can bring that back.
 //
-// The same two doors, push_back and retarget are why the watcher lives
+// The same two doors, push_back and retarget are why the profiler lives
 // here: every way a frame comes or goes -- a call, a return, a tail call, a
 // generator's resume and yield, a coroutine's whole slice parking and
 // coming back, an unwind, a destructor's frame -- passes through them, so
@@ -7496,6 +7499,12 @@ class Profiler {
 template <class Prof>
 class FrameStack {
  public:
+  // Empty, with its profiler built in place from `prof_args`: none for
+  // NoProfiler, the Profile and the Program for a Profiler.
+  template <class... ProfArgs>
+  explicit FrameStack(ProfArgs&&... prof_args)
+      : prof(std::forward<ProfArgs>(prof_args)...) {}
+
   // Top first, like any other way frames leave -- not in the order the
   // vector's own destructor would pick. What a host exception unwinding
   // through vm::run takes down.
@@ -7539,15 +7548,16 @@ class FrameStack {
   std::vector<FramePtr> v_;
 
  public:
-  VMLIB_NO_UNIQUE_ADDRESS Prof prof{};
+  VMLIB_NO_UNIQUE_ADDRESS Prof prof;
 };
 
-// The watcher that watches nothing takes no room either: the stack, and so
+// The profiler that counts nothing takes no room either: the stack, and so
 // every Exec member after it, is laid out as it was before there was one.
 static_assert(sizeof(FrameStack<NoProfiler>) == sizeof(std::vector<FramePtr>));
 
-// Built from its first five members (vm::run); every later one has an
-// initializer, which -Wextra checks and test_verify's -Werror enforces.
+// Built from its first five members and its frame stack, which carries
+// its profiler (vm::run); every other member has an initializer, which
+// -Wextra checks and test_verify's -Werror enforces.
 template <class Prof>
 struct Exec {
   const Program& p;
@@ -7567,7 +7577,7 @@ struct Exec {
   // aimed at them, and a deque owns its elements outright, which leaves no
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
-  FrameStack<Prof> frames{};
+  FrameStack<Prof> frames;
 
   // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
   // to run after the entry frame, FIFO. C++-side handles, so the collector
@@ -9569,18 +9579,24 @@ namespace vm {
 
 namespace detail {
 
-// vm::run under either watcher: NoProfiler for the overloads that only run,
-// a Profiler counting into the caller's Profile for the one that profiles.
-template <class Prof>
-void run_watched(const Program& p, coreir::Runtime& rt,
-                 const RunOptions& opts, Prof prof) {
+// vm::run under either profiler: NoProfiler for the overloads that only
+// run, a Profiler counting into the caller's Profile -- built in place
+// from `prof_args` -- for the one that profiles.
+template <class Prof, class... ProfArgs>
+void run_with(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
+              ProfArgs&&... prof_args) {
   coreir::Runtime::Scope scope(rt);
   // A frame cap, not a call count: the bottom frame (this entry frame, or
   // later a job's) is not a call, so it comes on top of the bound.
   const size_t max_frames =
       static_cast<size_t>(std::max(opts.max_call_depth, 0)) + 1;
-  Exec<Prof> e{p, max_frames, rt, opts.entry_frame_drops, opts.describe};
-  e.frames.prof = std::move(prof);
+  Exec<Prof> e{
+      .p = p,
+      .max_frames = max_frames,
+      .rt = rt,
+      .entry_frame_drops = opts.entry_frame_drops,
+      .describe = opts.describe,
+      .frames = FrameStack<Prof>(std::forward<ProfArgs>(prof_args)...)};
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.
@@ -9614,13 +9630,13 @@ void run_watched(const Program& p, coreir::Runtime& rt,
 }  // namespace detail
 
 inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
-  detail::run_watched(p, rt, opts, detail::NoProfiler{});
+  detail::run_with<detail::NoProfiler>(p, rt, opts);
 }
 
 template <class P, class>
 void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
          P& profile) {
-  detail::run_watched(p, rt, opts, detail::Profiler(profile, p));
+  detail::run_with<detail::Profiler>(p, rt, opts, profile, p);
 }
 
 inline void run(const Program& p, coreir::Runtime& rt) {
