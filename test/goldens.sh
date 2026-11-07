@@ -18,17 +18,24 @@ if [ "${1:-}" = --update ]; then
   export VMLIB_UPDATE_GOLDENS=1
   shift
 fi
+BUILD=$ROOT/build-goldens
+cmake -S "$ROOT" -B "$BUILD" -DVMLIB_BUILD_EXAMPLES=ON \
+      -DVMLIB_CHECK_GOLDENS=ON -DVMLIB_BUILD_BENCH=OFF >/dev/null
+
+# A front end's goldens test is its test-name prefix, as the build's
+# registry lists it (front-ends.txt), and `goldens`.
 tests=
 for fe in "$@"; do
   fe=${fe%/}
   fe=${fe##*/}
-  # PL/0's tests are the main suite's, unprefixed (test/CMakeLists.txt).
-  if [ "$fe" = pl0 ]; then fe=goldens; else fe=$fe-goldens; fi
-  tests=${tests:+$tests|}$fe
+  test=$(awk -F'\t' -v fe="$fe" '$1 == fe {print $5 "goldens"; found = 1}
+                                 END {exit !found}' "$BUILD/front-ends.txt") || {
+    echo "$0: no front end '$fe' in $BUILD/front-ends.txt" >&2
+    exit 1
+  }
+  tests=${tests:+$tests|}$test
 done
 
-cmake -S "$ROOT" -B "$ROOT/build-goldens" -DVMLIB_BUILD_EXAMPLES=ON \
-      -DVMLIB_CHECK_GOLDENS=ON -DVMLIB_BUILD_BENCH=OFF >/dev/null
-exec ctest --test-dir "$ROOT/build-goldens" -L goldens ${tests:+-R "^($tests)\$"} \
+exec ctest --test-dir "$BUILD" -L goldens ${tests:+-R "^($tests)\$"} \
            --no-tests=error --output-on-failure \
            -j "${CTEST_PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}"
