@@ -1678,8 +1678,10 @@ struct Binder {
       out.push_back(b.make_defer(emit_closure(fn_of.at(ensure_), ctx, p)));
     }
     const NodeId body = emit_body(*a.nodes[0], ctx);
-    NodeId handler = b.make_throw(E);
-    if (rescue_ != nullptr) {
+    NodeId handler;
+    if (rescue_ == nullptr) {
+      handler = b.make_throw(E);
+    } else {
       std::vector<NodeId> hs;
       const Ast* bodypart = nullptr;
       for (const auto& g : rescue_->nodes) {

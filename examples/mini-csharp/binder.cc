@@ -1324,8 +1324,10 @@ struct Binder {
       out.push_back(b.make_defer(emit_closure(fn_of.at(fin), ctx, p)));
     }
     const NodeId body = emit_block(*a.nodes[0], ctx);
-    NodeId handler = b.make_throw(E);
-    if (cat != nullptr) {
+    NodeId handler;
+    if (cat == nullptr) {
+      handler = b.make_throw(E);
+    } else {
       std::vector<NodeId> hs;
       for (const auto& n : cat->nodes) {
         if (n->tag == "ident"_) {
