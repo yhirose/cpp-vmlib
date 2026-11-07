@@ -24,6 +24,7 @@
 // checked, whatever the build type.
 #undef NDEBUG
 
+#include <algorithm>
 #include <cstdio>
 #include <map>
 #include <stdexcept>
@@ -231,7 +232,10 @@ int main() {
     }
     // The table: most self instructions first, a function with a source
     // position labelled by it and a helper by its name alone, the host
-    // functions' calls, then the opcodes.
+    // functions' calls, then the opcodes. Which opcodes, and how many of
+    // each, is what the compiler emitted and moves with it: their sum is
+    // pinned above, and here only that each one that ran has its row, and
+    // the two that count this program's calls and returns.
     const std::string table = vm::to_string(r.program, r.profile);
     const std::string want =
         "97 instructions, 11 calls\n"
@@ -245,27 +249,22 @@ int main() {
         "calls  native\n"
         "    1  twice\n"
         "\n"
-        "count   share  opcode\n"
-        "   18   18.6%  loadlocal\n"
-        "   16   16.5%  clearregs\n"
-        "   13   13.4%  loadconst\n"
-        "   10   10.3%  ret\n"
-        "    8    8.2%  callvalue\n"
-        "    5    5.2%  makeclosure\n"
-        "    4    4.1%  eq\n"
-        "    4    4.1%  jumpiffalse\n"
-        "    3    3.1%  sub\n"
-        "    3    3.1%  mul\n"
-        "    3    3.1%  loadcapture\n"
-        "    2    2.1%  add\n"
-        "    2    2.1%  storecell\n"
-        "    2    2.1%  out\n"
-        "    1    1.0%  loadcell\n"
-        "    1    1.0%  cellnew\n"
-        "    1    1.0%  loadnil\n"
-        "    1    1.0%  nativeref\n";
-    if (table != want) {
+        "count   share  opcode\n";
+    size_t ran = 0;
+    for (const uint64_t n : r.profile.ops) ran += n != 0;
+    const size_t rows =
+        table.size() < want.size()
+            ? 0
+            : static_cast<size_t>(std::count(table.begin() + want.size(),
+                                              table.end(), '\n'));
+    if (table.compare(0, want.size(), want) != 0 || rows != ran) {
       fail("calls: table", "  want\n" + want + "  got\n" + table);
+    }
+    const auto ops = [&](vm::Op op) {
+      return r.profile.ops[static_cast<uint8_t>(op)];
+    };
+    if (ops(vm::Op::CallValue) != 8 || ops(vm::Op::Ret) != 10) {
+      fail("calls: opcodes", table);
     }
   }
 

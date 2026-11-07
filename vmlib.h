@@ -9742,13 +9742,36 @@ inline std::string profile_row(
   return out + label + "\n";
 }
 
-inline std::string profile_percent(uint64_t n, uint64_t of) {
-  char buf[16];
-  std::snprintf(buf, sizeof buf, "%.1f%%",
-                of == 0 ? 0.0
-                        : 100.0 * static_cast<double>(n) /
-                              static_cast<double>(of));
+// A profile table's every fraction: one decimal.
+inline std::string profile_decimal(double x) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.1f", x);
   return buf;
+}
+
+inline std::string profile_percent(uint64_t n, uint64_t of) {
+  return profile_decimal(of == 0 ? 0.0
+                                 : 100.0 * static_cast<double>(n) /
+                                       static_cast<double>(of)) +
+         "%";
+}
+
+// One section of a profile table: a blank line and its heading, then a
+// row for each of `n` entries that `shown` keeps, the largest `key` first
+// and ties in the order they came. Nothing if it keeps none.
+template <class Shown, class Key, class Row>
+std::string profile_section(const std::string& heading, size_t n,
+                            Shown shown, Key key, Row row) {
+  std::vector<size_t> order;
+  for (size_t i = 0; i < n; ++i) {
+    if (shown(i)) order.push_back(i);
+  }
+  if (order.empty()) return {};
+  std::stable_sort(order.begin(), order.end(),
+                   [&](size_t a, size_t b) { return key(a) > key(b); });
+  std::string out = "\n" + heading;
+  for (const size_t i : order) out += row(i);
+  return out;
 }
 
 }  // namespace detail
@@ -9768,70 +9791,56 @@ inline std::string to_string(const Program& p, const Profile& profile) {
   std::string out = std::to_string(all) + " instructions, " +
                     std::to_string(calls) + " calls\n";
 
-  std::vector<size_t> ran;
-  for (size_t i = 0; i < profile.chunks.size(); ++i) {
-    if (profile.chunks[i].calls != 0 || profile.chunks[i].self != 0) {
-      ran.push_back(i);
-    }
-  }
-  std::stable_sort(ran.begin(), ran.end(), [&](size_t a, size_t b) {
-    const Profile::Counts& x = profile.chunks[a];
-    const Profile::Counts& y = profile.chunks[b];
-    return x.self != y.self ? x.self > y.self : x.total > y.total;
-  });
-  out += "\n" + profile_row({{"self", w}, {"self%", 6}, {"total", w},
-                             {"total%", 6}, {"calls", w}, {"per call", per_w}},
-                            "function");
-  for (const size_t i : ran) {
-    const Profile::Counts& c = profile.chunks[i];
-    char per_call[32] = "-";
-    if (c.calls != 0) {
-      std::snprintf(per_call, sizeof per_call, "%.1f",
-                    static_cast<double>(c.self) /
-                        static_cast<double>(c.calls));
-    }
-    std::string label = p.chunks[i].name;
-    if (const coreir::SrcPos sp = detail::first_pos(p, p.chunks[i]);
-        sp.line != 0) {
-      label += " " + std::to_string(sp.line) + ":" + std::to_string(sp.col);
-    }
-    out += profile_row({{std::to_string(c.self), w},
-                        {profile_percent(c.self, all), 6},
-                        {std::to_string(c.total), w},
-                        {profile_percent(c.total, all), 6},
-                        {std::to_string(c.calls), w},
-                        {per_call, per_w}},
-                       label);
-  }
+  // The functions that were called: a function only runs once it has been
+  // (a generator's body, once its function has), so this is every one
+  // that ran, and none of them divides by zero.
+  const auto& chunks = profile.chunks;
+  out += detail::profile_section(
+      profile_row({{"self", w}, {"self%", 6}, {"total", w}, {"total%", 6},
+                   {"calls", w}, {"per call", per_w}},
+                  "function"),
+      chunks.size(), [&](size_t i) { return chunks[i].calls != 0; },
+      [&](size_t i) { return chunks[i].self; },
+      [&](size_t i) {
+        const Profile::Counts& c = chunks[i];
+        std::string label = p.chunks[i].name;
+        if (const coreir::SrcPos sp = detail::first_pos(p, p.chunks[i]);
+            sp.line != 0) {
+          label +=
+              " " + std::to_string(sp.line) + ":" + std::to_string(sp.col);
+        }
+        return profile_row(
+            {{std::to_string(c.self), w},
+             {profile_percent(c.self, all), 6},
+             {std::to_string(c.total), w},
+             {profile_percent(c.total, all), 6},
+             {std::to_string(c.calls), w},
+             {detail::profile_decimal(static_cast<double>(c.self) /
+                                      static_cast<double>(c.calls)),
+              per_w}},
+            label);
+      });
 
-  if (!profile.natives.empty()) {
-    std::vector<std::pair<std::string, uint64_t>> natives(
-        profile.natives.begin(), profile.natives.end());
-    std::stable_sort(natives.begin(), natives.end(),
-                     [](const auto& a, const auto& b) {
-                       return a.second > b.second;
-                     });
-    out += "\n" + profile_row({{"calls", w}}, "native");
-    for (const auto& [name, n] : natives) {
-      out += profile_row({{std::to_string(n), w}}, name);
-    }
-  }
+  const std::vector<std::pair<std::string, uint64_t>> natives(
+      profile.natives.begin(), profile.natives.end());
+  out += detail::profile_section(
+      profile_row({{"calls", w}}, "native"), natives.size(),
+      [&](size_t i) { return natives[i].second != 0; },
+      [&](size_t i) { return natives[i].second; },
+      [&](size_t i) {
+        return profile_row({{std::to_string(natives[i].second), w}},
+                           natives[i].first);
+      });
 
-  std::vector<size_t> ops;
-  for (size_t op = 0; op < profile.ops.size(); ++op) {
-    if (profile.ops[op] != 0) ops.push_back(op);
-  }
-  std::stable_sort(ops.begin(), ops.end(), [&](size_t a, size_t b) {
-    return profile.ops[a] > profile.ops[b];
-  });
-  if (!ops.empty()) {
-    out += "\n" + profile_row({{"count", w}, {"share", 6}}, "opcode");
-    for (const size_t op : ops) {
-      out += profile_row({{std::to_string(profile.ops[op]), w},
-                          {profile_percent(profile.ops[op], all), 6}},
-                         detail::name_of(static_cast<Op>(op)));
-    }
-  }
+  const auto& ops = profile.ops;
+  out += detail::profile_section(
+      profile_row({{"count", w}, {"share", 6}}, "opcode"), ops.size(),
+      [&](size_t i) { return ops[i] != 0; }, [&](size_t i) { return ops[i]; },
+      [&](size_t i) {
+        return profile_row(
+            {{std::to_string(ops[i]), w}, {profile_percent(ops[i], all), 6}},
+            detail::name_of(static_cast<Op>(i)));
+      });
   return out;
 }
 
