@@ -11,11 +11,13 @@
 # does not contain.
 #
 #   LANG_EXT[lang]       its programs' file extension.
-#   LANG_NAME[lang]      what its implementation is called.
+#   LANG_BIN[lang]       the variable holding its implementation's command
+#                        (below).
 #   LANG_VERSION[lang]   the version whose output the goldens are, and the
 #                        only one test/goldens.sh accepts (CI installs
 #                        exactly these). Below is why each is pinned as
 #                        tightly as it is.
+#   lang_name LANG       prints what its implementation is called.
 #   lang_version LANG    prints the version of LANG that would run.
 #   lang_command LANG SCRATCH FILE...
 #                        sets the array CMD to the command that runs the
@@ -30,11 +32,10 @@
 #                        but the program itself, so bench/languages times
 #                        the language rather than this file.
 #
-# Each implementation is the command in a variable of its own -- PYTHON,
-# RUBY, LUA, GUILE, CULEBRA, NODE, DOTNET, GO; PL/0's is CULEBRA running
-# the file PL0_CUL -- and the environment overrides any of them, the way
-# CC names a C compiler: to run a version installed under another name
-# (PYTHON=python3.14) or not on PATH at all.
+# Each implementation is the command in the variable LANG_BIN names for it
+# -- PL/0's is culebra's, running the file PL0_CUL -- and the environment
+# overrides any of them, the way CC names a C compiler: to run a version
+# installed under another name (PYTHON=python3.14) or not on PATH at all.
 
 if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
    { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
@@ -46,9 +47,9 @@ declare -A LANG_EXT=(
   [python]=py [ruby]=rb [lua]=lua [scheme]=scm [culebra]=cul [js]=js
   [csharp]=cs [go]=go [pl0]=pas
 )
-declare -A LANG_NAME=(
-  [python]=python3 [ruby]=ruby [lua]=lua [scheme]=guile [culebra]=culebra
-  [js]=node [csharp]=dotnet [go]=go [pl0]="culebra pl0.cul"
+declare -A LANG_BIN=(
+  [python]=PYTHON [ruby]=RUBY [lua]=LUA [scheme]=GUILE [culebra]=CULEBRA
+  [js]=NODE [csharp]=DOTNET [go]=GO [pl0]=CULEBRA
 )
 
 # A version matches when it is this one or a release of it: 3.14 is any
@@ -97,6 +98,11 @@ lang_pl0_cul() {
   echo "$PL0_CUL"
 }
 
+lang_name() {
+  local bin=${LANG_BIN[$1]}
+  echo "${!bin##*/}"
+}
+
 lang_version() {
   case $1 in
     python) "$PYTHON" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' ;;
@@ -127,11 +133,11 @@ lang_pinned() {
   fi
   have=$(lang_version "$lang") || have=
   if [ "$have" != "$want" ] && [[ $have != "$want".* ]]; then
-    echo "$lang: the goldens are ${LANG_NAME[$lang]} $want's output, and" \
-         "this is ${have:-no ${LANG_NAME[$lang]} at all}" >&2
+    echo "$lang: the goldens are $(lang_name "$lang") $want's output, and" \
+         "this is ${have:-no $(lang_name "$lang") at all}" >&2
     return 1
   fi
-  echo "${LANG_NAME[$lang]} $have"
+  echo "$(lang_name "$lang") $have"
 }
 
 # Runs a compile step with its output kept out of the way, and shown only
@@ -154,18 +160,13 @@ lang_command() {
     cat "$@" >"$file"
   fi
   case $lang in
-    python) CMD=("$PYTHON" "$file") ;;
-    ruby) CMD=("$RUBY" "$file") ;;
-    lua) CMD=("$LUA" "$file") ;;
     # Without --no-auto-compile, Guile writes progress notes the first
     # time it sees a file: output of the cache's state, not the program's.
     scheme) CMD=("$GUILE" --no-auto-compile -s "$file") ;;
-    culebra) CMD=("$CULEBRA" "$file") ;;
     pl0)
       local pl0_cul
       pl0_cul=$(lang_pl0_cul) || return
       CMD=("$CULEBRA" "$pl0_cul" "$file") ;;
-    js) CMD=("$NODE" "$file") ;;
     # Built once, not `go run`: that compiles and links on every run.
     # `go build prog.go` names its file, which works outside a module.
     go)
@@ -189,6 +190,12 @@ EOF
       lang_build "$scratch/build.log" \
         "$DOTNET" build "$scratch/prog.csproj" -c Release -o "$scratch/out" || return
       CMD=("$DOTNET" "$scratch/out/prog.dll") ;;
-    *) echo "test/languages.sh: no language '$lang'" >&2; return 1 ;;
+    *)
+      local bin=${LANG_BIN[$lang]:-}
+      if [ -z "$bin" ]; then
+        echo "test/languages.sh: no language '$lang'" >&2
+        return 1
+      fi
+      CMD=("${!bin}" "$file") ;;
   esac
 }

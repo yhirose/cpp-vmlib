@@ -151,7 +151,7 @@ row() {
     real_ms=$(best_ms "$workload" "${CMD[@]}")
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$workload" "$lang" "$mini_ms" \
-    "${LANG_NAME[$lang]}" "$real_ms"
+    "$(lang_name "$lang")" "$real_ms"
 }
 
 printf 'task\tlang\tmini\treal\treal_ms\n'
