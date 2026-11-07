@@ -129,6 +129,16 @@ A few things worth knowing before you write a binder:
   compiles to a test of the tags and builds no string at all; a type
   string kept in a variable and compared later builds one, and so does
   each literal it meets.
+- **An operator may name a fallback.** `Unary` and `Binary` are the VM's
+  own operators. Given a fallback (`b.binary(op, x, y, Fallback{callee,
+  tags, exact}, p)`), the operator answers only when every operand's tag
+  is in `tags`, it does not trap, and -- `exact` -- an int `Add`, `Sub`,
+  `Mul` or `Neg` does not wrap; otherwise the fallback is called with the
+  operands and its answer is the node's. That is how a dynamic language's
+  `+`, `<` and `==` stay one instruction on the values it agrees with the
+  VM about -- two numbers, two strings, a Python int that fits -- and its
+  own helper on the rest: the front end draws the line, and the call it
+  would have made anyway is the fallback, now made only past it.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.

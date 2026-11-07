@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -529,6 +531,164 @@ int main() {
           "a closure and a host function are the same type");
     check(!same_type_name(ValueTag::Func, ValueTag::Object),
           "a closure and an object are not");
+  }
+
+  // --- 12d. An operator with a fallback (Tag::Unary): the operator's answer
+  // when every operand's tag is in its set, it does not trap and -- exact
+  // -- an int result does not wrap; the fallback, called with the
+  // operands, otherwise. The fallback here prints "f" and what it was
+  // handed, and answers -1. ------------------------------------------------
+  {
+    constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+    const uint32_t kInt = tags_named("int");
+    const uint32_t kDbl = tags_named("double");
+    const uint32_t kStr = tags_named("string");
+    // The module: main prints what `make` builds, over the fallback #1.
+    const auto run = [&](const std::function<NodeId(Builder&)>& make,
+                         const std::string& what) {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      const auto print = [&](NodeId v) {
+        return b.intrinsic(IntrinsicId::Print, {v}, p);
+      };
+      m.funcs.push_back({"main", 0, 0, make(b), {}, {}});
+      Func fb{"fb", 2, 0,
+              b.block({print(b.str_literal("f", p)),
+                       print(b.varref(VarKind::Local, 0, p)),
+                       print(b.varref(VarKind::Local, 1, p)),
+                       b.make_return(b.literal(-1, p), p)},
+                      p),
+              {"x", "y"}, {}};
+      fb.num_params = 2;
+      fb.lenient_arity = true;
+      m.funcs.push_back(fb);
+      check_eq(run_module(m, what), "", what + ": unexpected failure");
+      return joined();
+    };
+    const auto print = [&](Builder& b, NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const auto fb = [&](Builder& b, uint32_t tags, bool exact = false) {
+      return Fallback{b.make_closure(1, 0, p), tags, exact};
+    };
+    struct Case {
+      std::function<NodeId(Builder&)> make;
+      const char* want;
+      const char* what;
+    };
+    const auto bin = [&](BinOp op, std::function<NodeId(Builder&)> l,
+                         std::function<NodeId(Builder&)> r, uint32_t tags,
+                         bool exact = false) {
+      return [=, &print, &fb](Builder& b) {
+        return print(b, b.binary(op, l(b), r(b), fb(b, tags, exact), p));
+      };
+    };
+    const auto un = [&](UnOp op, std::function<NodeId(Builder&)> x,
+                        uint32_t tags, bool exact = false) {
+      return [=, &print, &fb](Builder& b) {
+        return print(b, b.unary(op, x(b), fb(b, tags, exact), p));
+      };
+    };
+    const auto I = [&](int64_t v) {
+      return [=](Builder& b) { return b.literal(v, p); };
+    };
+    const auto D = [&](double v) {
+      return [=](Builder& b) { return b.double_literal(v, p); };
+    };
+    const auto S = [&](const char* v) {
+      return [=](Builder& b) { return b.str_literal(v, p); };
+    };
+    const Case cases[] = {
+        {bin(BinOp::Add, I(1), I(2), kInt), "3|", "ints in the set"},
+        {bin(BinOp::Add, I(1), D(2.5), kInt), "f|1|2.5|-1|",
+         "a double outside it"},
+        {bin(BinOp::Add, I(1), D(2.5), kInt | kDbl), "3.5|",
+         "a double inside it"},
+        {bin(BinOp::Add, I(kMax), I(1), kInt), "-9223372036854775808|",
+         "an add that wraps, not exact"},
+        {bin(BinOp::Add, I(kMax), I(1), kInt, true),
+         "f|9223372036854775807|1|-1|", "an exact add that would wrap"},
+        {bin(BinOp::Add, I(kMax - 1), I(1), kInt, true),
+         "9223372036854775807|", "an exact add that fits"},
+        {bin(BinOp::Sub, I(kMin), I(1), kInt, true),
+         "f|-9223372036854775808|1|-1|", "an exact sub that would wrap"},
+        {bin(BinOp::Sub, I(-1), I(kMax), kInt, true),
+         "-9223372036854775808|", "an exact sub that fits"},
+        {bin(BinOp::Sub, I(kMax - 1), I(-1), kInt, true),
+         "9223372036854775807|", "an exact sub of a negative that fits"},
+        {bin(BinOp::Mul, I(int64_t{1} << 32), I(int64_t{1} << 31), kInt,
+             true),
+         "f|4294967296|2147483648|-1|", "an exact mul that would wrap"},
+        {bin(BinOp::Mul, I(-1), I(kMin), kInt, true),
+         "f|-1|-9223372036854775808|-1|", "-1 times the least int"},
+        {bin(BinOp::Mul, I(int64_t{1} << 32), I(-(int64_t{1} << 31)), kInt,
+             true),
+         "-9223372036854775808|", "an exact mul that just fits"},
+        {bin(BinOp::Div, I(1), I(0), kInt), "f|1|0|-1|",
+         "a trap is the fallback's"},
+        {bin(BinOp::Eq, I(1), S("a"), kInt | kStr), "f|1|a|-1|",
+         "so is Eq refusing two types"},
+        {bin(BinOp::Lt, S("a"), S("b"), kStr), "true|", "two strings"},
+        {un(UnOp::Neg, I(kMin), kInt, true), "f|-9223372036854775808|nil|-1|",
+         "an exact Neg that would wrap"},
+        {un(UnOp::Neg, I(kMin), kInt), "-9223372036854775808|",
+         "a Neg that wraps"},
+        {un(UnOp::Neg, I(5), kInt, true), "-5|", "an exact Neg that fits"},
+        {un(UnOp::Neg, S("s"), kStr), "f|s|nil|-1|", "a Neg that traps"},
+        // The operands run first, each once; the fallback only when called,
+        // after them; and a statement's value goes nowhere.
+        {[&](Builder& b) {
+           const auto seen = [&](const char* s, NodeId v) {
+             return b.block({print(b, b.str_literal(s, p)), v}, p);
+           };
+           const auto sum = [&](uint32_t tags) {
+             return b.binary(BinOp::Add, seen("l", b.literal(1, p)),
+                             seen("r", b.double_literal(2.5, p)),
+                             {seen("callee", b.make_closure(1, 0, p)), tags},
+                             p);
+           };
+           return b.block({print(b, sum(kInt | kDbl)), print(b, sum(kInt)),
+                           sum(kDbl), print(b, b.str_literal("end", p))},
+                          p);
+         },
+         "l|r|3.5|l|r|callee|f|1|2.5|-1|l|r|callee|f|1|2.5|end|",
+         "what runs, and when"},
+    };
+    for (const Case& c : cases) {
+      check_eq(run(c.make, c.what), c.want, std::string("fallback: ") + c.what);
+    }
+
+    // The code: the operands in the registers after the result's, the
+    // Try, and the fallback's call over those same registers, which the
+    // Try jumps past when it answers.
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 2, 0,
+         print(b, b.binary(BinOp::Add, b.varref(VarKind::Local, 0, p),
+                           b.varref(VarKind::Local, 1, p), fb(b, kInt, true),
+                           p)),
+         {"a", "b"}, {}});
+    m.funcs.push_back({"fb", 0, 0, b.literal(0, p), {}, {}});
+    check(to_string(m).find("add or-call {int} exact") != std::string::npos,
+          "fallback: the IR dump shows the operator's set");
+    const std::string dump = vm::to_string(vm::compile(m));
+    const size_t at = dump.find("\ttrybinary r0, add r1, r2, {int} exact, ");
+    const size_t call = dump.find("\tcallvalue r0, r3, args r1..3\t");
+    check(at != std::string::npos && call != std::string::npos && at < call,
+          "fallback: the Try, then the call over its operands");
+    if (at != std::string::npos && call != std::string::npos) {
+      // `<pc>\tcallvalue`: the Try's target is the pc after it.
+      const size_t line = dump.rfind('\n', call) + 1;
+      const int call_pc = std::stoi(dump.substr(line + 2));
+      const size_t target = dump.find(", ", at + 30) + 2;
+      check_eq(dump.substr(target, dump.find('\t', target) - target),
+               std::to_string(call_pc + 1),
+               "fallback: the Try jumps past the call");
+    }
   }
 
   // --- 13. Same: identity, where Eq refuses to answer. --------------------

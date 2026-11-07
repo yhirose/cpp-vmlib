@@ -284,6 +284,78 @@ int main() {
            }),
            "", "a call kept in the body and dropped from a wrapper still runs");
 
+  // An operator's tag set and flags (Tag::Unary): only with a fallback to
+  // read them, only tags that exist, only the flags there are, and kExact
+  // only where an int result can wrap. A fallback is an operand, so a
+  // statement there is one in value position.
+  const auto callee = [&](Builder& b) {
+    return b.native_ref(b.declare_native("f"), p);
+  };
+  const auto add = [&](Builder& b, Fallback f) {
+    return b.binary(BinOp::Add, b.literal(1, p), b.literal(2, p), f, p);
+  };
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n =
+                 b.binary(BinOp::Add, b.literal(1, p), b.literal(2, p), p);
+             m.nodes[n.v].a = 1;
+             return n;
+           }),
+           "operator has tags or flags but no fallback",
+           "tags without a fallback");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.unary(UnOp::Neg, b.literal(1, p), p);
+             m.nodes[n.v].b = kExact;
+             return n;
+           }),
+           "operator has tags or flags but no fallback",
+           "flags without a fallback");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {callee(b), ~kAllTags & (kAllTags + 1)});
+           }),
+           "operator's tag set names no tag", "a tag past the last");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = add(b, {callee(b), 1});
+             m.nodes[n.v].b = 2;
+             return n;
+           }),
+           "unknown operator flag", "a flag that is not kExact");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.binary(BinOp::Lt, b.literal(1, p), b.literal(2, p),
+                             {callee(b), 1, true}, p);
+           }),
+           "only Add, Sub, Mul and Neg can be exact", "an exact comparison");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, true},
+                            p);
+           }),
+           "only Add, Sub, Mul and Neg can be exact", "an exact Not");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {callee(b), kAllTags, true});
+           }) + verdict([&](Module&, Builder& b) {
+             return b.unary(UnOp::Neg, b.literal(1, p),
+                            {callee(b), kAllTags, true}, p);
+           }),
+           "", "an exact Add and an exact Neg");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = add(b, {callee(b), 1});
+             m.nodes[n.v].num_children = 4;
+             return n;
+           }),
+           "Binary takes 2 or 3 children", "a Binary with two fallbacks");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {b.make_break(p), 1});
+           }),
+           "statement in value position", "a fallback is a value");
+
+  // An operator with a fallback may call it, so it runs twice as a call
+  // would -- even over operands and a callee that are only reads.
+  check_eq(shared([&](Builder& b) {
+             const NodeId sum = add(b, {callee(b), 1});
+             return b.array_lit({sum, sum}, {4, 4});
+           }),
+           "1:1: binary runs twice in arraylit@4:4|",
+           "an operator with a fallback is observable");
+
   if (g_failures != 0) {
     std::fprintf(stderr, "verify: %d failure(s)\n", g_failures);
     return 1;

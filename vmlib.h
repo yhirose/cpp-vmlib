@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1025,8 +1026,24 @@ namespace coreir {
 enum class Tag : uint8_t {
   Literal,    // a = const pool index
   VarRef,     // op = VarKind, a = index
-  Unary,      // op = UnOp,    children: operand
-  Binary,     // op = BinOp,   children: lhs, rhs
+  // The VM's own operators. A dynamic language's operators are these on
+  // the values the two agree about -- two numbers, two strings -- and the
+  // language's own code on everything else: Lua's metamethods, Python's
+  // dunders, JavaScript's `+` on a string, a bignum's limbs. So an
+  // operator may name a fallback, a last child evaluating to anything
+  // callable. With one, `a` is a set of tags (bit t for ValueTag t, the
+  // form coreir::tags_named builds), and the operator answers only when
+  // every operand's tag is in the set, the operator does not trap on them,
+  // and -- with kExact in `b` -- an int Add, Sub, Mul or Neg does not wrap.
+  // Otherwise the fallback is evaluated, after the operands and only
+  // then, and called with the operands' values, and what it returns is the
+  // node's value. Which tags go in the set is the language's to say: the
+  // ones on which the VM's operator already is the language's. Lua 5.4's
+  // OP_ADD with OP_MMBIN after it is the same split, with the language
+  // built in; here the front end draws the line, and the call it would
+  // have made anyway is the fallback.
+  Unary,      // op = UnOp,  children: operand [, fallback]
+  Binary,     // op = BinOp, children: lhs, rhs [, fallback]
   Assign,     // op = VarKind, a = index, children: value
   If,         // children: cond, then [, else]
   // A branch on one of several literal keys, all the same coreir::ConstKind
@@ -1217,6 +1234,12 @@ enum class BinOp : uint8_t {
 // walk the enum's range -- kLastTag's own reason, one enum further.
 inline constexpr UnOp kLastUnOp = UnOp::WrapU32;
 inline constexpr BinOp kLastBinOp = BinOp::UGe;
+
+// An operator's flags, in Node::b when it has a fallback (Tag::Unary).
+// kExact: an int Add, Sub, Mul or Neg whose result wrapped is the
+// fallback's to answer -- a language whose integers do not wrap (Python's
+// and Ruby's grow) takes int64's answer only when it is the true one.
+inline constexpr int32_t kExact = 1;
 
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
 // shortest-round-trip doubles included. A language whose display rules
@@ -1618,8 +1641,8 @@ inline constexpr int arity_of(Tag t) {
   switch (t) {
     case Tag::Literal:   return 0;
     case Tag::VarRef:    return 0;
-    case Tag::Unary:     return 1;
-    case Tag::Binary:    return 2;
+    case Tag::Unary:     return -1;  // operand [, fallback]
+    case Tag::Binary:    return -1;  // lhs, rhs [, fallback]
     case Tag::Assign:    return 1;
     case Tag::If:        return -1;  // 2 or 3
     case Tag::Switch:    return -1;  // subject, (key, body)*, optional default
@@ -1756,8 +1779,20 @@ inline constexpr bool yields_value(Tag t) {
 // do not survive that.
 // ---------------------------------------------------------------------------
 
-struct UnaryView  { UnOp op; NodeId operand; };
-struct BinaryView { BinOp op; NodeId lhs, rhs; };
+// `fallback` is invalid when the operator has none, and `tags` and
+// `exact` then say nothing (Tag::Unary).
+struct UnaryView {
+  UnOp op;
+  NodeId operand, fallback;
+  uint32_t tags;
+  bool exact;
+};
+struct BinaryView {
+  BinOp op;
+  NodeId lhs, rhs, fallback;
+  uint32_t tags;
+  bool exact;
+};
 struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
@@ -1787,10 +1822,16 @@ struct LoopJumpView { int32_t depth; };
 struct NativeRefView { int32_t index; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
-  return {static_cast<UnOp>(m.at(n).op), m.child(n, 0)};
+  const Node& x = m.at(n);
+  return {static_cast<UnOp>(x.op), m.child(n, 0),
+          x.num_children > 1 ? m.child(n, 1) : NodeId{},
+          static_cast<uint32_t>(x.a), (x.b & kExact) != 0};
 }
 inline BinaryView view_binary(const Module& m, NodeId n) {
-  return {static_cast<BinOp>(m.at(n).op), m.child(n, 0), m.child(n, 1)};
+  const Node& x = m.at(n);
+  return {static_cast<BinOp>(x.op), m.child(n, 0), m.child(n, 1),
+          x.num_children > 2 ? m.child(n, 2) : NodeId{},
+          static_cast<uint32_t>(x.a), (x.b & kExact) != 0};
 }
 inline AssignView view_assign(const Module& m, NodeId n) {
   return {static_cast<VarKind>(m.at(n).op), m.at(n).a, m.child(n, 0)};
@@ -1858,6 +1899,15 @@ inline NativeRefView view_native_ref(const Module& m, NodeId n) {
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
+
+// An operator's fallback, for Builder::unary and Builder::binary
+// (Tag::Unary has the rule): what is called when an operand's tag is not in
+// `tags`, the operator traps, or -- `exact` -- an int result wraps.
+struct Fallback {
+  NodeId callee;
+  uint32_t tags = 0;
+  bool exact = false;
+};
 
 class Builder {
 public:
@@ -1937,6 +1987,17 @@ public:
   }
   NodeId binary(BinOp op, NodeId lhs, NodeId rhs, SrcPos p) {
     return emit(Tag::Binary, static_cast<uint8_t>(op), p, 0, 0, {lhs, rhs});
+  }
+  NodeId unary(UnOp op, NodeId operand, const Fallback& f, SrcPos p) {
+    return emit(Tag::Unary, static_cast<uint8_t>(op), p,
+                static_cast<int32_t>(f.tags), f.exact ? kExact : 0,
+                {operand, f.callee});
+  }
+  NodeId binary(BinOp op, NodeId lhs, NodeId rhs, const Fallback& f,
+                SrcPos p) {
+    return emit(Tag::Binary, static_cast<uint8_t>(op), p,
+                static_cast<int32_t>(f.tags), f.exact ? kExact : 0,
+                {lhs, rhs, f.callee});
   }
   NodeId assign(VarKind k, int32_t index, NodeId value, SrcPos p) {
     return emit(Tag::Assign, static_cast<uint8_t>(k), p, index, 0, {value});
@@ -2101,6 +2162,12 @@ public:
     NodeId unary(UnOp op, NodeId x) { return b().unary(op, x, p_); }
     NodeId binary(BinOp op, NodeId l, NodeId r) {
       return b().binary(op, l, r, p_);
+    }
+    NodeId unary(UnOp op, NodeId x, const Fallback& f) {
+      return b().unary(op, x, f, p_);
+    }
+    NodeId binary(BinOp op, NodeId l, NodeId r, const Fallback& f) {
+      return b().binary(op, l, r, f, p_);
     }
     NodeId assign(VarKind k, int32_t i, NodeId v) {
       return b().assign(k, i, v, p_);
@@ -3380,6 +3447,29 @@ inline int64_t wrap_neg(int64_t a) {
   return static_cast<int64_t>(0u - static_cast<uint64_t>(a));
 }
 
+// Whether an int Add, Sub, Mul or Neg wraps: its int64 result, the one
+// wrap_add et al. give, is not the true one -- what kExact asks of an
+// operator with a fallback (Tag::Unary). Asked before the operation, by
+// comparing against the bounds, so no signed overflow happens in asking
+// (the CERT INT32-C checks).
+inline bool wraps(BinOp op, int64_t a, int64_t b) {
+  constexpr int64_t lo = std::numeric_limits<int64_t>::min();
+  constexpr int64_t hi = std::numeric_limits<int64_t>::max();
+  switch (op) {
+    case BinOp::Add: return b > 0 ? a > hi - b : a < lo - b;
+    case BinOp::Sub: return b < 0 ? a > hi + b : a < lo + b;
+    case BinOp::Mul:
+      if (a > 0) return b > 0 ? a > hi / b : b < lo / a;
+      if (b > 0) return a < lo / b;
+      return a != 0 && b < hi / a;
+    default:
+      return false;
+  }
+}
+inline bool wraps(UnOp op, int64_t a) {
+  return op == UnOp::Neg && a == std::numeric_limits<int64_t>::min();
+}
+
 // Operators that never widen to double: the classic bitops plus the
 // unsigned-only group (a bit pattern's "unsigned" reading has nothing to
 // widen to). No longer is_bitop -- the U-prefixed group is not a bitop, and
@@ -3951,6 +4041,15 @@ enum class Op : uint8_t {
   // same way.
   TypeIn,       // a = dst, b = src, c = tag set (coreir::tags_named's bits)
   SameType,     // a = dst, b = lhs, c = rhs   (coreir::same_type_name)
+  // An operator with a fallback (coreir's Tag::Unary has the rule): the
+  // operator's answer, into a, from the operands in the registers after
+  // it, when every operand's tag is in the set c, it does not trap, and --
+  // kExact in b's flags -- an int result does not wrap; then on at d.
+  // Otherwise nothing is written and the next instruction runs, which is
+  // the fallback's call over those same operand registers, ending at d.
+  // Lua 5.4's arithmetic opcodes skip the OP_MMBIN after them the same way.
+  TryUnary,     // a = dst, a + 1 = operand, b = try_mode, c = tags, d = done
+  TryBinary,    // a = dst, a + 1 and a + 2 = operands, b, c, d as TryUnary
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
   FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
@@ -3989,6 +4088,16 @@ enum class Op : uint8_t {
   CoroStatus,   // a = dst, b = coroutine reg
   CoroCurrent,  // a = dst
 };
+
+// TryUnary's and TryBinary's b: the operator (a UnOp or a BinOp, which the
+// opcode says) in the low byte, and its flags (coreir::kExact) above.
+inline constexpr int32_t try_mode(uint8_t op, int32_t flags) {
+  return op | flags << 8;
+}
+inline constexpr uint8_t try_op(int32_t mode) {
+  return static_cast<uint8_t>(mode & 0xff);
+}
+inline constexpr int32_t try_flags(int32_t mode) { return mode >> 8; }
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
 // own Add..UGe, so the compiler and the executor can share one arithmetic
@@ -5316,6 +5425,25 @@ struct Verifier {
            (c.bits >= 0 && static_cast<size_t>(c.bits) < m.str_consts.size());
   }
 
+  // An operator's tag set and flags (Tag::Unary): none without a fallback,
+  // since nothing would read them; with one, tags that exist and flags
+  // that do, and kExact only where an int result can wrap.
+  static const char* fallback_error(const Node& n, bool has_fallback,
+                                    bool can_wrap) {
+    if (!has_fallback) {
+      if (n.a == 0 && n.b == 0) return nullptr;
+      return "operator has tags or flags but no fallback";
+    }
+    if ((static_cast<uint32_t>(n.a) & ~kAllTags) != 0) {
+      return "operator's tag set names no tag";
+    }
+    if ((n.b & ~kExact) != 0) return "unknown operator flag";
+    if ((n.b & kExact) != 0 && !can_wrap) {
+      return "only Add, Sub, Mul and Neg can be exact";
+    }
+    return nullptr;
+  }
+
   // The subject aside, children come in (key, body) pairs plus an optional
   // trailing default -- an even total means the last one is that default.
   // Each key must be a Literal (verify() cannot evaluate an arbitrary
@@ -5434,12 +5562,30 @@ struct Verifier {
         if (n.op > static_cast<uint8_t>(kLastUnOp)) {
           return fail("unknown unary operator");
         }
+        if (n.num_children != 1 && n.num_children != 2) {
+          return fail("Unary takes 1 or 2 children");
+        }
+        if (const char* e = fallback_error(
+                n, n.num_children == 2,
+                static_cast<UnOp>(n.op) == UnOp::Neg)) {
+          return fail(e);
+        }
         break;
-      case Tag::Binary:
+      case Tag::Binary: {
         if (n.op > static_cast<uint8_t>(kLastBinOp)) {
           return fail("unknown binary operator");
         }
+        if (n.num_children != 2 && n.num_children != 3) {
+          return fail("Binary takes 2 or 3 children");
+        }
+        const auto op = static_cast<BinOp>(n.op);
+        if (const char* e = fallback_error(
+                n, n.num_children == 3,
+                op == BinOp::Add || op == BinOp::Sub || op == BinOp::Mul)) {
+          return fail(e);
+        }
         break;
+      }
       case Tag::VarRef:
       case Tag::Assign: {
         if (n.a < 0 || n.a >= slot_limit(f, static_cast<VarKind>(n.op))) {
@@ -5655,11 +5801,38 @@ inline std::string const_text(const Const& c,
   return "?";
 }
 
+// A tag set in type_name's words, each name once ("function" is two
+// tags). A set holding most tags is a `!=`, so it prints as the few it
+// leaves out: "not {nil}" rather than eleven names. The bytecode's TypeIn
+// and the operators' fallbacks print theirs this way, in both dumps.
+inline std::string tag_set_text(uint32_t set) {
+  const bool negated =
+      std::popcount(set) > std::popcount(~set & kAllTags);
+  if (negated) set = ~set & kAllTags;
+  std::string out = negated ? "not {" : "{";
+  for (uint32_t t = 0; t <= static_cast<uint32_t>(kLastValueTag); ++t) {
+    const char* name = type_name(static_cast<ValueTag>(t));
+    // Only at the name's first tag, so "function" is not printed twice.
+    if ((set >> t & 1u) &&
+        std::countr_zero(tags_named(name)) == static_cast<int>(t)) {
+      if (out.back() != '{') out += ",";
+      out += name;
+    }
+  }
+  return out + "}";
+}
+
 struct Dumper {
   const Module& m;
   std::ostringstream out;
 
   void indent(int d) { out << std::string(static_cast<size_t>(d) * 2, ' '); }
+
+  // An operator's fallback: the tags it answers on, and whether exactly.
+  void fallback(uint32_t tags, bool exact) {
+    out << " or-call " << tag_set_text(tags);
+    if (exact) out << " exact";
+  }
 
   void node(NodeId id, int d) {
     const Node& n = m.at(id);
@@ -5675,12 +5848,18 @@ struct Dumper {
         out << "varref " << name_of(v.kind) << "[" << v.index << "]";
         break;
       }
-      case Tag::Unary:
-        out << name_of(static_cast<UnOp>(n.op));
+      case Tag::Unary: {
+        const auto v = view_unary(m, id);
+        out << name_of(v.op);
+        if (v.fallback.valid()) fallback(v.tags, v.exact);
         break;
-      case Tag::Binary:
-        out << name_of(static_cast<BinOp>(n.op));
+      }
+      case Tag::Binary: {
+        const auto v = view_binary(m, id);
+        out << name_of(v.op);
+        if (v.fallback.valid()) fallback(v.tags, v.exact);
         break;
+      }
       case Tag::Assign: {
         auto v = view_assign(m, id);
         out << "assign " << name_of(v.kind) << "[" << v.index << "]";
@@ -5900,9 +6079,15 @@ inline constexpr bool observable(IntrinsicId id) {
 }
 
 // Whether running `x` can be told from not running it, its children aside.
+// An operator with a fallback (Tag::Unary) may call it, as a call does: it
+// is the operator with one child more than its operands.
 inline bool observable(const Node& x) {
-  return x.tag == Tag::Intrinsic ? observable(static_cast<IntrinsicId>(x.op))
-                                 : observable(x.tag);
+  switch (x.tag) {
+    case Tag::Intrinsic: return observable(static_cast<IntrinsicId>(x.op));
+    case Tag::Unary:     return x.num_children > 1;
+    case Tag::Binary:    return x.num_children > 2;
+    default:             return observable(x.tag);
+  }
 }
 
 // Which nodes run: the ones a function body reaches. A node built and then
@@ -6160,6 +6345,8 @@ inline const char* name_of(Op op) {
     case Op::TypeOf:      return "typeof";
     case Op::TypeIn:      return "typein";
     case Op::SameType:    return "sametype";
+    case Op::TryUnary:    return "tryunary";
+    case Op::TryBinary:   return "trybinary";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";
     case Op::FMod:        return "fmod";
@@ -6187,27 +6374,6 @@ inline const char* name_of(Op op) {
     case Op::CoroCurrent: return "corocurrent";
   }
   return "?";
-}
-
-// A TypeIn's tag set in type_name's words, each name once ("function" is
-// two tags). A set holding most tags is a `!=`, so it prints as the few it
-// leaves out: "not {nil}" rather than eleven names.
-inline std::string tag_set_text(uint32_t set) {
-  const bool negated =
-      std::popcount(set) > std::popcount(~set & coreir::kAllTags);
-  if (negated) set = ~set & coreir::kAllTags;
-  std::string out = negated ? "not {" : "{";
-  for (uint32_t t = 0; t <= static_cast<uint32_t>(coreir::kLastValueTag);
-       ++t) {
-    const char* name = coreir::type_name(static_cast<coreir::ValueTag>(t));
-    // Only at the name's first tag, so "function" is not printed twice.
-    if ((set >> t & 1u) && std::countr_zero(coreir::tags_named(name)) ==
-                               static_cast<int>(t)) {
-      if (out.back() != '{') out += ",";
-      out += name;
-    }
-  }
-  return out + "}";
 }
 
 }  // namespace detail
@@ -6324,8 +6490,23 @@ inline std::string to_string(const Program& p) {
           break;
         case Op::TypeIn:
           out << " r" << in.a << ", r" << in.b << ", "
-              << detail::tag_set_text(static_cast<uint32_t>(in.c));
+              << coreir::detail::tag_set_text(static_cast<uint32_t>(in.c));
           break;
+        case Op::TryUnary:
+        case Op::TryBinary: {
+          const uint8_t op = try_op(in.b);
+          const bool unary = in.op == Op::TryUnary;
+          out << " r" << in.a << ", "
+              << (unary ? coreir::name_of(static_cast<coreir::UnOp>(op))
+                        : coreir::name_of(static_cast<coreir::BinOp>(op)))
+              << " r" << (in.a + 1);
+          if (!unary) out << ", r" << (in.a + 2);
+          out << ", "
+              << coreir::detail::tag_set_text(static_cast<uint32_t>(in.c));
+          if ((try_flags(in.b) & coreir::kExact) != 0) out << " exact";
+          out << ", " << in.d;
+          break;
+        }
         // An intrinsic's operands are its arity's worth, after the
         // destination when it writes one -- compile_intrinsic's layout.
         case Op::Out: case Op::OutRaw: case Op::In: case Op::Len:
@@ -6490,6 +6671,21 @@ struct FnCompiler {
   }
 
   int32_t here() const { return static_cast<int32_t>(ch.code.size()); }
+
+  // A call of the value in `callee` with `argc` arguments from `args_at` on
+  // (and, `spread`, the array after them), its result into `dst`. In tail
+  // position, and allowed here, the call may replace the frame
+  // (Op::TailCall). Everything after it -- the scope exits and the Ret a
+  // Return or the body's end emits -- stays emitted: when the replacement
+  // does not happen (a native or generator callee, the entry frame)
+  // TailCall is a CallValue and that code runs.
+  void emit_call(int32_t dst, int32_t callee, int32_t args_at, int32_t argc,
+                 bool spread, bool tail, uint32_t pos) {
+    const bool replace = tail && tail_call_ok();
+    const Op op = spread ? (replace ? Op::TailCallSpread : Op::CallSpread)
+                         : (replace ? Op::TailCall : Op::CallValue);
+    emit(op, dst, callee, args_at, pos, argc);
+  }
 
   // Whether this subtree registers a Defer with the scope being compiled.
   // Nested Scopes own their own defers, so the walk does not descend into
@@ -6869,6 +7065,30 @@ struct FnCompiler {
   }
 
 
+  // An operator with a fallback (Tag::Unary): its result register, then
+  // the operands in the run after it, the Try instruction, and the
+  // fallback's call over that run -- the call the front end would have
+  // made, now on the one path where the operator has no answer -- with the
+  // Try jumping past it. The result register comes first so the operands
+  // stay in theirs, held until the statement ends as a call's arguments
+  // are, whichever path ran.
+  int32_t compile_try(Op op, NodeId id, std::initializer_list<NodeId> operands,
+                      NodeId fallback, uint32_t tags, bool exact, bool tail) {
+    const Node& n = m.at(id);
+    const int32_t base = top;
+    const int32_t dst = alloc();
+    for (const NodeId x : operands) compile_operand(x);
+    const size_t at = emit(op, dst, try_mode(n.op, exact ? kExact : 0),
+                           static_cast<int32_t>(tags), n.pos);
+    const int32_t callee = compile_expr(fallback);
+    emit_call(dst, callee, dst + 1, static_cast<int32_t>(operands.size()),
+              false, tail, n.pos);
+    ch.code[at].d = here();
+    top = base;
+    alloc();
+    return dst;
+  }
+
   // Eq or Ne over TypeOf's answer, which asks about tags and nothing else,
   // so no string is built on either side: against a string literal (either
   // way round) it is one TypeIn over the tags type_name calls that -- `!=`
@@ -7038,6 +7258,10 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         auto v = view_unary(m, id);
+        if (v.fallback.valid()) {
+          return compile_try(Op::TryUnary, id, {v.operand}, v.fallback,
+                             v.tags, v.exact, tail);
+        }
         return compile_op(op_of(v.op), n.pos, v.operand);
       }
       case Tag::Scope:
@@ -7046,6 +7270,10 @@ struct FnCompiler {
         return compile_try(id);
       case Tag::Binary: {
         auto v = view_binary(m, id);
+        if (v.fallback.valid()) {
+          return compile_try(Op::TryBinary, id, {v.lhs, v.rhs}, v.fallback,
+                             v.tags, v.exact, tail);
+        }
         if (const auto r = compile_type_test(v, n.pos)) return *r;
         // A failing division reports at its right operand, so that is the
         // position stamped on the instruction that can trap.
@@ -7164,15 +7392,8 @@ struct FnCompiler {
         }
         top = base;
         const int32_t r = alloc();
-        // In tail position, and allowed here, the call may replace the
-        // frame (Op::TailCall). Everything after it -- the scope exits and
-        // the Ret a Return or the body's end emits -- stays emitted: when
-        // the replacement does not happen (a native or generator callee,
-        // the entry frame) TailCall is a CallValue and that code runs.
-        const bool replace = tail && tail_call_ok();
-        const Op op = spread ? (replace ? Op::TailCallSpread : Op::CallSpread)
-                             : (replace ? Op::TailCall : Op::CallValue);
-        emit(op, r, callee, args_at, n.pos, operands - (spread ? 1 : 0));
+        emit_call(r, callee, args_at, operands - (spread ? 1 : 0), spread,
+                  tail, n.pos);
         return r;
       }
       default:
@@ -8962,6 +9183,34 @@ struct Exec {
     finish_coro(co);
   }
 
+  // TryUnary and TryBinary (bytecode.h): the operator's answer into in.a,
+  // and true, when it has one for these operands; false, with nothing
+  // written, when the fallback's call that follows is to answer.
+  static bool try_operator(Frame& f, const Insn& in) {
+    const auto tags = static_cast<uint32_t>(in.c);
+    const auto in_set = [tags](const Value& v) {
+      return (tags >> static_cast<uint32_t>(v.tag()) & 1u) != 0;
+    };
+    const bool exact = (try_flags(in.b) & kExact) != 0;
+    const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
+    if (!in_set(x)) return false;
+    if (in.op == Op::TryUnary) {
+      const auto op = static_cast<UnOp>(try_op(in.b));
+      if (!unop_error(op, x).empty()) return false;
+      if (exact && x.is_int() && wraps(op, x.as_int())) return false;
+      f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
+      return true;
+    }
+    const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    if (!in_set(y)) return false;
+    const auto op = static_cast<BinOp>(try_op(in.b));
+    if (exact && x.is_int() && y.is_int() &&
+        wraps(op, x.as_int(), y.as_int())) {
+      return false;
+    }
+    return eval_binop(op, x, y, f.regs[static_cast<size_t>(in.a)]).empty();
+  }
+
   void dispatch(size_t floor) {
     while (true) {
       Frame& f = *frames.back();
@@ -9047,6 +9296,13 @@ struct Exec {
             continue;
           }
           break;
+        case Op::TryUnary:
+        case Op::TryBinary:
+          if (try_operator(f, in)) {
+            f.pc = static_cast<size_t>(in.d);
+            continue;
+          }
+          break;  // into the fallback's call
         case Op::Switch: {
           const SwitchTable& t = ch.switch_tables[static_cast<size_t>(in.b)];
           int32_t target = -1;
