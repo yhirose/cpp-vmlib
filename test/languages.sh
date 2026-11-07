@@ -68,12 +68,14 @@ declare -A LANG_BIN=(
 #   together.
 # csharp 8.0 is .NET's: the program is built for net8.0, and the newest
 #   8.0.x runtime is what runs it.
+# go 1.27.3: Go's newest, to the patch, since what CI installs is that
+#   release's own tarball.
 # The rest are pinned at the release the language is named by (Lua 5.4,
-# Guile 3.0) or at a current one (Node's LTS, Go's newest), so that what
-# checks the goldens does not move under them when a newer one comes out.
+# Guile 3.0) or at a current one (Node's LTS), so that what checks the
+# goldens does not move under them when a newer one comes out.
 declare -A LANG_VERSION=(
   [python]=3.14 [ruby]=3.3 [lua]=5.4 [scheme]=3.0 [culebra]=0.8.0 [js]=24
-  [csharp]=8.0 [go]=1.27
+  [csharp]=8.0 [go]=1.27.3
 )
 LANG_VERSION[pl0]=${LANG_VERSION[culebra]}
 

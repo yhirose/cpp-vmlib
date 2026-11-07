@@ -3,8 +3,9 @@ description: >-
   The real language every example front end imitates, at the version
   test/languages.sh pins it to: the oracle test/goldens.sh checks the
   samples' goldens against, and the baseline bench/languages times the
-  front ends next to. Linux only (lua and guile come from apt), and the
-  repository must already be checked out.
+  front ends next to. Linux x64 only (lua and guile come from the image's
+  apt archive, so a job using this names its image), and the repository
+  must already be checked out.
 
 runs:
   using: composite
@@ -27,11 +28,16 @@ runs:
     - uses: actions/setup-node@v7
       with:
         node-version: ${{ steps.pin.outputs.js }}
-    # No cache: there is no go.sum to key one on, only single-file programs.
-    - uses: actions/setup-go@v7
-      with:
-        go-version: ${{ steps.pin.outputs.go }}
-        cache: false
+    # Go's own release tarball, unpacked under RUNNER_TEMP the way culebra
+    # is below: the pinned release exactly, without setup-go's copy of it
+    # into the tool cache, which was most of that step's time.
+    - shell: bash
+      env:
+        GO_VERSION: ${{ steps.pin.outputs.go }}
+      run: |
+        curl -fsSL "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz" |
+          tar xz -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/go/bin" >>"$GITHUB_PATH"
     - uses: actions/setup-dotnet@v6
       with:
         dotnet-version: ${{ steps.pin.outputs.csharp }}.x
