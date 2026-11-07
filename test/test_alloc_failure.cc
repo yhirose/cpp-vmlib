@@ -393,7 +393,7 @@ Module drops() {
     const auto [d] = w.params("d");
     const auto [g, h] = w.locals("g", "h");
     const auto obj = [&](const char* name) {
-      return w.obj({{"name", w.S(name)}, {"\x01" "drop", w.L(d)}});
+      return w.set_drop(w.obj({{"name", w.S(name)}}), w.L(d));
     };
     w.add(w.b.scope(g.i, h.i + 1,
                     w.blk({w.set(g, obj("g")), w.set(h, obj("h")),
@@ -406,7 +406,7 @@ Module drops() {
   w.singleton = false;
   const auto [d, o, q, e] = w.locals("d", "o", "q", "e");
   const auto obj = [&](const char* name) {
-    return w.obj({{"name", w.S(name)}, {"\x01" "drop", w.L(d)}});
+    return w.set_drop(w.obj({{"name", w.S(name)}}), w.L(d));
   };
   w.add(w.set(d, w.b.make_closure(1, 0)));
   w.add(w.set(o, obj("a")));
@@ -719,7 +719,7 @@ Module reachable() {
     const auto [d] = w.params("d");
     const auto [k, g, h] = w.locals("k", "g", "h");
     const auto obj = [&](const char* name) {
-      return w.obj({{"name", w.S(name)}, {"\x01" "drop", w.L(d)}});
+      return w.set_drop(w.obj({{"name", w.S(name)}}), w.L(d));
     };
     w.add(w.set(k, w.obj({})));
     w.add(w.b.scope(g.i, h.i + 1,

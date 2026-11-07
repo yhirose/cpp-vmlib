@@ -112,8 +112,8 @@ struct SrcPos {
 //
 // Map is the associative container whose keys are values rather than
 // strings -- what Object deliberately is not. An Object's string keys are
-// what let a struct be indexed by slot (FieldGet/FieldSet) and what the
-// drop key hangs on; a language's dict/map with int, double or object keys
+// what let a struct be indexed by slot (FieldGet/FieldSet); a language's
+// dict/map with int, double or object keys
 // needs a second container rather than a widened first one, so nothing
 // about Object changes when Map arrives. Coroutine is a suspended
 // activation like Generator, but of a whole frame *stack* rather than one
@@ -138,18 +138,6 @@ static_assert(ValueTag::Native > ValueTag::Str);
 
 struct HeapObj;
 struct ObjectObj;
-
-// The first byte of a key the implementation chose rather than the
-// program: unspellable from a language whose identifiers are printable,
-// which is the point. kDropKey is the library's own such key; a front end
-// spells its own the same way (examples/common/runtime_parts.h has the
-// convention the examples share).
-inline constexpr char kImplPrefix = '\x01';
-
-// The key under which an Object carries its destructor (Runtime::set_drop_fn
-// has the contract).
-inline constexpr char kDropKey[] = "\x01" "drop";
-static_assert(kDropKey[0] == kImplPrefix);
 
 // Everything a running program's heap consists of, owned by an object rather
 // than by file-scope state.
@@ -180,7 +168,7 @@ class Runtime {
   // temporary halfway through an instruction), which no registration scheme
   // could enumerate. Everything unreachable from those roots is condemned,
   // pinned, given its destructor (the drop hook, for each condemned Object
-  // carrying the drop key -- newest object first, the heap list's order),
+  // that has one -- newest object first, the heap list's order),
   // handed to the finalize hook, then stripped of its references and freed
   // -- ~Runtime's own two-step, run early. Runs automatically from the
   // allocators once the heap outgrows a doubling threshold, on every
@@ -216,8 +204,9 @@ class Runtime {
     finalize_ = fn;
   }
 
-  // Deterministic destructors: an Object whose kDropKey holds a callable
-  // gets it called -- with the object as its one argument -- at the moment
+  // Deterministic destructors: an Object whose destructor (ObjectObj::drop,
+  // given with DropSet) is a callable gets it called -- with the object as
+  // its one argument -- at the moment
   // its refcount reaches zero, before the object is freed; at the exit of
   // the scope that owns the cycle it is in (owned_scope_exit); or, last,
   // in the collection that condemns it. The hook is how: the executor
@@ -234,15 +223,15 @@ class Runtime {
   void* drop_ctx() const { return drop_ctx_; }
   void (*drop_fn() const)(void*, HeapObj*) { return drop_; }
 
-  // The drop chokepoint: hands `o` to the hook if it is an Object carrying
-  // kDropKey that has not been dropped yet, marking it dropped first -- so
+  // The drop chokepoint: hands `o` to the hook if it is an Object with a
+  // destructor that has not been dropped yet, marking it dropped first -- so
   // a destructor runs at most once per object, whatever its own body
   // releases and whichever of the three paths gets there first. Answers
   // whether it ran.
   bool run_drop(HeapObj* o);
 
   // Deterministic drop for cycles: the owned stack (culebra's design).
-  // Every Object goes on it the moment its drop key is bound, and a Scope
+  // Every Object goes on it the moment it is given a destructor, and a Scope
   // resolves, at its exit, the entries registered since it was entered --
   // dynamically, so what a callee bound counts. An entry every reference
   // to which comes from objects reachable only from itself -- a member of
@@ -257,7 +246,7 @@ class Runtime {
   // nodes every candidate survives to the backstop.
   uint64_t owned_mark() const { return owned_next_id_; }
   void owned_scope_exit(uint64_t mark);
-  // ObjectObj::set / remove's chokepoints for the drop key.
+  // ObjectObj::set_drop's chokepoints.
   void owned_register(ObjectObj* o);
   void owned_unregister(ObjectObj* o);
   bool in_collect() const { return in_collect_; }
@@ -641,6 +630,14 @@ struct ObjectObj : HeapObj {
   // the props, so it outlives what the object holds, as an instance's type
   // outlives its dict in CPython's dealloc.
   Value meta;
+  // The destructor, nil for none (Runtime::set_drop_fn has the contract).
+  // The library's own hidden slot, as meta is the front end's: no key
+  // names it, so a program spelling any key neither reads, forges nor
+  // strips one. Set only through set_drop -- the DropSet intrinsic --
+  // since giving an object a destructor is what puts it on the owned stack
+  // and taking it away what takes it off. Released after the props and
+  // before the meta.
+  Value drop;
 
   Value* find(const std::string& k) {
     for (auto& kv : props) {
@@ -648,9 +645,6 @@ struct ObjectObj : HeapObj {
     }
     return nullptr;
   }
-  // Binding the drop key is what puts an object on the owned stack;
-  // removing it takes it off. Both go through here, so the two cannot
-  // drift apart.
   // By value: a caller with a value to spare (a freshly built result object,
   // say) hands it over instead of paying a retain/release pair, and one with
   // a live one pays exactly the copy it paid before.
@@ -660,7 +654,20 @@ struct ObjectObj : HeapObj {
     } else {
       props.emplace_back(k, std::move(v));
     }
-    if (owner && k == kDropKey) owner->owned_register(this);
+  }
+
+  // Gives the object its destructor, or takes it away with nil -- and puts
+  // it on the owned stack or takes it off, in the one place, so the two
+  // cannot drift apart. The old destructor dies last: its release can run
+  // a drop hook that reads this object.
+  void set_drop(Value f) {
+    const Value old = std::exchange(drop, std::move(f));
+    if (!owner) return;
+    if (drop.is_nil()) {
+      owner->owned_unregister(this);
+    } else {
+      owner->owned_register(this);
+    }
   }
 
   // Erases the key if present; absent is a no-op. Order of the survivors
@@ -673,7 +680,6 @@ struct ObjectObj : HeapObj {
         // not reallocate under the erase's own element shifting.
         const Value dead = std::move(it->second);
         props.erase(it);
-        if (owner && k == kDropKey) owner->owned_unregister(this);
         return;
       }
     }
@@ -1142,7 +1148,7 @@ enum class Tag : uint8_t {
   // whose shape (which field lives at which slot) is known at compile time
   // rather than discovered at runtime, which a statically-typed struct's
   // fields are and a dynamic object's keys are not. The receiver is still
-  // an ObjectObj -- same drop key, same owned-stack machinery, same
+  // an ObjectObj -- same destructor, same owned-stack machinery, same
   // ObjectKeys -- so a struct is exactly an Object a front end has
   // promised to index this way instead of by key. That promise has two
   // obligations: every field is present (built via ObjectLit, which fills
@@ -1366,8 +1372,8 @@ enum class IntrinsicId : uint8_t {
   FnArity,      // (f) -> int, or -(required + 1) for a variadic function
   // The tracing collector, on demand: a full collection right now, on top
   // of the ones the allocators run on their own (Runtime::collect). Answers
-  // how many objects it freed. A condemned Object carrying the drop key
-  // gets its destructor -- the same closure call a refcount death makes,
+  // how many objects it freed. A condemned Object with a destructor gets
+  // it called -- the same closure call a refcount death makes,
   // over a still-whole cycle, newest object first -- and one that stores
   // itself somewhere reachable is spared (Runtime::collect has the rule).
   // Called from inside a destructor it answers 0: one collection at a
@@ -1504,12 +1510,20 @@ enum class IntrinsicId : uint8_t {
   // setmetatable draw the same lines.
   MetaGet,      // (v) -> value | nil
   MetaSet,      // (object | map, value) -> the object
+  // Gives an Object its destructor (ObjectObj::drop), or takes it away
+  // with nil: what the run calls, with the object as its one argument,
+  // when the object dies (Runtime::set_drop_fn has the contract). Like the
+  // meta it is no key, so nothing a program spells reaches it; and giving
+  // one is what puts the object on the owned stack, whose analysis drops a
+  // cycle of them at the exit of the scope that owns it. Answers the
+  // object; traps on anything but an Object.
+  DropSet,      // (object, callable | nil) -> the object
 };
 
 // The last enumerator, for the scans (from_name, test_names) that walk the
 // enum's range: one place to move when an intrinsic is added, rather than
 // every scan naming the last one itself.
-inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::MetaSet;
+inline constexpr IntrinsicId kLastIntrinsic = IntrinsicId::DropSet;
 
 // A variable is either a slot in this frame or a slot borrowed from an
 // enclosing one. There is deliberately no "level" -- static links assume the
@@ -1803,6 +1817,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::CoroCurrent: return 0;
     case IntrinsicId::MetaGet: return 1;
     case IntrinsicId::MetaSet: return 2;
+    case IntrinsicId::DropSet: return 2;
   }
   return 0;
 }
@@ -3251,6 +3266,10 @@ class FuncWriter {
   NodeId set_meta(NodeId o, NodeId m) {
     return in(IntrinsicId::MetaSet, {o, m});
   }
+  // An object's destructor (ObjectObj::drop), given -- the object answered.
+  NodeId set_drop(NodeId o, NodeId f) {
+    return in(IntrinsicId::DropSet, {o, f});
+  }
   NodeId push(NodeId a, NodeId v) { return in(IntrinsicId::ArrayPush, {a, v}); }
   NodeId len(NodeId v) { return in(IntrinsicId::Len, {v}); }
   NodeId typ(NodeId v) { return in(IntrinsicId::TypeOf, {v}); }
@@ -4284,6 +4303,7 @@ enum class Op : uint8_t {
   CoroCurrent,  // a = dst
   MetaGet,      // a = dst, b = src   (nil for a value with no slot)
   MetaSet,      // a = dst, b = object or map reg, c = value reg
+  DropSet,      // a = dst, b = object reg, c = destructor reg
 };
 
 // TryUnary's and TryBinary's b: the operator (a UnOp or a BinOp, which the
@@ -4408,6 +4428,7 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::CoroCurrent:  return Op::CoroCurrent;
     case I::MetaGet:      return Op::MetaGet;
     case I::MetaSet:      return Op::MetaSet;
+    case I::DropSet:      return Op::DropSet;
   }
   return Op::LoadNil;
 }
@@ -4942,6 +4963,7 @@ void visit_children(HeapObj* o, Fn fn) {
       [&](ArrayObj& a) { for (const Value& v : a.items) visit(v); },
       [&](ObjectObj& x) {
         for (const auto& kv : x.props) visit(kv.second);
+        visit(x.drop);
         visit(x.meta);
       },
       [&](CellObj& c) { visit(c.v); },
@@ -5030,7 +5052,7 @@ inline std::vector<char> owned_unreachable(const std::vector<ObjectObj*>& cand) 
 inline bool Runtime::run_drop(HeapObj* h) {
   if (h->kind != ValueTag::Object || !drop_) return false;
   auto* o = static_cast<ObjectObj*>(h);
-  if (o->dropped || !o->find(kDropKey)) return false;
+  if (o->dropped || o->drop.is_nil()) return false;
   o->dropped = true;  // before the call: re-entrant, and at most once
   drop_(drop_ctx_, h);
   return true;
@@ -5299,11 +5321,10 @@ inline int64_t Runtime::heap_bytes() const {
   return bytes;
 }
 
-// The refcount just hit zero. An Object carrying the drop contract's key
-// runs its destructor first (unless it already has), pinned so the closure
-// can read the fields; a destructor that stores the object somewhere
-// resurrects it and the free is skipped. Everything else -- and every
-// non-Object -- frees directly.
+// The refcount just hit zero. An Object with a destructor runs it first
+// (unless it already has), pinned so the closure can read the fields; a
+// destructor that stores the object somewhere resurrects it and the free
+// is skipped. Everything else -- and every non-Object -- frees directly.
 inline void heap_release_to_zero(HeapObj* h) {
   if (h->kind == ValueTag::Object && h->owner && !h->owner->sweeping()) {
     ++h->rc;  // pin across the destructor
@@ -5358,7 +5379,7 @@ inline HeapObj::HeapObj(ValueTag k) : rc(1), kind(k), owner(Runtime::current()) 
 
 // Every free unlinks first and clears `owner`, so one is left here only when
 // a constructor above this one threw. That object never got as far as a
-// drop key, so it is on no owned stack -- and its derived part is already
+// destructor, so it is on no owned stack -- and its derived part is already
 // destroyed, which is why only the list is touched: reading an ObjectObj's
 // owned_idx from here would read an object whose lifetime has ended.
 inline HeapObj::~HeapObj() {
@@ -5370,12 +5391,14 @@ namespace detail {
 // container is detached and released after the object is already empty:
 // releasing a child can run its drop hook (owned_scope_exit strips with
 // sweeping_ off), and a hook may read or write this object -- which must not
-// be half-way through releasing its own elements. An object's or a map's
-// meta goes last, after everything it holds (ObjectObj::meta).
+// be half-way through releasing its own elements. An object's destructor
+// goes after its props, and an object's or a map's meta last, after
+// everything else it holds (ObjectObj::meta).
 inline constexpr Overloaded strip_refs{
     [](ArrayObj& a) { release_detached(a.items); },
     [](ObjectObj& x) {
       release_detached(x.props);
+      x.drop = Value();
       x.meta = Value();
     },
     [](CellObj& c) { c.v = Value(); },
@@ -5559,6 +5582,7 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::CoroCurrent: return "corocurrent";
     case IntrinsicId::MetaGet: return "metaget";
     case IntrinsicId::MetaSet: return "metaset";
+    case IntrinsicId::DropSet: return "dropset";
   }
   return "?";
 }
@@ -6294,6 +6318,7 @@ inline constexpr bool observable(IntrinsicId id) {
     case IntrinsicId::CoroYield:
     case IntrinsicId::CoroClose:
     case IntrinsicId::MetaSet:
+    case IntrinsicId::DropSet:
       return true;
   }
   return true;
@@ -6593,6 +6618,7 @@ inline const char* name_of(Op op) {
     case Op::CoroCurrent: return "corocurrent";
     case Op::MetaGet:     return "metaget";
     case Op::MetaSet:     return "metaset";
+    case Op::DropSet:     return "dropset";
   }
   return "?";
 }
@@ -6746,7 +6772,7 @@ inline std::string to_string(const Program& p) {
         case Op::StrUpper: case Op::StrLower: case Op::NewMap:
         case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
         case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent:
-        case Op::MetaGet: case Op::MetaSet: {
+        case Op::MetaGet: case Op::MetaSet: case Op::DropSet: {
           const coreir::IntrinsicId id = *intrinsic_of(in.op);
           const int32_t regs[] = {in.a, in.b, in.c, in.d};
           const uint32_t n =
@@ -9093,19 +9119,18 @@ struct Exec {
   }
 
   // The drop-contract hook (see Runtime::set_drop_fn): run the object's
-  // "\x01" "drop" closure with the object itself as the argument. A throwing
-  // destructor is reported on stderr as "drop: <value>" (a trap: its own
-  // message) and swallowed -- an object going away must not fail the
-  // program that let go of it. So is any other exception: an allocation
-  // that failed ("drop: out of memory") or a host's own. Nothing can leave
-  // here, since this runs inside a release, and a release runs inside
-  // Value's destructor and its move assignment.
+  // destructor (ObjectObj::drop) with the object itself as the argument. A
+  // throwing destructor is reported on stderr as "drop: <value>" (a trap: its
+  // own message) and swallowed -- an object going away must not fail the
+  // program that let go of it. So is any other exception: an allocation that
+  // failed ("drop: out of memory") or a host's own. Nothing can leave here,
+  // since this runs inside a release, and a release runs inside Value's
+  // destructor and its move assignment.
   static void drop_hook(void* ctx, HeapObj* h) noexcept {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
-    Value* dv = o->find(kDropKey);
-    if (!dv || !dv->is_callable()) return;
-    Value closure = *dv;
+    if (!o->drop.is_callable()) return;
+    Value closure = o->drop;
     Value arg = Value::make_ref(h);
     ExitHeadroom room(*self);
     const size_t floor = self->frames.size();
@@ -9860,10 +9885,7 @@ struct Exec {
         }
         case Op::FieldSet: {
           ObjectObj* o = field_target(f, f.regs[in.a], in.b, in.d, "set");
-          // A plain overwrite of an existing slot, never a new key -- so
-          // unlike ObjectObj::set() this never has a drop key to register:
-          // a struct's drop key (if it has one) is already registered, from
-          // when ObjectLit first built it with that key present. See the
+          // A plain overwrite of an existing slot, never a new key. See the
           // FieldGet/FieldSet Tag comment for why front ends must build
           // every field through ObjectLit before any FieldSet reaches it.
           o->props[static_cast<size_t>(in.b)].second = f.regs[in.c];
@@ -10373,6 +10395,16 @@ struct Exec {
                         type_name(f.regs[in.b].tag()));
           }
           *slot = f.regs[in.c];
+          f.regs[in.a] = f.regs[in.b];
+          break;
+        }
+        case Op::DropSet: {
+          const Value& o = f.regs[in.b];
+          if (!o.is_object()) {
+            fail(f, std::string("cannot give a destructor to ") +
+                        type_name(o.tag()));
+          }
+          o.as_object()->set_drop(f.regs[in.c]);
           f.regs[in.a] = f.regs[in.b];
           break;
         }

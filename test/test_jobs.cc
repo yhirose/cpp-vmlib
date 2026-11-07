@@ -233,9 +233,10 @@ int main() {
     m.funcs.push_back({"d", 1, 0, say(b, "drop"), {"x"}, {}});
     m.funcs.back().num_params = 1;
     auto with_drop = [&](const char* tag) {
-      return b.object_lit(
-          {{b.str_literal("tag", p), b.str_literal(tag, p)},
-           {b.str_literal("\x01" "drop", p), b.varref(VarKind::Capture, 0, p)}},
+      return b.intrinsic(
+          IntrinsicId::DropSet,
+          {b.object_lit({{b.str_literal("tag", p), b.str_literal(tag, p)}}, p),
+           b.varref(VarKind::Capture, 0, p)},
           p);
     };
     m.funcs.push_back(
@@ -248,11 +249,14 @@ int main() {
     m.funcs[0] = {"main", 1, 0,
                   b.block({b.assign(VarKind::Cell, 0, b.make_closure(1, 0, p), p),
                            b.assign(VarKind::Local, 0,
-                                    b.object_lit({{b.str_literal("tag", p),
-                                                   b.str_literal("main", p)},
-                                                  {b.str_literal("\x01" "drop", p),
-                                                   b.varref(VarKind::Cell, 0, p)}},
-                                                 p),
+                                    b.intrinsic(
+                                        IntrinsicId::DropSet,
+                                        {b.object_lit(
+                                             {{b.str_literal("tag", p),
+                                               b.str_literal("main", p)}},
+                                             p),
+                                         b.varref(VarKind::Cell, 0, p)},
+                                        p),
                                     p),
                            enqueue(b, 2, 1), say(b, "main")},
                           p),

@@ -44,5 +44,7 @@ a temporary receiver:
   drop t
 tagged t
 after the call
+a key spelled like the destructor:
+  keys: 2
 end of program
 top-level defer

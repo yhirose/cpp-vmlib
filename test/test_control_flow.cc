@@ -313,9 +313,11 @@ int main() {
         b.binary(BinOp::Lt, loc(0), lit(3), p),
         b.block(
             {b.scope(1, 3,
-                     b.block({set(1, b.object_lit({{b.str_literal("\x01" "drop", p),
-                                                    b.varref(VarKind::Cell, 0, p)}},
-                                                  p)),
+                     b.block({set(1, b.intrinsic(
+                                         IntrinsicId::DropSet,
+                                         {b.object_lit({}, p),
+                                          b.varref(VarKind::Cell, 0, p)},
+                                         p)),
                               set(2, lit(0)),
                               b.make_while(
                                   b.binary(BinOp::Lt, loc(2), lit(3), p),

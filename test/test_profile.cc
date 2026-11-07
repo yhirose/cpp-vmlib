@@ -315,16 +315,17 @@ int main() {
 
   // --- 3. A tail call's exit runs a destructor before the callee starts. -
   // main { print(f(1)) }   g(n) { return n + 1 }   drop(self) { say "drop" }
-  // f(n) { c = {drop: drop}; return g(n) }   -- c a cell, the call a tail
-  // call. The object goes with f's cells as the callee's replace them:
-  // drop runs in f's time on the stack, not g's.
+  // f(n) { c = dropset({}, drop); return g(n) }   -- c a cell, the call a
+  // tail call. The object goes with f's cells as the callee's replace
+  // them: drop runs in f's time on the stack, not g's.
   {
     Module m;
     Builder b(m);
     m.capture_maps.push_back({});
     m.funcs.push_back({});
-    const NodeId obj = b.object_lit(
-        {{b.str_literal("\x01" "drop", p), b.make_closure(3, 0, p)}}, p);
+    const NodeId obj =
+        b.intrinsic(IntrinsicId::DropSet,
+                    {b.object_lit({}, p), b.make_closure(3, 0, p)}, p);
     m.funcs.push_back(
         {"f", 1, 0,
          b.block({b.assign(VarKind::Cell, 0, obj, p),
@@ -347,8 +348,8 @@ int main() {
         "main", 0, 0,
         pr(b, b.call_value(b.make_closure(1, 0, p), {lit(b, 1)}, p)), {}, {}};
     const Profiled r = run_profiled(m, "tail call exit", "drop|2|");
-    expect(r, "tail call exit", 27,
-           {{"main", 1, 7, 27}, {"f", 1, 10, 15}, {"g", 1, 5, 5},
+    expect(r, "tail call exit", 26,
+           {{"main", 1, 7, 26}, {"f", 1, 9, 14}, {"g", 1, 5, 5},
             {"drop", 1, 5, 5}});
   }
 
@@ -439,7 +440,7 @@ int main() {
   }
 
   // --- 7. A destructor and a defer, inside the frame that runs them. -----
-  // main { scope { o = {drop: drop} } ; f(); say "end" }
+  // main { scope { o = dropset({}, drop) } ; f(); say "end" }
   // drop(self) { say "drop" }
   // f() { scope { defer d; say "f" } }   d() { say "defer" }
   {
@@ -458,8 +459,9 @@ int main() {
                  p),
          {}, {}});
     m.funcs.push_back({"d", 0, 0, say(b, "defer"), {}, {}});
-    const NodeId obj = b.object_lit(
-        {{b.str_literal("\x01" "drop", p), b.make_closure(1, 0, p)}}, p);
+    const NodeId obj =
+        b.intrinsic(IntrinsicId::DropSet,
+                    {b.object_lit({}, p), b.make_closure(1, 0, p)}, p);
     m.funcs[0] = {
         "main", 1, 0,
         b.block({b.scope(0, 1, b.assign(VarKind::Local, 0, obj, p), p),
@@ -467,8 +469,8 @@ int main() {
                 p),
         {"o"}, {}};
     const Profiled r = run_profiled(m, "drop and defer", "drop|f|defer|end|");
-    expect(r, "drop and defer", 40,
-           {{"main", 1, 17, 40}, {"drop", 1, 5, 5}, {"f", 1, 13, 18},
+    expect(r, "drop and defer", 39,
+           {{"main", 1, 16, 39}, {"drop", 1, 5, 5}, {"f", 1, 13, 18},
             {"d", 1, 5, 5}});
   }
 

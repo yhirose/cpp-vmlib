@@ -119,17 +119,17 @@ A few things worth knowing before you write a binder:
 - **Intrinsics** are what a language cannot write in itself: `Print`,
   `ReadInt`, `Len`, `ToStr`, `TypeOf`, numeric conversions, the array,
   object and map primitives (`ArrayPush`, `ArraySlice`, `ObjectKeys`,
-  `MapNew`, ...), the slot no key reaches (`MetaGet`, `MetaSet`; see
-  [Hidden state](#hidden-state)), the string primitives (`StrSlice`,
-  `StrByte`, `StrFromByte`, `StrUpper`, `StrLower`), `Same`, `Collect`, the
-  generator and coroutine protocols (`GenResume`, `CoroResume`,
-  `CoroYield`, ...) and the job queue (`Enqueue`). Everything else -- map,
-  filter, a channel, a Promise -- is a loop or an object your front end
-  writes in its own language. `TypeOf` answers a string, but compared
-  straight against a string literal (`TypeOf(x) == "array"`) or against
-  another `TypeOf` it compiles to a test of the tags and builds no string
-  at all; a type string kept in a variable and compared later builds one,
-  and so does each literal it meets.
+  `MapNew`, ...), the slots no key reaches (`MetaGet`, `MetaSet`,
+  `DropSet`; see [Hidden state](#hidden-state)), the string primitives
+  (`StrSlice`, `StrByte`, `StrFromByte`, `StrUpper`, `StrLower`), `Same`,
+  `Collect`, the generator and coroutine protocols (`GenResume`,
+  `CoroResume`, `CoroYield`, ...) and the job queue (`Enqueue`).
+  Everything else -- map, filter, a channel, a Promise -- is a loop or an
+  object your front end writes in its own language. `TypeOf` answers a
+  string, but compared straight against a string literal (`TypeOf(x) ==
+  "array"`) or against another `TypeOf` it compiles to a test of the tags
+  and builds no string at all; a type string kept in a variable and
+  compared later builds one, and so does each literal it meets.
 - **An operator may name a fallback.** `Unary` and `Binary` are the VM's
   own operators. Given a fallback (`b.binary(op, x, y, Fallback{callee,
   tags, exact}, p)`), the operator answers only when every operand's tag
@@ -279,11 +279,13 @@ cursor it steps, the nil-and-false truthiness, a float printed with its ".0",
 two containers compared by what they hold, a promise settled once and
 awaited, an operator that is the VM's where the language agrees with it
 and the language's helper elsewhere -- and the end of that file lists
-what each front end still writes for itself, and why. Its key convention
-is worth taking even without the rest: the implementation's own object
-keys start with `0x01` (`vmlib.h`'s `kDropKey` is one), and a program's
-names kept beside them, its methods on a class table, with `0x02`, so
-that neither can meet the other or a field.
+what each front end still writes for itself, and why. Its rule for an
+object's state is worth taking even without the rest: what the
+implementation keeps on an object goes in its meta ([Hidden
+state](#hidden-state)), never under a key, so every key is the
+program's; and an object that holds two namespaces of the program's --
+mini-csharp's class table, its methods beside its static fields -- keeps
+the second under a `0x02` prefix, so that neither meets the other.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.
@@ -313,12 +315,18 @@ kept as the golden (see [Testing](#testing)).
   back; a function returns its body's value, so one that falls off its end
   must end in the language's nothing; a constructor that returns an object
   is what `new` gives.
-- *The implementation's names stay out of the program's.* A key the
-  implementation chooses needs a prefix no identifier can spell -- the
-  `0x01`/`0x02` convention above. mini-culebra's `init` and `name` had
-  collided with methods of those names, mini-csharp's class name and
-  constructor with methods called `name` and `ctor`, and mini-js's `$map`
-  and `$methods` with properties a program can spell.
+- *The implementation's state stays out of the program's keys.* A key
+  the implementation chooses, however it is spelled, is a key some program
+  can spell: mini-culebra's `init` and `name` had collided with methods of
+  those names, mini-csharp's class name and constructor with methods
+  called `name` and `ctor`, mini-js's `$map` and `$methods` with
+  properties a program can write -- and once all of those moved under a
+  `0x01` prefix no identifier can start with, a string with a raw `0x01`
+  byte still reached them: it stripped a Lua table's metatable, made a
+  JavaScript object a Map, crashed a culebra instance's `type_of`, and
+  gave any object a destructor. What the implementation keeps goes in the
+  object's meta and its destructor in its own slot, which no key reaches
+  ([Hidden state](#hidden-state)).
 - *Printing is the language's*: number formatting, string escapes and
   `repr`, how a record or a procedure displays, an error's wording, and the
   report of an uncaught exception, which `test/run_errors.cmake` pins for
@@ -518,7 +526,7 @@ name lives at which offset) a statically-typed binder already knows before
 it ever runs. `FieldGet`/`FieldSet` are the same receiver, read and written
 by slot instead of by key: `props[slot]` directly, no comparison at all. A
 struct is exactly an `ObjectObj` a front end has promised to index this way
--- same drop key, same owned-stack machinery, same `ObjectKeys` -- so
+-- same destructor, same owned-stack machinery, same `ObjectKeys` -- so
 nothing about the value model changes, only how one kind of front end
 chooses to reach it.
 
@@ -527,12 +535,11 @@ field through one `ObjectLit` (which fills props in key order and never
 leaves a gap) before any `FieldGet`/`FieldSet` reaches the object, and never
 hand a struct-backed object to `ObjectRemove` -- removing a key would shift
 every later field's slot out from under the front end's own numbering. A
-type with a destructor keeps its drop key as one of those fields, occupying
-a slot like any other (first is the simplest layout to compute by hand).
-Slot numbering is the front end's own to assign, the same contract
-`VarKind::Local`'s slot indices already are -- `FieldGet`/`FieldSet` carry
-the field's name too, but only for a trap message ("field 'next' of ..."),
-never to execute anything.
+type with a destructor is given it with `DropSet`, beside its fields and in
+none of their slots. Slot numbering is the front end's own to assign, the
+same contract `VarKind::Local`'s slot indices already are --
+`FieldGet`/`FieldSet` carry the field's name too, but only for a trap
+message ("field 'next' of ..."), never to execute anything.
 
 ## Switch
 
@@ -578,14 +585,13 @@ Go's `case a, b:` (multiple      ->  one (key, body) child pair per label,
 ## Maps
 
 `Object` is keyed by strings, and deliberately so: string keys are what let
-a struct be indexed by slot (`FieldGet`/`FieldSet`) and what the drop key
-hangs on. A language's `dict`/`Map`/`map[int]T`/numeric-keyed table needs
-keys that are values, and gets a second container rather than a widened
-first one: `ValueTag::Map`, made by `Intrinsic(MapNew)`, filled and read
-through the same `Index`/`SetIndex` (which already dispatch on the
-receiver), sized by `Len`, and asked about through `ObjectHas`, `ObjectKeys`
-and `ObjectRemove`, each of which accepts a map receiver too. Nothing about
-`Object` changes.
+a struct be indexed by slot (`FieldGet`/`FieldSet`). A language's
+`dict`/`Map`/`map[int]T`/numeric-keyed table needs keys that are values, and
+gets a second container rather than a widened first one: `ValueTag::Map`,
+made by `Intrinsic(MapNew)`, filled and read through the same
+`Index`/`SetIndex` (which already dispatch on the receiver), sized by `Len`,
+and asked about through `ObjectHas`, `ObjectKeys` and `ObjectRemove`, each
+of which accepts a map receiver too. Nothing about `Object` changes.
 
 Two values are the same key when they have the same tag and -- for a string
 -- the same bytes, or -- for everything else -- the same payload: an int by
@@ -653,6 +659,22 @@ What goes in it is the front end's. Lua's metatable, CPython's
 one slot, and an object with more than one fact to hide keeps them
 together in what the slot holds: an array no program can reach, so its
 positions are names nobody else can spell.
+[examples/common/runtime_parts.h](examples/common/runtime_parts.h) has the
+convention the front ends here share -- an instance's meta is its class,
+and anything else's a *kind record*, `["kind", state...]`.
+
+An object's destructor is the library's own slot beside it,
+`ObjectObj::drop`, given with `DropSet(o, f)` and taken away with
+`DropSet(o, nil)`; like `MetaSet`, it answers the object. It used to be a
+key, `"\x01drop"`, and for the same reason as the meta it is not one
+now: a program that wrote that string -- a JavaScript property, a Python
+keyword argument, a culebra key -- gave any object a destructor, and
+every listing of keys had to skip it. Giving an object a destructor is
+what puts it on the owned stack, so the registration and the slot change
+together in one place, and an object's keys are never more than its
+properties. A front end whose language makes the destructor a property
+-- culebra's `{drop: fn () {...}}` -- gives the property's value with
+`DropSet` where the literal is built.
 
 ## Strings and slices
 
@@ -694,7 +716,7 @@ with a rest param, so `-1` reads the same either way (see
 
 A native runs on the spot, with no frame, and its answer lands where a
 closure's return would; it is callable wherever a closure is -- `CallValue`,
-`CallSpread`, `Enqueue`, `Defer`, the drop key -- and `TypeOf` says
+`CallSpread`, `Enqueue`, `Defer`, `DropSet` -- and `TypeOf` says
 "function" for it.
 Its signature is `bool (*)(NativeCall&)`: read the arguments, set `result`
 and return `true`, or set `error` and return `false`, which raises that

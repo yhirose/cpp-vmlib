@@ -97,12 +97,12 @@ void record_name(void* ctx, HeapObj* h) {
   *order += (name ? name->as_str() : std::string("?")) + "|";
 }
 
-// {name: <name>, <drop key>: 0}: an object the hook above is handed when
-// it dies.
+// {name: <name>}, with a destructor: an object the hook above is handed
+// when it dies.
 Value named_resource(const char* name) {
   Value o = Value::make_object();
   o.as_object()->set("name", Value::make_str(name));
-  o.as_object()->set(kDropKey, Value::make_int(0));
+  o.as_object()->set_drop(Value::make_int(0));
   return o;
 }
 
@@ -274,7 +274,7 @@ int main() {
   //        whose cycle closes through its own meta drops at the exit of
   //        the scope that bound it, not at some later collection.
   // d = fn (self) { print(self.name) }
-  // { r = {name: "r", <drop key>: d}; metaset(r, {back: r}) }; print("after")
+  // { r = dropset({name: "r"}, d); metaset(r, {back: r}) }; print("after")
   {
     Module m;
     m.capture_maps.push_back({});
@@ -294,7 +294,7 @@ int main() {
     w.add(w.set(d, w.b.make_closure(1, 0)));
     w.add(w.b.scope(
         r.i, r.i + 1,
-        w.blk({w.set(r, w.obj({{"name", w.S("r")}, {kDropKey, w.L(d)}})),
+        w.blk({w.set(r, w.set_drop(w.obj({{"name", w.S("r")}}), w.L(d))),
                w.set_meta(w.L(r), w.obj({{"back", w.L(r)}}))})));
     w.add(print(w, w.S("after")));
     w.write(m.funcs[0], "main");

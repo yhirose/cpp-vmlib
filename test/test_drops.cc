@@ -16,8 +16,9 @@
 // temporaries, which must not keep a scope's cycle alive; a container's
 // own order, first to last, when it is freed with drop-bearing values in
 // it; a call's arguments, which go with the callee rather than staying
-// in the caller's registers until its statement ends; and a destructor in
-// a frame at the call-depth bound, which still gets a frame to run in.
+// in the caller's registers until its statement ends; a destructor in a
+// frame at the call-depth bound, which still gets a frame to run in; and
+// that a destructor is no key -- given and taken away by DropSet alone.
 
 #include <cstdio>
 #include <stdexcept>
@@ -63,7 +64,8 @@ std::string joined() {
 // A module whose funcs[1] is the shared destructor
 //   drop = fn (self) { print(self.name) }
 // and whose funcs[0] (main) is left for the case to fill in. `mk(slot,
-// name)` builds `slot = {name: "<name>", "\x01drop": <local 0>}`, so every
+// name)` builds `slot = {name: "<name>"}` with <local 0> as its destructor
+// (DropSet), so every
 // case's main keeps the closure in local 0 and its objects after it.
 struct Prog {
   coreir::Module m;
@@ -100,13 +102,14 @@ struct Prog {
   coreir::NodeId collect() {
     return print(b.intrinsic(coreir::IntrinsicId::Collect, {}, p));
   }
-  // {name: "<name>", "\x01drop": <drop>} -- main's local 0 unless the
-  // destructor is somewhere else in the function building it.
+  // {name: "<name>"} with <drop> as its destructor -- main's local 0
+  // unless the destructor is somewhere else in the function building it.
   coreir::NodeId obj(const char* name) { return obj(name, local(0)); }
   coreir::NodeId obj(const char* name, coreir::NodeId drop) {
-    return b.object_lit({{str("name"), str(name)},
-                         {str("\x01" "drop"), drop}},
-                        p);
+    return with_drop(b.object_lit({{str("name"), str(name)}}, p), drop);
+  }
+  coreir::NodeId with_drop(coreir::NodeId o, coreir::NodeId drop) {
+    return b.intrinsic(coreir::IntrinsicId::DropSet, {o, drop}, p);
   }
   coreir::NodeId mk(int32_t slot, const char* name) {
     return b.block({b.assign(coreir::VarKind::Local, slot, obj(name), p)}, p);
@@ -575,9 +578,7 @@ int main() {
         // The plain one is local 1; the captured one is cell 0.
         auto mk_cell = [&](const char* name) {
           return g.b.assign(VarKind::Cell, 0,
-                            g.b.object_lit({{g.str("name"), g.str(name)},
-                                            {g.str("\x01" "drop"), g.local(0)}},
-                                           g.p),
+                            g.obj(name),
                             g.p);
         };
         std::vector<NodeId> body;
@@ -758,10 +759,7 @@ int main() {
       g.m.funcs.push_back(rec);
     };
     const auto obj = [](Prog& g, const char* name) {
-      return g.b.object_lit({{g.str("name"), g.str(name)},
-                             {g.str("\x01" "drop"),
-                              g.b.make_closure(1, 0, g.p)}},
-                            g.p);
+      return g.obj(name, g.b.make_closure(1, 0, g.p));
     };
     {
       // c() { cell0 = obj("c"); print("body") }; c(); print("after")
@@ -859,9 +857,8 @@ int main() {
     dx.num_params = 1;
     g.m.funcs.push_back(dx);  // funcs[2]
     const auto obj = [&](const char* name, int32_t drop_slot) {
-      return g.b.object_lit({{g.str(K), g.str(name)},
-                             {g.str("\x01" "drop"), g.local(drop_slot)}},
-                            g.p);
+      return g.with_drop(g.b.object_lit({{g.str(K), g.str(name)}}, g.p),
+                         g.local(drop_slot));
     };
     g.main(g.b.block(
                {g.bind_drop(),
@@ -907,10 +904,9 @@ int main() {
                {g.b.assign(coreir::VarKind::Local, 1, g.b.object_lit({}, g.p),
                            g.p),
                 g.set(1, "a",
-                      g.b.object_lit({{g.str("back"), g.local(1)},
-                                      {g.str("\x01" "drop"),
-                                       g.b.make_closure(2, 0, g.p)}},
-                                     g.p)),
+                      g.with_drop(
+                          g.b.object_lit({{g.str("back"), g.local(1)}}, g.p),
+                          g.b.make_closure(2, 0, g.p))),
                 g.set(1, "b0", g.b.literal(0, g.p)),
                 g.set(1, "b1", g.b.literal(1, g.p)),
                 g.set(1, "b2", g.b.literal(2, g.p)),
@@ -1103,6 +1099,55 @@ int main() {
     bound.max_call_depth = 10;
     expect_clean(run_module(g.m, "limit", bound), "limit");
     check_eq(joined(), "arg|local|after|", "limit output");
+  }
+
+  // --- 20. A destructor is no key. The object's keys do not list it; a
+  //         key spelled "\x01drop" -- where one once lived -- is only a
+  //         property, and gives no destructor; DropSet with nil takes one
+  //         away; and only an Object takes one.
+  // { a = {name: "a"} with d; print(len(objectkeys(a)))
+  //   b = {name: "b", "\x01drop": d}
+  //   c = {name: "c"} with d, then with nil }; print("after")
+  {
+    Prog g;
+    const auto keys = [&](int32_t slot) {
+      return g.b.intrinsic(
+          IntrinsicId::Len,
+          {g.b.intrinsic(IntrinsicId::ObjectKeys, {g.local(slot)}, g.p)}, g.p);
+    };
+    g.main(
+        g.b.block(
+            {g.bind_drop(),
+             g.b.scope(
+                 1, 4,
+                 g.b.block(
+                     {g.mk(1, "a"), g.print(keys(1)),
+                      g.b.assign(VarKind::Local, 2,
+                                 g.b.object_lit(
+                                     {{g.str("name"), g.str("b")},
+                                      {g.str("\x01" "drop"), g.local(0)}},
+                                     g.p),
+                                 g.p),
+                      g.b.assign(VarKind::Local, 3,
+                                 g.with_drop(g.obj("c"), g.b.nil_literal(g.p)),
+                                 g.p)},
+                     g.p),
+                 g.p),
+             g.print_str("after")},
+            g.p),
+        {"a", "b", "c"});
+    expect_clean(run_module(g.m, "no key"), "no key");
+    check_eq(joined(), "1|a|after|", "no key output");
+  }
+  // dropset([], d)
+  {
+    Prog g;
+    g.main(g.b.block({g.bind_drop(),
+                      g.with_drop(g.b.array_lit({}, g.p), g.local(0))},
+                     g.p),
+           {});
+    check_eq(run_module(g.m, "on an array").failure,
+             "cannot give a destructor to array", "on an array: the trap");
   }
 
   if (g_failures != 0) {

@@ -45,64 +45,27 @@ using coreir::UnOp;
 // ---- Keys, by who chose the name -------------------------------------------
 //
 // What the implementation keeps on an object is in its meta (Hidden state,
-// below), under no key, so an object's keys are the program's. Most
-// objects hold one namespace of the program's -- an instance's fields, a
-// class's methods -- under the names themselves. One that holds two keeps
-// the second under program_key, a prefix no identifier can start with, so
+// below) and its destructor in its own slot (vmlib.h's DropSet), under no
+// key, so every key of an object is the program's: nothing a program
+// spells, with whatever bytes, reaches the implementation's state, and
+// nothing that lists, counts or prints keys has any to skip. Most objects
+// hold one namespace of the program's -- an instance's fields, a class's
+// methods -- under the names themselves. One that holds two keeps the
+// second under program_key, a prefix no identifier can start with, so
 // that a name in one never meets the same name in the other: mini-csharp's
 // class table holds its static fields bare and its methods prefixed, and
 // an instance the field behind an auto property prefixed beside the fields
-// the source declared. A program that spells a prefixed key as a string
-// reaches a name of its own and nothing of the implementation's.
-// mini-csharp's class tables once kept their name and constructor beside
-// the methods, under the same prefix: a method named `name` overwrote the
-// class's name, and one named `ctor` was the constructor.
-//
-// The one name of the implementation's still kept as a key is the
-// runtime's destructor, vmlib.h's kDropKey, which starts with
-// kImplPrefix, 0x01.
-using coreir::kImplPrefix;
+// the source declared. A program that spells a prefixed key reaches a name
+// of its own and nothing more. mini-csharp's class tables once kept their
+// name and constructor beside the methods, under the same prefix: a method
+// named `name` overwrote the class's name, and one named `ctor` was the
+// constructor.
 inline constexpr char kProgramPrefix = '\x02';
 
 // The key for a name the program chose in a second namespace of one
 // object.
 inline std::string program_key(const std::string& name) {
   return kProgramPrefix + name;
-}
-
-// Whether a key is the implementation's or a second namespace's -- under
-// either prefix -- and so none of the object's properties: listing an
-// object's keys, counting them or printing them skips it. A program can
-// still spell such a key, with a raw 0x01 byte, and a key it spells that
-// way is hidden too. The C++ form is for a host function; the IR form
-// takes the key in a local, of any type, since a value-keyed table's keys
-// need not be strings.
-inline bool hidden_key(std::string_view k) {
-  return !k.empty() && (k[0] == kImplPrefix || k[0] == kProgramPrefix);
-}
-inline NodeId hidden_key(coreir::Builder::At& b, int32_t k) {
-  using coreir::VarKind;
-  const auto first_is = [&](char c) {
-    return b.binary(BinOp::Eq,
-                    b.intrinsic(IntrinsicId::StrByte,
-                                {b.varref(VarKind::Local, k), b.literal(0)}),
-                    b.literal(static_cast<unsigned char>(c)));
-  };
-  return b.make_if(
-      b.binary(BinOp::Eq,
-               b.intrinsic(IntrinsicId::TypeOf, {b.varref(VarKind::Local, k)}),
-               b.str_literal("string")),
-      b.make_if(b.binary(BinOp::Gt,
-                         b.intrinsic(IntrinsicId::Len,
-                                     {b.varref(VarKind::Local, k)}),
-                         b.literal(0)),
-                b.make_if(first_is(kImplPrefix), b.bool_literal(true),
-                          first_is(kProgramPrefix)),
-                b.bool_literal(false)),
-      b.bool_literal(false));
-}
-inline NodeId hidden_key(FuncWriter& w, FuncWriter::Slot k) {
-  return hidden_key(w.b, k.i);
 }
 
 // ---- Hidden state ----------------------------------------------------------

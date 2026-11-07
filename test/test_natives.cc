@@ -7,8 +7,8 @@
 // only through NativeCall::error, which the program's own TryCatch can
 // catch; a native can call back into the program (NativeCall::call), and a
 // throw the callee lets out travels through the native to the caller's
-// handler; natives are callable wherever a closure is (Enqueue, Defer, the
-// drop key); a CallSpread reaches one with its own copy of the arguments,
+// handler; natives are callable wherever a closure is (Enqueue, Defer, a
+// destructor); a CallSpread reaches one with its own copy of the arguments,
 // whatever the native's callbacks do to the array spread; and every native
 // value is gone from the heap when the run ends.
 
@@ -331,10 +331,10 @@ int main() {
                           // {drop: say}: the destructor is the native, and
                           // it is handed the object.
                           b.assign(VarKind::Local, 0,
-                                   b.object_lit(
-                                       {{b.str_literal("\x01" "drop", p),
-                                         b.varref(VarKind::Cell, 0, p)}},
-                                       p),
+                                   b.intrinsic(IntrinsicId::DropSet,
+                                               {b.object_lit({}, p),
+                                                b.varref(VarKind::Cell, 0, p)},
+                                               p),
                                    p),
                           pr(b, b.str_literal("body", p))},
                          p),

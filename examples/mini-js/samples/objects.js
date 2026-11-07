@@ -65,3 +65,13 @@ class Plain { m() { return 1; } }
 new Plain(note('f', 0));
 new Error(note('g', 'x'), note('h', 0));
 console.log(fmt(argsSeen));
+
+// A property is the program's whatever its name: the one below starts with
+// byte 1, written raw, and is no destructor however it is spelled -- the
+// object goes with no call -- and Object.keys lists it.
+function forged() {
+  const o = {name: 'o'};
+  o['drop'] = function () { console.log('forged drop'); };
+  return Object.keys(o).length;
+}
+show('forged', forged());

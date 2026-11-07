@@ -3,10 +3,10 @@
 # design", and everything below is that design's observable behaviour,
 # checked against culebra itself.
 #
-# An Object whose drop key holds a callable is a resource. Two ways to make
+# An Object whose destructor is a callable is a resource. Two ways to make
 # one: a class with a `drop()` method, and an object literal with a `drop`
-# property -- and the key it really lands under is unspellable from the
-# language, which is why a program cannot forge or read it.
+# property -- which becomes the object's destructor, kept where no key
+# reaches it, so a program cannot forge or read it by spelling a key.
 
 class R {
   new(id) { self.id = id }
@@ -156,6 +156,17 @@ fn temporaries() {
 }
 println('a temporary receiver:')
 temporaries()
+
+# A key is a property whatever its bytes. The one below starts with byte 1,
+# written raw, and is where a destructor was once kept: it is a property
+# now and nothing more -- the object is no resource, and keys() lists it.
+fn forged() {
+  let o = {name: 'o'}
+  o['drop'] = fn () { println('  forged drop') }
+  println("  keys: {o.keys().size()}")
+}
+println('a key spelled like the destructor:')
+forged()
 
 # A top-level binding lives to the end of the program and is released
 # without its destructor -- culebra's rule, and the reason this front end

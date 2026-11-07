@@ -16,3 +16,4 @@ for-of keys: ['x=10', 'y=20', 'label=origin', 'extra=true']
 break/continue: ['00', '10', '20']
 function property: hi there
 ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+forged: 2

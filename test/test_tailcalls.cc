@@ -258,9 +258,9 @@ int main() {
         {"g", 1, 2,
          b.scope(0, 1,
                  b.block({b.assign(VarKind::Local, 0,
-                                   b.object_lit({{b.str_literal("\x01" "drop", p),
-                                                  cap(b, 1)}},
-                                                p),
+                                   b.intrinsic(IntrinsicId::DropSet,
+                                               {b.object_lit({}, p), cap(b, 1)},
+                                               p),
                                    p),
                           b.make_return(b.call_value(cap(b, 0), {}, p), p)},
                          p),
@@ -306,7 +306,8 @@ int main() {
     m.funcs.back().num_params = 1;
     // captures: 0 = f, 1 = d1, 2 = d2. Locals: 0 = a, 1 = b.
     auto hook = [&](Builder& bb, int32_t cap_i) {
-      return bb.object_lit({{bb.str_literal("\x01" "drop", p), cap(bb, cap_i)}}, p);
+      return bb.intrinsic(IntrinsicId::DropSet,
+                          {bb.object_lit({}, p), cap(bb, cap_i)}, p);
     };
     m.funcs.push_back(
         {"g", 2, 3,

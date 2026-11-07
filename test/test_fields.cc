@@ -2,11 +2,10 @@
 // SetIndex already use, at a slot the front end assigns rather than a key
 // looked up by comparison. Every case here checks the promise the Tag
 // comment makes: reading and writing a slot works exactly like Index/
-// SetIndex on the same key would, ObjectKeys and the drop-key destructor
-// (built through ObjectLit, per the contract FieldGet/FieldSet leans on) are
-// untouched, and the two ways a front end can get this wrong -- an
-// out-of-range slot, a non-Object receiver -- trap rather than corrupting
-// anything.
+// SetIndex on the same key would, ObjectKeys and a destructor (given with
+// DropSet, beside the fields rather than among them) are untouched, and the
+// two ways a front end can get this wrong -- an out-of-range slot, a
+// non-Object receiver -- trap rather than corrupting anything.
 
 #include <cstdio>
 #include <stdexcept>
@@ -208,11 +207,10 @@ int main() {
     check_eq(joined(), "x|y|99|", "ObjectKeys still names both fields");
   }
 
-  // --- 3. The drop key: a struct built with kDropKey present from its one
-  //     ObjectLit keeps working with FieldSet on its other fields, and its
-  //     destructor still runs exactly once when the scope releases it --
-  //     the destructor call is Runtime's own, over `find(kDropKey)`, and
-  //     FieldSet never touches that key. -----------------------------
+  // --- 3. A destructor: a struct given one with DropSet keeps its field
+  //     slots and keeps working with FieldSet, and its destructor still
+  //     runs exactly once when the scope releases it -- the destructor is
+  //     no field, so FieldSet never reaches it. ------------------------
   {
     Module m;
     Builder b(m);
@@ -221,22 +219,24 @@ int main() {
     // pushed (with a placeholder body, filled in below) before drop.
     m.funcs.push_back({"main", 2, 0, NodeId{}, {"d", "o"}, {}});
 
-    // drop(self) { print(self.name) } -- self is Local 0, field 1 (name);
-    // field 0 is the drop key itself.
+    // drop(self) { print(self.name) } -- self is Local 0, field 0 (name),
+    // the struct's one field.
     Func drop{"drop", 1, 0, NodeId{}, {"self"}, {}};
     drop.num_params = 1;
     drop.body =
         b.intrinsic(IntrinsicId::Print,
-                   {b.field_get(b.varref(VarKind::Local, 0, p), 1, "name",
+                   {b.field_get(b.varref(VarKind::Local, 0, p), 0, "name",
                                 p)},
                    p);
     m.funcs.push_back(drop);  // funcs[1]
 
-    // main: d = closure(drop); o = {"\x01drop": d, name: "widget"};
+    // main: d = closure(drop); o = dropset({name: "widget"}, d);
     // FieldSet o.name = "renamed"; scope exit drops o.
-    const NodeId obj = b.object_lit(
-        {{b.str_literal("\x01" "drop", p), b.varref(VarKind::Local, 0, p)},
-         {b.str_literal("name", p), b.str_literal("widget", p)}},
+    const NodeId obj = b.intrinsic(
+        IntrinsicId::DropSet,
+        {b.object_lit({{b.str_literal("name", p), b.str_literal("widget", p)}},
+                      p),
+         b.varref(VarKind::Local, 0, p)},
         p);
     const NodeId body = b.block(
         {b.assign(VarKind::Local, 0, b.make_closure(1, 0, p), p),
@@ -244,23 +244,23 @@ int main() {
              1, 2,
              b.block(
                  {b.assign(VarKind::Local, 1, obj, p),
-                  b.field_set(b.varref(VarKind::Local, 1, p), 1, "name",
+                  b.field_set(b.varref(VarKind::Local, 1, p), 0, "name",
                              b.str_literal("renamed", p), p),
                   b.intrinsic(
                       IntrinsicId::Print,
-                      {b.field_get(b.varref(VarKind::Local, 1, p), 1,
+                      {b.field_get(b.varref(VarKind::Local, 1, p), 0,
                                   "name", p)},
                       p)},
                  p),
              p)},
         p);
     m.funcs[0].body = b.scope(0, 1, body, p);
-    const RunResult r = run_module(m, "drop key survives FieldSet");
-    expect_clean(r, "drop key survives FieldSet");
+    const RunResult r = run_module(m, "destructor survives FieldSet");
+    expect_clean(r, "destructor survives FieldSet");
     // "renamed" printed by the FieldGet right after the FieldSet, then
     // "renamed" again from the destructor at scope exit -- proving the
     // destructor read the field FieldSet actually wrote, not a stale copy.
-    check_eq(joined(), "renamed|renamed|", "drop key survives FieldSet");
+    check_eq(joined(), "renamed|renamed|", "destructor survives FieldSet");
   }
 
   // --- 4. Traps: an out-of-range slot, a non-Object receiver, for both

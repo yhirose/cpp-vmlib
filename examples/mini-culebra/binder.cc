@@ -5,8 +5,8 @@
 // shown working against the language that motivated them:
 //
 //   * **The owned stack.** "Deterministic drop for cycles: the owned stack
-//     (culebra's design)." An Object whose kDropKey holds a callable is a
-//     resource: its destructor runs when its count reaches zero, at the
+//     (culebra's design)." An Object given a callable destructor (DropSet)
+//     is a resource: its destructor runs when its count reaches zero, at the
 //     exit of the scope that owns the cycle it is in, or in the collection
 //     that condemns it. `class R { drop() {...} }` and `{drop: fn () {...}}`
 //     are the two ways a program here makes one, and samples/drops.cul is
@@ -86,6 +86,9 @@ constexpr int64_t kClassMethods = kClassOwn + 1;
 // such a write can reach.
 constexpr char kNewField[] = "new";
 constexpr char kNameField[] = "name";
+// The property that is an object's destructor, in culebra; here it is the
+// object's destructor (DropSet), which no key reaches.
+constexpr char kDropField[] = "drop";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -555,11 +558,11 @@ struct Binder {
     r.finish("$arrstr");
   }
 
-  // An object's own keys, in insertion order, skipping the ones this front
-  // end adds for itself (runtime_parts.h's hidden_key). A class
-  // instance prints its class name first and marks its fields `mut`, which
-  // is culebra's own rendering and the reason the class has to be
-  // reachable from the instance at all.
+  // An object's own keys, in insertion order -- every one of them: what
+  // this front end keeps on an object, its class and its destructor, is
+  // no key. A class instance prints its class name first and marks its
+  // fields `mut`, which is culebra's own rendering and the reason the
+  // class has to be reachable from the instance at all.
   void rt_objstr() {
     RT r(*this);
     const auto [o] = r.params("o");
@@ -580,7 +583,6 @@ struct Binder {
         r.blk({
             r.set(k, r.idx(r.L(ks), r.L(i))),
             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
-            r.iff(hidden_key(r, k), r.b.make_continue()),
             r.iff(r.bin(BinOp::Gt, r.L(n), r.I(0)),
                   r.set(out, r.bin(BinOp::Add, r.L(out), r.S(", ")))),
             r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1))),
@@ -990,9 +992,9 @@ struct Binder {
   //
   // The constructor is what turns the class into an instance: a fresh
   // object whose meta is C (so a method call can find its methods) and,
-  // when the class declares one, the runtime's own drop key (so the object
-  // *is* a resource). Binding that key is what puts it on the owned stack;
-  // everything about when its destructor runs follows from that.
+  // when the class declares one, `drop` as its destructor (DropSet, so the
+  // object *is* a resource). Giving it one is what puts it on the owned
+  // stack; everything about when its destructor runs follows from that.
   NodeId emit_class(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
@@ -1006,7 +1008,7 @@ struct Binder {
     NodeId init = b.nil_literal();
     std::vector<std::pair<NodeId, NodeId>> kvs;
     for (const auto& [name, g] : methods) {
-      if (name == "drop") has_drop = true;
+      if (name == kDropField) has_drop = true;
       if (name == kNewField) {
         init_params =
             static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
@@ -1044,11 +1046,10 @@ struct Binder {
     std::vector<NodeId> body{
         b.assign(VarKind::Local, inst, new_instance(bp, C), p)};
     if (has_drop) {
-      body.push_back(b.set_index(
-          O, b.str_literal(coreir::kDropKey, p),
-          b.index(kind_field(bp, C, kClassMethods), b.str_literal("drop", p),
-                  p),
-          p));
+      body.push_back(bp.intrinsic(
+          IntrinsicId::DropSet,
+          {O, bp.index(kind_field(bp, C, kClassMethods),
+                       bp.str_literal("drop"))}));
     }
     std::vector<NodeId> init_args{O};
     for (int32_t i = 1; i < nparams; ++i) {
@@ -1230,20 +1231,53 @@ struct Binder {
         return b.array_lit(items);
       }
       case "objectlit"_: {
-        // A `drop` property is the runtime's destructor key, not a
-        // property named "drop": binding it is what registers the object
-        // on the owned stack, which is the whole of "this literal is a
-        // resource".
-        std::vector<std::pair<NodeId, NodeId>> kvs;
-        for (const auto& c : a.nodes) {
-          const Ast& key = *c->nodes[0];
-          std::string k = key.tag == "string"_
-                              ? unescape(std::string(key.token))
-                              : std::string(key.token);
-          if (k == "drop") k = coreir::kDropKey;
-          kvs.emplace_back(b.str_literal(k), emit_expr(*c->nodes[1], ctx));
+        // A `drop` property is the object's destructor (DropSet), not a
+        // property named "drop": giving it one is what registers the
+        // object on the owned stack, which is the whole of "this literal
+        // is a resource". The entries before the first `drop` are the
+        // literal; that one and any after it are given or stored in
+        // source order, as the literal would have run them, on the
+        // object in a slot of a scope around the literal alone -- which
+        // a literal ending in its `drop`, the usual shape, needs not.
+        const auto key_of = [](const Ast& c) {
+          const Ast& key = *c.nodes[0];
+          return key.tag == "string"_ ? unescape(std::string(key.token))
+                                      : std::string(key.token);
+        };
+        size_t first = a.nodes.size();
+        for (size_t i = 0; i < a.nodes.size(); ++i) {
+          if (key_of(*a.nodes[i]) == kDropField) {
+            first = i;
+            break;
+          }
         }
-        return b.object_lit(kvs);
+        const int32_t mark = ctx.mark();
+        const bool slot = first + 1 < a.nodes.size();
+        const int32_t t = slot ? ctx.alloc_local("$obj") : -1;
+        std::vector<std::pair<NodeId, NodeId>> kvs;
+        for (size_t i = 0; i < first; ++i) {
+          kvs.emplace_back(b.str_literal(key_of(*a.nodes[i])),
+                           emit_expr(*a.nodes[i]->nodes[1], ctx));
+        }
+        NodeId obj = b.object_lit(kvs);
+        if (first == a.nodes.size()) return obj;
+        if (!slot) {
+          return b.intrinsic(IntrinsicId::DropSet,
+                             {obj, emit_expr(*a.nodes[first]->nodes[1], ctx)});
+        }
+        const NodeId O = b.varref(VarKind::Local, t);
+        std::vector<NodeId> steps{b.assign(VarKind::Local, t, obj)};
+        for (size_t i = first; i < a.nodes.size(); ++i) {
+          const std::string k = key_of(*a.nodes[i]);
+          const NodeId v = emit_expr(*a.nodes[i]->nodes[1], ctx);
+          steps.push_back(
+              k == kDropField
+                  ? b.intrinsic(IntrinsicId::DropSet, {O, v})
+                  : b.set_index(O, b.str_literal(k), v));
+        }
+        steps.push_back(O);
+        const int32_t end = ctx.release(mark);
+        return b.scope(mark, end, b.block(steps));
       }
       default:
         fail(a, "cannot evaluate " + a.name);
@@ -1578,12 +1612,10 @@ bool native_size(NativeCall& c) {
     c.result =
         Value::make_int(static_cast<int64_t>(v.as_array()->items.size()));
   } else if (v.is_object()) {
-    // What keys() lists: an instance's class is none of its fields.
-    int64_t n = 0;
-    for (const auto& kv : v.as_object()->props) {
-      if (!runtime_parts::hidden_key(kv.first)) ++n;
-    }
-    c.result = Value::make_int(n);
+    // What keys() lists: every key. An instance's class and a resource's
+    // destructor are no keys at all.
+    c.result =
+        Value::make_int(static_cast<int64_t>(v.as_object()->props.size()));
   } else {
     c.error = c.trap("size() wants a String, an Array or an Object");
     return false;
@@ -1619,8 +1651,6 @@ bool native_keys(NativeCall& c) {
   }
   std::vector<Value> out;
   for (const auto& kv : c.arg(0).as_object()->props) {
-    // The keys this front end adds for itself; a program must not see them.
-    if (runtime_parts::hidden_key(kv.first)) continue;
     out.push_back(Value::make_str(kv.first));
   }
   c.result = Value::make_array(std::move(out));

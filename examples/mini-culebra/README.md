@@ -101,23 +101,26 @@ of a golden file, and it is the reason this feature exists.
 
 ## A worked example: what makes an object a resource
 
-`Runtime::run_drop`'s contract is that an Object whose `kDropKey` holds a
-callable gets it called with the object as its one argument. Two things
-follow, and both fall out of one convention rather than being arranged:
+`Runtime::run_drop`'s contract is that an Object given a callable
+destructor -- `DropSet`, which keeps it beside the object's keys rather
+than among them -- gets it called with the object as its one argument.
+Two things follow, and both fall out of one convention rather than being
+arranged:
 
-**Binding the key is the registration.** `ObjectObj::set` calls
-`owned_register` when the key is `kDropKey`, so `{drop: fn () {...}}` is a
-resource from the moment the literal is built -- the binder just emits that
-property under the real key (`"\x01" "drop"`, unspellable from a language
-whose identifiers are printable) instead of under `"drop"`.
+**Giving the destructor is the registration.** `ObjectObj::set_drop`
+calls `owned_register`, so `{drop: fn () {...}}` is a resource from the
+moment the literal is built -- the binder gives the object its `drop`
+property's value as its destructor instead of storing a property named
+`"drop"`. No key reaches it: a program that writes a key, with whatever
+bytes, writes a property, and makes nothing a resource.
 
 **Every function's parameter 0 is `self`.** That is this binder's one
 structural convention, and it is not an invention: culebra's own
 `{iter: fn () { self }}` needs it. It means a method reaches its receiver,
 an object literal's own functions do too -- and the drop protocol needs no
 special case at all, because "called with the object as its one argument"
-lands exactly in `self`. A class's `drop()` method is hung on the instance
-as the drop key verbatim.
+lands exactly in `self`. A class's `drop()` method is given to each
+instance as its destructor verbatim.
 
 ## Classes, without a class in the IR
 
@@ -134,7 +137,7 @@ C["name"] = "C"
 
 ctor(self, args...):
   inst = {}, meta C
-  inst["\x01drop"] = record(C).methods["drop"]   ; when the class declares one
+  dropset(inst, record(C).methods["drop"])   ; when the class declares one
   record(C).new(inst, args...)
   return inst
 ```
