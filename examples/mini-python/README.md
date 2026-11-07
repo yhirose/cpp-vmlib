@@ -39,10 +39,11 @@ multiplication and decimal rendering in IR and checks them against
 them, and that is the interesting part of `binder.cc`:
 
 **The representation.** A little-endian `Array` of `Int` limbs in base
-10^9, wrapped in an object under a key no Python source can spell, with the
-sign beside it. Base 10^9 because a limb product plus two carries stays
-under 2^63, and because rendering is nine decimal digits per limb with no
-division at all -- `$bstr` is a loop over `ToStr` and a zero-pad.
+10^9, with the sign beside it, in an object's kind record -- its meta, the
+slot no attribute or key reaches (`MetaGet`/`MetaSet`). Base 10^9 because
+a limb product plus two carries stays under 2^63, and because rendering is
+nine decimal digits per limb with no division at all -- `$bstr` is a loop
+over `ToStr` and a zero-pad.
 
 **The promotion rule.** `+`, `-` and `*` on two machine integers are the
 VM's `Add`, `Sub` and `Mul` when the answer fits an int64, and go to the
@@ -166,7 +167,10 @@ matter which subclass called it.
 A class that derives from a builtin exception (`class AppError(Exception)`)
 gets no table to inherit from -- `Exception` is not a class here -- so it
 is marked with the name it is rooted at instead, and `$isname` walks the
-same chain checking that mark. `__str__`, `__repr__` and `__eq__` are
+same chain checking that mark. An instance of one has a message of its own
+to keep beside its class, so its meta is an exception's kind record naming
+the class, and every question about a value's class starts from the one
+helper that reads either shape. `__str__`, `__repr__` and `__eq__` are
 found by `$clsfind` exactly like any other method and called through the
 same convention as everything else; `$str`, `$repr` and `$eq` each try one
 before falling back to their builtin behavior.
@@ -180,17 +184,18 @@ user exception hierarchy that `except AppError` catches by name while
 ## Tuples are not lists, quietly
 
 The IR has exactly one sequence type, and Python has two that print and
-compare differently -- `(1, 2) == [1, 2]` is `False`, `str((1,))` keeps its
-trailing comma, `type(t).__name__` is `"tuple"`. So a tuple is its array
-wrapped in an object under a key no Python source can write (the same
-trick every other hidden field in this front end uses), and every sequence
-func -- `$len`, `$idx`, `$iter`, `$slice`, `$eq`, `$cmp`, `$str` -- unwraps
-before it looks. `a, b = f()`, `for k, v in d.items()`, and a return of
-`a, b` are all one function, `$unpack`, that raises Python's own "too many"
-/"not enough values to unpack" wording; `enumerate`, `zip`, `.items()` and
-sorting a list of pairs all build and compare tuples through the same
-funcs. `samples/tuples.py` covers all of it, including the two `ValueError`
-messages and that a bare `(expr)` is not a tuple but `(expr,)` is.
+compare differently -- `(1, 2) == [1, 2]` is `False`, `str((1,))` keeps
+its trailing comma, `type(t).__name__` is `"tuple"`. So a tuple is an
+object whose kind record holds its array, out of reach of every attribute
+and key (where every other hidden field in this front end is too), and
+every sequence func -- `$len`, `$idx`, `$iter`, `$slice`, `$eq`, `$cmp`,
+`$str` -- unwraps before it looks. `a, b = f()`, `for k, v in d.items()`,
+and a return of `a, b` are all one function, `$unpack`, that raises
+Python's own "too many"/"not enough values to unpack" wording;
+`enumerate`, `zip`, `.items()` and sorting a list of pairs all build and
+compare tuples through the same funcs. `samples/tuples.py` covers all of
+it, including the two `ValueError` messages and that a bare `(expr)` is
+not a tuple but `(expr,)` is.
 
 ## Comprehensions are a function, called immediately
 

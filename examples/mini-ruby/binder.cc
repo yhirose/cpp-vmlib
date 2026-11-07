@@ -63,13 +63,17 @@ using namespace runtime_parts;
 namespace mini_ruby {
 namespace {
 
-// An exception's kind and message and a Range's marker, under keys the
-// implementation chose (runtime_parts.h's kImplPrefix). Classes are
-// runtime_parts.h's layout, which keeps them in the class's kind record
-// and an instance's meta, so a method's key is its name.
-constexpr char kExcKey[] = "\x01" "e";
-constexpr char kMsgKey[] = "\x01" "m";
-constexpr char kRangeKey[] = "\x01" "r";
+// What the implementation keeps on an object is its meta
+// (runtime_parts.h's Hidden state), where no key reaches it: an
+// exception's kind and message, a Range's two ends, and -- the class
+// layout's -- an instance's class and a class's name and base. So an
+// exception or a Range has no keys at all, and a method's key is its name.
+constexpr char kExcKind[] = "exc";
+constexpr int64_t kExcName = 1;
+constexpr int64_t kExcMessage = 2;
+constexpr char kRangeKind[] = "range";
+constexpr int64_t kRangeLo = 1;
+constexpr int64_t kRangeHi = 2;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -805,14 +809,15 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.call("$hashstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("#<Proc>"))));
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("#<Object>"))));
-    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
-                r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
+    r.add(r.iff(is_kind(r, v, kExcKind),
+                r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
     r.add(r.iff(
-        r.has(r.L(v), r.S(kRangeKey)),
-        r.ret(r.bin(
-            BinOp::Add,
-            r.bin(BinOp::Add, r.call("$str", {r.idx(r.L(v), "lo")}), r.S("..")),
-            r.call("$str", {r.idx(r.L(v), "hi")})))));
+        is_kind(r, v, kRangeKind),
+        r.ret(r.bin(BinOp::Add,
+                    r.bin(BinOp::Add,
+                          r.call("$str", {kind_field(r, r.L(v), kRangeLo)}),
+                          r.S("..")),
+                    r.call("$str", {kind_field(r, r.L(v), kRangeHi)})))));
     r.add(r.set(c, r.call("$classof", {r.L(v)})));
     r.add(r.iff(
         r.isnt(r.typ(c), "nil"),
@@ -948,8 +953,7 @@ struct Binder {
   void rt_range() {
     one("$range",
         [&](RT& r) {
-          return r.obj(
-              {{kRangeKey, r.Bo(true)}, {"lo", r.L(0)}, {"hi", r.L(1)}});
+          return of_kind(r, r.obj({}), kRangeKind, {r.L(0), r.L(1)});
         },
         {"lo", "hi"});
   }
@@ -968,7 +972,7 @@ struct Binder {
                              {"v", r.in(IntrinsicId::ObjectKeys, {r.L(v)})},
                              {"src", r.L(v)},
                              {"i", r.I(0)}}))));
-    r.add(r.iff(r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRangeKey))),
+    r.add(r.iff(is_kind(r, v, kRangeKind),
                 r.ret(sequence_cursor(r, r.call("$toa", {r.L(v)})))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("not iterable")})));
@@ -1169,9 +1173,11 @@ struct Binder {
     const auto [out, i] = r.locals("out", "i");
     r.add(r.iff(r.is(r.typ(v), "array"), r.ret(r.L(v))));
     r.add(
-        r.iff(r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRangeKey))),
-              r.blk({r.set(out, r.arr({})), r.set(i, r.idx(r.L(v), "lo")),
-                     r.wh(r.bin(BinOp::Le, r.L(i), r.idx(r.L(v), "hi")),
+        r.iff(is_kind(r, v, kRangeKind),
+              r.blk({r.set(out, r.arr({})),
+                     r.set(i, kind_field(r, r.L(v), kRangeLo)),
+                     r.wh(r.bin(BinOp::Le, r.L(i),
+                                kind_field(r, r.L(v), kRangeHi)),
                           r.blk({r.push(r.L(out), r.L(i)),
                                  r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
                      r.ret(r.L(out))})));
@@ -1221,7 +1227,7 @@ struct Binder {
   void rt_mkexc() {
     one("$mkexc",
         [&](RT& r) {
-          return r.obj({{kExcKey, r.L(0)}, {kMsgKey, r.L(1)}});
+          return of_kind(r, r.obj({}), kExcKind, {r.L(0), r.L(1)});
         },
         {"kind", "msg"});
   }
@@ -1350,8 +1356,8 @@ struct Binder {
     const auto [c] = r.locals("c");
     r.add(r.set(c, r.call("$classof", {r.L(v)})));
     r.add(r.iff(r.isnt(r.typ(c), "nil"), r.ret(class_name(r, r.L(c)))));
-    r.add(r.iff(r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kExcKey))),
-                r.ret(r.idx(r.L(v), kExcKey))));
+    r.add(r.iff(is_kind(r, v, kExcKind),
+                r.ret(kind_field(r, r.L(v), kExcName))));
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("NilClass"))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("TrueClass"), r.S("FalseClass")))));
@@ -1410,16 +1416,17 @@ struct Binder {
   void rt_caseeq() {
     RT r(*this);
     const auto [pattern, value] = r.params("pattern", "value");
-    r.add(
-        r.iff(r.both(r.is(r.typ(pattern), "object"),
-                     r.has(r.L(pattern), r.S(kRangeKey))),
-              r.ret(r.both(
-                  r.bin(BinOp::Ge,
-                        r.call("$cmp", {r.L(value), r.idx(r.L(pattern), "lo")}),
-                        r.I(0)),
-                  r.bin(BinOp::Le,
-                        r.call("$cmp", {r.L(value), r.idx(r.L(pattern), "hi")}),
-                        r.I(0))))));
+    r.add(r.iff(
+        is_kind(r, pattern, kRangeKind),
+        r.ret(r.both(
+            r.bin(BinOp::Ge,
+                  r.call("$cmp",
+                         {r.L(value), kind_field(r, r.L(pattern), kRangeLo)}),
+                  r.I(0)),
+            r.bin(BinOp::Le,
+                  r.call("$cmp",
+                         {r.L(value), kind_field(r, r.L(pattern), kRangeHi)}),
+                  r.I(0))))));
     r.add(r.iff(is_kind(r, pattern, kClassKind),
                 r.ret(r.call("$isa", {r.L(value), r.L(pattern)}))));
     r.add(r.ret(r.call("$eq", {r.L(pattern), r.L(value)})));
@@ -2750,12 +2757,10 @@ const std::vector<vm::NativeDef>& stdlib() {
 // ruby's own wording after the position: the message, then the class in
 // parentheses.
 std::string describe(const Value& v) {
-  if (v.is_object()) {
-    ObjectObj* o = v.as_object();
-    const Value* kind = o->find(kExcKey);
-    const Value* msg = o->find(kMsgKey);
-    if (kind != nullptr && kind->is_str() && msg != nullptr) {
-      return to_display(*msg) + " (" + kind->as_str() + ")";
+  if (const auto* exc = runtime_parts::kind_record(v, kExcKind)) {
+    const Value& kind = (*exc)[kExcName];
+    if (kind.is_str()) {
+      return to_display((*exc)[kExcMessage]) + " (" + kind.as_str() + ")";
     }
   }
   return to_display(v);

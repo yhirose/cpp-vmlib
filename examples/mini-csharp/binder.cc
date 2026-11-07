@@ -63,11 +63,11 @@ namespace {
 // second namespace of the program's beside the methods, its static fields,
 // so the methods are under program_key(name) and the statics bare: a
 // static field and a method of one name, in one class or across a base,
-// never meet. The rest are names this front end chose, under the
-// implementation's prefix -- the kind and message on an exception.
-constexpr char kExcKey[] = "\x01" "e";
-constexpr char kMsgKey[] = "\x01" "m";
+// never meet. An exception's message is in its kind record the same way,
+// where no key reaches it.
 constexpr int64_t kClassCtor = kClassOwn;
+constexpr char kExcKind[] = "exc";
+constexpr int64_t kExcMessage = 1;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -819,7 +819,8 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(v), "int"), r.is(r.typ(v), "double")),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
-    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kMsgKey))));
+    r.add(r.iff(is_kind(r, v, kExcKind),
+                r.ret(kind_field(r, r.L(v), kExcMessage))));
     r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S(program_key("ToString"))})));
     r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
@@ -1055,7 +1056,7 @@ struct Binder {
   void rt_mkexc() {
     RT r(*this);
     const auto [msg] = r.params("msg");
-    r.add(r.ret(r.obj({{kExcKey, r.Bo(true)}, {kMsgKey, r.L(msg)}})));
+    r.add(r.ret(of_kind(r, r.obj({}), kExcKind, {r.L(msg)})));
     r.finish("$mkexc");
   }
 
@@ -2205,12 +2206,8 @@ const std::vector<vm::NativeDef>& stdlib() {
 // What .NET prints after "Unhandled exception." -- every exception here is
 // a System.Exception, there being no hierarchy.
 std::string describe(const Value& v) {
-  if (v.is_object()) {
-    ObjectObj* o = v.as_object();
-    const Value* msg = o->find(kMsgKey);
-    if (o->find(kExcKey) != nullptr && msg != nullptr) {
-      return "System.Exception: " + to_display(*msg);
-    }
+  if (const auto* exc = runtime_parts::kind_record(v, kExcKind)) {
+    return "System.Exception: " + to_display((*exc)[kExcMessage]);
   }
   return to_display(v);
 }

@@ -56,15 +56,27 @@ using namespace runtime_parts;
 namespace mini_python {
 namespace {
 
-// A bignum's two fields and an exception's name and message, under keys
-// the implementation chose (runtime_parts.h's kImplPrefix) -- whose first
-// byte no Python identifier can start with. Classes are runtime_parts.h's
-// layout: a class's facts are in its kind record and an instance's class
-// is its meta, so a method's key is its name.
-constexpr char kBigKey[] = "\x01" "b";   // the limb array
-constexpr char kSignKey[] = "\x01" "s";  // -1 or 1
-constexpr char kExcKey[] = "\x01" "e";
-constexpr char kMsgKey[] = "\x01" "m";
+// What the implementation keeps on an object is its meta (runtime_parts.h's
+// Hidden state), where no attribute reaches it. Classes are
+// runtime_parts.h's layout: a class's facts are in its kind record and an
+// instance's class is its meta, so a method's key is its name. A bignum, a
+// tuple, an exception and a type object each have a kind record of their
+// own, and no attributes beside it but a type's `__name__`.
+//
+// A bignum: its limb array and its sign, -1 or 1.
+constexpr char kBigKind[] = "big";
+constexpr int64_t kBigLimbs = 1;
+constexpr int64_t kBigSign = 2;
+// An exception: a builtin's name -- nil for one of the program's classes,
+// whose class names it -- the message, nil until one is given, and the
+// program's class -- nil for a builtin. An exception of the program's is
+// an instance, but its meta is this record rather than its class, since
+// it has a message of its own to keep beside the class: value_class reads
+// either shape.
+constexpr char kExcKind[] = "exc";
+constexpr int64_t kExcName = 1;
+constexpr int64_t kExcMessage = 2;
+constexpr int64_t kExcClass = 3;
 // Inheritance: a class's kind record holds its base's table
 // (kClassBase), the builtin exception it is rooted at -- `Exception` is not
 // a class here, so a class that derives from one is marked rather than
@@ -72,15 +84,15 @@ constexpr char kMsgKey[] = "\x01" "m";
 // `isinstance` and `except` have an identity to compare. See README.md.
 constexpr int64_t kClassRoot = kClassOwn;
 constexpr int64_t kClassId = kClassOwn + 1;
-// A tuple is an array wrapped in an object, which is the only way to keep
-// `type(t)` and `print(t)` honest: the IR has one sequence, and Python has
-// two that print and compare differently.
-constexpr char kTupKey[] = "\x01" "t";
+// A tuple is its array in an object's kind record, which is the only way
+// to keep `type(t)` and `print(t)` honest: the IR has one sequence, and
+// Python has two that print and compare differently.
+constexpr char kTupleKind[] = "tuple";
+constexpr int64_t kTupleItems = 1;
 // What `type(v)` answers is an object with the program-visible `__name__`,
-// marked as a type by a key of the implementation's: marked by `__name__`
-// itself, as it was, an instance with an attribute of that name printed as
-// a class.
-constexpr char kTypeKey[] = "\x01" "y";
+// marked as a type by its kind record: marked by `__name__` itself, as it
+// once was, an instance with an attribute of that name printed as a class.
+constexpr char kTypeKind[] = "type";
 
 // Base 10^9: a limb product plus two carries stays under 2^63, and
 // rendering is nine decimal digits per limb with no division at all.
@@ -855,18 +867,31 @@ struct Binder {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
+  // The class of `v` -- a read, which runs more than once -- or nil: an
+  // instance's meta, or the class an exception of the program's carries
+  // in its kind record beside its message. Every question about a value's
+  // class starts here, so that both shapes are one rule.
+  static NodeId value_class(RT& r, NodeId v) {
+    return r.iff(r.is(r.typ(r.meta(v)), "object"), r.meta(v),
+                 r.iff(is_kind(r.b, v, kExcKind),
+                       kind_field(r, v, kExcClass), r.Nil()));
+  }
+
   // -- The bignum recipe ---------------------------------------------------
   //
   // A little-endian Array of Int limbs in base 10^9, no leading zero limbs,
-  // wrapped in an object so that TypeOf can tell one from a list. Zero and
+  // kept with the sign in an object's kind record so that nothing takes one
+  // for a list. Zero and
   // anything that fits an int64 are *not* big: $mkbig demotes, which is
   // what keeps ordinary arithmetic on ordinary numbers.
 
   void rt_isbig() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(v), "object"), r.ret(r.has(r.L(v), r.S(kBigKey)))));
-    r.add(r.ret(r.Bo(false)));
+    // Asked of every number `-` and `str()` meet: anything but an object
+    // returns at the first test.
+    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
+    r.add(r.ret(is_kind(r, v, kBigKind)));
     r.finish("$isbig");
   }
 
@@ -920,14 +945,15 @@ struct Binder {
                r.iff(r.bin(BinOp::Lt, r.L(sign), r.I(0)),
                      r.set(v, r.b.unary(UnOp::Neg, r.L(v)))),
                r.ret(r.L(v))})));
-    r.add(r.ret(r.obj({{kBigKey, r.L(limbs)}, {kSignKey, r.L(sign)}})));
+    r.add(r.ret(of_kind(r, r.obj({}), kBigKind, {r.L(limbs), r.L(sign)})));
     r.finish("$mkbig");
   }
 
   void rt_biglimbs() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.idx(r.L(v), kBigKey))));
+    r.add(r.iff(r.call("$isbig", {r.L(v)}),
+                r.ret(kind_field(r, r.L(v), kBigLimbs))));
     r.add(r.ret(r.call("$tolimbs", {r.call("$abs", {r.L(v)})})));
     r.finish("$biglimbs");
   }
@@ -935,7 +961,8 @@ struct Binder {
   void rt_bigsign() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.idx(r.L(v), kSignKey))));
+    r.add(r.iff(r.call("$isbig", {r.L(v)}),
+                r.ret(kind_field(r, r.L(v), kBigSign))));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(v), r.I(0)), r.ret(r.I(-1))));
     r.add(r.ret(r.I(1)));
     r.finish("$bigsign");
@@ -1096,7 +1123,7 @@ struct Binder {
     const auto [x, i, out, t] = r.locals("x", "i", "out", "t");
     r.add(r.iff(r.b.unary(UnOp::Not, r.call("$isbig", {r.L(v)})),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
-    r.add(r.set(x, r.idx(r.L(v), kBigKey)));
+    r.add(r.set(x, kind_field(r, r.L(v), kBigLimbs)));
     r.add(r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))));
     r.add(r.set(out, r.in(IntrinsicId::ToStr, {r.idx(r.L(x), r.L(i))})));
     r.add(r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1))));
@@ -1107,7 +1134,7 @@ struct Binder {
                          r.set(t, r.bin(BinOp::Add, r.S("0"), r.L(t)))),
                     r.set(out, r.bin(BinOp::Add, r.L(out), r.L(t))),
                     r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})));
-    r.add(r.iff(r.bin(BinOp::Lt, r.idx(r.L(v), kSignKey), r.I(0)),
+    r.add(r.iff(r.bin(BinOp::Lt, kind_field(r, r.L(v), kBigSign), r.I(0)),
                 r.set(out, r.bin(BinOp::Add, r.S("-"), r.L(out)))));
     r.add(r.ret(r.L(out)));
     r.finish("$bstr");
@@ -1121,7 +1148,7 @@ struct Binder {
     r.add(r.iff(
         r.call("$isbig", {r.L(v)}),
         r.blk(
-            {r.set(x, r.idx(r.L(v), kBigKey)), r.set(acc, r.D(0.0)),
+            {r.set(x, kind_field(r, r.L(v), kBigLimbs)), r.set(acc, r.D(0.0)),
              r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))),
              r.wh(r.bin(BinOp::Ge, r.L(i), r.I(0)),
                   r.blk({r.set(acc, r.bin(BinOp::Add,
@@ -1129,7 +1156,7 @@ struct Binder {
                                           r.in(IntrinsicId::ToDouble,
                                                {r.idx(r.L(x), r.L(i))}))),
                          r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})),
-             r.iff(r.bin(BinOp::Lt, r.idx(r.L(v), kSignKey), r.I(0)),
+             r.iff(r.bin(BinOp::Lt, kind_field(r, r.L(v), kBigSign), r.I(0)),
                    r.set(acc, r.b.unary(UnOp::Neg, r.L(acc)))),
              r.ret(r.L(acc))})));
     r.add(r.ret(r.in(IntrinsicId::ToDouble, {r.L(v)})));
@@ -1141,9 +1168,10 @@ struct Binder {
     const auto [v] = r.params("v");
     r.add(r.iff(
         r.call("$isbig", {r.L(v)}),
-        r.ret(r.obj(
-            {{kBigKey, r.idx(r.L(v), kBigKey)},
-             {kSignKey, r.b.unary(UnOp::Neg, r.idx(r.L(v), kSignKey))}}))));
+        r.ret(of_kind(
+            r, r.obj({}), kBigKind,
+            {kind_field(r, r.L(v), kBigLimbs),
+             r.b.unary(UnOp::Neg, kind_field(r, r.L(v), kBigSign))}))));
     r.add(r.ret(r.b.unary(UnOp::Neg, r.L(v))));
     r.finish("$neg");
   }
@@ -1188,10 +1216,12 @@ struct Binder {
                 r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
     r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.is(r.typ(b), "array")),
                 r.ret(r.call("$listadd", {r.L(a), r.L(b)}))));
+    const auto items = [&](FuncWriter::Slot t) {
+      return kind_field(r, r.L(t), kTupleItems);
+    };
     r.add(r.iff(r.both(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
-                r.ret(r.call("$tuple",
-                             {r.call("$listadd", {r.idx(r.L(a), kTupKey),
-                                                  r.idx(r.L(b), kTupKey)})}))));
+                r.ret(r.call("$tuple", {r.call("$listadd",
+                                               {items(a), items(b)})}))));
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
@@ -1458,8 +1488,8 @@ struct Binder {
         r.blk({r.iff(r.b.unary(UnOp::Not, r.both(r.call("$istup", {r.L(a)}),
                                                  r.call("$istup", {r.L(b)}))),
                      r.ret(r.Bo(false))),
-               r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
-                                    r.idx(r.L(b), kTupKey)}))})));
+               r.ret(r.call("$eq", {kind_field(r, r.L(a), kTupleItems),
+                                    kind_field(r, r.L(b), kTupleItems)}))})));
     r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S("__eq__")})));
     r.add(r.iff(r.isnt(r.typ(f_), "nil"),
                 r.ret(r.call("$truthy",
@@ -1521,24 +1551,30 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("<function>"))));
     r.add(r.iff(r.is(r.typ(v), "generator"), r.ret(r.S("<generator>"))));
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.call("$bstr", {r.L(v)}))));
-    r.add(r.iff(r.has(r.L(v), r.S(kTupKey)),
-                r.ret(r.call("$tupstr", {r.idx(r.L(v), kTupKey)}))));
-    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
-                r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
+    r.add(r.iff(is_kind(r, v, kTupleKind),
+                r.ret(r.call("$tupstr",
+                             {kind_field(r, r.L(v), kTupleItems)}))));
+    // A builtin exception displays as its message.
+    r.add(r.iff(
+        r.both(is_kind(r, v, kExcKind),
+               r.is(r.typ(kind_field(r, r.L(v), kExcClass)), "nil")),
+        r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("__str__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
     // A class of the program's own that derives from a builtin exception
     // displays as its message, the way the builtin ones do.
-    r.add(r.iff(r.has(r.L(v), r.S(kMsgKey)),
-                r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
-    r.add(r.iff(r.has(r.L(v), r.S(kTypeKey)),
+    r.add(r.iff(
+        r.both(is_kind(r, v, kExcKind),
+               r.isnt(r.typ(kind_field(r, r.L(v), kExcMessage)), "nil")),
+        r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
+    r.add(r.iff(is_kind(r, v, kTypeKind),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<class '"),
                                   r.idx(r.L(v), r.S("__name__"))),
                             r.S("'>")))));
-    r.add(r.set(f, instance_class(r, v)));
+    r.add(r.set(f, value_class(r, r.L(v))));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<"), class_name(r, r.L(f))),
@@ -1653,7 +1689,8 @@ struct Binder {
   void rt_exc() {
     RT r(*this);
     const auto [name, msg] = r.params("name", "msg");
-    r.add(r.b.make_throw(r.obj({{kExcKey, r.L(name)}, {kMsgKey, r.L(msg)}})));
+    r.add(r.b.make_throw(
+        of_kind(r, r.obj({}), kExcKind, {r.L(name), r.L(msg), r.Nil()})));
     r.finish("$exc");
   }
 
@@ -1756,10 +1793,11 @@ struct Binder {
                r.iff(r.bin(BinOp::Gt, r.L(out), r.L(n)), r.set(out, r.L(n)))}));
     };
     // A slice of a tuple is a tuple.
-    r.add(
-        r.iff(r.call("$istup", {r.L(v)}),
-              r.ret(r.call("$tuple", {r.call("$slice", {r.idx(r.L(v), kTupKey),
-                                                        r.L(i), r.L(j)})}))));
+    r.add(r.iff(
+        r.call("$istup", {r.L(v)}),
+        r.ret(r.call("$tuple",
+                     {r.call("$slice", {kind_field(r, r.L(v), kTupleItems),
+                                        r.L(i), r.L(j)})}))));
     r.add(r.set(n, r.len(r.L(v))));
     r.add(norm(a, i, r.I(0)));
     r.add(norm(b, j, r.L(n)));
@@ -1816,7 +1854,8 @@ struct Binder {
         r.is(r.typ(o), "object"),
         r.blk(
             {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
-             r.set(found, r.call("$clsfind", {r.meta(r.L(o)), r.L(name)})),
+             r.set(found,
+                   r.call("$clsfind", {value_class(r, r.L(o)), r.L(name)})),
              r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found)))})));
     r.add(r.ret(
         r.call("$exc", {r.S("AttributeError"),
@@ -1878,6 +1917,7 @@ struct Binder {
   void rt_typename() {
     RT r(*this);
     const auto [v] = r.params("v");
+    const auto [c] = r.locals("c");
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("NoneType"))));
     r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.S("bool"))));
     r.add(r.iff(r.is(r.typ(v), "int"), r.ret(r.S("int"))));
@@ -1889,9 +1929,11 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "generator"), r.ret(r.S("generator"))));
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.S("int"))));
     r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.S("tuple"))));
-    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kExcKey))));
-    r.add(r.iff(r.is(r.typ(r.meta(r.L(v))), "object"),
-                r.ret(class_name(r, r.meta(r.L(v))))));
+    r.add(r.iff(r.both(is_kind(r, v, kExcKind),
+                       r.is(r.typ(kind_field(r, r.L(v), kExcName)), "string")),
+                r.ret(kind_field(r, r.L(v), kExcName))));
+    r.add(r.set(c, value_class(r, r.L(v))));
+    r.add(r.iff(r.isnt(r.typ(c), "nil"), r.ret(class_name(r, r.L(c)))));
     r.add(r.ret(r.S("object")));
     r.finish("$typename");
   }
@@ -1899,8 +1941,9 @@ struct Binder {
   void rt_type() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.ret(r.obj({{kTypeKey, r.Bo(true)},
-                       {"__name__", r.call("$typename", {r.L(v)})}})));
+    r.add(r.ret(of_kind(
+        r, r.obj({{"__name__", r.call("$typename", {r.L(v)})}}), kTypeKind,
+        {})));
     r.finish("$type");
   }
 
@@ -2238,9 +2281,11 @@ struct Binder {
     const auto [v, name] = r.params("v", "name");
     const auto [t] = r.locals("t");
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
-                r.ret(r.bin(BinOp::Eq, r.idx(r.L(v), kExcKey), r.L(name)))));
-    r.add(r.set(t, instance_class(r, v)));
+    r.add(r.iff(r.both(is_kind(r, v, kExcKind),
+                       r.is(r.typ(kind_field(r, r.L(v), kExcName)), "string")),
+                r.ret(r.bin(BinOp::Eq, kind_field(r, r.L(v), kExcName),
+                            r.L(name)))));
+    r.add(r.set(t, value_class(r, r.L(v))));
     r.add(walk_bases(
         r, t,
         r.iff(r.both(r.is(r.typ(kind_field(r, r.L(t), kClassRoot)), "string"),
@@ -2257,7 +2302,7 @@ struct Binder {
     RT r(*this);
     const auto [v, cls] = r.params("v", "cls");
     const auto [t] = r.locals("t");
-    r.add(r.set(t, instance_class(r, v)));
+    r.add(r.set(t, value_class(r, r.L(v))));
     r.add(walk_bases(r, t,
                      r.iff(r.in(IntrinsicId::Same,
                                 {kind_field(r, r.L(t), kClassId), r.L(cls)}),
@@ -2317,7 +2362,11 @@ struct Binder {
   void rt_excinit() {
     RT r(*this);
     const auto [self, a] = r.params("self", "a");
-    r.add(r.sidx(r.L(self), r.S(kMsgKey), r.call("$excmsg", {r.L(a)})));
+    // Only an exception has a message to keep: `super().__init__()` from a
+    // class with no base reaches here too.
+    r.add(r.iff(is_kind(r, self, kExcKind),
+                set_kind_field(r, r.L(self), kExcMessage,
+                               r.call("$excmsg", {r.L(a)}))));
     r.add(r.ret(r.Nil()));
     r.finish("$excinit");
   }
@@ -2338,7 +2387,7 @@ struct Binder {
   void rt_dunder() {
     RT r(*this);
     const auto [v, key] = r.params("v", "key");
-    r.add(r.ret(r.call("$clsfind", {instance_class(r, v), r.L(key)})));
+    r.add(r.ret(r.call("$clsfind", {value_class(r, r.L(v)), r.L(key)})));
     r.finish("$dunder");
   }
 
@@ -2352,14 +2401,15 @@ struct Binder {
   void rt_tuple() {
     RT r(*this);
     const auto [a] = r.params("a");
-    r.add(r.ret(r.obj({{kTupKey, r.L(a)}})));
+    r.add(r.ret(of_kind(r, r.obj({}), kTupleKind, {r.L(a)})));
     r.finish("$tuple");
   }
 
   void rt_untup() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.idx(r.L(v), kTupKey))));
+    r.add(r.iff(r.call("$istup", {r.L(v)}),
+                r.ret(kind_field(r, r.L(v), kTupleItems))));
     r.add(r.ret(r.L(v)));
     r.finish("$untup");
   }
@@ -2367,8 +2417,10 @@ struct Binder {
   void rt_istup() {
     RT r(*this);
     const auto [v] = r.params("v");
+    // Asked of every operand `+` and every sequence an index meets:
+    // anything but an object returns at the first test.
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
-    r.add(r.ret(r.has(r.L(v), r.S(kTupKey))));
+    r.add(r.ret(is_kind(r, v, kTupleKind)));
     r.finish("$istup");
   }
 
@@ -3882,9 +3934,15 @@ struct Binder {
     const NodeId O = b.varref(VarKind::Local, 2, p);
     const NodeId F = b.varref(VarKind::Local, 3, p);
     // `__init__` may be the base's, so it is looked up rather than indexed.
+    // An exception of the program's keeps a message beside its class, so
+    // its meta is its kind record, naming the class.
     auto bp = b.at(p);
     std::vector<NodeId> body{
-        b.assign(VarKind::Local, 2, new_instance(bp, C), p),
+        b.assign(VarKind::Local, 2,
+                 is_exc ? of_kind(bp, bp.object_lit({}), kExcKind,
+                                  {bp.nil_literal(), bp.nil_literal(), C})
+                        : new_instance(bp, C),
+                 p),
         b.assign(VarKind::Local, 3,
                  rt.call("$clsfind", {C, b.str_literal("__init__", p)}, p),
                  p),
@@ -4154,8 +4212,8 @@ struct Binder {
       limbs.push_back(b.literal(rem));
       rest = q.empty() ? "0" : q;
     }
-    return b.object_lit({{b.str_literal(kBigKey), b.array_lit(limbs)},
-                         {b.str_literal(kSignKey), b.literal(1)}});
+    return of_kind(b, b.object_lit({}), kBigKind,
+                   {b.array_lit(limbs), b.literal(1)});
   }
 
   NodeId emit_postfix(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -4456,10 +4514,11 @@ struct Binder {
 
     if (is_exception_name(g)) {
       return call_it(Takes{0, any, any}, [&](Args a, Args) {
-        return b.object_lit({{b.str_literal(kExcKey, p), b.str_literal(g, p)},
-                             {b.str_literal(kMsgKey, p),
-                              rt.call("$excmsg", {b.array_lit(a, p)}, p)}},
-                            p);
+        auto bp = b.at(p);
+        return of_kind(bp, bp.object_lit({}), kExcKind,
+                       {bp.str_literal(g),
+                        rt.call("$excmsg", {bp.array_lit(a)}, p),
+                        bp.nil_literal()});
       });
     }
     if (g == "sorted") {
@@ -5013,17 +5072,18 @@ const std::vector<vm::NativeDef>& stdlib() {
 // message when there is one -- a builtin's name travels in the object, a
 // program's own class names itself in its table.
 std::string describe(const Value& v) {
-  if (!v.is_object()) return to_display(v);
-  ObjectObj* o = v.as_object();
+  const auto* exc = runtime_parts::kind_record(v, kExcKind);
+  if (!exc) return to_display(v);
+  const Value& msg = (*exc)[kExcMessage];
   std::string name;
-  if (const Value* k = o->find(kExcKey); k && k->is_str()) {
-    name = k->as_str();
-  } else if (const std::string* n = runtime_parts::instance_class_name(v)) {
-    name = *n;
+  if (const Value& k = (*exc)[kExcName]; k.is_str()) {
+    name = k.as_str();
+  } else if (const auto* cls = runtime_parts::kind_record((*exc)[kExcClass],
+                                                         kClassKind)) {
+    name = (*cls)[kClassName].as_str();
   }
-  const Value* msg = o->find(kMsgKey);
-  if (name.empty() || msg == nullptr) return to_display(v);
-  const std::string text = to_display(*msg);
+  if (name.empty() || msg.is_nil()) return to_display(v);
+  const std::string text = to_display(msg);
   return text.empty() ? name : name + ": " + text;
 }
 
