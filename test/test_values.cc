@@ -12,6 +12,7 @@
 // Every case asserts the live heap-object count is zero afterward, so a
 // missing release fails the test rather than waiting for a leak checker.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -819,12 +820,15 @@ int main() {
       const auto lt = [&] {
         return b.binary(BinOp::Lt, local(b), b.literal(1, p), p);
       };
-      const auto body = [&](NodeId stmt) {
+      const auto compiled = [&](NodeId stmt) {
         m.funcs.clear();
         m.funcs.push_back({"main", 1, 0, b.block({stmt, b.nil_literal(p)}, p),
                            {"x"}, {}});
         m.funcs.push_back({"fb", 0, 0, b.literal(0, p), {}, {}});
-        return vm::to_string(vm::compile(m));
+        return vm::compile(m);
+      };
+      const auto body = [&](NodeId stmt) {
+        return vm::to_string(compiled(stmt));
       };
       const std::string branch =
           body(cond(b, b.unary(UnOp::Truth, lt(), fb(b, kNilBool), p)));
@@ -843,34 +847,29 @@ int main() {
             "truth: without bool in the set, the fallback stays");
       // Over a comparison with a fallback, the comparison's Try exits
       // straight to a jump on its own register: the test's Try is on the
-      // fallback's path alone.
-      // So too a comparison a Block ends in.
-      const std::string tried = body(cond(
-          b, b.unary(UnOp::Truth,
-                     b.block({b.assign(VarKind::Local, 0, b.literal(7, p), p),
-                              b.binary(BinOp::Lt, local(b), b.literal(1, p),
-                                       fb(b, kInt), p)},
-                             p),
-                     fb(b, kNilBool), p)));
-      const size_t at = tried.find("\ttrybinary r");
-      bool straight = false;
-      if (at != std::string::npos) {
-        const std::string reg = tried.substr(
-            at + 11, tried.find(',', at) - at - 11);
-        const size_t exit = tried.find(", ", tried.find("}, ", at)) + 2;
-        const std::string pc =
-            tried.substr(exit, tried.find('\t', exit) - exit);
-        // The instruction at the exit: `\n  <pc>\tjumpif... <reg>,`.
-        const std::string head = "\n  " + pc + "\t";
-        const size_t line = tried.find(head);
-        const auto is = [&](const std::string& insn) {
-          return tried.compare(line + head.size(), insn.size(), insn) == 0;
-        };
-        straight = line != std::string::npos &&
-                   (is("jumpiffalse " + reg + ",") ||
-                    is("jumpiftrue " + reg + ","));
-      }
-      check(straight, "truth: a comparison's own answer goes to the jump");
+      // fallback's path alone. So too a comparison a Block ends in.
+      const auto straight = [&](NodeId comparison) {
+        const vm::Program prog = compiled(
+            cond(b, b.unary(UnOp::Truth, comparison, fb(b, kNilBool), p)));
+        const std::vector<vm::Insn>& code = prog.chunks[0].code;
+        const auto at = std::find_if(code.begin(), code.end(), [](auto& in) {
+          return in.op == vm::Op::TryBinary;
+        });
+        if (at == code.end()) return false;
+        const vm::Insn& exit = code[static_cast<size_t>(at->d)];
+        return (exit.op == vm::Op::JumpIfFalse ||
+                exit.op == vm::Op::JumpIfTrue) &&
+               exit.a == at->a;
+      };
+      const auto lt_or_call = [&] {
+        return b.binary(BinOp::Lt, local(b), b.literal(1, p), fb(b, kInt), p);
+      };
+      check(straight(lt_or_call()),
+            "truth: a comparison's own answer goes to the jump");
+      check(straight(b.block(
+                {b.assign(VarKind::Local, 0, b.literal(7, p), p), lt_or_call()},
+                p)),
+            "truth: so does that of a comparison a Block ends in");
     }
 
     // The code: the operands in the registers after the result's, the
@@ -944,8 +943,8 @@ int main() {
       const auto set = [&](int32_t i, NodeId v) {
         return b.assign(VarKind::Local, i, v, p);
       };
-      // The operands' own set when the operation is to be asked; nil's,
-      // which none of them is but Eq's left, when it is not.
+      // The operands' own set when the operation is to be asked; bool's,
+      // which none of them is, when it is not.
       const auto fb = [&](std::initializer_list<std::string_view> tags) {
         return Fallback{b.make_closure(1, 0, p),
                         trap ? tags_named(tags) : tags_named("bool")};
