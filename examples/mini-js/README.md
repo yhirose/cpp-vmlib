@@ -174,13 +174,18 @@ of jobs (`Enqueue`); *which* queue discipline settles what, in what order,
 is JavaScript's rule and not every language's, so it lives here -- the same
 division mini-go draws for a Go channel.
 
-**A Promise is an object.** `{$promise, s: 0|1|2, v, cbs}` -- pending,
-fulfilled or rejected, the settled value, and the reactions waiting on it.
-`$psettle` sets the state once and `Enqueue`s every waiting reaction;
-`$then` and `$react` are the combinators, including the three rules that
-make a chain behave: a link with no handler passes the state through, a
-handler that throws rejects the next promise, and resolving with a promise
-*adopts* it rather than nesting it.
+**A Promise is an object.** Its state -- pending, fulfilled or rejected
+-- the settled value, and the reactions waiting on it, under keys no
+property name can be, so a promise has none of them as properties and an
+object that merely looks like one is awaited as itself. `$psettle` sets
+the state once and `Enqueue`s every waiting reaction. These, `$await` and
+the rest of the settling are
+[examples/common/runtime_parts.h](../common/runtime_parts.h)'s, shared
+with mini-csharp's Task. `$then` and `$react` are JavaScript's
+combinators, including the three rules that make a chain behave: a link
+with no handler passes the state through, a handler that throws rejects
+the next promise, and resolving with a promise *adopts* it rather than
+nesting it.
 
 **`await` parks the coroutine directly.** `Enqueue` accepts a closure *or a
 coroutine*, so `$await` registers `CoroCurrent()` itself as the promise's
@@ -192,8 +197,8 @@ $await(v):
   p = $topromise(v)
   $pon(p, CoroCurrent())      ; wake me when it settles
   CoroYield(nil)
-  if (p.s === rejected) throw p.v
-  return p.v
+  if (p is rejected) throw its reason
+  return its value
 ```
 
 Because `CoroYield` parks *every* frame from the coroutine's bottom up to
@@ -205,17 +210,17 @@ and what a generator's single-frame `Yield` could not do.
 `async function twice(v) { return (await v) * 2; }`:
 
 ```
-func #34 twice  locals=1 captures=0
+func #39 twice  locals=1 captures=0
   cellfresh cell[0]; assign cell[0] <- $pnew()          ; the promise
-  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #35
+  cellfresh cell[1]; assign cell[1] <- makeclosure twice$body #40
   cellfresh cell[2]; assign cell[2] <- varref local[0]  ; the argument
   cororesume
     corocreate
-      makeclosure twice$run #36 cmap=5
+      makeclosure twice$run #41 cmap=5
     literal nil
   return varref cell[0]                                  ; the promise
-func #35 twice$body   ; the body you wrote, with twice's own captures
-func #36 twice$run    ; calls the body, settles the promise with the
+func #40 twice$body   ; the body you wrote, with twice's own captures
+func #41 twice$run    ; calls the body, settles the promise with the
                       ; value it returned or the value it threw
 ```
 

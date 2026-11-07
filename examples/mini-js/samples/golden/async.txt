@@ -7,5 +7,6 @@ caught from await: rejected
 executor: from executor
 chain: recovered from at 2
 adopted: inner
+lookalike: [true, undefined, undefined, undefined]
 main resolved: main value
 order: ['body start', 'after call', 'main start', 'sync tail', 'body end', 'executor ran', 'main end']

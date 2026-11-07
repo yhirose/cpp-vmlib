@@ -777,8 +777,7 @@ struct Binder {
     static const std::vector<std::string> names = {
         "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$nullcall", "$getf", "$setf",
         "$idx", "$setidx", "$dictadd", "$len", "$iter", "$iternext",
-        "$join", "$exc", "$mkexc", "$newlist", "$newdict", "$tnew", "$tsettle", "$ton", "$totask",
-        "$tresolve", "$adopt", "$await", "$mainwrap",
+        "$join", "$exc", "$mkexc", "$newlist", "$newdict", "$mainwrap",
     };
     return names;
   }
@@ -1051,92 +1050,10 @@ struct Binder {
 
   // -- Task, async and await ----------------------------------------------
   //
-  // The same three-func lowering examples/mini-js uses for a Promise, and
-  // that is the observation worth keeping: the statically-typed language
-  // and the dynamic one wanted exactly the same thing from the scheduler.
-  void rt_tnew() {
-    RT r(*this);
-
-    r.add(r.ret(r.obj({{"$task", r.Bo(true)},
-                       {"s", r.I(0)},
-                       {"v", r.Nil()},
-                       {"cbs", r.arr({})}})));
-    r.finish("$tnew");
-  }
-
-  void rt_tsettle() {
-    RT r(*this);
-    const auto [t, st, v] = r.params("t", "st", "v");
-    const auto [cbs, i] = r.locals("cbs", "i");
-    r.add(r.iff(r.bin(BinOp::Ne, r.idx(r.L(t), "s"), r.I(0)), r.ret(r.Nil())));
-    r.add(r.sidx(r.L(t), r.S("s"), r.L(st)));
-    r.add(r.sidx(r.L(t), r.S("v"), r.L(v)));
-    r.add(r.set(cbs, r.idx(r.L(t), "cbs")));
-    r.add(r.sidx(r.L(t), r.S("cbs"), r.arr({})));
-    r.add(r.set(i, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(cbs))),
-               r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(cbs), r.L(i))}),
-                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
-    r.add(r.ret(r.Nil()));
-    r.finish("$tsettle");
-  }
-
-  void rt_ton() {
-    RT r(*this);
-    const auto [t, cb] = r.params("t", "cb");
-    r.add(
-        r.iff(r.bin(BinOp::Ne, r.idx(r.L(t), "s"), r.I(0)),
-              r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
-    r.add(r.in(IntrinsicId::ArrayPush, {r.idx(r.L(t), "cbs"), r.L(cb)}));
-    r.add(r.ret(r.Nil()));
-    r.finish("$ton");
-  }
-
-  void rt_totask() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
-    r.add(r.iff(r.is(r.typ(v), "object"),
-                r.iff(r.has(r.L(v), r.S("$task")), r.ret(r.L(v)))));
-    r.add(r.set(t, r.call("$tnew", {})));
-    r.add(r.call("$tsettle", {r.L(t), r.I(1), r.L(v)}));
-    r.add(r.ret(r.L(t)));
-    r.finish("$totask");
-  }
-
-  void rt_tresolve() {
-    RT r(*this);
-    const auto [t, v] = r.params("t", "v");
-    r.add(r.iff(r.is(r.typ(v), "object"),
-                r.iff(r.has(r.L(v), r.S("$task")),
-                      r.blk({r.setc(0, r.L(t)), r.setc(1, r.L(v)),
-                             r.call("$ton", {r.L(v), r.clos("$adopt", {0, 1})}),
-                             r.ret(r.Nil())}))));
-    r.add(r.call("$tsettle", {r.L(t), r.I(1), r.L(v)}));
-    r.add(r.ret(r.Nil()));
-    r.finish("$tresolve", 2);
-  }
-
-  void rt_adopt() {
-    RT r(*this);
-
-    r.add(r.call("$tsettle",
-                 {r.P(0), r.idx(r.P(1), "s"), r.idx(r.P(1), "v")}));
-    r.finish("$adopt", 0, 2);
-  }
-
-  void rt_await() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    const auto [t] = r.locals("t");
-    r.add(r.set(t, r.call("$totask", {r.L(v)})));
-    r.add(r.call("$ton", {r.L(t), r.in(IntrinsicId::CoroCurrent, {})}));
-    r.add(r.in(IntrinsicId::CoroYield, {r.Nil()}));
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(t), "s"), r.I(2)),
-                r.b.make_throw(r.idx(r.L(t), "v"))));
-    r.add(r.ret(r.idx(r.L(t), "v")));
-    r.finish("$await");
-  }
+  // A Task is runtime_parts.h's promise, the one examples/mini-js's Promise
+  // is too, with the same three-func lowering of an async method: the
+  // statically-typed language and the dynamic one wanted exactly the same
+  // thing from the scheduler. `.Result` and `.Wait()` are $await.
 
   // Main runs as a coroutine, spawned by the entry frame. That is what
   // lets `.Wait()` park -- a CoroYield in the entry frame would have no
@@ -1153,8 +1070,8 @@ struct Binder {
     rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_nullcall(); rt_getf();
     rt_setf(); rt_idx(); rt_setidx(); rt_dictadd(); rt_len(); rt_iter();
     rt_iternext(); rt_join(); rt_exc();
-    rt_mkexc(); rt_newlist(); rt_newdict(); rt_tnew(); rt_tsettle(); rt_ton(); rt_totask();
-    rt_tresolve(); rt_adopt(); rt_await(); rt_mainwrap();
+    rt_mkexc(); rt_newlist(); rt_newdict(); write_promise_helpers(rt);
+    rt_mainwrap();
   }
 
   NodeId default_of(const Ast* type, SrcPos p) {
@@ -1849,10 +1766,10 @@ struct Binder {
       return rt.call("$join", {rt.call("$str", {a0(0)}, p), a0(1)}, p);
     }
     if (g == "Task" && (mem == "Yield" || mem == "CompletedTask")) {
-      return rt.call("$totask", {b.nil_literal(p)}, p);
+      return rt.call("$topromise", {b.nil_literal(p)}, p);
     }
     if (g == "Task" && mem == "FromResult") {
-      return rt.call("$totask", {a0(0)}, p);
+      return rt.call("$topromise", {a0(0)}, p);
     }
     // A static method reached through its class name: `Probe.Helper(x)`.
     if (class_by_name.count(g)) {
@@ -2089,7 +2006,7 @@ struct Binder {
     m.funcs.push_back({});
 
     std::vector<NodeId> launch{
-        b.cell_fresh(0), b.assign(VarKind::Cell, 0, rt.call("$tnew", {}, p))};
+        b.cell_fresh(0), b.assign(VarKind::Cell, 0, rt.call("$pnew", {}, p))};
     std::vector<CaptureSrc> fwd;
     for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
     const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
@@ -2148,11 +2065,12 @@ struct Binder {
         0, 1,
         b.make_try(
             0,
-            rt.call("$tresolve",
+            rt.call("$presolve",
                     {b.varref(VarKind::Capture, 1),
                      b.call_value(b.varref(VarKind::Capture, 0), callargs)},
                     p),
-            rt.call("$tsettle", {b.varref(VarKind::Capture, 1), b.literal(2),
+            rt.call("$psettle", {b.varref(VarKind::Capture, 1),
+                                 b.literal(kRejected),
                                  b.varref(VarKind::Local, 0)},
                     p)));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
@@ -2164,6 +2082,7 @@ struct Binder {
     m.funcs.push_back({});
     rs.fns[0].index = 0;
     rt.reserve(rt_names());
+    rt.reserve(promise_helpers());
     const size_t declared = fns.size();
     for (size_t f = 1; f < declared; ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());

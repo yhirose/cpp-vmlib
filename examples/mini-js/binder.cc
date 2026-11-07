@@ -502,10 +502,8 @@ struct Binder {
         "$push",   "$iter",    "$iternext", "$throwtype", "$minner",
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
         "$mfill",  "$sfill",   "$newresult",
-        "$pnew",   "$ispromise", "$psettle", "$pon",    "$topromise",
-        "$presolve", "$adopt", "$then",    "$react",    "$presolve1",
-        "$preject1", "$await",   "$prejected", "$arrayof", "$pushall",
-        "$logjoin",
+        "$then",    "$react",    "$presolve1", "$preject1", "$prejected",
+        "$arrayof", "$pushall", "$logjoin",
     };
     return names;
   }
@@ -995,8 +993,12 @@ struct Binder {
   // discipline settles what, in what order, is the language's -- the same
   // division examples/mini-go draws for a Go channel.
   //
-  //   * A Promise is an object: {$promise, s: 0|1|2, v, cbs}. `s` is
-  //     pending/fulfilled/rejected, `cbs` the reactions waiting on it.
+  //   * A Promise is runtime_parts.h's promise, settled once by $psettle,
+  //     which the ES rules this file needs already are: a second resolve,
+  //     or a reject after a resolve, is ignored (27.2.1.3's
+  //     "alreadyResolved"), and resolving with a promise adopts its state
+  //     (27.2.1.3.2) rather than fulfilling with the promise as a value.
+  //     What is JavaScript's own is below: `then`, and `new Promise`.
   //   * A reaction is whatever Enqueue accepts -- a closure, or a
   //     *coroutine*. `await` registers the coroutine itself, so settling a
   //     promise wakes the awaiting function directly, with no callback
@@ -1009,92 +1011,9 @@ struct Binder {
   //     and on the way back either answer its value or throw its reason.
   //     Every frame between the coroutine's bottom and the CoroYield is
   //     parked, which is why `await` works inside a call the body makes
-  //     rather than only at the body's own top level.
-
-  void rt_pnew() {
-    RT r(*this);
-
-    r.add(r.ret(r.obj({{"$promise", r.Bo(true)},
-                       {"s", r.I(0)},
-                       {"v", r.Nil()},
-                       {"cbs", r.b.array_lit({})}})));
-    r.finish("$pnew");
-  }
-
-  void rt_ispromise() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(
-        r.iff(r.is(r.typ(v), "object"),
-              r.ret(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S("$promise")}))));
-    r.add(r.ret(r.Bo(false)));
-    r.finish("$ispromise");
-  }
-
-  // Settling is once and for all: a second resolve, or a reject after a
-  // resolve, is ignored -- ES2023 27.2.1.3's "alreadyResolved".
-  void rt_psettle() {
-    RT r(*this);
-    const auto [p, st, v] = r.params("p", "st", "v");
-    const auto [cbs, i] = r.locals("cbs", "i");
-    r.add(r.iff(r.bin(BinOp::Ne, r.idx(r.L(p), "s"), r.I(0)), r.ret(r.Nil())));
-    r.add(r.sidx(r.L(p), "s", r.L(st)));
-    r.add(r.sidx(r.L(p), "v", r.L(v)));
-    r.add(r.set(cbs, r.idx(r.L(p), "cbs")));
-    r.add(r.sidx(r.L(p), "cbs", r.b.array_lit({})));
-    r.add(r.set(i, r.I(0)));
-    r.add(r.b.make_while(
-        r.bin(BinOp::Lt, r.L(i), r.len(r.L(cbs))),
-        r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(cbs), r.L(i))}),
-               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
-    r.add(r.ret(r.Nil()));
-    r.finish("$psettle");
-  }
-
-  void rt_pon() {
-    RT r(*this);
-    const auto [p, cb] = r.params("p", "cb");
-    r.add(
-        r.iff(r.bin(BinOp::Ne, r.idx(r.L(p), "s"), r.I(0)),
-              r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
-    r.add(r.in(IntrinsicId::ArrayPush, {r.idx(r.L(p), "cbs"), r.L(cb)}));
-    r.add(r.ret(r.Nil()));
-    r.finish("$pon");
-  }
-
-  void rt_topromise() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    const auto [p] = r.locals("p");
-    r.add(r.iff(r.call("$ispromise", {r.L(v)}), r.ret(r.L(v))));
-    r.add(r.set(p, r.call("$pnew", {})));
-    r.add(r.call("$psettle", {r.L(p), r.I(1), r.L(v)}));
-    r.add(r.ret(r.L(p)));
-    r.finish("$topromise");
-  }
-
-  // Resolving with a promise adopts its state (ES2023 27.2.1.3.2) rather
-  // than fulfilling with the promise as a value -- which is what makes an
-  // async function that returns a promise flatten instead of nesting.
-  void rt_presolve() {
-    RT r(*this);
-    const auto [q, v] = r.params("q", "v");
-    r.add(r.iff(r.call("$ispromise", {r.L(v)}),
-                r.blk({r.setc(0, r.L(q)), r.setc(1, r.L(v)),
-                       r.call("$pon", {r.L(v), r.clos("$adopt", {0, 1})}),
-                       r.ret(r.Nil())})));
-    r.add(r.call("$psettle", {r.L(q), r.I(1), r.L(v)}));
-    r.add(r.ret(r.Nil()));
-    r.finish("$presolve", 2);
-  }
-
-  void rt_adopt() {
-    RT r(*this);
-
-    r.add(r.call("$psettle",
-                 {r.P(0), r.idx(r.P(1), "s"), r.idx(r.P(1), "v")}));
-    r.finish("$adopt", 0, 2);
-  }
+  //     rather than only at the body's own top level. The resume comes
+  //     from $psettle's Enqueue rather than from any callback this front
+  //     end writes.
 
   void rt_then() {
     RT r(*this);
@@ -1121,16 +1040,17 @@ struct Binder {
       const NodeId run = r.b.make_try(
           0,
           r.call("$presolve",
-                 {r.P(1), r.b.call_value(r.P(h), {r.idx(r.P(0), "v")})}),
-          r.call("$psettle", {r.P(1), r.I(2), r.L(e)}));
+                 {r.P(1),
+                  r.b.call_value(r.P(h), {promise_value(r, r.P(0))})}),
+          r.call("$psettle", {r.P(1), r.I(kRejected), r.L(e)}));
       const NodeId pass =
-          fulfilled ? r.call("$presolve", {r.P(1), r.idx(r.P(0), "v")})
-                    : r.call("$psettle",
-                             {r.P(1), r.I(2), r.idx(r.P(0), "v")});
+          fulfilled ? r.call("$presolve", {r.P(1), promise_value(r, r.P(0))})
+                    : r.call("$psettle", {r.P(1), r.I(kRejected),
+                                          promise_value(r, r.P(0))});
       return r.iff(r.is(r.typ(r.P(h)), "function"), run, pass);
     };
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.P(0), "s"), r.I(1)), arm(2, true),
-                arm(3, false)));
+    r.add(r.iff(r.bin(BinOp::Eq, promise_state(r, r.P(0)), r.I(kFulfilled)),
+                arm(2, true), arm(3, false)));
     r.finish("$react", 0, 4);
   }
 
@@ -1147,25 +1067,8 @@ struct Binder {
   void rt_preject1() {
     RT r(*this);
     const auto [e] = r.params("e");
-    r.add(r.call("$psettle", {r.P(0), r.I(2), r.L(e)}));
+    r.add(r.call("$psettle", {r.P(0), r.I(kRejected), r.L(e)}));
     r.finish("$preject1", 0, 1);
-  }
-
-  // `await`. CoroCurrent is the coroutine the async call spawned; parking
-  // it on the promise and yielding is the whole of it, and the resume
-  // comes from $psettle's Enqueue rather than from any callback this
-  // front end writes.
-  void rt_await() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    const auto [p] = r.locals("p");
-    r.add(r.set(p, r.call("$topromise", {r.L(v)})));
-    r.add(r.call("$pon", {r.L(p), r.in(IntrinsicId::CoroCurrent, {})}));
-    r.add(r.in(IntrinsicId::CoroYield, {r.Nil()}));
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(p), "s"), r.I(2)),
-                r.b.make_throw(r.idx(r.L(p), "v"))));
-    r.add(r.ret(r.idx(r.L(p), "v")));
-    r.finish("$await");
   }
 
   void rt_prejected() {
@@ -1173,7 +1076,7 @@ struct Binder {
     const auto [e] = r.params("e");
     const auto [p] = r.locals("p");
     r.add(r.set(p, r.call("$pnew", {})));
-    r.add(r.call("$psettle", {r.L(p), r.I(2), r.L(e)}));
+    r.add(r.call("$psettle", {r.L(p), r.I(kRejected), r.L(e)}));
     r.add(r.ret(r.L(p)));
     r.finish("$prejected");
   }
@@ -1205,18 +1108,11 @@ struct Binder {
     rt_fill("$mfill", true);
     rt_fill("$sfill", false);
     rt_newresult();
-    rt_pnew();
-    rt_ispromise();
-    rt_psettle();
-    rt_pon();
-    rt_topromise();
-    rt_presolve();
-    rt_adopt();
+    write_promise_helpers(rt);
     rt_then();
     rt_react();
     rt_presolve1();
     rt_preject1();
-    rt_await();
     rt_prejected();
   }
 
@@ -2488,7 +2384,8 @@ struct Binder {
             0,
             rt.call("$presolve", {b.varref(VarKind::Capture, 1), call_body},
                     p),
-            rt.call("$psettle", {b.varref(VarKind::Capture, 1), b.literal(2),
+            rt.call("$psettle", {b.varref(VarKind::Capture, 1),
+                                 b.literal(kRejected),
                                  b.varref(VarKind::Local, 0)},
                     p)));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
@@ -2510,6 +2407,7 @@ struct Binder {
     m.funcs.push_back({});
     rs.fns[static_cast<size_t>(top)].index = 0;
     rt.reserve(rt_names());
+    rt.reserve(promise_helpers());
     for (size_t f = 1; f < fns.size(); ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});

@@ -158,8 +158,10 @@ which builds a Task, spawns a coroutine and returns; the body; and the
 entry that settles the Task -- which is *the same lowering
 examples/mini-js writes for a Promise*. Worth noticing: the
 statically-typed language and the dynamic one wanted exactly the same
-thing from `CoroCreate`, `CoroYield` and `Enqueue`, and neither needed the
-other's.
+thing from `CoroCreate`, `CoroYield` and `Enqueue` -- so much so that the
+Task and the Promise are now one promise, settled and awaited by the
+helpers [examples/common/runtime_parts.h](../common/runtime_parts.h)
+writes for both.
 
 `Main` itself is wrapped in a coroutine and enqueued, because `.Wait()`
 and `.Result` have to be able to suspend the caller, and only a coroutine

@@ -19,8 +19,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "vmlib.h"
 
@@ -28,6 +30,7 @@ namespace runtime_parts {
 
 using coreir::BinOp;
 using coreir::FuncWriter;
+using coreir::HelperTable;
 using coreir::HelperWriter;
 using coreir::IntrinsicId;
 using coreir::NodeId;
@@ -259,6 +262,139 @@ inline NodeId equal_entries(HelperWriter& r, FuncWriter::Slot a,
                          r.ret(r.Bo(false))),
                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
        r.ret(r.Bo(true))});
+}
+
+// ---- Promises --------------------------------------------------------------
+//
+// A promise -- JavaScript's Promise, C#'s Task -- settled once and waited
+// on, over the scheduler's primitives (CoroCurrent, CoroYield, Enqueue).
+// mini-js and mini-csharp wrote the same one, and found that the dynamic
+// language and the static one wanted the same thing from the scheduler:
+//
+//   { kPromiseState: kPending | kFulfilled | kRejected,
+//     kPromiseValue: the value, or the reason,
+//     kPromiseWaiting: [what settling it enqueues] }
+//
+// Every key is the implementation's: a promise is a value the program
+// holds, and none of these is a property of it.
+//
+// The helpers call one another, so their names are fixed: a front end
+// reserves promise_helpers() beside its own, writes them once with
+// write_promise_helpers, and calls them from its emit pass --
+//
+//   $pnew()             a pending promise
+//   $psettle(p, st, v)  settles p, once -- a second settle is ignored --
+//                       and enqueues what was waiting on it
+//   $pon(p, cb)         enqueues cb when p settles, now if it has
+//   $topromise(v)       v if it is a promise, else one fulfilled with v
+//   $presolve(q, v)     resolves q with v: adopts v's state if v is a
+//                       promise (so one returned from an async function
+//                       flattens), else fulfils q with it
+//   $await(v)           parks the running coroutine until v, as a promise,
+//                       settles: its value, or its reason thrown
+//
+// -- and $adopt, the reaction $presolve hangs on a promise it adopts. What a
+// language builds on them (JavaScript's `then` and `new Promise`, C#'s
+// `.Result`) is its own.
+inline constexpr char kPromiseState[] = "\x01" "s";
+inline constexpr char kPromiseValue[] = "\x01" "v";
+inline constexpr char kPromiseWaiting[] = "\x01" "w";
+inline constexpr int64_t kPending = 0;
+inline constexpr int64_t kFulfilled = 1;
+inline constexpr int64_t kRejected = 2;
+
+inline NodeId is_promise(FuncWriter& w, FuncWriter::Slot v) {
+  return w.both(w.is(w.typ(v), "object"), w.has(w.L(v), w.S(kPromiseState)));
+}
+inline NodeId promise_state(FuncWriter& w, NodeId p) {
+  return w.idx(p, kPromiseState);
+}
+inline NodeId promise_value(FuncWriter& w, NodeId p) {
+  return w.idx(p, kPromiseValue);
+}
+
+inline const std::vector<std::string>& promise_helpers() {
+  static const std::vector<std::string> names = {
+      "$pnew", "$psettle", "$pon", "$topromise", "$presolve", "$adopt",
+      "$await"};
+  return names;
+}
+
+inline void write_promise_helpers(HelperTable& rt) {
+  {
+    HelperWriter r(rt);
+    r.add(r.ret(r.obj({{kPromiseState, r.I(kPending)},
+                       {kPromiseValue, r.Nil()},
+                       {kPromiseWaiting, r.arr({})}})));
+    r.finish("$pnew");
+  }
+  {
+    HelperWriter r(rt);
+    const auto [p, st, v] = r.params("p", "st", "v");
+    const auto [waiting, i] = r.locals("waiting", "i");
+    r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
+                r.ret(r.Nil())));
+    r.add(r.sidx(r.L(p), kPromiseState, r.L(st)));
+    r.add(r.sidx(r.L(p), kPromiseValue, r.L(v)));
+    r.add(r.set(waiting, r.idx(r.L(p), kPromiseWaiting)));
+    r.add(r.sidx(r.L(p), kPromiseWaiting, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(waiting))),
+               r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(waiting), r.L(i))}),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.ret(r.Nil()));
+    r.finish("$psettle");
+  }
+  {
+    HelperWriter r(rt);
+    const auto [p, cb] = r.params("p", "cb");
+    r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
+                r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
+    r.add(r.push(r.idx(r.L(p), kPromiseWaiting), r.L(cb)));
+    r.add(r.ret(r.Nil()));
+    r.finish("$pon");
+  }
+  {
+    HelperWriter r(rt);
+    const auto [v] = r.params("v");
+    const auto [p] = r.locals("p");
+    r.add(r.iff(is_promise(r, v), r.ret(r.L(v))));
+    r.add(r.set(p, r.call("$pnew", {})));
+    r.add(r.call("$psettle", {r.L(p), r.I(kFulfilled), r.L(v)}));
+    r.add(r.ret(r.L(p)));
+    r.finish("$topromise");
+  }
+  {
+    // cells: 0 = q, 1 = v, for $adopt to close over.
+    HelperWriter r(rt);
+    const auto [q, v] = r.params("q", "v");
+    r.add(r.iff(is_promise(r, v),
+                r.blk({r.setc(0, r.L(q)), r.setc(1, r.L(v)),
+                       r.call("$pon", {r.L(v), r.clos("$adopt", {0, 1})}),
+                       r.ret(r.Nil())})));
+    r.add(r.call("$psettle", {r.L(q), r.I(kFulfilled), r.L(v)}));
+    r.add(r.ret(r.Nil()));
+    r.finish("$presolve", 2);
+  }
+  {
+    // captures: 0 = the promise to settle, 1 = the one it adopts.
+    HelperWriter r(rt);
+    r.add(r.call("$psettle", {r.P(0), promise_state(r, r.P(1)),
+                              promise_value(r, r.P(1))}));
+    r.finish("$adopt", 0, 2);
+  }
+  {
+    HelperWriter r(rt);
+    const auto [v] = r.params("v");
+    const auto [p] = r.locals("p");
+    r.add(r.set(p, r.call("$topromise", {r.L(v)})));
+    r.add(r.call("$pon", {r.L(p), r.in(IntrinsicId::CoroCurrent, {})}));
+    r.add(r.in(IntrinsicId::CoroYield, {r.Nil()}));
+    r.add(r.iff(r.bin(BinOp::Eq, promise_state(r, r.L(p)), r.I(kRejected)),
+                r.b.make_throw(promise_value(r, r.L(p)))));
+    r.add(r.ret(promise_value(r, r.L(p))));
+    r.finish("$await");
+  }
 }
 
 // ---- Left per language, and why -------------------------------------------

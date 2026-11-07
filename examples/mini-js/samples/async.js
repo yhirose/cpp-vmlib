@@ -57,6 +57,13 @@ async function main() {
   const adopted = await Promise.resolve('x').then(() => Promise.resolve('inner'));
   show('adopted', adopted);
 
+  // An object shaped like what a promise keeps inside is awaited as the
+  // value it is, and a promise shows none of that as properties.
+  const lookalike = {$promise: true, s: 2, v: 'reason', cbs: []};
+  const awaited = await lookalike;
+  const real = Promise.resolve(7);
+  show('lookalike', [awaited === lookalike, real.s, real.v, real.cbs]);
+
   tick('main end');
   return 'main value';
 }
