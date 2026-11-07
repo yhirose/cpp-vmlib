@@ -451,23 +451,18 @@ struct Binder {
 
   // Lua's `%` and `//` floor; C's (and BinOp::Mod's, and BinOp::Div's on
   // two ints) truncate toward zero. `-7 % 3` is 2 here and -1 there, and
-  // `-7 // 2` is -4 here and -3 there -- so both get a correction when the
-  // operands' signs differ and the division was not exact.
+  // `-7 // 2` is -4 here and -3 there. On two integers that is
+  // BinOp::FloorMod and BinOp::FloorDiv, which the operators in the
+  // program are (Binder::floor), with these behind them for a float and a
+  // zero divisor.
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [i, f] = r.locals("i", "f");
+    const auto [f] = r.locals("f");
     r.add(r.iff(
         r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
-        r.blk(
-            {r.set(i, r.bin(BinOp::Mod, r.L(a), r.L(b))),
-             r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(i), r.I(0)),
-                               r.bin(BinOp::Lt,
-                                     r.bin(BinOp::Mul, r.L(i), r.L(b)), r.I(0)),
-                               r.Bo(false)),
-                   r.set(i, r.bin(BinOp::Add, r.L(i), r.L(b)))),
-             r.ret(r.L(i))})));
-    // The float path: fmod, corrected the same way.
+        r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
+    // The float path: fmod, corrected when the signs disagree.
     r.add(r.set(f, r.in(IntrinsicId::FMod, {r.L(a), r.L(b)})));
     r.add(r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(f), r.D(0.0)),
                             r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(f), r.L(b)),
@@ -481,20 +476,9 @@ struct Binder {
   void rt_idiv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [q] = r.locals("q");
     r.add(r.iff(
         r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
-        r.blk(
-            {r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))),
-             // Truncation and flooring differ exactly when the
-             // signs disagree and the remainder is nonzero.
-             r.iff(r.b.make_if(r.bin(BinOp::Ne,
-                                     r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
-                               r.bin(BinOp::Lt,
-                                     r.bin(BinOp::Mul, r.L(a), r.L(b)), r.I(0)),
-                               r.Bo(false)),
-                   r.set(q, r.bin(BinOp::Sub, r.L(q), r.I(1)))),
-             r.ret(r.L(q))})));
+        r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
     r.add(r.ret(
         r.nat("floor", {r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(a)}),
                               r.in(IntrinsicId::ToDouble, {r.L(b)}))})));
@@ -1003,6 +987,12 @@ struct Binder {
                         p);
   }
 
+  // `//` and `%` on two integers are FloorDiv and FloorMod, Lua's own
+  // floor; on a float, or by zero, the helper's.
+  NodeId floor(BinOp op, const char* helper, NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, op, x, y, tags_named("int"), helper, p);
+  }
+
   // `==` on two values of these types is Eq's -- an integer and a float
   // compare as numbers -- and on two of different types, which Eq refuses,
   // $eq's, which says they differ. A table is $eq's, for __eq.
@@ -1273,8 +1263,8 @@ struct Binder {
           else if (t == "-") acc = arith(BinOp::Sub, "$subm", acc, rhs, op_p);
           else if (t == "*") acc = arith(BinOp::Mul, "$mulm", acc, rhs, op_p);
           else if (t == "/") acc = rt.call("$div", {acc, rhs}, op_p);
-          else if (t == "//") acc = rt.call("$idiv", {acc, rhs}, op_p);
-          else acc = rt.call("$mod", {acc, rhs}, op_p);
+          else if (t == "//") acc = floor(BinOp::FloorDiv, "$idiv", acc, rhs, op_p);
+          else acc = floor(BinOp::FloorMod, "$mod", acc, rhs, op_p);
         }
         return {acc};
       }

@@ -4,9 +4,13 @@
 
 print(1 + 2 * 3, 7 - 2, 3 * 4)
 -- `/` is always a float, `//` floors, and `%` follows `//`. BinOp::Div on
--- two ints truncates and BinOp::Mod is C's, so both of these are lowered
--- through a func this front end writes.
+-- two ints truncates and BinOp::Mod is C's, so both of these are
+-- BinOp::FloorDiv and BinOp::FloorMod, with a func this front end writes
+-- behind them for a float and a zero divisor.
 print(7 / 2, 7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)
+-- Which way to round is the signs' to say, not their product's, which
+-- wraps past 2^63.
+print(-3 % 4611686018427387904, -3 // 4611686018427387904)
 print(2 ^ 10, 2 ^ 0.5)
 print(math.type(1), math.type(1.0), math.type(7 // 2), math.type(7 / 2))
 

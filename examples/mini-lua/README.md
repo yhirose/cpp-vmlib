@@ -100,10 +100,11 @@ way: the VM's operator on the values where it is Lua's, the helper,
 with its metamethods, on the rest.
 
 **`%` and `//` floor.** `-7 % 3` is 2 in Lua and -1 in C, and `BinOp::Mod`
-is C's; `-7 // 2` is -4 in Lua and -3 from `BinOp::Div`. `$mod` and `$idiv`
-apply the correction, which is needed exactly when the operands' signs
-disagree and the division was not exact. (`/` is a third: it is *always* a
-float in Lua, even on two integers.)
+is C's; `-7 // 2` is -4 in Lua and -3 from `BinOp::Div`. On two integers
+they are `BinOp::FloorMod` and `BinOp::FloorDiv`, the floor itself; `$mod`
+and `$idiv` behind them take a float, correcting `FMod` when the signs
+disagree, and a zero divisor. (`/` is a third: it is *always* a float in
+Lua, even on two integers.)
 
 **`==` across two types is `false`**, where `eval_binop` refuses the
 comparison -- *"a question a language answers, not the VM."*
