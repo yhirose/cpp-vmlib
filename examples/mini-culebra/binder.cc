@@ -910,16 +910,10 @@ struct Binder {
     const int32_t mark = ctx.mark();
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it);
-    const NodeId S = b.varref(VarKind::Local, st);
-    std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
-        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
-        b.make_yield(b.index(S, b.str_literal("value")))};
     const NodeId body =
-        b.block({b.assign(VarKind::Local, it,
-                          rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
-                 b.make_while(b.bool_literal(true), b.block(loop))});
+        for_each(rt, p, it, st,
+                 rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p),
+                 {b.make_yield(value_of(b, st))});
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
   }
@@ -937,8 +931,6 @@ struct Binder {
     const int32_t mark = ctx.mark();
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it);
-    const NodeId S = b.varref(VarKind::Local, st);
 
     const int32_t v = decl_of.at(a.nodes[0].get());
     const int32_t emark = ctx.mark();
@@ -946,8 +938,7 @@ struct Binder {
     std::vector<NodeId> elem;
     const auto c = cells.find(v);
     if (c != cells.end()) elem.push_back(b.cell_fresh(c->second));
-    elem.push_back(
-        bind_decl(v, b.index(S, b.str_literal("value")), ctx, p, false));
+    elem.push_back(bind_decl(v, value_of(b, st), ctx, p, false));
     elem.push_back(emit_block(*a.nodes[2], ctx, false, false));
     const int32_t eend = ctx.release(emark);
     const NodeId elem_scope =
@@ -955,14 +946,10 @@ struct Binder {
             ? b.scope(emark, eend, b.block(elem), release_list({v}, ctx, p))
             : b.scope(emark, emark, b.block(elem), release_list({v}, ctx, p));
 
-    std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
-        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
-        elem_scope};
     const NodeId body =
-        b.block({b.assign(VarKind::Local, it,
-                          rt.call("$iter", {emit_expr(*a.nodes[1], ctx)}, p)),
-                 b.make_while(b.bool_literal(true), b.block(loop))});
+        for_each(rt, p, it, st,
+                 rt.call("$iter", {emit_expr(*a.nodes[1], ctx)}, p),
+                 {elem_scope});
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
   }

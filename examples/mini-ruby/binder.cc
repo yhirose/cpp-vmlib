@@ -962,14 +962,11 @@ struct Binder {
     RT r(*this);
     const auto [v, blk] = r.params("v", "blk");
     const auto [it, st] = r.locals("it", "st");
-    r.add(r.set(it, r.call("$iter", {r.L(v)})));
-    r.add(r.wh(r.Bo(true),
-               r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
-                      r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
-                      r.iff(r.has(r.L(st), r.S("key")),
-                            r.callb(r.L(blk), {r.idx(r.L(st), "key"),
-                                               r.idx(r.L(st), "value")}),
-                            r.callb(r.L(blk), {r.idx(r.L(st), "value")}))})));
+    add_for_each(
+        r, it, st, r.call("$iter", {r.L(v)}),
+        {r.iff(r.has(r.L(st), r.S("key")),
+               r.callb(r.L(blk), {r.idx(r.L(st), "key"), value_of(r, st)}),
+               r.callb(r.L(blk), {value_of(r, st)}))});
     r.add(r.ret(r.L(v)));
     r.finish("$each");
   }

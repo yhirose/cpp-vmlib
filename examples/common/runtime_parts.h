@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "vmlib.h"
@@ -167,6 +168,68 @@ inline void iter_step(FuncWriter& w, FuncWriter::Slot it) {
   w.add(w.iff(w.bin(BinOp::Ge, w.L(i), w.len(w.L(a))), w.ret(step_done(w))));
   w.add(w.sidx(w.L(it), "i", w.bin(BinOp::Add, w.L(i), w.I(1))));
   w.add(w.ret(step(w, w.idx(w.L(a), w.L(i)))));
+}
+
+// ---- A for-each loop -------------------------------------------------------
+//
+// The loop a for-each lowers to, whether a binder's emit pass writes it or
+// a helper does: the cursor in `it`, each step in `st`, until a step is
+// done --
+//
+//   it = cursor
+//   while (true) { st = $iternext(it); if (st.done) break; body... }
+//
+// `it` and `st` are local slots the caller allocated, `cursor` is what its
+// `$iter` built (or a cursor it already holds), and `body` is what one
+// element runs, written over value_of(st). The step is the front end's
+// helper named "$iternext". A caller builds `body` before calling, in
+// whatever order its own slots and scopes need.
+inline NodeId done_of(coreir::Builder::At& b, int32_t st) {
+  return b.index(b.varref(coreir::VarKind::Local, st), b.str_literal("done"));
+}
+inline NodeId value_of(coreir::Builder::At& b, int32_t st) {
+  return b.index(b.varref(coreir::VarKind::Local, st), b.str_literal("value"));
+}
+namespace detail {
+// The loop's two statements: the cursor stored, and the while.
+inline std::pair<NodeId, NodeId> for_each(HelperTable& rt, coreir::SrcPos p,
+                                          int32_t it, int32_t st,
+                                          NodeId cursor,
+                                          const std::vector<NodeId>& body) {
+  using coreir::VarKind;
+  auto b = coreir::Builder(rt.module()).at(p);
+  std::vector<NodeId> loop{
+      b.assign(VarKind::Local, st,
+               rt.call("$iternext", {b.varref(VarKind::Local, it)}, p)),
+      b.make_if(done_of(b, st), b.make_break(), NodeId{})};
+  loop.insert(loop.end(), body.begin(), body.end());
+  return {b.assign(VarKind::Local, it, cursor),
+          b.make_while(b.bool_literal(true), b.block(loop))};
+}
+}  // namespace detail
+
+inline NodeId for_each(HelperTable& rt, coreir::SrcPos p, int32_t it,
+                       int32_t st, NodeId cursor,
+                       const std::vector<NodeId>& body) {
+  const auto [start, loop] = detail::for_each(rt, p, it, st, cursor, body);
+  return coreir::Builder(rt.module()).at(p).block({start, loop});
+}
+
+// The same, in a helper's own slots, added to its body as two statements
+// rather than one block around them, as a helper's loop always stands.
+inline NodeId done_of(FuncWriter& w, FuncWriter::Slot st) {
+  return done_of(w.b, st.i);
+}
+inline NodeId value_of(FuncWriter& w, FuncWriter::Slot st) {
+  return value_of(w.b, st.i);
+}
+inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
+                         FuncWriter::Slot st, NodeId cursor,
+                         const std::vector<NodeId>& body) {
+  const auto [start, loop] =
+      detail::for_each(r.table, r.pos, it.i, st.i, cursor, body);
+  r.add(start);
+  r.add(loop);
 }
 
 // ---- Truthiness ------------------------------------------------------------

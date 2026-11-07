@@ -251,8 +251,8 @@ What the helpers *say* is the language's, not the library's: how a class
 finds a method, what is false, how a value prints. Where front ends here
 made the same decision and wrote it the same way, it is kept once, outside
 `vmlib.h`, in [examples/common/runtime_parts.h](examples/common/runtime_parts.h)
--- the class layout and the walk up its bases, the cursor a for-each
-loop steps, the nil-and-false truthiness, a float printed with its ".0",
+-- the class layout and the walk up its bases, a for-each loop and the
+cursor it steps, the nil-and-false truthiness, a float printed with its ".0",
 two containers compared by what they hold, a promise settled once and
 awaited -- and the end of that file lists what each front end still
 writes for itself, and why. Its

@@ -1253,18 +1253,12 @@ struct Binder {
     const int32_t mark = ctx.mark();
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it);
-    const NodeId S = b.varref(VarKind::Local, st);
-    std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
-        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
-        bind_decl(decl_of.at(a.nodes[1].get()),
-                  b.index(S, b.str_literal("value")), ctx, p),
+    const std::vector<NodeId> each{
+        bind_decl(decl_of.at(a.nodes[1].get()), value_of(b, st), ctx, p),
         emit_stmt(*a.nodes[3], ctx)};
     const NodeId body =
-        b.block({b.assign(VarKind::Local, it,
-                          rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p)),
-                 b.make_while(b.bool_literal(true), b.block(loop))});
+        for_each(rt, p, it, st,
+                 rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p), each);
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
   }

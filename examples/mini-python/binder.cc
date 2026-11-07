@@ -1854,11 +1854,8 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [out, it, st] = r.locals("out", "it", "st");
     r.add(r.set(out, r.arr({})));
-    r.add(r.set(it, r.call("$iter", {r.L(v)})));
-    r.add(
-        r.wh(r.Bo(true), r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
-                                r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
-                                r.push(r.L(out), r.idx(r.L(st), "value"))})));
+    add_for_each(r, it, st, r.call("$iter", {r.L(v)}),
+                   {r.push(r.L(out), value_of(r, st))});
     r.add(r.ret(r.L(out)));
     r.finish("$tolist");
   }
@@ -1953,11 +1950,8 @@ struct Binder {
     RT r(*this);
     const auto [dst, src] = r.params("dst", "src");
     const auto [it, st] = r.locals("it", "st");
-    r.add(r.set(it, r.call("$iter", {r.L(src)})));
-    r.add(
-        r.wh(r.Bo(true), r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
-                                r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
-                                r.push(r.L(dst), r.idx(r.L(st), "value"))})));
+    add_for_each(r, it, st, r.call("$iter", {r.L(src)}),
+                   {r.push(r.L(dst), value_of(r, st))});
     r.add(r.ret(r.L(dst)));
     r.finish("$aext");
   }
@@ -2486,10 +2480,10 @@ struct Binder {
     const auto [g, dflt, hasdflt] = r.params("g", "dflt", "hasdflt");
     const auto [st] = r.locals("st");
     r.add(r.set(st, r.call("$iternext", {r.call("$iter", {r.L(g)})})));
-    r.add(r.iff(r.idx(r.L(st), "done"),
+    r.add(r.iff(done_of(r, st),
                 r.blk({r.iff(r.L(hasdflt), r.ret(r.L(dflt))),
                        r.call("$exc", {r.S("StopIteration"), r.S("")})})));
-    r.add(r.ret(r.idx(r.L(st), "value")));
+    r.add(r.ret(value_of(r, st)));
     r.finish("$next");
   }
 
@@ -3377,19 +3371,9 @@ struct Binder {
         // *returns* is dropped -- see README.md.
         const int32_t it = ctx.alloc_local("$it");
         const int32_t st = ctx.alloc_local("$step");
-        const NodeId I = b.varref(VarKind::Local, it);
-        const NodeId S = b.varref(VarKind::Local, st);
-        return b.block(
-            {b.assign(VarKind::Local, it,
-                      rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
-             b.make_while(
-                 b.bool_literal(true),
-                 b.block(
-                     {b.assign(VarKind::Local, st,
-                               rt.call("$iternext", {I}, p)),
-                      b.make_if(b.index(S, b.str_literal("done")),
-                                b.make_break(), NodeId{}),
-                      b.make_yield(b.index(S, b.str_literal("value")))}))});
+        return for_each(rt, p, it, st,
+                        rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p),
+                        {b.make_yield(value_of(b, st))});
       }
       case "globalstmt"_:
       case "nonlocalstmt"_:
@@ -3479,13 +3463,9 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it);
-    const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *a.nodes[0];
-    std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
-        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
-    const NodeId value = b.index(S, b.str_literal("value"));
+    std::vector<NodeId> loop;
+    const NodeId value = value_of(b, st);
     if (tg.nodes.size() == 1) {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
@@ -3504,10 +3484,8 @@ struct Binder {
       }
     }
     loop.push_back(emit_block(*a.nodes[2], ctx));
-    return b.block({b.assign(VarKind::Local, it,
-                             rt.call("$iter", {emit_expr(*a.nodes[1], ctx)},
-                                     p)),
-                    b.make_while(b.bool_literal(true), b.block(loop))});
+    return for_each(rt, p, it, st,
+                    rt.call("$iter", {emit_expr(*a.nodes[1], ctx)}, p), loop);
   }
 
   // try/except/finally. `finally` is a Defer inside the Scope wrapping the
@@ -4853,13 +4831,9 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, it);
-    const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *c.nodes[0];
-    std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
-        b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
-    const NodeId value = b.index(S, b.str_literal("value"));
+    std::vector<NodeId> loop;
+    const NodeId value = value_of(b, st);
     if (tg.nodes.size() == 1) {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
@@ -4881,8 +4855,7 @@ struct Binder {
                             ? given
                             : rt.call("$iter",
                                       {emit_expr(*c.nodes[1], ctx)}, p);
-    return b.block({b.assign(VarKind::Local, it, iter),
-                    b.make_while(b.bool_literal(true), b.block(loop))});
+    return for_each(rt, p, it, st, iter, loop);
   }
 
   Module build(const Ast& program) {

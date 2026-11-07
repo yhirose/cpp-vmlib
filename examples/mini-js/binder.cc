@@ -954,15 +954,12 @@ struct Binder {
     const auto [o, init] = r.params("o", "init");
     const auto [it, st, e] = r.locals("it", "st", "e");
     r.add(r.iff(r.is(r.typ(init), "nil"), r.ret(r.L(o))));
-    r.add(r.set(it, r.call("$iter", {r.L(init)})));
     const NodeId add =
         pairs ? r.call("$mset", {r.L(o), r.idx(r.L(e), r.I(0)),
                                  r.idx(r.L(e), r.I(1))})
               : r.call("$sadd", {r.L(o), r.L(e)});
-    r.add(r.wh(r.Bo(true),
-               r.blk({r.set(st, r.call("$iternext", {r.L(it)})),
-                      r.iff(r.idx(r.L(st), "done"), r.b.make_break()),
-                      r.set(e, r.idx(r.L(st), "value")), add})));
+    add_for_each(r, it, st, r.call("$iter", {r.L(init)}),
+                   {r.set(e, value_of(r, st)), add});
     r.add(r.ret(r.L(o)));
     r.finish(name);
   }
@@ -1480,24 +1477,13 @@ struct Binder {
     const int32_t mark = ctx.mark();
     const int32_t it = ctx.alloc_local("$it");
     const int32_t st = ctx.alloc_local("$step");
-    std::vector<NodeId> out;
-    out.push_back(b.assign(VarKind::Local, it,
-                           rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p)));
-    std::vector<NodeId> loop;
-    loop.push_back(
-        b.assign(VarKind::Local, st,
-                 rt.call("$iternext", {b.varref(VarKind::Local, it)}, p)));
-    loop.push_back(
-        b.make_if(b.index(b.varref(VarKind::Local, st), b.str_literal("done")),
-                  b.make_break(), NodeId{}));
-    loop.push_back(bind_decl(
-        decl_of.at(a.nodes[1].get()),
-        b.index(b.varref(VarKind::Local, st), b.str_literal("value")), ctx, p));
-    loop.push_back(emit_body(*a.nodes[3], ctx));
-    out.push_back(b.make_while(b.bool_literal(true), b.block(loop)));
-
+    const NodeId cursor = rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p);
+    const std::vector<NodeId> each{
+        bind_decl(decl_of.at(a.nodes[1].get()), value_of(b, st), ctx, p),
+        emit_body(*a.nodes[3], ctx)};
+    const NodeId loop = for_each(rt, p, it, st, cursor, each);
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(out));
+    return b.scope(mark, end, loop);
   }
 
   // try/catch/finally. `finally` is a Defer, not a copy of the block down
