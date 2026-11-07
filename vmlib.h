@@ -7068,6 +7068,9 @@ inline void clear_frame(Frame& f) {
 // thousand frames' worth of registers for the rest of the run.
 struct FramePool {
   static constexpr size_t kMax = 64;
+  // Reserved whole up front: a frame comes back here from a deleter, inside
+  // a destructor, where an allocation that failed would have nowhere to go.
+  FramePool() { free_list.reserve(kMax); }
   // Plain unique_ptrs, not FramePtrs: a frame already on the free list must
   // be deleted when the list goes, not handed back to the list it is in.
   std::vector<std::unique_ptr<Frame>> free_list;
