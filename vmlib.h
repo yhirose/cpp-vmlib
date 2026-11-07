@@ -4473,8 +4473,11 @@ inline bool Runtime::run_drop(HeapObj* h) {
 
 inline void Runtime::owned_register(ObjectObj* o) {
   if (o->owned_idx >= 0) return;
-  o->owned_idx = static_cast<int64_t>(owned_.size());
-  owned_.push_back({o, owned_next_id_++});
+  // The entry first, its index after: a push that cannot allocate leaves
+  // the object off the stack rather than pointing past its end.
+  owned_.push_back({o, owned_next_id_});
+  o->owned_idx = static_cast<int64_t>(owned_.size() - 1);
+  ++owned_next_id_;
   // Tombstones pile up under a scope that never exits (the entry frame's);
   // prune now and then, keeping every back-pointer right.
   if ((owned_next_id_ & 1023) == 0) {
@@ -4495,38 +4498,60 @@ inline void Runtime::owned_scope_exit(uint64_t mark) {
   // The common case: nothing was bound under this scope.
   if (owned_.empty() || owned_.back().id < mark) return;
 
+  // Everything this allocates before it changes anything, as far as it
+  // can: the lists below are reserved for every entry above the mark, so
+  // a failed allocation leaves the stack as it was. The analysis that
+  // follows allocates too; past that point the pins are a guard's, which
+  // releases them however this is left.
+  size_t above = 0;
+  for (size_t i = owned_.size(); i-- > 0 && owned_[i].id >= mark;) ++above;
+  std::vector<OwnedEntry> cand;
+  std::vector<ObjectObj*> objs;
+  std::vector<ObjectObj*> dropped;
+  cand.reserve(above);
+  objs.reserve(above);
+  dropped.reserve(above);
+
+  // The candidates' pins, released in the candidates' order on the way out
+  // -- the last thing this does, or the first thing a throw does.
+  struct Pins {
+    const std::vector<OwnedEntry>& cand;
+    ~Pins() {
+      for (const OwnedEntry& e : cand) {
+        if (--e.obj->rc == 0) heap_release_to_zero(e.obj);
+      }
+    }
+  } pins{cand};
+
   // The candidates, newest first: the entries above the mark, less the
   // tombstones and the already dropped. Pinned, since a destructor below
   // may drop the last edge between two of them, and neither may go before
   // the sweep at the end decides.
-  std::vector<OwnedEntry> cand;
   while (!owned_.empty() && owned_.back().id >= mark) {
     const OwnedEntry e = owned_.back();
     owned_.pop_back();
     if (!e.obj) continue;
     e.obj->owned_idx = -1;
     if (e.obj->dropped) continue;
-    ++e.obj->rc;
     cand.push_back(e);
+    ++e.obj->rc;
   }
   if (cand.empty()) return;
 
-  std::vector<ObjectObj*> objs;
-  objs.reserve(cand.size());
   for (const OwnedEntry& e : cand) objs.push_back(e.obj);
   const std::vector<char> gone = detail::owned_unreachable(objs);
 
   // Survivors go back first, oldest first and with their ids, so the
   // outer scope whose mark they are above resolves them -- and before any
   // destructor runs, since one may bind new entries, which must sit above.
+  // No more go back than came off, so the stack does not grow.
   for (size_t i = cand.size(); i-- > 0;) {
     if (gone[i]) continue;
-    cand[i].obj->owned_idx = static_cast<int64_t>(owned_.size());
     owned_.push_back(cand[i]);
+    cand[i].obj->owned_idx = static_cast<int64_t>(owned_.size() - 1);
   }
 
   // Destructors, newest first, each over a still-whole cycle.
-  std::vector<ObjectObj*> dropped;
   for (size_t i = 0; i < cand.size(); ++i) {
     if (!gone[i]) continue;
     run_drop(cand[i].obj);
@@ -4542,9 +4567,6 @@ inline void Runtime::owned_scope_exit(uint64_t mark) {
     for (size_t i = 0; i < dropped.size(); ++i) {
       if (still[i]) clear_heap_object_refs(dropped[i]);
     }
-  }
-  for (const OwnedEntry& e : cand) {
-    if (--e.obj->rc == 0) heap_release_to_zero(e.obj);
   }
 }
 
