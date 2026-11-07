@@ -888,7 +888,7 @@ struct Binder {
     method_walk(r, recv, key);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
                 r.ret(r.ref("$nullcall"))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
+    r.add(r.iff(r.b.unary(UnOp::Not, r.has(r.L(recv), r.S(kClassKey))),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
         "$exc", {r.bin(BinOp::Add, r.S("no such method: "),
@@ -1248,8 +1248,7 @@ struct Binder {
         b.assign(VarKind::Local, first, b.bool_literal(false)), b.block(step))};
     if (!a.nodes[1]->nodes.empty()) {
       loop.push_back(
-          b.make_if(b.binary(BinOp::Eq, emit_expr(*a.nodes[1]->nodes[0], ctx),
-                             b.bool_literal(false)),
+          b.make_if(b.unary(UnOp::Not, emit_expr(*a.nodes[1]->nodes[0], ctx)),
                     b.make_break(), NodeId{}));
     }
     loop.push_back(emit_stmt(*a.nodes[3], ctx));
@@ -1418,8 +1417,7 @@ struct Binder {
         return v;
       }
       case "notexp"_:
-        return b.binary(BinOp::Eq, emit_expr(*a.nodes[0], ctx),
-                        b.bool_literal(false));
+        return b.unary(UnOp::Not, emit_expr(*a.nodes[0], ctx));
       case "negexp"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "awaitexp"_: {

@@ -623,9 +623,9 @@ struct Binder {
     one("$true", 1, [&](RT& r) {
       return r.iff(r.is(r.typ(r.L(0)), "bool"), r.L(0), r.Bo(true));
     }, {"v"});
-    one("$not", 1, [&](RT& r) {
-      return r.bin(BinOp::Eq, r.call("$true", {r.L(0)}), r.Bo(false));
-    }, {"v"});
+    one("$not", 1,
+        [&](RT& r) { return r.b.unary(UnOp::Not, r.call("$true", {r.L(0)})); },
+        {"v"});
 
     // Numbers. Two exact integers stay exact, which is eval_binop's own
     // rule; `/` on two exact integers would be a *rational* in Scheme, and
@@ -791,11 +791,11 @@ struct Binder {
     r.add(r.set(i, r.I(1)));
     if (bi.fold == Fold::Chain) {
       const NodeId prev = x(r.bin(BinOp::Sub, r.L(i), r.I(1)));
-      r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.L(n)),
-                 r.blk({r.iff(r.bin(BinOp::Eq, r.call(bi.rt, {prev, x(r.L(i))}),
-                                    r.Bo(false)),
-                              r.ret(r.Bo(false))),
-                        next()})));
+      r.add(r.wh(
+          r.bin(BinOp::Lt, r.L(i), r.L(n)),
+          r.blk({r.iff(r.b.unary(UnOp::Not, r.call(bi.rt, {prev, x(r.L(i))})),
+                       r.ret(r.Bo(false))),
+                 next()})));
       r.add(r.ret(r.Bo(true)));
     } else {
       const auto [acc] = r.locals("acc");
@@ -889,7 +889,7 @@ struct Binder {
   void rt_append2() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(r.bin(BinOp::Eq, r.pairp(r.L(a)), r.Bo(false)), r.ret(r.L(b))));
+    r.add(r.iff(r.b.unary(UnOp::Not, r.pairp(r.L(a))), r.ret(r.L(b))));
     r.add(r.ret(
         r.arr({r.car(r.L(a)), r.call("$append2", {r.cdr(r.L(a)), r.L(b)})})));
     r.finish("$append2");
@@ -917,7 +917,7 @@ struct Binder {
     r.add(r.wh(r.both(r.bin(BinOp::Gt, r.L(i), r.I(0)), r.pairp(r.L(p))),
                r.blk({r.set(p, r.cdr(r.L(p))),
                       r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.pairp(r.L(p)), r.Bo(false)),
+    r.add(r.iff(r.b.unary(UnOp::Not, r.pairp(r.L(p))),
                 r.err("list-ref: index out of range")));
     r.add(r.ret(r.car(r.L(p))));
     r.finish("$listref");
@@ -956,8 +956,7 @@ struct Binder {
   void rt_map1() {
     RT r(*this);
     const auto [f, l] = r.params("f", "l");
-    r.add(
-        r.iff(r.bin(BinOp::Eq, r.pairp(r.L(l)), r.Bo(false)), r.ret(r.Nil())));
+    r.add(r.iff(r.b.unary(UnOp::Not, r.pairp(r.L(l))), r.ret(r.Nil())));
     r.add(r.ret(r.arr({r.b.call_value(r.L(f), {r.car(r.L(l))}),
                        r.call("$map1", {r.L(f), r.cdr(r.L(l))})})));
     r.finish("$map1");
@@ -1015,11 +1014,11 @@ struct Binder {
           r.bin(BinOp::Add, r.bin(BinOp::Add, r.S(" "), r.L(k)),
                 r.bin(BinOp::Add, r.S(": "),
                       r.call("$disp", {r.idx(r.L(v), r.L(k))})));
-      const NodeId each = r.blk(
-          {r.set(k, r.idx(r.L(keys), r.L(i))),
-           r.iff(r.bin(BinOp::Eq, hidden_key(r, k), r.Bo(false)),
-                 r.set(out, r.bin(BinOp::Add, r.L(out), field))),
-           r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))});
+      const NodeId each =
+          r.blk({r.set(k, r.idx(r.L(keys), r.L(i))),
+                 r.iff(r.b.unary(UnOp::Not, hidden_key(r, k)),
+                       r.set(out, r.bin(BinOp::Add, r.L(out), field))),
+                 r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))});
       r.add(r.iff(
           r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRecKey))),
           r.blk({r.set(out, r.bin(BinOp::Add, r.S("#<"),

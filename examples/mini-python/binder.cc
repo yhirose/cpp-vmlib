@@ -1091,7 +1091,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [x, i, out, t] = r.locals("x", "i", "out", "t");
-    r.add(r.iff(r.bin(BinOp::Eq, r.call("$isbig", {r.L(v)}), r.Bo(false)),
+    r.add(r.iff(r.b.unary(UnOp::Not, r.call("$isbig", {r.L(v)})),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.set(x, r.idx(r.L(v), kBigKey)));
     r.add(r.set(i, r.bin(BinOp::Sub, r.len(r.L(x)), r.I(1))));
@@ -1429,15 +1429,13 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(a), "array"), equal_elements(r, a, b, i, "$eq")));
     r.add(r.iff(r.is(r.typ(a), "map"),
                 equal_entries(r, a, b, i, ks, k, "$eq")));
-    r.add(
-        r.iff(r.either(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
-              r.blk({r.iff(r.bin(BinOp::Eq,
-                                 r.both(r.call("$istup", {r.L(a)}),
-                                        r.call("$istup", {r.L(b)})),
-                                 r.Bo(false)),
-                           r.ret(r.Bo(false))),
-                     r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
-                                          r.idx(r.L(b), kTupKey)}))})));
+    r.add(r.iff(
+        r.either(r.call("$istup", {r.L(a)}), r.call("$istup", {r.L(b)})),
+        r.blk({r.iff(r.b.unary(UnOp::Not, r.both(r.call("$istup", {r.L(a)}),
+                                                 r.call("$istup", {r.L(b)}))),
+                     r.ret(r.Bo(false))),
+               r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
+                                    r.idx(r.L(b), kTupKey)}))})));
     r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S(program_key("__eq__"))})));
     r.add(r.iff(r.isnt(r.typ(f_), "nil"),
                 r.ret(r.call("$truthy",
@@ -1541,10 +1539,10 @@ struct Binder {
                   {hex, d, r.bin(BinOp::Add, d, r.I(1))});
     };
     r.add(r.set(q, r.S("'")));
-    r.add(r.iff(r.both(r.call("$in", {r.S("'"), r.L(s)}),
-                       r.bin(BinOp::Eq, r.call("$in", {r.S("\""), r.L(s)}),
-                             r.Bo(false))),
-                r.set(q, r.S("\""))));
+    r.add(
+        r.iff(r.both(r.call("$in", {r.S("'"), r.L(s)}),
+                     r.b.unary(UnOp::Not, r.call("$in", {r.S("\""), r.L(s)}))),
+              r.set(q, r.S("\""))));
     r.add(r.set(out, r.L(q)));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(
@@ -2051,14 +2049,13 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(k), "nil"), r.ret(r.L(out))));
     r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(k)})));
     r.add(r.set(i, r.I(0)));
-    r.add(r.wh(
-        r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
-        r.blk(
-            {r.set(key, r.idx(r.L(ks), r.L(i))),
-             r.iff(r.bin(BinOp::Eq, r.call("$hasname", {r.L(names), r.L(key)}),
-                         r.Bo(false)),
-                   r.sidx(r.L(out), r.L(key), r.idx(r.L(k), r.L(key)))),
-             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(
+        r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+             r.blk({r.set(key, r.idx(r.L(ks), r.L(i))),
+                    r.iff(r.b.unary(UnOp::Not,
+                                    r.call("$hasname", {r.L(names), r.L(key)})),
+                          r.sidx(r.L(out), r.L(key), r.idx(r.L(k), r.L(key)))),
+                    r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.L(out)));
     r.finish("$kwrest");
   }
@@ -2072,18 +2069,17 @@ struct Binder {
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(
         r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
-        r.blk(
-            {r.set(key, r.idx(r.L(ks), r.L(i))),
-             r.iff(r.bin(BinOp::Eq, r.call("$hasname", {r.L(names), r.L(key)}),
-                         r.Bo(false)),
-                   r.call("$exc",
-                          {r.S("TypeError"),
-                           r.bin(BinOp::Add,
-                                 r.bin(BinOp::Add, r.L(fn),
-                                       r.S("() got an unexpected keyword "
-                                           "argument '")),
-                                 r.bin(BinOp::Add, r.L(key), r.S("'")))})),
-             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+        r.blk({r.set(key, r.idx(r.L(ks), r.L(i))),
+               r.iff(r.b.unary(UnOp::Not,
+                               r.call("$hasname", {r.L(names), r.L(key)})),
+                     r.call("$exc",
+                            {r.S("TypeError"),
+                             r.bin(BinOp::Add,
+                                   r.bin(BinOp::Add, r.L(fn),
+                                         r.S("() got an unexpected keyword "
+                                             "argument '")),
+                                   r.bin(BinOp::Add, r.L(key), r.S("'")))})),
+               r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.Nil()));
     r.finish("$kwcheck");
   }
@@ -2118,21 +2114,21 @@ struct Binder {
     // Every required parameter no positional and no keyword answered.
     r.add(r.set(miss, r.arr({})));
     r.add(r.set(i, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(names))),
-               r.blk({r.set(n, r.idx(r.L(names), r.L(i))),
-                      r.iff(r.bin(BinOp::Eq,
-                                  r.either(r.both(r.bin(BinOp::Ge,
-                                                        r.idx(r.L(idxs), r.L(i)),
-                                                        r.I(0)),
-                                                  r.bin(BinOp::Gt, r.len(r.L(a)),
-                                                        r.idx(r.L(idxs), r.L(i)))),
-                                           r.call("$kwhas", {r.L(k), r.L(n)})),
-                                  r.Bo(false)),
-                            r.push(r.L(miss),
-                                   r.bin(BinOp::Add,
-                                         r.bin(BinOp::Add, r.S("'"), r.L(n)),
-                                         r.S("'")))),
-                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
+    r.add(r.wh(
+        r.bin(BinOp::Lt, r.L(i), r.len(r.L(names))),
+        r.blk(
+            {r.set(n, r.idx(r.L(names), r.L(i))),
+             r.iff(r.b.unary(
+                       UnOp::Not,
+                       r.either(r.both(r.bin(BinOp::Ge,
+                                             r.idx(r.L(idxs), r.L(i)), r.I(0)),
+                                       r.bin(BinOp::Gt, r.len(r.L(a)),
+                                             r.idx(r.L(idxs), r.L(i)))),
+                                r.call("$kwhas", {r.L(k), r.L(n)}))),
+                   r.push(r.L(miss),
+                          r.bin(BinOp::Add, r.bin(BinOp::Add, r.S("'"), r.L(n)),
+                                r.S("'")))),
+             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.set(c, r.len(r.L(miss))));
     // "'a'", "'a' and 'b'", "'a', 'b', and 'c'" -- three shapes, and the
     // last one keeps the serial comma.
@@ -2598,7 +2594,7 @@ struct Binder {
     r.add(r.set(out, r.arr({})));
     r.add(r.set(i, r.I(0)));
     r.add(r.iff(
-        r.bin(BinOp::Eq, r.L(hassep), r.Bo(false)),
+        r.b.unary(UnOp::Not, r.L(hassep)),
         r.blk({r.set(cur, r.S("")),
                r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(s))),
                     r.blk({r.iff(r.call("$isspace", {ch(r.L(s), r.L(i))}),
@@ -2768,7 +2764,7 @@ struct Binder {
     r.add(
         r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)),
               r.call("$exc", {r.S("IndexError"), r.S("pop from empty list")})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(hasi), r.Bo(false)),
+    r.add(r.iff(r.b.unary(UnOp::Not, r.L(hasi)),
                 r.ret(r.in(IntrinsicId::ArrayPop, {r.L(a)}))));
     r.add(r.set(k, r.L(i)));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(0)),
@@ -2895,13 +2891,12 @@ struct Binder {
   void rt_delitem() {
     RT r(*this);
     const auto [c, k] = r.params("c", "k");
-    r.add(r.iff(
-        r.is(r.typ(c), "map"),
-        r.blk({r.iff(r.bin(BinOp::Eq, r.has(r.L(c), r.L(k)), r.Bo(false)),
-                     r.call("$exc",
-                            {r.S("KeyError"), r.call("$repr", {r.L(k)})})),
-               r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
-               r.ret(r.Nil())})));
+    r.add(r.iff(r.is(r.typ(c), "map"),
+                r.blk({r.iff(r.b.unary(UnOp::Not, r.has(r.L(c), r.L(k))),
+                             r.call("$exc", {r.S("KeyError"),
+                                             r.call("$repr", {r.L(k)})})),
+                       r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
+                       r.ret(r.Nil())})));
     r.add(r.iff(r.is(r.typ(c), "array"),
                 r.blk({r.call("$apop", {r.L(c), r.L(k), r.Bo(true)}),
                        r.ret(r.Nil())})));
@@ -3003,15 +2998,13 @@ struct Binder {
                r.set(t, r.in(IntrinsicId::StrSlice,
                              {r.L(rest), r.bin(BinOp::Add, r.L(dot), r.I(1)),
                               r.len(r.L(rest))})),
-               r.iff(r.bin(BinOp::Eq, r.call("$alldigits", {r.L(t)}),
-                           r.Bo(false)),
+               r.iff(r.b.unary(UnOp::Not, r.call("$alldigits", {r.L(t)})),
                      r.call("$specerr", {r.L(spec)})),
                r.set(prec, r.call("$toint", {r.L(t)})),
                r.set(rest, r.in(IntrinsicId::StrSlice,
                                 {r.L(rest), r.I(0), r.L(dot)}))})));
     r.add(r.iff(r.both(r.bin(BinOp::Gt, r.len(r.L(rest)), r.I(0)),
-                       r.bin(BinOp::Eq, r.call("$alldigits", {r.L(rest)}),
-                             r.Bo(false))),
+                       r.b.unary(UnOp::Not, r.call("$alldigits", {r.L(rest)}))),
                 r.call("$specerr", {r.L(spec)})));
     r.add(r.set(w, r.iff(r.bin(BinOp::Eq, r.len(r.L(rest)), r.I(0)), r.I(0),
                          r.call("$toint", {r.L(rest)}))));
@@ -4048,15 +4041,12 @@ struct Binder {
           if (t == "is" || t == "is not") {
             const NodeId same =
                 b.at(op_p).intrinsic(IntrinsicId::Same, {lhs, rhs});
-            return t == "is" ? same
-                             : b.at(op_p).binary(BinOp::Eq, same,
-                                                 b.bool_literal(false));
+            return t == "is" ? same : b.at(op_p).unary(UnOp::Not, same);
           }
           if (t == "in") return rt.call("$in", {lhs, rhs}, op_p);
           if (t == "not in") {
-            return b.at(op_p).binary(BinOp::Eq,
-                                     rt.call("$in", {lhs, rhs}, op_p),
-                                     b.bool_literal(false));
+            return b.at(op_p).unary(UnOp::Not,
+                                    rt.call("$in", {lhs, rhs}, op_p));
           }
           const char* h = t == "<"    ? "$lt"
                           : t == "<=" ? "$le"

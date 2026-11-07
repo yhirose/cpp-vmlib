@@ -601,9 +601,8 @@ struct Binder {
             {r.iff(r.isnt(r.typ(key), "string"),
                    r.ret(r.call("$err", {r.S("TypeError"),
                                          r.S("object key must be a String")}))),
-             r.iff(r.bin(BinOp::Eq,
-                         r.in(IntrinsicId::ObjectHas, {r.L(recv), r.L(key)}),
-                         r.Bo(false)),
+             r.iff(r.b.unary(UnOp::Not, r.in(IntrinsicId::ObjectHas,
+                                             {r.L(recv), r.L(key)})),
                    r.ret(r.call("$err",
                                 {r.S("KeyError"), r.S("key not present")}))),
              r.ret(r.idx(r.L(recv), r.L(key)))}));

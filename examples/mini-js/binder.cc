@@ -1002,7 +1002,7 @@ struct Binder {
     r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
                r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
                       r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
-                      r.iff(r.bin(BinOp::Eq, hidden_key(r, k), r.Bo(false)),
+                      r.iff(r.b.unary(UnOp::Not, hidden_key(r, k)),
                             r.push(r.L(out), r.L(k)))})));
     r.add(r.ret(r.L(out)));
     r.finish("$keys");
@@ -1498,8 +1498,8 @@ struct Binder {
         b.assign(VarKind::Local, first, b.bool_literal(false)), b.block(step)));
     if (!a.nodes[1]->nodes.empty()) {
       const NodeId c = truthy(emit_expr(*a.nodes[1]->nodes[0], ctx), p);
-      loop.push_back(b.make_if(b.binary(BinOp::Eq, c, b.bool_literal(false)),
-                               b.make_break(), NodeId{}));
+      loop.push_back(
+          b.make_if(b.unary(UnOp::Not, c), b.make_break(), NodeId{}));
     }
     loop.push_back(emit_body(*a.nodes[3], ctx));
     out.push_back(b.make_while(b.bool_literal(true), b.block(loop)));

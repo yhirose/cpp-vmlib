@@ -1631,7 +1631,7 @@ struct Binder {
       case "untilstmt"_: {
         NodeId c = truthy(emit_expr(*a.nodes[0], ctx), p);
         if (a.tag == "untilstmt"_) {
-          c = b.binary(BinOp::Eq, c, b.bool_literal(false));
+          c = b.unary(UnOp::Not, c);
         }
         return b.make_while(c, emit_body(*a.nodes[1], ctx));
       }
@@ -1639,7 +1639,7 @@ struct Binder {
         const Ast& mod = *a.nodes[1];
         NodeId cond = truthy(emit_expr(*mod.nodes[0], ctx), p);
         if (mod.tag == "unlessmod"_ || mod.tag == "untilmod"_) {
-          cond = b.binary(BinOp::Eq, cond, b.bool_literal(false));
+          cond = b.unary(UnOp::Not, cond);
         }
         if (mod.tag == "whilemod"_ || mod.tag == "untilmod"_) {
           return b.make_while(cond, emit_stmt(*a.nodes[0], ctx));
@@ -1661,7 +1661,7 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     NodeId cond = truthy(emit_expr(*a.nodes[0], ctx), p);
-    if (negate) cond = b.binary(BinOp::Eq, cond, b.bool_literal(false));
+    if (negate) cond = b.unary(UnOp::Not, cond);
     NodeId chain;
     const Ast* elsepart = nullptr;
     std::vector<const Ast*> elsifs;

@@ -678,7 +678,7 @@ struct Binder {
     // __newindex fires only for a key the raw table does not already
     // have -- Lua's own rule, so an overwrite never consults it.
     r.add(r.iff(
-        r.bin(BinOp::Eq, r.has(r.L(t), r.L(key)), r.Bo(false)),
+        r.b.unary(UnOp::Not, r.has(r.L(t), r.L(key))),
         r.blk(
             {r.set(m, r.call("$mm", {r.L(t), r.S("__newindex")})),
              r.iff(
@@ -804,7 +804,7 @@ struct Binder {
     const auto [r_] = r.locals("r");
     r.add(r.set(r_, r.call("$resume", {r.P(0), r.L(v)})));
     // A failed resume answers {false, err}; wrap raises the err itself.
-    r.add(r.iff(r.bin(BinOp::Eq, r.idx(r.L(r_), r.I(0)), r.Bo(false)),
+    r.add(r.iff(r.b.unary(UnOp::Not, r.idx(r.L(r_), r.I(0))),
                 r.b.make_throw(r.idx(r.L(r_), r.I(1)))));
     r.add(r.ret(
         r.in(IntrinsicId::ArraySlice, {r.L(r_), r.I(1), r.len(r.L(r_))})));
