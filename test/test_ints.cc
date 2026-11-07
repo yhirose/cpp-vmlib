@@ -619,8 +619,8 @@ int main() {
     check_trap({b.binary(BinOp::UMod, b.literal(5, p), b.literal(0, p), p)},
               m, b, p, "divide by zero", "UMod by zero");
   }
-  // FloorDiv and FloorMod trap where Div and Mod do -- a zero divisor,
-  // the least int over -1 -- and, int-only, on a double.
+  // FloorDiv and FloorMod trap where Div and Mod do: a zero divisor and
+  // the least int over -1. A double is test_values' case.
   for (const BinOp op : {BinOp::FloorDiv, BinOp::FloorMod}) {
     const std::string name = name_of(op);
     {
@@ -640,13 +640,6 @@ int main() {
                            b.literal(-1, p), p)},
                  m, b, p, "division overflow",
                  name + " of the least int by -1");
-    }
-    {
-      Module m;
-      Builder b(m);
-      const SrcPos p{1, 1};
-      check_trap({b.binary(op, b.double_literal(7.5, p), b.literal(2, p), p)},
-                 m, b, p, ("cannot " + name).c_str(), name + " of a double");
     }
   }
   {

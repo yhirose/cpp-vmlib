@@ -317,6 +317,67 @@ int main() {
     check_eq(joined(), "nil|true|false|true|3|3.5|0.75|", "scalar output");
   }
 
+  // --- 7b. FloorDiv and FloorMod on doubles: the quotient floored and the
+  // remainder on the divisor's side, an int widening as for Add, and Div's
+  // inf or nan for a zero divisor. Each case its own run, so one that traps
+  // does not hide the rest. ----------------------------------------------
+  {
+    const double inf = std::numeric_limits<double>::infinity();
+    struct Case {
+      BinOp op;
+      double a, b;
+      bool int_a;  // `a` as an int, which widens
+      const char* want;
+    };
+    const Case cases[] = {
+        {BinOp::FloorDiv, 7.5, 2, false, "3|double|"},
+        {BinOp::FloorDiv, -7.5, 2, false, "-4|"},
+        {BinOp::FloorDiv, 7.5, -2, false, "-4|"},
+        {BinOp::FloorDiv, 7, 2.5, true, "2|double|"},
+        {BinOp::FloorDiv, 0.0, -2, false, "-0|"},
+        {BinOp::FloorDiv, 7.5, 0, false, "inf|"},
+        {BinOp::FloorDiv, -7.5, 0, false, "-inf|"},
+        {BinOp::FloorDiv, 0.0, 0, false, "nan|"},
+        {BinOp::FloorMod, 7.5, 2, false, "1.5|double|"},
+        {BinOp::FloorMod, -7.5, 2, false, "0.5|"},
+        {BinOp::FloorMod, 7.5, -2, false, "-0.5|"},
+        {BinOp::FloorMod, -7.5, -2, false, "-1.5|"},
+        {BinOp::FloorMod, 7, 2.5, true, "2|double|"},
+        // A zero remainder keeps the dividend's sign, fmod's.
+        {BinOp::FloorMod, -4.0, 2, false, "-0|"},
+        {BinOp::FloorMod, 4.0, -2, false, "0|"},
+        {BinOp::FloorMod, -7.5, inf, false, "inf|"},
+        {BinOp::FloorMod, 7.5, inf, false, "7.5|"},
+        // Opposite sides, though the product underflows to -0.
+        {BinOp::FloorMod, 1e-320, -1e-10, false, "-1e-10|"},
+        {BinOp::FloorMod, 7.5, 0, false, "nan|"},
+    };
+    for (const Case& c : cases) {
+      Module m;
+      Builder b(m);
+      const auto r = [&] {
+        return b.binary(c.op,
+                        c.int_a ? b.literal(static_cast<int64_t>(c.a), p)
+                                : b.double_literal(c.a, p),
+                        b.double_literal(c.b, p), p);
+      };
+      std::vector<NodeId> body = {b.intrinsic(IntrinsicId::Print, {r()}, p)};
+      // A whole answer is a double all the same.
+      if (std::string(c.want).find("double") != std::string::npos) {
+        body.push_back(b.intrinsic(
+            IntrinsicId::Print, {b.intrinsic(IntrinsicId::TypeOf, {r()}, p)},
+            p));
+      }
+      m.funcs.push_back({"main", 0, 0, b.block(body, p), {}, {}});
+      const std::string what = std::string(name_of(c.op)) + " " +
+                               coreir::to_display(Value::make_double(c.a)) +
+                               ", " +
+                               coreir::to_display(Value::make_double(c.b));
+      check_eq(run_module(m, what), "", what + ": no trap");
+      check_eq(joined(), c.want, what);
+    }
+  }
+
   // --- 8. Reading a local before assigning it. ----------------------------
   // Uninit is a tag now rather than a flag beside the value, so this is the
   // case that says the tag never escapes into a program's hands.

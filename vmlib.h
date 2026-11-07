@@ -1248,13 +1248,16 @@ enum class BinOp : uint8_t {
   // comparison does not care about sign -- and neither does Add/Sub/Mul,
   // whose wrapping result is the same bits either way.
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,
-  // Int-only too: division rounding toward negative infinity, and the
-  // remainder that goes with it, which takes the divisor's sign -- Python's
-  // and Lua's `//` and `%`, Ruby's `/` and `%`, Scheme's `floor/` and
-  // `modulo`, where Div and Mod are C's, truncating. Each of those front
-  // ends had written the correction over Div and Mod for itself, and each
-  // had tested the signs by multiplying them, which wraps past 2^63. A zero
+  // Division rounding toward negative infinity, and the remainder that
+  // goes with it, which takes the divisor's sign -- Python's and Lua's `//`
+  // and `%`, Ruby's `%` and Integer `/`, Scheme's `floor/` and `modulo`,
+  // where Div and Mod are C's, truncating. Each of those front ends had
+  // written the correction over Div and Mod for itself, and each had tested
+  // the signs by multiplying them, which wraps past 2^63. On two ints a zero
   // divisor traps, and so does the least int over -1, as for Div and Mod.
+  // A double widens the other operand, as for Add, and the answer is
+  // Div's floored and fmod's moved to the divisor's side (floor_mod) --
+  // with Div's inf and nan, not a trap, for a zero divisor.
   FloorDiv, FloorMod,
 };
 
@@ -3551,7 +3554,6 @@ inline bool is_int_only(BinOp op) {
     case BinOp::Shl: case BinOp::Shr:
     case BinOp::UDiv: case BinOp::UMod: case BinOp::UShr:
     case BinOp::ULt: case BinOp::ULe: case BinOp::UGt: case BinOp::UGe:
-    case BinOp::FloorDiv: case BinOp::FloorMod:
       return true;
     default:
       return false;
@@ -3619,6 +3621,18 @@ enum class Fault : uint8_t {
   // the int must be in range.
   IntKey, StrKey, Range,
 };
+
+// FloorMod on doubles: fmod's remainder, which is exact and takes the
+// dividend's sign, moved over by one divisor when it is nonzero and on the
+// other side of zero from the divisor -- Lua's luai_nummod and CPython's
+// float_rem. The sides are compared rather than the product's sign taken,
+// which a tiny remainder times a tiny divisor loses to underflow. A zero
+// remainder keeps fmod's sign, as Lua's and Ruby's do; CPython gives it
+// the divisor's, which a front end for Python says for itself.
+inline double floor_mod(double a, double b) {
+  const double m = std::fmod(a, b);
+  return m != 0 && (m < 0) != (b < 0) ? m + b : m;
+}
 
 // The check and the arithmetic in one walk of the operand ladder: on
 // success `out` takes the result and the answer is Fault::None, and on
@@ -3743,6 +3757,12 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       case BinOp::Mul: out = Value::make_double(a * b); return ok;
       // inf/nan, not a trap
       case BinOp::Div: out = Value::make_double(a / b); return ok;
+      case BinOp::FloorDiv:
+        out = Value::make_double(std::floor(a / b));
+        return ok;
+      case BinOp::FloorMod:
+        out = Value::make_double(floor_mod(a, b));
+        return ok;
       default: out = compare(op, a, b); return ok;
     }
   }
