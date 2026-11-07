@@ -261,11 +261,12 @@ are built at their own `class`/`def` rather than wherever `new` happens
 to run. The table is apart from the class's own properties, so
 `ClassName.m = f`, a static in JavaScript, leaves what an instance's `m`
 calls alone, while `instance.constructor === ClassName` still reads true
-the way real JavaScript's does. The table itself sits under
-`"\x01methods"`, a key no property name a program writes can be -- the
-[shared convention](../common/runtime_parts.h) for the implementation's
-own keys, which the collection a Map or a Set wraps follows too -- so
-even a static named `$methods` is only a static.
+the way real JavaScript's does. The table itself is in the class's kind
+record, which no property reaches -- the
+[shared convention](../common/runtime_parts.h) for what the
+implementation keeps on an object, which the collection a Map or a Set
+wraps and a promise's state follow too -- so a static of any name, and a
+property spelled with whatever bytes, is only a property.
 
 `new ClassName(args)` copies every member onto a fresh instance and calls
 whichever one is named `constructor`. What it copies is not quite the raw

@@ -71,3 +71,10 @@ show('lookalike', [lookalike.size, walked, lookalike.$map]);
 // And a Map or a Set has no own keys to list.
 show('own keys', [Object.keys(new Map([['a', 1]])).length,
                   Object.keys(new Set([1])).length]);
+
+// Nor is one with a key that starts with byte 1, written raw below: what
+// makes a Map is no property, whatever its name, so holding a Map under
+// one makes nothing a Map -- and Object.keys lists the key like any other.
+const odd = {};
+odd['map'] = new Map([['a', 1]]);
+show('odd key', [odd.size, Object.keys(odd).length]);

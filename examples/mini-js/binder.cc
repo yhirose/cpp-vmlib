@@ -65,15 +65,17 @@ using namespace runtime_parts;
 namespace mini_js {
 namespace {
 
-// The keys this implementation keeps on objects a program can hold -- the
-// collection a Map or a Set wraps, a class's table of methods -- under
-// runtime_parts.h's kImplPrefix, which no property name a program writes
-// begins with. Spelled `$map` and the like, as they were, `{$map: 5}` was a
-// Map to `.size`, `{$set: [1, 2]}` one `for...of` would walk, and a static
-// `C.$methods` replaced the class's methods.
-constexpr char kMapKey[] = "\x01" "map";
-constexpr char kSetKey[] = "\x01" "set";
-constexpr char kMethodsKey[] = "\x01" "methods";
+// What this implementation keeps on objects a program can hold -- the
+// collection a Map or a Set wraps, a class's table of methods -- is their
+// kind record (runtime_parts.h's Hidden state), which no property reaches.
+// Kept under keys, as `$map` and later as "\x01map", `{$map: 5}` was a Map
+// to `.size`, a static `C.$methods` replaced the class's methods, and a
+// key written with a raw 0x01 byte still made an object a Map.
+constexpr char kMapKind[] = "Map";
+constexpr char kSetKind[] = "Set";
+constexpr int64_t kCollection = 1;  // the value-keyed map either wraps
+constexpr char kClassKind[] = "class";
+constexpr int64_t kClassMethods = 1;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -736,16 +738,12 @@ struct Binder {
         r.S("object"),
         r.blk({
             r.set(k, r.call("$str", {r.L(key)})),
-            r.iff(
-                r.is(r.L(k), "size"),
-                r.blk({r.iff(r.in(IntrinsicId::ObjectHas,
-                                  {r.L(recv), r.S(kMapKey)}),
-                             r.ret(r.in(IntrinsicId::ToDouble,
-                                        {r.len(r.idx(r.L(recv), kMapKey))}))),
-                       r.iff(r.in(IntrinsicId::ObjectHas,
-                                  {r.L(recv), r.S(kSetKey)}),
-                             r.ret(r.in(IntrinsicId::ToDouble,
-                                        {r.len(r.idx(r.L(recv), kSetKey))})))})),
+            r.iff(r.is(r.L(k), "size"),
+                  r.iff(r.either(is_kind(r, recv, kMapKind),
+                                 is_kind(r, recv, kSetKind)),
+                        r.ret(r.in(IntrinsicId::ToDouble,
+                                   {r.len(kind_field(r, r.L(recv),
+                                                     kCollection))})))),
             r.ret(r.idx(r.L(recv), r.L(k))),
         }));
     arms.emplace_back(
@@ -880,15 +878,15 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "object"),
         r.blk({
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kSetKey)}),
+            r.iff(is_kind(r, v, kSetKind),
                   r.ret(sequence_cursor(
                       r, r.in(IntrinsicId::ObjectKeys,
-                              {r.idx(r.L(v), kSetKey)})))),
+                              {kind_field(r, r.L(v), kCollection)})))),
             // A Map iterates [key, value] pairs; materializing them up
             // front keeps $iternext one shape rather than three.
-            r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kMapKey)}),
+            r.iff(is_kind(r, v, kMapKind),
                   r.blk({
-                      r.set(mm, r.idx(r.L(v), kMapKey)),
+                      r.set(mm, kind_field(r, r.L(v), kCollection)),
                       r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(mm)})),
                       r.set(out, r.b.array_lit({})),
                       r.set(i, r.I(0)),
@@ -922,12 +920,8 @@ struct Binder {
   void rt_minner() {
     RT r(*this);
     const auto [o] = r.params("o");
-    r.add(
-        r.iff(r.is(r.typ(o), "object"),
-              r.blk({r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S(kMapKey)}),
-                           r.ret(r.idx(r.L(o), kMapKey))),
-                     r.iff(r.in(IntrinsicId::ObjectHas, {r.L(o), r.S(kSetKey)}),
-                           r.ret(r.idx(r.L(o), kSetKey)))})));
+    r.add(r.iff(r.either(is_kind(r, o, kMapKind), is_kind(r, o, kSetKind)),
+                r.ret(kind_field(r, r.L(o), kCollection))));
     r.add(r.ret(r.call("$throwtype", {r.S("not a Map or a Set")})));
     r.finish("$minner");
   }
@@ -989,23 +983,12 @@ struct Binder {
     r.finish(name);
   }
 
-  // Object.keys: an object's own keys, less the ones this implementation
-  // keeps on it (runtime_parts.h's hidden_key) -- the collection a Map or a
-  // Set wraps, a class's table of methods -- which are none of its
-  // properties, and which node does not list.
+  // Object.keys: an object's own keys, every one of them -- what this
+  // implementation keeps on it is in its kind record, which is no key.
   void rt_keys() {
     RT r(*this);
     const auto [o] = r.params("o");
-    const auto [ks, out, i, k] = r.locals("ks", "out", "i", "k");
-    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(o)})));
-    r.add(r.set(out, r.arr({})));
-    r.add(r.set(i, r.I(0)));
-    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
-               r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
-                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
-                      r.iff(r.b.unary(UnOp::Not, hidden_key(r, k)),
-                            r.push(r.L(out), r.L(k)))})));
-    r.add(r.ret(r.L(out)));
+    r.add(r.ret(r.in(IntrinsicId::ObjectKeys, {r.L(o)})));
     r.finish("$keys");
   }
 
@@ -1742,7 +1725,7 @@ struct Binder {
   // function is not constructible here: without `this` there is nothing
   // for a constructor body to write into -- see README.md.
   // `class Name { constructor(...) {...} m(...) {...} }` -- a plain
-  // object whose table of methods, under kMethodsKey, holds one closure per
+  // object whose table of methods, in its kind record, holds one closure per
   // member (`constructor` included, under that name). The table is what
   // `new` reads, apart from the class's own properties: `C.m = f` is a
   // static in JavaScript, and leaves what an instance's `m` calls alone.
@@ -1767,7 +1750,7 @@ struct Binder {
     }
     return bind_decl(
         decl_of.at(a.nodes[0].get()),
-        b.object_lit({{b.str_literal(kMethodsKey), b.object_lit(kvs)}}), ctx, p,
+        of_kind(b, b.object_lit({}), kClassKind, {b.object_lit(kvs)}), ctx, p,
         false);
   }
 
@@ -1792,9 +1775,9 @@ struct Binder {
     // anything for...of walks.
     if (n == "Map" || n == "Set") {
       const BuiltinArgs xs = emit_args(arglist, 1, ctx);
-      const NodeId empty = b.object_lit(
-          {{b.str_literal(n == "Map" ? kMapKey : kSetKey),
-            b.intrinsic(IntrinsicId::MapNew, {})}});
+      const NodeId empty =
+          of_kind(b, b.object_lit({}), n == "Map" ? kMapKind : kSetKind,
+                  {b.intrinsic(IntrinsicId::MapNew, {})});
       const NodeId made =
           xs.args.empty()
               ? empty
@@ -1860,7 +1843,7 @@ struct Binder {
         b.assign(VarKind::Local, kv,
                  read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
         b.cell_fresh(ccell),
-        b.assign(VarKind::Cell, ccell, b.index(K, b.str_literal(kMethodsKey))),
+        b.assign(VarKind::Cell, ccell, kind_field(b, K, kClassMethods)),
         b.cell_fresh(tcell), b.assign(VarKind::Cell, tcell, b.object_lit({})),
         b.assign(VarKind::Local, tv, b.varref(VarKind::Cell, tcell))};
     for (const auto& [name, g] : ci.methods) {

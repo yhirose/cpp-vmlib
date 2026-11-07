@@ -562,12 +562,14 @@ inline NodeId equal_entries(HelperWriter& r, FuncWriter::Slot a,
 // mini-js and mini-csharp wrote the same one, and found that the dynamic
 // language and the static one wanted the same thing from the scheduler:
 //
-//   { kPromiseState: kPending | kFulfilled | kRejected,
-//     kPromiseValue: the value, or the reason,
-//     kPromiseWaiting: [what settling it enqueues] }
+//   {}, with the kind record
+//   [kPromiseKind, kPending | kFulfilled | kRejected  (kPromiseState),
+//                  the value, or the reason           (kPromiseValue),
+//                  [what settling it enqueues]        (kPromiseWaiting)]
 //
-// Every key is the implementation's: a promise is a value the program
-// holds, and none of these is a property of it.
+// A promise is a value the program holds, and none of its state is a
+// property of it -- so a program that writes properties on one, or
+// builds an object, reaches none of it and forges none.
 //
 // The helpers call one another, so their names are fixed: a front end
 // reserves promise_helpers() beside its own, writes them once with
@@ -587,23 +589,23 @@ inline NodeId equal_entries(HelperWriter& r, FuncWriter::Slot a,
 // -- and $adopt, the reaction $presolve hangs on a promise it adopts. What a
 // language builds on them (JavaScript's `then` and `new Promise`, C#'s
 // `.Result`) is its own.
-inline constexpr char kPromiseState[] = "\x01" "s";
-inline constexpr char kPromiseValue[] = "\x01" "v";
-inline constexpr char kPromiseWaiting[] = "\x01" "w";
+inline constexpr char kPromiseKind[] = "promise";
+inline constexpr int64_t kPromiseState = 1;
+inline constexpr int64_t kPromiseValue = 2;
+inline constexpr int64_t kPromiseWaiting = 3;
 inline constexpr int64_t kPending = 0;
 inline constexpr int64_t kFulfilled = 1;
 inline constexpr int64_t kRejected = 2;
 
-// `then`, when `v` holds a promise -- two tests, each branching on its own.
+// `then`, when `v` holds a promise.
 inline NodeId if_promise(FuncWriter& w, FuncWriter::Slot v, NodeId then) {
-  return w.iff(w.is(w.typ(v), "object"),
-               w.iff(w.has(w.L(v), w.S(kPromiseState)), then));
+  return w.iff(is_kind(w, v, kPromiseKind), then);
 }
 inline NodeId promise_state(FuncWriter& w, NodeId p) {
-  return w.idx(p, kPromiseState);
+  return kind_field(w, p, kPromiseState);
 }
 inline NodeId promise_value(FuncWriter& w, NodeId p) {
-  return w.idx(p, kPromiseValue);
+  return kind_field(w, p, kPromiseValue);
 }
 
 inline const std::vector<std::string>& promise_helpers() {
@@ -616,9 +618,8 @@ inline const std::vector<std::string>& promise_helpers() {
 inline void write_promise_helpers(HelperTable& rt) {
   {
     HelperWriter r(rt);
-    r.add(r.ret(r.obj({{kPromiseState, r.I(kPending)},
-                       {kPromiseValue, r.Nil()},
-                       {kPromiseWaiting, r.arr({})}})));
+    r.add(r.ret(of_kind(r, r.obj({}), kPromiseKind,
+                        {r.I(kPending), r.Nil(), r.arr({})})));
     r.finish("$pnew");
   }
   {
@@ -627,10 +628,10 @@ inline void write_promise_helpers(HelperTable& rt) {
     const auto [waiting, i] = r.locals("waiting", "i");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
                 r.ret(r.Nil())));
-    r.add(r.sidx(r.L(p), kPromiseState, r.L(st)));
-    r.add(r.sidx(r.L(p), kPromiseValue, r.L(v)));
-    r.add(r.set(waiting, r.idx(r.L(p), kPromiseWaiting)));
-    r.add(r.sidx(r.L(p), kPromiseWaiting, r.arr({})));
+    r.add(set_kind_field(r, r.L(p), kPromiseState, r.L(st)));
+    r.add(set_kind_field(r, r.L(p), kPromiseValue, r.L(v)));
+    r.add(r.set(waiting, kind_field(r, r.L(p), kPromiseWaiting)));
+    r.add(set_kind_field(r, r.L(p), kPromiseWaiting, r.arr({})));
     r.add(r.set(i, r.I(0)));
     r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(waiting))),
                r.blk({r.in(IntrinsicId::Enqueue, {r.idx(r.L(waiting), r.L(i))}),
@@ -643,7 +644,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     const auto [p, cb] = r.params("p", "cb");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
                 r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
-    r.add(r.push(r.idx(r.L(p), kPromiseWaiting), r.L(cb)));
+    r.add(r.push(kind_field(r, r.L(p), kPromiseWaiting), r.L(cb)));
     r.add(r.ret(r.Nil()));
     r.finish("$pon");
   }
@@ -831,7 +832,7 @@ inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.
 // * mini-js's classes. A class is an object holding its table of methods
-//   under one key, and `new` copies them onto the instance as wrappers
+//   in its kind record, and `new` copies them onto the instance as wrappers
 //   that supply `this` -- not runtime_parts' layout, where an instance
 //   points back at its class and a call walks to it. JavaScript reads a
 //   method off the instance like any property, and this subset's classes
