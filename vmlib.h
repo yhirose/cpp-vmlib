@@ -41,12 +41,21 @@
 // helper called from one place regardless, and the hot function around it
 // then grows past its own inlining limit. CPython's Py_NO_INLINE and V8's
 // V8_NOINLINE are the same macro.
+//
+// VMLIB_INLINE is the other half: a helper the executor calls from two
+// cases -- an operation's own and its Try's (an operation with a fallback)
+// -- which a compiler left to itself stops inlining once it has a second
+// caller, and every Index or Add then pays a call. CPython's
+// Py_ALWAYS_INLINE is the same macro.
 #if defined(__GNUC__) || defined(__clang__)
 #define VMLIB_NOINLINE __attribute__((noinline))
+#define VMLIB_INLINE inline __attribute__((always_inline))
 #elif defined(_MSC_VER)
 #define VMLIB_NOINLINE __declspec(noinline)
+#define VMLIB_INLINE __forceinline
 #else
 #define VMLIB_NOINLINE
+#define VMLIB_INLINE inline
 #endif
 
 // A member that takes no room when its type is empty: C++20's
@@ -3621,7 +3630,7 @@ enum class Fault : uint8_t {
 // act on the answer was a type ladder per instruction more than the work
 // needs. binop_error and apply_binop below are this same function asked for
 // one half at a time, for a front end folding constants at compile time.
-inline Fault binop_fault(BinOp op, const Value& l, const Value& r,
+VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
                          Value& out) {
   constexpr Fault ok = Fault::None;
   // Two ints stay integers; anything else numeric widens to double. Mod on
@@ -3814,7 +3823,7 @@ inline bool is_wrap(UnOp op) {
 
 // Whether a unary operator takes `v`: Neg a number, BitNot and the Wraps
 // an int, Not and Truth anything. unop_error is the diagnostic.
-inline Fault unop_fault(UnOp op, const Value& v) {
+VMLIB_INLINE Fault unop_fault(UnOp op, const Value& v) {
   if (op == UnOp::Neg && !v.is_number()) return Fault::Operand;
   if ((op == UnOp::BitNot || is_wrap(op)) && !v.is_int()) {
     return Fault::Operand;
@@ -3859,7 +3868,7 @@ inline double to_float32(double d) {
   return static_cast<double>(static_cast<float>(d));
 }
 
-inline Value apply_unop(UnOp op, const Value& v) {
+VMLIB_INLINE Value apply_unop(UnOp op, const Value& v) {
   // One exhaustive switch rather than an is_wrap guard around a second one:
   // a width added to UnOp without a case here fails the build (-Wswitch),
   // not silently falls into whichever arm happened to be last.
@@ -3891,7 +3900,7 @@ inline int64_t index_bound(const Value& recv) {
              : static_cast<int64_t>(recv.as_array()->items.size());
 }
 
-inline Fault index_fault(const Value& recv, const Value& key) {
+VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key) {
   if (recv.is_str() || recv.is_array()) {
     if (!key.is_int()) {
       return recv.is_str() ? Fault::StrKeyType : Fault::ArrayKeyType;
@@ -3937,7 +3946,7 @@ inline std::string index_error(const Value& recv, const Value& key) {
 // element. The asymmetry is deliberate and matches what the two are for: an
 // array index out of range is almost always a bug, while asking an object
 // whether it has a key is how you find out.
-inline Value index_get(const Value& recv, const Value& key) {
+VMLIB_INLINE Value index_get(const Value& recv, const Value& key) {
   if (recv.is_str()) {
     // One byte, as a string. Bytes, not code points: what a code point is
     // belongs to the language's string model, and a front end with one
