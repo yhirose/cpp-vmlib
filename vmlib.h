@@ -7265,9 +7265,10 @@ struct FnCompiler {
     return v.fallback.valid() && is_comparison(v.op);
   }
 
-  // The statements Blocks hold before their last child, run, and the node
-  // that is left: a Block's value, reached the way compile_expr reaches
-  // it.
+  // The statements a Block holds before its last child, run, and the
+  // node its value comes from: the last child, or past a Block there, that
+  // Block's. The one walk to a Block's value, for compile_expr's value and
+  // compile_branch's condition.
   NodeId compile_leading(NodeId id) {
     while (m.at(id).tag == Tag::Block && m.at(id).num_children > 0) {
       const uint32_t last = m.at(id).num_children - 1;
@@ -7451,10 +7452,7 @@ struct FnCompiler {
       }
       case Tag::Block:
         if (n.num_children == 0) break;
-        for (uint32_t i = 0; i + 1 < n.num_children; ++i) {
-          compile_stmt(m.child(id, i));
-        }
-        compile_branch(m.child(id, n.num_children - 1), when, jumps);
+        compile_branch(compile_leading(id), when, jumps);
         return;
       case Tag::If:
         compile_if_branch(id, when, jumps);
@@ -7552,10 +7550,7 @@ struct FnCompiler {
           emit(Op::LoadNil, r, 0, 0, n.pos);
           return r;
         }
-        for (uint32_t i = 0; i + 1 < n.num_children; ++i) {
-          compile_stmt(m.child(id, i));
-        }
-        return compile_value(m.child(id, n.num_children - 1), tail);
+        return compile_value(compile_leading(id), tail);
       }
 
       // An If's value is the branch taken's, so both branches have to land in
