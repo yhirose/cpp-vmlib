@@ -2247,10 +2247,11 @@ std::string to_string(const Module& m, const SharedEffect& e);
 // node built and then left unused costs nothing but its space; this kind
 // is a front end dropping something the language runs -- an argument a
 // library function lowered by name never reads, which the audits found in
-// six front ends. dropped_effects lists the top of each subtree so dropped,
-// a node nothing holds, whose subtree has an observable node no body
-// reaches. A front end's test runs both over every program it ships
-// (--check-effects, test/run_effects.cmake).
+// six front ends. dropped_effects lists each such node itself, the call or
+// the fresh object rather than what was built around it: every node no
+// body reaches whose own running could be observed. A front end's test
+// runs both over every program it ships (--check-effects,
+// test/run_effects.cmake).
 struct DroppedEffect {
   NodeId node;
 };
@@ -5893,53 +5894,6 @@ struct SharingScan {
   }
 };
 
-// What dropped_effects asks of a node: whether it runs, and if not,
-// whether what it holds was observable.
-struct DropScan {
-  const Module& m;
-  std::vector<char> live;
-  std::vector<signed char> loss;  // per node: -1 not yet known, 0, 1
-
-  explicit DropScan(const Module& mod)
-      : m(mod),
-        live(reached(mod)),
-        loss(mod.nodes.size(), -1) {}
-
-  // Whether a node no body reaches can be read through. verify() looks
-  // only at what a body reaches, so the rest has its position and its
-  // children in range only because a Builder made it; one that has not is
-  // nothing a run could reach, and adds nothing here.
-  bool readable(uint32_t n) const {
-    const Node& x = m.nodes[n];
-    // 64-bit: first_child + num_children can wrap in 32.
-    if (x.pos >= m.positions.size() ||
-        static_cast<uint64_t>(x.first_child) + x.num_children >
-            m.child_ids.size()) {
-      return false;
-    }
-    for (uint32_t i = 0; i < x.num_children; ++i) {
-      if (m.child(NodeId{n}, i).v >= m.nodes.size()) return false;
-    }
-    return true;
-  }
-
-  // Whether `n`'s subtree has an observable node no function body reaches:
-  // what building `n` and then dropping it lost. Everything below a live
-  // node is live, so the walk ends at one.
-  bool lost(uint32_t n) {
-    if (live[n] || !readable(n)) return false;
-    if (loss[n] >= 0) return loss[n] != 0;
-    loss[n] = 0;  // a cycle, which verify() never saw, adds nothing
-    const Node& x = m.nodes[n];
-    bool r = observable(x);
-    for (uint32_t i = 0; !r && i < x.num_children; ++i) {
-      r = lost(m.child(NodeId{n}, i).v);
-    }
-    loss[n] = r ? 1 : 0;
-    return r;
-  }
-};
-
 // "line:col", where a finding's node stands.
 inline std::string line_col(const Module& m, NodeId id) {
   const SrcPos p = m.pos_of(id);
@@ -5965,19 +5919,16 @@ inline std::string to_string(const Module& m, const SharedEffect& e) {
 }
 
 inline std::vector<DroppedEffect> dropped_effects(const Module& m) {
-  detail::DropScan scan(m);
-  // The top of a dropped subtree is a node nothing holds: whatever holds a
-  // node no body reaches is not reached either.
-  std::vector<char> held(m.nodes.size(), 0);
-  for (uint32_t n = 0; n < m.nodes.size(); ++n) {
-    if (!scan.readable(n)) continue;
-    for (uint32_t i = 0; i < m.nodes[n].num_children; ++i) {
-      held[m.child(NodeId{n}, i).v] = 1;
-    }
-  }
+  const std::vector<char> live = detail::reached(m);
   std::vector<DroppedEffect> out;
   for (uint32_t n = 0; n < m.nodes.size(); ++n) {
-    if (!held[n] && scan.lost(n)) out.push_back({NodeId{n}});
+    const Node& x = m.nodes[n];
+    // verify() never looked at a node no body reaches, so its position is
+    // in range only because a Builder made it; one that is not, no
+    // Builder did, and there is nowhere to report it.
+    if (!live[n] && detail::observable(x) && x.pos < m.positions.size()) {
+      out.push_back({NodeId{n}});
+    }
   }
   return out;
 }

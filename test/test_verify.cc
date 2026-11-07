@@ -47,7 +47,7 @@ std::string verdict(const std::function<NodeId(Module&, Builder&)>& build,
 
 // shared_effects or dropped_effects (`list`) over a module whose main body
 // `build` makes -- leaving out of it whatever it builds and drops -- its
-// findings joined by "|". `edit`, if any, then corrupts the module.
+// findings joined by "|". `edit`, if any, then changes the module.
 template <class List>
 std::string findings(List list, const std::function<NodeId(Builder&)>& build,
                      const std::function<void(Module&)>& edit = {}) {
@@ -244,18 +244,30 @@ int main() {
   const auto print_one = [&](Builder& b) {
     return b.intrinsic(IntrinsicId::Print, {b.literal(1, p)}, p);
   };
-  check_eq(dropped([&](Builder& b) {
-             call(b);
-             return print_one(b);
-           }),
+  // A call built beside main's body and left out of it, and then `edit`.
+  const auto call_then = [&](const std::function<void(Module&, NodeId)>& edit) {
+    NodeId c;
+    return dropped(
+        [&](Builder& b) {
+          c = call(b);
+          return print_one(b);
+        },
+        [&](Module& m) { edit(m, c); });
+  };
+  check_eq(call_then([](Module&, NodeId) {}),
            "2:2: callvalue is built but no function body reaches it|",
            "a call no body reaches is dropped");
+  check_eq(call_then([](Module& m, NodeId c) { m.funcs[1].body = c; }), "",
+           "a call in another function's body is not dropped");
+  // A node no body reaches is one verify() never looked at.
+  check_eq(call_then([](Module& m, NodeId c) { m.nodes[c.v].pos = 1000; }),
+           "", "a dropped call whose position is past the end is not listed");
   check_eq(dropped([&](Builder& b) {
              b.binary(BinOp::Add, call(b), b.literal(1, p), {3, 3});
              return print_one(b);
            }),
-           "3:3: binary is built but no function body reaches it|",
-           "what was dropped is reported at its top, once");
+           "2:2: callvalue is built but no function body reaches it|",
+           "a dropped read over a call names the call");
   check_eq(dropped([&](Builder& b) {
              b.intrinsic(IntrinsicId::MapNew, {}, {2, 2});
              b.intrinsic(IntrinsicId::ToStr, {b.varref(VarKind::Local, 0, p)},
@@ -271,35 +283,6 @@ int main() {
              return b.block({c}, p);
            }),
            "", "a call kept in the body and dropped from a wrapper still runs");
-  {
-    // f's body is reached as much as main's: each runs when it is called.
-    Module m;
-    Builder b(m);
-    m.capture_maps.push_back({});
-    m.funcs.push_back({"main", 0, 0, print_one(b), {}, {}});
-    m.funcs.push_back({"f", 0, 0, b.block({call(b)}, p), {}, {}});
-    check_eq(std::to_string(dropped_effects(m).size()), "0",
-             "a call in any function's body is not dropped");
-  }
-  // A node no body reaches is one verify() never looked at, and one whose
-  // children or position are out of range is read no further.
-  const auto corrupt = [&](const std::function<void(Node&, Module&)>& edit) {
-    NodeId c;
-    return dropped(
-        [&](Builder& b) {
-          c = call(b);
-          return print_one(b);
-        },
-        [&](Module& m) { edit(m.nodes[c.v], m); });
-  };
-  check_eq(corrupt([](Node& n, Module&) { n.first_child = 0xFFFFFFFFu; }), "",
-           "a dropped node whose children wrap around 32 bits");
-  check_eq(corrupt([](Node& n, Module& m) {
-             m.child_ids[n.first_child] = NodeId{1000};
-           }),
-           "", "a dropped node whose child is past the end");
-  check_eq(corrupt([](Node& n, Module&) { n.pos = 1000; }), "",
-           "a dropped node whose position is past the end");
 
   if (g_failures != 0) {
     std::fprintf(stderr, "verify: %d failure(s)\n", g_failures);

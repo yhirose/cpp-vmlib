@@ -198,11 +198,11 @@ function body reaches, built and then left out of the tree, so it never
 runs at all. `verify()` looks only at what a body reaches, and a node
 dropped costs nothing but its space -- but a call dropped is how an
 argument a library function never reads goes missing. Each finding is the
-top of what was dropped, a node nothing holds. A node built on the chance
-it is needed and then discarded is reported the same way, though it loses
-nothing; build it on the path that uses it instead. Every front end here
-takes `--check-effects` to print both lists, and its tests ask it of every
-program it ships.
+effect itself, the call or the fresh object, not what was built around
+it. A node built on the chance it is needed and then discarded is
+reported the same way, though it loses nothing; build it on the path that
+uses it instead. Every front end here takes `--check-effects` to print
+both lists, and its tests ask it of every program it ships.
 
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
