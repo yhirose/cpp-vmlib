@@ -290,28 +290,6 @@ inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
 // stand in for: where the two give the same answer. The helper is the one
 // the front end called before, so no rule changes, and the call is made
 // only where it is needed.
-inline NodeId op_or_helper(HelperTable& rt, BinOp op, NodeId x, NodeId y,
-                           uint32_t tags, const std::string& helper,
-                           coreir::SrcPos p, bool exact = false) {
-  return coreir::Builder(rt.module())
-      .at(p)
-      .binary(op, x, y, Fallback{rt.ref(helper, p), tags, exact});
-}
-inline NodeId op_or_helper(HelperTable& rt, UnOp op, NodeId x, uint32_t tags,
-                           const std::string& helper, coreir::SrcPos p,
-                           bool exact = false) {
-  return coreir::Builder(rt.module())
-      .at(p)
-      .unary(op, x, Fallback{rt.ref(helper, p), tags, exact});
-}
-// Index's own, the receiver and the key its operands.
-inline NodeId index_or_helper(HelperTable& rt, NodeId recv, NodeId key,
-                              uint32_t tags, const std::string& helper,
-                              coreir::SrcPos p) {
-  return coreir::Builder(rt.module())
-      .at(p)
-      .index(recv, key, Fallback{rt.ref(helper, p), tags});
-}
 
 // The sets on which languages here draw the same line.
 //
@@ -378,17 +356,17 @@ class Operators {
                           std::to_string(operands) + " operands",
                       0, 0);
     }
+    const Fallback f{rt_.ref(helper, p), o.tags, o.exact};
+    auto b = coreir::Builder(rt_.module()).at(p);
     switch (o.kind) {
       case VmOp::Kind::Unary:
-        return op_or_helper(rt_, static_cast<UnOp>(o.op), args[0], o.tags,
-                            helper, p, o.exact);
+        return b.unary(static_cast<UnOp>(o.op), args[0], f);
       case VmOp::Kind::Binary:
-        return op_or_helper(rt_, static_cast<BinOp>(o.op), args[0], args[1],
-                            o.tags, helper, p, o.exact);
+        return b.binary(static_cast<BinOp>(o.op), args[0], args[1], f);
       case VmOp::Kind::Index:
-        break;
+        return b.index(args[0], args[1], f);
     }
-    return index_or_helper(rt_, args[0], args[1], o.tags, helper, p);
+    return NodeId{};
   }
 
  private:

@@ -1176,8 +1176,8 @@ struct Binder {
 
   NodeId exact_or(RT& r, BinOp op, FuncWriter::Slot a, FuncWriter::Slot b,
                   const char* limbs) {
-    return op_or_helper(r.table, op, r.L(a), r.L(b), tags_named("int"), limbs,
-                        r.pos, true);
+    return r.b.binary(op, r.L(a), r.L(b),
+                      Fallback{r.ref(limbs), tags_named("int"), true});
   }
 
   void rt_add() {
