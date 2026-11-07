@@ -933,12 +933,12 @@ it removed, the way callgrind's instruction counts are. What a count cannot
 see is what an instruction costs: a call is one instruction and a frame,
 and a host function is a call with no instructions at all, so a profile
 says where to look and the benchmarks say what a change bought. A frame is
-counted however it comes and goes -- a call, a generator's resume and
-yield, a coroutine's frames parking and coming back, a job, a destructor
-or a defer, an unwind -- since each of those passes through the
-executor's frame stack, which is where the profiler hears of it; a tail
-call, which keeps its frame, reports the change of function itself
-(`test/test_profile.cc` pins each).
+counted however it comes and goes -- a call or a tail call, a generator's
+resume and yield, a coroutine's frames parking and coming back, a job, a
+destructor or a defer, an unwind -- since each of those passes through
+the executor's frame stack, which is where the profiler hears of it, and
+which it checks has seen every function leave as often as it came by the
+time the run ends (`test/test_profile.cc` pins each).
 
 Counting costs the run that asks for it up to a sixth more time (on
 `bench/languages`' fib and loop, through three front ends), and a run

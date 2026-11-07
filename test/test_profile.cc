@@ -5,18 +5,24 @@
 // What this pins, a small program each: a recursion, counted once in its
 // total, with a helper and a host function that calls back into the
 // program; tail calls, one to another function and three to itself, each
-// a call; a generator, whose total stops at each yield and resumes with
-// it; a coroutine whose two frames park and come back together; the job
-// queue, which runs after the entry frame has gone; a destructor and a
-// defer, which run inside the frame whose exit runs them; and a throw
-// that unwinds two frames. Then the table vm::to_string makes of a
-// profile, word for word.
+// a call, and one whose exit runs a destructor, in the caller's time; a
+// generator, whose total stops at each yield and resumes with it; a
+// coroutine whose two frames park and come back together; the job queue,
+// which runs after the entry frame has gone; a destructor and a defer,
+// which run inside the frame whose exit runs them; and a throw that
+// unwinds two frames. Then the table vm::to_string makes of a profile,
+// word for word.
 //
 // The counts are exact: an instruction count does not move with the
 // machine, which is the point of counting them. They are also the
 // compiler's -- a change to what it emits for these programs moves them,
 // and a failure prints the profile and the bytecode it counted, to re-pin
 // from.
+
+// The profiler asserts that every function has left the stack as often as
+// it came by the end of a run (~Profiler); this test is where that is
+// checked, whatever the build type.
+#undef NDEBUG
 
 #include <cstdio>
 #include <map>
@@ -308,7 +314,46 @@ int main() {
            {{"main", 1, 14, 64}, {"bounce", 1, 4, 4}, {"loop", 4, 46, 46}});
   }
 
-  // --- 3. A generator: its total runs only while it does. ---------------
+  // --- 3. A tail call's exit runs a destructor before the callee starts. -
+  // main { print(f(1)) }   g(n) { return n + 1 }   drop(self) { say "drop" }
+  // f(n) { c = {drop: drop}; return g(n) }   -- c a cell, the call a tail
+  // call. The object goes with f's cells as the callee's replace them:
+  // drop runs in f's time on the stack, not g's.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({});
+    const NodeId obj = b.object_lit(
+        {{b.str_literal("\x01" "drop", p), b.make_closure(3, 0, p)}}, p);
+    m.funcs.push_back(
+        {"f", 1, 0,
+         b.block({b.assign(VarKind::Cell, 0, obj, p),
+                  b.make_return(b.call_value(b.make_closure(2, 0, p),
+                                             {loc(b, 0)}, p),
+                                p)},
+                 p),
+         {"n"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.back().num_cells = 1;
+    m.funcs.back().tail_calls = true;
+    m.funcs.push_back(
+        {"g", 1, 0,
+         b.make_return(b.binary(BinOp::Add, loc(b, 0), lit(b, 1), p), p),
+         {"n"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs.push_back({"drop", 1, 0, say(b, "drop"), {"self"}, {}});
+    m.funcs.back().num_params = 1;
+    m.funcs[0] = {
+        "main", 0, 0,
+        pr(b, b.call_value(b.make_closure(1, 0, p), {lit(b, 1)}, p)), {}, {}};
+    const Profiled r = run_profiled(m, "tail call exit", "drop|2|");
+    expect(r, "tail call exit", 27,
+           {{"main", 1, 7, 27}, {"f", 1, 10, 15}, {"g", 1, 5, 5},
+            {"drop", 1, 5, 5}});
+  }
+
+  // --- 4. A generator: its total runs only while it does. ---------------
   // gen() { yield 1; yield 2; return 3 }
   // main { g = gen(); print(resume(g).value) three times }
   {
@@ -338,7 +383,7 @@ int main() {
     expect(r, "generator", 35, {{"main", 1, 27, 35}, {"gen", 1, 8, 8}});
   }
 
-  // --- 4. A coroutine: two frames park at a yield and come back. ---------
+  // --- 5. A coroutine: two frames park at a yield and come back. ---------
   // body(x) { print(h()); return 0 }   h() { return yield 7 }
   // main { co = coroutine(body); print(resume(co, nil).value);
   //        print(resume(co, 5).done) }
@@ -376,7 +421,7 @@ int main() {
            {{"main", 1, 20, 29}, {"body", 1, 6, 9}, {"h", 1, 3, 3}});
   }
 
-  // --- 5. The job queue: jobs run after the entry frame has returned. ----
+  // --- 6. The job queue: jobs run after the entry frame has returned. ----
   // main { enqueue(job); enqueue(job); say "main" }   job() { say "job" }
   {
     Module m;
@@ -394,7 +439,7 @@ int main() {
     expect(r, "jobs", 23, {{"main", 1, 13, 13}, {"job", 2, 10, 10}});
   }
 
-  // --- 6. A destructor and a defer, inside the frame that runs them. -----
+  // --- 7. A destructor and a defer, inside the frame that runs them. -----
   // main { scope { o = {drop: drop} } ; f(); say "end" }
   // drop(self) { say "drop" }
   // f() { scope { defer d; say "f" } }   d() { say "defer" }
@@ -428,7 +473,7 @@ int main() {
             {"d", 1, 5, 5}});
   }
 
-  // --- 7. A throw unwinds two frames into main's handler. ----------------
+  // --- 8. A throw unwinds two frames into main's handler. ----------------
   // main { try { outer() } catch e { print e }; say "end" }
   // outer() { inner(); say "unreached" }   inner() { throw "boom" }
   {

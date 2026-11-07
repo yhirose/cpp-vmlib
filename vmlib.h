@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <charconv>
 #include <climits>
 #include <cmath>
@@ -7460,6 +7461,14 @@ class Profiler {
     }
   }
 
+  // The stack is empty when the run ends -- ~FrameStack empties it before
+  // this -- so every function has left it as often as it came, and every
+  // total is closed. A frame that changed function behind FrameStack's
+  // back would leave one open, and its time silently uncounted.
+  ~Profiler() {
+    for ([[maybe_unused]] const size_t d : depth_) assert(d == 0);
+  }
+
  private:
   size_t index(const Chunk& c) const {
     return p_->index_of(c);
@@ -7478,11 +7487,12 @@ class Profiler {
 // elements would be written to under it. With no pop_back or erase to reach
 // for, no call site can bring that back.
 //
-// The same two doors, and push_back, are why the watcher lives here: every
-// way a frame comes or goes -- a call, a return, a generator's resume and
-// yield, a coroutine's whole slice parking and coming back, an unwind, a
-// destructor's frame -- passes through them, so `prof` hears of each from
-// the one place that sees them all rather than from a hook at each site.
+// The same two doors, push_back and retarget are why the watcher lives
+// here: every way a frame comes or goes -- a call, a return, a tail call, a
+// generator's resume and yield, a coroutine's whole slice parking and
+// coming back, an unwind, a destructor's frame -- passes through them, so
+// `prof` hears of each from the one place that sees them all rather than
+// from a hook at each site.
 template <class Prof>
 class FrameStack {
  public:
@@ -7513,6 +7523,16 @@ class FrameStack {
   // Drops frames, top first, until `n` remain.
   void truncate(size_t n) {
     while (v_.size() > n) pop();
+  }
+
+  // The top frame, `top`, becomes an activation of `ch` without leaving
+  // the stack -- a tail call. The one way a frame on the stack changes
+  // chunk, so that the profiler hears of it as the end of one function's
+  // time on the stack and the start of another's.
+  void retarget(Frame& top, const Chunk& ch) {
+    if constexpr (Prof::kOn) prof.leave(*top.chunk);
+    top.chunk = &ch;
+    if constexpr (Prof::kOn) prof.enter(ch);
   }
 
  private:
@@ -8569,11 +8589,14 @@ struct Exec {
     // rest param's array is built while there is no half-replaced frame
     // for a destructor its allocation runs to find.
     TakenArgs taken = take_args(nch, args, argc, pos);
+    if constexpr (Prof::kOn) frames.prof.call(nch);
     // This frame's exit, in full, before the callee starts: every
     // temporary except the argument window, the locals
     // last-slot-first, then each open scope's owned resolution
     // innermost-first -- what falling off the end would do, minus
-    // per-scope interleaving, since the frame is going as a whole.
+    // per-scope interleaving, since the frame is going as a whole --
+    // and last what the frame was handed rather than declared, its
+    // cells and then its captures, each replaced by the callee's.
     // The compiler has kept defers out of here (tail_call_ok), so
     // there are none to run: neither f.defers nor f.defer_marks can
     // be non-empty at a TailCall.
@@ -8600,19 +8623,15 @@ struct Exec {
     // a position: the frame that made it is gone, and a helper
     // tail-calling a helper must not erase the place that led into both.
     if (pos.line != 0) f.call_pos = pos;
-    // The one way a frame changes activation without leaving the stack.
-    if constexpr (Prof::kOn) frames.prof.leave(*f.chunk);
-    f.chunk = &nch;
-    if constexpr (Prof::kOn) {
-      frames.prof.enter(nch);
-      frames.prof.call(nch);
-    }
+    f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
+    f.captures = c->cells;
+    // Nothing of the caller's activation is left, and nothing of the
+    // callee's has run: the frame is the callee's from here.
+    frames.retarget(f, nch);
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
     fill_params(nch, args, std::move(taken), f.locals);
     f.regs.assign(static_cast<size_t>(nch.num_regs), Value());
-    f.cells.assign(static_cast<size_t>(nch.num_cells), Value());
-    f.captures = c->cells;
     f.argc = argc;
     // A tail call is the loop back-edge of a program written as calls:
     // the same interrupt point Jump gives a While.
