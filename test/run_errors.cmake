@@ -1,10 +1,11 @@
 # A failing program's transcript: each case must exit 1 with exactly the
 # stderr its expected/<case>.err holds -- the message and the position.
-# PL/0's diagnostics (test/errors/) and each front end's report of an
-# exception nothing caught (examples/mini-*/uncaught/) are checked this
-# way. The real language reports in a format of its own -- a traceback, a
-# stack trace -- so the transcript is this runtime's line, and each case's
-# own comment says what the real language prints for it.
+# PL/0's diagnostics (test/errors/), each front end's report of an
+# exception nothing caught (examples/mini-*/uncaught/) and its refusal of
+# a program the language refuses (examples/mini-*/errors/) are checked
+# this way. The real language reports in a format of its own -- a
+# traceback, a stack trace -- so the transcript is this runtime's line, and
+# each case's own comment says what the real language prints for it.
 #
 #   cmake -DBIN=<binary> -DDIR=<case directory> -DEXT=<source extension>
 #         -P run_errors.cmake

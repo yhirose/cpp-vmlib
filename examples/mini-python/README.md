@@ -414,3 +414,6 @@ position and exit code -- to match `uncaught/expected/`, through the
 `test/run_errors.cmake` PL/0's error cases use. The words after the
 position are `RunOptions::describe`'s, and they are `python3`'s own:
 the last line of its traceback, which each case's comment quotes.
+`ctest -R mini-python-errors` runs `errors/` the same way: programs
+`python3` refuses to compile, which this front end refuses to bind, in
+the words of the `SyntaxError` each case's comment quotes.

@@ -917,12 +917,13 @@ binder and whatever `vm::RunOptions` its programs need, and hands them to
 the command line every front end here runs (`examples/common/driver.h`);
 its `CMakeLists.txt` is one `add_front_end()` call
 (`examples/common/CMakeLists.txt`), which builds it and registers its
-tests -- `samples/` against their `golden/` transcripts, `uncaught/` if
-there is one, and `--check-effects` over every program -- and its name
-joins the list of front ends in the top-level `CMakeLists.txt`. A front end
-outside this repository brings its own CLI, and its own implementation of
-the `coreir_rt_*` contract if the stdio host does not suit it. Nothing in
-`coreir` or `vm` changes, or even has to know the front end exists.
+tests -- `samples/` against their `golden/` transcripts, `uncaught/` and
+`errors/` where they exist, and `--check-effects` over every program -- and
+its name joins the list of front ends in the top-level `CMakeLists.txt`. A
+front end outside this repository brings its own CLI, and its own
+implementation of the `coreir_rt_*` contract if the stdio host does not
+suit it. Nothing in `coreir` or `vm` changes, or even has to know the
+front end exists.
 
 ## Design notes
 
@@ -1075,13 +1076,14 @@ install in that action.
 A failing program is checked the same way from the other side:
 `test/run_errors.cmake` runs a directory of programs that each end in an
 error and requires each report -- message, position and exit code -- to
-match its transcript, for PL/0's diagnostics (`test/errors/`) and for the
+match its transcript, for PL/0's diagnostics (`test/errors/`), for the
 uncaught exceptions of the five front ends that word their own
-(`RunOptions::describe`, `examples/mini-*/uncaught/`). And
-`test/run_effects.cmake` binds every sample, uncaught case and
-`bench/languages` program of a front end with `--check-effects`, so a node
-evaluated twice, or built and dropped, fails a test rather than waiting
-for a probe to notice its output.
+(`RunOptions::describe`, `examples/mini-*/uncaught/`), and for a program
+a front end refuses to bind because its language refuses it
+(`examples/mini-*/errors/`). And `test/run_effects.cmake` binds every
+sample, uncaught case and `bench/languages` program of a front end with
+`--check-effects`, so a node evaluated twice, or built and dropped, fails
+a test rather than waiting for a probe to notice its output.
 
 `test/` holds what the samples cannot reach: one executable per property,
 each building its Core-IR by hand and supplying its own `coreir_rt` host.

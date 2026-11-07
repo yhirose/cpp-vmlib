@@ -76,6 +76,10 @@ endfunction()
 #                     nothing catches is reported in the language's own
 #                     words (RunOptions::describe), as uncaught/expected/
 #                     holds each case's report (test/run_errors.cmake).
+#   <prefix>errors    Only with an errors/ directory: a program the
+#                     language refuses is refused at bind time in its
+#                     words, as errors/expected/ holds each case's report
+#                     (test/run_errors.cmake).
 #   <prefix>effects   Nothing a program could observe is evaluated twice
 #                     (coreir::shared_effects) or built and dropped
 #                     (coreir::dropped_effects): every sample, uncaught
@@ -112,6 +116,11 @@ function(front_end_tests prefix target)
   if(EXISTS ${arg_DIR}/uncaught)
     add_test(NAME ${prefix}uncaught
              COMMAND ${run} -DDIR=${arg_DIR}/uncaught
+                     -P ${scripts}/run_errors.cmake)
+  endif()
+  if(EXISTS ${arg_DIR}/errors)
+    add_test(NAME ${prefix}errors
+             COMMAND ${run} -DDIR=${arg_DIR}/errors
                      -P ${scripts}/run_errors.cmake)
   endif()
   add_test(NAME ${prefix}effects

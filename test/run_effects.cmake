@@ -10,9 +10,9 @@
 #         -DEXT=<source extension> [-DLEAD=<file>] -P run_effects.cmake
 #
 # The cases are SRC/samples (and its subdirectories), SRC/uncaught and
-# bench/languages' programs, every *.EXT among them. LEAD -- mini-js's
-# prelude -- is bound ahead of each of its samples and is not a case
-# (test/cases.cmake).
+# bench/languages' programs, every *.EXT among them; SRC/errors' are not,
+# since they fail to bind on purpose. LEAD -- mini-js's prelude -- is
+# bound ahead of each of its samples and is not a case (test/cases.cmake).
 
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
 require_args(run_effects.cmake BIN SRC EXT)

@@ -298,3 +298,6 @@ position and exit code -- to match `uncaught/expected/`, through the
 `test/run_errors.cmake` PL/0's error cases use. The words after the
 position are `RunOptions::describe`'s, and they are `ruby`'s own:
 the message and class after its position, which each case's comment quotes.
+`ctest -R mini-ruby-errors` runs `errors/` the same way: programs `ruby`
+refuses to parse, which this front end refuses to bind, in the words each
+case's comment quotes.
