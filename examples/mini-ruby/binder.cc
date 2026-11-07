@@ -773,23 +773,10 @@ struct Binder {
     r.finish("$pow");
   }
 
+  // Float#to_s: shortest round trip, ".0" on a whole one.
   void rt_fstr() {
-    const double lim = 9007199254740992.0;
     RT r(*this);
-    const auto [d] = r.params("d");
-    const auto [i] = r.locals("i");
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)), r.ret(r.S("NaN"))));
-    r.add(r.iff(r.in(IntrinsicId::Same, {r.L(d), r.D(-0.0)}),
-                r.ret(r.S("-0.0"))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Gt, r.L(d), r.D(-lim)),
-               r.bin(BinOp::Lt, r.L(d), r.D(lim))),
-        r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(d)})),
-               r.iff(r.bin(BinOp::Eq, r.in(IntrinsicId::ToDouble, {r.L(i)}),
-                           r.L(d)),
-                     r.ret(r.bin(BinOp::Add, r.in(IntrinsicId::ToStr, {r.L(i)}),
-                                 r.S(".0"))))})));
-    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(d)})));
+    float_str(r, "NaN");
     r.finish("$fstr");
   }
 

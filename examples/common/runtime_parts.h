@@ -183,6 +183,33 @@ inline void truthy_nil_false(FuncWriter& w) {
   w.add(w.ret(w.Bo(true)));
 }
 
+// ---- How a float prints ----------------------------------------------------
+//
+// `(d)`: a double as shortest round trip -- ToStr, which is to_display --
+// with ".0" forced onto a whole one, so that 4.0 prints "4.0" and not "4".
+// to_display's comment calls that a language's decision, and Python, Ruby,
+// Guile and culebra all make it the same way; how they spell NaN is theirs
+// ("nan", "NaN", "+nan.0"). -0.0 is whole, and its integer has lost the
+// sign, so it is spelled out before the whole-number path.
+inline void float_str(FuncWriter& w, const std::string& nan) {
+  const double lim = 9007199254740992.0;  // 2^53: every whole double below
+                                          // it has an int64 of its own
+  const auto [d] = w.params("d");
+  const auto [i] = w.locals("i");
+  w.add(w.iff(w.bin(BinOp::Ne, w.L(d), w.L(d)), w.ret(w.S(nan))));
+  w.add(w.iff(w.in(IntrinsicId::Same, {w.L(d), w.D(-0.0)}),
+              w.ret(w.S("-0.0"))));
+  w.add(w.iff(
+      w.both(w.bin(BinOp::Gt, w.L(d), w.D(-lim)),
+             w.bin(BinOp::Lt, w.L(d), w.D(lim))),
+      w.blk({w.set(i, w.in(IntrinsicId::ToInt, {w.L(d)})),
+             w.iff(w.bin(BinOp::Eq, w.in(IntrinsicId::ToDouble, {w.L(i)}),
+                         w.L(d)),
+                   w.ret(w.bin(BinOp::Add, w.in(IntrinsicId::ToStr, {w.L(i)}),
+                               w.S(".0"))))})));
+  w.add(w.ret(w.in(IntrinsicId::ToStr, {w.L(d)})));
+}
+
 // ---- Left per language, and why -------------------------------------------
 //
 // * `$truthy` past nil and false. JavaScript's falsy set has "" and NaN and

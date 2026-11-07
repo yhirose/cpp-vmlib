@@ -498,31 +498,14 @@ struct Binder {
   // How culebra prints a Float. to_display is shortest-round-trip, and its
   // comment names this exact case: "4.0 is '4' -- whether a whole double
   // should show a decimal point is a language's decision, and a front end
-  // that cares builds the string". This is that front end caring.
+  // that cares builds the string". This is that front end caring, the way
+  // Python, Ruby and Guile do too (runtime_parts.h's float_str). Past the
+  // whole numbers, a double already carries a '.' or an exponent, and
+  // culebra's own spelling of those is to_chars' -- 1e+21, 2.5e-07 -- so
+  // ToStr is the answer verbatim.
   void rt_fstr() {
-    const double lim = 9007199254740992.0;  // 2^53
     RT r(*this);
-    const auto [d] = r.params("d");
-    const auto [i] = r.locals("i");
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)),
-                r.ret(r.in(IntrinsicId::ToStr, {r.L(d)}))));
-    // -0.0 is integral and its integer form has lost the sign, so it is
-    // the one value the general path below would print as "0.0".
-    r.add(r.iff(r.in(IntrinsicId::Same, {r.L(d), r.D(-0.0)}),
-                r.ret(r.S("-0.0"))));
-    r.add(r.iff(
-        r.bin(BinOp::Gt, r.L(d), r.D(-lim)),
-        r.iff(r.bin(BinOp::Lt, r.L(d), r.D(lim)),
-              r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(d)})),
-                     r.iff(r.bin(BinOp::Eq,
-                                 r.in(IntrinsicId::ToDouble, {r.L(i)}), r.L(d)),
-                           r.ret(r.bin(BinOp::Add,
-                                       r.in(IntrinsicId::ToStr, {r.L(i)}),
-                                       r.S(".0"))))}))));
-    // Everything else already carries a '.' or an exponent, and culebra's
-    // own spelling of those is to_chars' -- 1e+21, 2.5e-07 -- so ToStr is
-    // the answer verbatim.
-    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(d)})));
+    float_str(r, "nan");
     r.finish("$fstr");
   }
 
