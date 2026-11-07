@@ -1092,10 +1092,14 @@ enum class Tag : uint8_t {
   // Containers. Index and SetIndex dispatch on what the receiver turns out
   // to be, rather than there being a separate pair per container type: a[0]
   // and o["k"] differ only in what a and o are, and a front end that wants
-  // them to be different syntax can still lower both to these.
+  // them to be different syntax can still lower both to these. Index may
+  // name a fallback as an operator does (Tag::Unary has the rule, with the
+  // receiver and the key as the operands): a list's element at an index in
+  // range is the VM's, and a negative index, a missing key or a receiver
+  // of the language's own is the language's.
   ArrayLit,   // children: items...
   ObjectLit,  // children: key, value, key, value, ...
-  Index,      // children: receiver, key
+  Index,      // children: receiver, key [, fallback]; a = tags with one
   SetIndex,   // children: receiver, key, value
   // A struct field, at a slot the front end assigns -- the same contract
   // VarKind::Local's slot indices already are. Where Index looks a key up
@@ -1668,7 +1672,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::CallSpread:  return -1;  // callee, args, then the spread
     case Tag::ArrayLit:    return -1;
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
-    case Tag::Index:       return 2;
+    case Tag::Index:       return -1;  // receiver, key [, fallback]
     case Tag::SetIndex:    return 3;
     case Tag::FieldGet:    return 1;
     case Tag::FieldSet:    return 2;
@@ -1807,6 +1811,8 @@ struct BinaryView {
   uint32_t tags;
   bool exact;
 };
+// `fallback` invalid when there is none, as for an operator.
+struct IndexView { NodeId receiver, key, fallback; uint32_t tags; };
 struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
@@ -1846,6 +1852,12 @@ inline BinaryView view_binary(const Module& m, NodeId n) {
   return {static_cast<BinOp>(x.op), m.child(n, 0), m.child(n, 1),
           x.num_children > 2 ? m.child(n, 2) : NodeId{},
           static_cast<uint32_t>(x.a), (x.b & kExact) != 0};
+}
+inline IndexView view_index(const Module& m, NodeId n) {
+  const Node& x = m.at(n);
+  return {m.child(n, 0), m.child(n, 1),
+          x.num_children > 2 ? m.child(n, 2) : NodeId{},
+          static_cast<uint32_t>(x.a)};
 }
 inline AssignView view_assign(const Module& m, NodeId n) {
   return {static_cast<VarKind>(m.at(n).op), m.at(n).a, m.child(n, 0)};
@@ -2113,6 +2125,10 @@ public:
   NodeId index(NodeId recv, NodeId key, SrcPos p) {
     return emit(Tag::Index, 0, p, 0, 0, {recv, key});
   }
+  NodeId index(NodeId recv, NodeId key, const Fallback& f, SrcPos p) {
+    return emit(Tag::Index, 0, p, static_cast<int32_t>(f.tags), 0,
+                {recv, key, f.callee});
+  }
   NodeId set_index(NodeId recv, NodeId key, NodeId value, SrcPos p) {
     return emit(Tag::SetIndex, 0, p, 0, 0, {recv, key, value});
   }
@@ -2235,6 +2251,9 @@ public:
       return b().object_lit(kvs, p_);
     }
     NodeId index(NodeId recv, NodeId key) { return b().index(recv, key, p_); }
+    NodeId index(NodeId recv, NodeId key, const Fallback& f) {
+      return b().index(recv, key, f, p_);
+    }
     NodeId set_index(NodeId recv, NodeId key, NodeId v) {
       return b().set_index(recv, key, v, p_);
     }
@@ -4092,6 +4111,7 @@ enum class Op : uint8_t {
   // Lua 5.4's arithmetic opcodes skip the OP_MMBIN after them the same way.
   TryUnary,     // a = dst, a + 1 = operand, b = try_mode, c = tags, d = done
   TryBinary,    // a = dst, a + 1 and a + 2 = operands, b, c, d as TryUnary
+  TryIndex,     // a = dst, a + 1 = receiver, a + 2 = key, c, d as TryUnary
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
   FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
@@ -5633,6 +5653,14 @@ struct Verifier {
         }
         break;
       }
+      case Tag::Index:
+        if (n.num_children != 2 && n.num_children != 3) {
+          return fail("Index takes 2 or 3 children");
+        }
+        if (const char* e = fallback_error(n, n.num_children == 3, false)) {
+          return fail(e);
+        }
+        break;
       case Tag::VarRef:
       case Tag::Assign: {
         if (n.a < 0 || n.a >= slot_limit(f, static_cast<VarKind>(n.op))) {
@@ -5955,7 +5983,12 @@ struct Dumper {
         break;
       case Tag::ArrayLit:  out << "arraylit"; break;
       case Tag::ObjectLit: out << "objectlit"; break;
-      case Tag::Index:    out << "index"; break;
+      case Tag::Index: {
+        const auto v = view_index(m, id);
+        out << "index";
+        if (v.fallback.valid()) fallback(v.tags, false);
+        break;
+      }
       case Tag::SetIndex: out << "setindex"; break;
       // One case for both: FieldSetView is FieldView plus a value child, so
       // the slot and the name const are the same a/b either way, and the
@@ -6126,13 +6159,14 @@ inline constexpr bool observable(IntrinsicId id) {
 }
 
 // Whether running `x` can be told from not running it, its children aside.
-// An operator with a fallback (Tag::Unary) may call it, as a call does: it
-// is the operator with one child more than its operands.
+// An operator or an Index with a fallback (Tag::Unary) may call it, as a
+// call does: it is the one with a child more than its operands.
 inline bool observable(const Node& x) {
   switch (x.tag) {
     case Tag::Intrinsic: return observable(static_cast<IntrinsicId>(x.op));
     case Tag::Unary:     return x.num_children > 1;
-    case Tag::Binary:    return x.num_children > 2;
+    case Tag::Binary:
+    case Tag::Index:     return x.num_children > 2;
     default:             return observable(x.tag);
   }
 }
@@ -6395,6 +6429,7 @@ inline const char* name_of(Op op) {
     case Op::SameType:    return "sametype";
     case Op::TryUnary:    return "tryunary";
     case Op::TryBinary:   return "trybinary";
+    case Op::TryIndex:    return "tryindex";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";
     case Op::FMod:        return "fmod";
@@ -6542,12 +6577,15 @@ inline std::string to_string(const Program& p) {
               << coreir::detail::tag_set_text(static_cast<uint32_t>(in.c));
           break;
         case Op::TryUnary:
-        case Op::TryBinary: {
+        case Op::TryBinary:
+        case Op::TryIndex: {
           const uint8_t op = try_op(in.b);
           const bool unary = in.op == Op::TryUnary;
           out << " r" << in.a << ", "
-              << (unary ? coreir::name_of(static_cast<coreir::UnOp>(op))
-                        : coreir::name_of(static_cast<coreir::BinOp>(op)))
+              << (in.op == Op::TryIndex
+                      ? "index"
+                      : unary ? coreir::name_of(static_cast<coreir::UnOp>(op))
+                              : coreir::name_of(static_cast<coreir::BinOp>(op)))
               << " r" << (in.a + 1);
           if (!unary) out << ", r" << (in.a + 2);
           out << ", "
@@ -7446,8 +7484,14 @@ struct FnCompiler {
         }
         return r;
       }
-      case Tag::Index:
-        return compile_op(Op::Index, n.pos, m.child(id, 0), m.child(id, 1));
+      case Tag::Index: {
+        const auto v = view_index(m, id);
+        if (v.fallback.valid()) {
+          return compile_try(Op::TryIndex, id, {v.receiver, v.key}, v.fallback,
+                             v.tags, false, tail);
+        }
+        return compile_op(Op::Index, n.pos, v.receiver, v.key);
+      }
       case Tag::FieldGet: {
         auto v = view_field_get(m, id);
         const int32_t base = top;
@@ -9266,7 +9310,7 @@ struct Exec {
     finish_coro(co);
   }
 
-  // TryUnary and TryBinary (bytecode.h): the operator's answer into in.a,
+  // TryUnary, TryBinary and TryIndex (bytecode.h): the answer into in.a,
   // and true, when it has one for these operands; false, with nothing
   // written, when the fallback's call that follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
@@ -9286,6 +9330,11 @@ struct Exec {
     }
     const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
     if (!in_set(y)) return false;
+    if (in.op == Op::TryIndex) {
+      if (!index_error(x, y).empty()) return false;
+      f.regs[static_cast<size_t>(in.a)] = index_get(x, y);
+      return true;
+    }
     const auto op = static_cast<BinOp>(try_op(in.b));
     if (exact && x.is_int() && y.is_int() &&
         wraps(op, x.as_int(), y.as_int())) {
@@ -9383,6 +9432,7 @@ struct Exec {
           break;
         case Op::TryUnary:
         case Op::TryBinary:
+        case Op::TryIndex:
           if (try_operator(f, in)) {
             f.pc = static_cast<size_t>(in.d);
             continue;

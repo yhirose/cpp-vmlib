@@ -637,6 +637,30 @@ int main() {
          "a Neg that wraps"},
         {un(UnOp::Neg, I(5), kInt, true), "-5|", "an exact Neg that fits"},
         {un(UnOp::Neg, S("s"), kStr), "f|s|nil|-1|", "a Neg that traps"},
+        // Index, with the receiver and the key as its operands: an
+        // element in range is the VM's, and an index out of it, which
+        // Index traps on, is the fallback's -- as are a receiver or a key
+        // outside the set.
+        {[&](Builder& b) {
+           const auto at = [&](NodeId r, NodeId k, uint32_t tags) {
+             return print(b, b.index(r, k, fb(b, tags), p));
+           };
+           const auto list = [&] {
+             return b.array_lit({b.literal(10, p), b.literal(20, p)}, p);
+           };
+           const uint32_t kArrInt = tags_named({"array", "int"});
+           return b.block(
+               {at(list(), b.literal(1, p), kArrInt),
+                at(list(), b.literal(2, p), kArrInt),
+                at(list(), b.literal(-1, p), kArrInt),
+                at(b.str_literal("ab", p), b.literal(1, p), kArrInt),
+                at(b.str_literal("ab", p), b.literal(1, p),
+                   tags_named({"string", "int"})),
+                at(list(), b.double_literal(1.0, p), kArrInt)},
+               p);
+         },
+         "20|f|<array>|2|-1|f|<array>|-1|-1|f|ab|1|-1|b|f|<array>|1|-1|",
+         "an Index"},
         // The operands run first, each once; the fallback only when called,
         // after them; and a statement's value goes nowhere.
         {[&](Builder& b) {
@@ -787,6 +811,30 @@ int main() {
     m.funcs.push_back({"fb", 0, 0, b.literal(0, p), {}, {}});
     check(to_string(m).find("add or-call {int} exact") != std::string::npos,
           "fallback: the IR dump shows the operator's set");
+    {
+      // An Index's Try, and its fallback's call over the same run.
+      Module mi;
+      Builder bi(mi);
+      mi.capture_maps.push_back({});
+      mi.funcs.push_back(
+          {"main", 2, 0,
+           print(bi, bi.index(bi.varref(VarKind::Local, 0, p),
+                              bi.varref(VarKind::Local, 1, p),
+                              {bi.make_closure(1, 0, p),
+                               tags_named({"array", "int"})},
+                              p)),
+           {"a", "i"}, {}});
+      mi.funcs.push_back({"fb", 0, 0, bi.literal(0, p), {}, {}});
+      check(to_string(mi).find("index or-call {int,array}") !=
+                std::string::npos,
+            "fallback: the IR dump shows an Index's set");
+      const std::string d = vm::to_string(vm::compile(mi));
+      check(d.find("\ttryindex r0, index r1, r2, {int,array}, 5\t") !=
+                    std::string::npos &&
+                d.find("\tcallvalue r0, r3, args r1..3\t") !=
+                    std::string::npos,
+            "fallback: an Index's Try and its call");
+    }
     const std::string dump = vm::to_string(vm::compile(m));
     const size_t at = dump.find("\ttrybinary r0, add r1, r2, {int} exact, ");
     const size_t call = dump.find("\tcallvalue r0, r3, args r1..3\t");

@@ -347,6 +347,29 @@ int main() {
            }),
            "statement in value position", "a fallback is a value");
 
+  // An Index's the same: tags only with a fallback, and nothing exact.
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p), p);
+             m.nodes[n.v].a = 1;
+             return n;
+           }),
+           "operator has tags or flags but no fallback",
+           "an Index's tags without a fallback");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p),
+                                      {callee(b), 1}, p);
+             m.nodes[n.v].b = kExact;
+             return n;
+           }),
+           "only Add, Sub, Mul and Neg can be exact", "an exact Index");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p),
+                                      {callee(b), 1}, p);
+             m.nodes[n.v].num_children = 4;
+             return n;
+           }),
+           "Index takes 2 or 3 children", "an Index with two fallbacks");
+
   // An operator with a fallback may call it, so it runs twice as a call
   // would -- even over operands and a callee that are only reads.
   check_eq(shared([&](Builder& b) {
@@ -355,6 +378,14 @@ int main() {
            }),
            "1:1: binary runs twice in arraylit@4:4|",
            "an operator with a fallback is observable");
+  check_eq(shared([&](Builder& b) {
+             const NodeId at =
+                 b.index(b.varref(VarKind::Local, 0, p), b.literal(0, p),
+                         {callee(b), 1}, p);
+             return b.array_lit({at, at}, {4, 4});
+           }),
+           "1:1: index runs twice in arraylit@4:4|",
+           "an Index with a fallback is observable");
 
   if (g_failures != 0) {
     std::fprintf(stderr, "verify: %d failure(s)\n", g_failures);

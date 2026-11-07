@@ -138,7 +138,10 @@ A few things worth knowing before you write a binder:
   `+`, `<` and `==` stay one instruction on the values it agrees with the
   VM about -- two numbers, two strings, a Python int that fits -- and its
   own helper on the rest: the front end draws the line, and the call it
-  would have made anyway is the fallback, now made only past it.
+  would have made anyway is the fallback, now made only past it. `Index`
+  takes one the same way, its receiver and key the operands: a list's
+  element at an index in range is the VM's, a negative index or a missing
+  key the language's.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
