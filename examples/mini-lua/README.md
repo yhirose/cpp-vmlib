@@ -145,13 +145,14 @@ else, and a key the program spells, whatever its bytes, is only a key.
 
 `__index` predates everything below and stays written the way it always
 was (`rt_get`, inline), and `__tostring` is the host's (below);
-`__add`/`__sub`/`__mul`/`__eq`/`__call`/`__newindex` all go through two
-small funcs, `$mt` (a table's metatable, or nil) and `$mm` (one
-metamethod off it, or nil):
+`__add`/`__sub`/`__mul`/`__eq`/`__call`/`__newindex` all go through one
+small func, `$mm` (one metamethod off a value's metatable, or nil), and
+`setmetatable` and `getmetatable` are `MetaSet` and `MetaGet` where they
+are called:
 
 ```
 $mm(v, name):
-  t = $mt(v)
+  t = MetaGet(v)          -- nil for no table, or a table without one
   if t == nil: return nil
   if not (t has name): return nil
   return t[name]

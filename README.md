@@ -282,10 +282,12 @@ and the language's helper elsewhere -- and the end of that file lists
 what each front end still writes for itself, and why. Its rule for an
 object's state is worth taking even without the rest: what the
 implementation keeps on an object goes in its meta ([Hidden
-state](#hidden-state)), never under a key, so every key is the
-program's; and an object that holds two namespaces of the program's --
-mini-csharp's class table, its methods beside its static fields -- keeps
-the second under a `0x02` prefix, so that neither meets the other.
+state](#hidden-state)), whose head is always the object's type -- an
+instance's class, or a kind's name before the state that kind keeps --
+never under a key, so every key is the program's; and two namespaces of
+the program's that would share an object are two objects -- a class's
+methods, its prototype, apart from its value, which holds its statics --
+so that neither meets the other.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.
@@ -325,8 +327,8 @@ kept as the golden (see [Testing](#testing)).
   byte still reached them: it stripped a Lua table's metatable, made a
   JavaScript object a Map, crashed a culebra instance's `type_of`, and
   gave any object a destructor. What the implementation keeps goes in the
-  object's meta and its destructor in its own slot, which no key reaches
-  ([Hidden state](#hidden-state)).
+  object's meta, and a destructor is given with `DropSet`, neither of
+  which any key reaches ([Hidden state](#hidden-state)).
 - *Printing is the language's*: number formatting, string escapes and
   `repr`, how a record or a procedure displays, an error's wording, and the
   report of an uncaught exception, which `test/run_errors.cmake` pins for

@@ -382,8 +382,7 @@ struct Binder {
         "$truthy", "$eq",   "$mod",  "$idiv", "$div",  "$cat",   "$str",
         "$key",    "$get",  "$set",  "$len",  "$one",  "$nth",   "$append",
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
-        "$setmt",  "$getmt", "$spread", "$error",
-        "$mt", "$mm", "$add", "$subm", "$mulm",
+        "$spread", "$error", "$mm", "$add", "$subm", "$mulm",
         "$select", "$pack", "$unpack", "$insertat", "$calltable",
     };
     return names;
@@ -528,25 +527,17 @@ struct Binder {
     r.finish("$str");
   }
 
-  // A table's metatable, and one metamethod off it -- the walk every
-  // metamethod here shares. `__index` (rt_get, above) predates this and
-  // stays written inline; the newer ones (`__add`/`__sub`/`__mul`/`__eq`/
-  // `__call`) all go through these two. `__tostring` is the host's
-  // (lua_tostring_mm).
-  void rt_mt() {
-    RT r(*this);
-    const auto [t] = r.params("t");
-    // MetaGet answers nil for a value that is no table, and for a table
-    // with no metatable.
-    r.add(r.ret(r.meta(r.L(t))));
-    r.finish("$mt");
-  }
-
+  // One metamethod off a value's metatable -- the walk every metamethod
+  // here shares. `__index` (rt_get, above) predates this and stays written
+  // inline; the newer ones (`__add`/`__sub`/`__mul`/`__eq`/`__call`) all go
+  // through this. `__tostring` is the host's (lua_tostring_mm).
   void rt_mm() {
     RT r(*this);
     const auto [v, name] = r.params("v", "name");
     const auto [mt] = r.locals("mt");
-    r.add(r.set(mt, r.call("$mt", {r.L(v)})));
+    // MetaGet answers nil for a value that is no table, and for a table
+    // with no metatable.
+    r.add(r.set(mt, r.meta(r.L(v))));
     r.add(r.iff(r.is(r.typ(mt), "nil"), r.ret(r.Nil())));
     r.add(r.ret(r.idx(r.L(mt), r.L(name))));
     r.finish("$mm");
@@ -879,20 +870,6 @@ struct Binder {
     r.finish("$error");
   }
 
-  void rt_setmt() {
-    RT r(*this);
-    const auto [t, mt] = r.params("t", "mt");
-    r.add(r.ret(r.set_meta(r.L(t), r.L(mt))));
-    r.finish("$setmt");
-  }
-
-  void rt_getmt() {
-    RT r(*this);
-    const auto [t] = r.params("t");
-    r.add(r.ret(r.meta(r.L(t))));
-    r.finish("$getmt");
-  }
-
   // A trailing call inside a table constructor contributes *all* of its
   // results -- `{f()}` is as many entries as f returned -- so the count is
   // not known until it runs.
@@ -975,8 +952,8 @@ struct Binder {
     rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
-    rt_insert(); rt_insertat(); rt_calltable(); rt_setmt(); rt_getmt(); rt_spread(); rt_error();
-    rt_mt(); rt_mm();
+    rt_insert(); rt_insertat(); rt_calltable(); rt_spread(); rt_error();
+    rt_mm();
     rt_select(); rt_pack(); rt_unpack();
     rt_arith("$add", BinOp::Add, "__add");
     rt_arith("$subm", BinOp::Sub, "__sub");
@@ -1464,10 +1441,11 @@ struct Binder {
         if (g == "type") return {native("type", {a0(0)}, p), false};
         if (g == "tostring") return {rt.call("$str", {a0(0)}, p), false};
         if (g == "setmetatable") {
-          return {rt.call("$setmt", {a0(0), a0(1)}, p), false};
+          return {b.intrinsic(IntrinsicId::MetaSet, {a0(0), a0(1)}, p),
+                  false};
         }
         if (g == "getmetatable") {
-          return {rt.call("$getmt", {a0(0)}, p), false};
+          return {b.intrinsic(IntrinsicId::MetaGet, {a0(0)}, p), false};
         }
         if (g == "error") {
           return {rt.call("$error",
