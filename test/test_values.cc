@@ -660,6 +660,118 @@ int main() {
       check_eq(run(c.make, c.what), c.want, std::string("fallback: ") + c.what);
     }
 
+    // Truth: the truthiness a condition tests, as a bool -- and, with a
+    // fallback, a language's own, the VM's answer taken only on the tags
+    // in the set. As a condition too, where a bool operand needs no call
+    // whatever the rest of the set is.
+    const uint32_t kNilBool = tags_named({"nil", "bool"});
+    const auto local = [&](Builder& b) {
+      return b.varref(VarKind::Local, 0, p);
+    };
+    const auto cond = [&](Builder& b, NodeId c) {
+      return b.make_if(c, print(b, b.str_literal("T", p)),
+                       print(b, b.str_literal("F", p)), p);
+    };
+    const struct {
+      std::function<NodeId(Builder&)> make;
+      const char* want;
+      const char* what;
+    } truths[] = {
+        {[&](Builder& b) {
+           return b.block(
+               {print(b, b.unary(UnOp::Truth, b.literal(0, p), p)),
+                print(b, b.unary(UnOp::Truth, b.literal(2, p), p)),
+                print(b, b.unary(UnOp::Truth, b.str_literal("", p), p)),
+                print(b, b.unary(UnOp::Truth, b.nil_literal(p), p)),
+                print(b, b.unary(UnOp::Truth, b.double_literal(0.0, p), p))},
+               p);
+         },
+         "false|true|true|false|false|", "the VM's truth, as a bool"},
+        {un(UnOp::Truth, I(0), kNilBool), "f|0|nil|-1|",
+         "an int is the language's"},
+        {un(UnOp::Truth, [&](Builder& b) { return b.nil_literal(p); },
+            kNilBool),
+         "false|", "nil is the VM's"},
+        {[&](Builder& b) {
+           return b.block(
+               {b.assign(VarKind::Local, 0, b.literal(0, p), p),
+                cond(b, b.unary(UnOp::Truth, local(b), fb(b, kNilBool), p)),
+                cond(b, b.unary(UnOp::Not, local(b), fb(b, kNilBool), p)),
+                cond(b, b.unary(UnOp::Truth,
+                                b.binary(BinOp::Lt, local(b),
+                                         b.literal(1, p), p),
+                                fb(b, kNilBool), p))},
+               p);
+         },
+         "f|0|nil|T|f|0|nil|T|T|", "as a condition"},
+        // A comparison with a fallback answers whatever the fallback does
+        // -- #2's 0 here -- so it is not a bool to skip the truth test on.
+        {[&](Builder& b) {
+           return cond(
+               b, b.unary(UnOp::Truth,
+                          b.binary(BinOp::Lt, b.str_literal("a", p),
+                                   b.literal(1, p),
+                                   {b.make_closure(2, 0, p), kInt}, p),
+                          fb(b, kNilBool), p));
+         },
+         "f|0|nil|T|", "over a comparison with a fallback"},
+    };
+    for (const auto& c : truths) {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      m.funcs.push_back({"main", 1, 0, c.make(b), {"x"}, {}});
+      Func f{"fb", 2, 0,
+             b.block({print(b, b.str_literal("f", p)),
+                      print(b, b.varref(VarKind::Local, 0, p)),
+                      print(b, b.varref(VarKind::Local, 1, p)),
+                      b.make_return(b.literal(-1, p), p)},
+                     p),
+             {"x", "y"}, {}};
+      f.num_params = 2;
+      f.lenient_arity = true;
+      m.funcs.push_back(f);
+      Func zero{"zero", 2, 0, b.literal(0, p), {"x", "y"}, {}};
+      zero.num_params = 2;
+      m.funcs.push_back(zero);
+      check_eq(run_module(m, c.what), "", std::string(c.what) + ": failed");
+      check_eq(joined(), c.want, std::string("truth: ") + c.what);
+    }
+
+    // A comparison handed to a language's truthiness is the comparison
+    // alone: a bool, which a set holding bool answers without a call, as
+    // a condition and as a value -- and only then.
+    {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      const auto lt = [&] {
+        return b.binary(BinOp::Lt, local(b), b.literal(1, p), p);
+      };
+      const auto body = [&](NodeId stmt) {
+        m.funcs.clear();
+        m.funcs.push_back({"main", 1, 0, b.block({stmt, b.nil_literal(p)}, p),
+                           {"x"}, {}});
+        m.funcs.push_back({"fb", 0, 0, b.literal(0, p), {}, {}});
+        return vm::to_string(vm::compile(m));
+      };
+      const std::string branch =
+          body(cond(b, b.unary(UnOp::Truth, lt(), fb(b, kNilBool), p)));
+      check(branch.find("\ttryunary") == std::string::npos &&
+                branch.find("\ttruth") == std::string::npos &&
+                branch.find("\tlt r") != std::string::npos,
+            "truth: a comparison as a condition is the comparison");
+      const std::string value =
+          body(print(b, b.unary(UnOp::Not, lt(), fb(b, kNilBool), p)));
+      check(value.find("\ttryunary") == std::string::npos &&
+                value.find("\tnot r") != std::string::npos,
+            "truth: a Not of a comparison is a Not");
+      const std::string other = body(
+          cond(b, b.unary(UnOp::Truth, lt(), fb(b, tags_named("nil")), p)));
+      check(other.find("\ttryunary") != std::string::npos,
+            "truth: without bool in the set, the fallback stays");
+    }
+
     // The code: the operands in the registers after the result's, the
     // Try, and the fallback's call over those same registers, which the
     // Try jumps past when it answers.

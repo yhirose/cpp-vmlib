@@ -1208,6 +1208,12 @@ enum class UnOp : uint8_t {
   // condition and its inverse are one rule stated once. Every front end
   // here with a boolean `!` was writing `If(x, false, true)` by hand.
   Not,
+  // That truthiness itself, as a bool: what a condition tests, as a value.
+  // Its use is with a fallback (Tag::Unary), as a language's own
+  // truthiness, which the VM's already is on some tags -- nil and bool for
+  // Lua and Ruby, the numbers too for Python -- so a condition on one of
+  // those costs no call of the language's helper.
+  Truth,
   WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,
 };
 
@@ -3423,6 +3429,14 @@ inline uint32_t tags_named(std::string_view name) {
   return set;
 }
 
+// The same, over several names: the set an operator with a fallback
+// answers on (Tag::Unary), spelled the way a type test spells one.
+inline uint32_t tags_named(std::initializer_list<std::string_view> names) {
+  uint32_t set = 0;
+  for (const std::string_view n : names) set |= tags_named(n);
+  return set;
+}
+
 // Whether type_name answers two tags alike: the same tag, or two that
 // share a name (a closure and a host function are both "function").
 inline bool same_type_name(ValueTag a, ValueTag b) {
@@ -3754,6 +3768,7 @@ inline Value apply_unop(UnOp op, const Value& v) {
     case UnOp::WrapU16: return wrap_to<uint16_t>(v.as_int());
     case UnOp::WrapU32: return wrap_to<uint32_t>(v.as_int());
     case UnOp::Not:     return Value::make_bool(!v.truthy());
+    case UnOp::Truth:   return Value::make_bool(v.truthy());
     case UnOp::Neg:     break;
   }
   return v.is_int() ? Value::make_int(wrap_neg(v.as_int()))
@@ -3929,6 +3944,7 @@ enum class Op : uint8_t {
   Neg,          // a = dst, b = src
   BitNot,       // a = dst, b = src
   Not,          // a = dst, b = src   (Bool(!truthy), never fails)
+  Truth,        // a = dst, b = src   (Bool(truthy), never fails)
   // coreir::UnOp's WrapI8..WrapU32, at a fixed offset from Neg/BitNot the
   // same way Add..Ge sits at one from coreir::BinOp's -- see kUnOpOffset.
   WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,  // a = dst, b = src
@@ -4132,6 +4148,7 @@ inline constexpr coreir::UnOp unop_of(Op op) {
 static_assert(op_of(coreir::UnOp::Neg) == Op::Neg);
 static_assert(op_of(coreir::UnOp::BitNot) == Op::BitNot);
 static_assert(op_of(coreir::UnOp::Not) == Op::Not);
+static_assert(op_of(coreir::UnOp::Truth) == Op::Truth);
 static_assert(op_of(coreir::UnOp::WrapU32) == Op::WrapU32);
 
 // A variable's storage class, as the opcode that reads it and the one that
@@ -5244,6 +5261,7 @@ inline const char* name_of(UnOp op) {
     case UnOp::Neg:    return "neg";
     case UnOp::BitNot: return "bitnot";
     case UnOp::Not:    return "not";
+    case UnOp::Truth:  return "truth";
     case UnOp::WrapI8:  return "wrapi8";
     case UnOp::WrapI16: return "wrapi16";
     case UnOp::WrapI32: return "wrapi32";
@@ -6279,7 +6297,7 @@ inline const char* name_of(Op op) {
     case Op::BitNot:      return "bitnot";
     // Shares coreir's name table via unop_of rather than re-typing the
     // Wrap* names.
-    case Op::Not:
+    case Op::Not: case Op::Truth:
     case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
     case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
       return coreir::name_of(unop_of(op));
@@ -6405,7 +6423,7 @@ inline std::string to_string(const Program& p) {
           out << " r" << in.a;
           break;
         // a = dst, b = src
-        case Op::Neg: case Op::BitNot: case Op::Not:
+        case Op::Neg: case Op::BitNot: case Op::Not: case Op::Truth:
         case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32:
         case Op::Move: case Op::Yield:
@@ -7144,6 +7162,36 @@ struct FnCompiler {
     return true;
   }
 
+  // Whether `id` yields a bool by what it is: a bool literal, or a
+  // comparison or a Not or Truth with no fallback, each of which answers a
+  // bool or traps.
+  bool yields_bool(NodeId id) const {
+    switch (m.at(id).tag) {
+      case Tag::Literal:
+        return m.const_kind(id) == ConstKind::Bool;
+      case Tag::Binary: {
+        const auto v = view_binary(m, id);
+        return !v.fallback.valid() && is_comparison(v.op);
+      }
+      case Tag::Unary: {
+        const auto v = view_unary(m, id);
+        return !v.fallback.valid() &&
+               (v.op == UnOp::Not || v.op == UnOp::Truth);
+      }
+      default:
+        return false;
+    }
+  }
+
+  // Whether a Not or a Truth with a fallback never calls it: its operand
+  // is a bool, which neither traps on, and bool is in its set. Then it is
+  // the plain operator -- a condition that is a comparison, handed to a
+  // language's truthiness, costs only the comparison.
+  bool answers_alone(const UnaryView& v) const {
+    return (v.op == UnOp::Not || v.op == UnOp::Truth) &&
+           (v.tags & tags_named("bool")) != 0 && yields_bool(v.operand);
+  }
+
   // A condition, compiled as the jumps it decides between rather than as a
   // value tested once it is built: control jumps -- through the jumps
   // appended to `jumps`, which the caller patches to its target -- when the
@@ -7158,9 +7206,11 @@ struct FnCompiler {
   // place the answer is already known: If(x, y, false) is "x false: jump
   // false; else y decides", so each test jumps straight to the target and a
   // nest of them costs what the hand-nested ifs would. Not flips `when`,
-  // and a Block runs its statements and lets its last child decide. The
-  // same scheme as CPython's compiler_jump_if and Lua's jump lists
-  // (luaK_goiftrue), on the IR's one conditional tag.
+  // Truth keeps it -- either one with a fallback only when the fallback
+  // could not be called (answers_alone) -- and a Block runs its
+  // statements and lets its last child decide. The same scheme as
+  // CPython's compiler_jump_if and Lua's jump lists (luaK_goiftrue), on
+  // the IR's one conditional tag.
   //
   // Nothing is evaluated that the value path would not evaluate, in the
   // same order: the arm a test skips is the arm the If would not have
@@ -7182,8 +7232,9 @@ struct FnCompiler {
         return;
       case Tag::Unary: {
         const auto v = view_unary(m, id);
-        if (v.op != UnOp::Not) break;
-        compile_branch(v.operand, !when, jumps);
+        if (v.op != UnOp::Not && v.op != UnOp::Truth) break;
+        if (v.fallback.valid() && !answers_alone(v)) break;
+        compile_branch(v.operand, v.op == UnOp::Not ? !when : when, jumps);
         return;
       }
       case Tag::Block:
@@ -7258,7 +7309,7 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         auto v = view_unary(m, id);
-        if (v.fallback.valid()) {
+        if (v.fallback.valid() && !answers_alone(v)) {
           return compile_try(Op::TryUnary, id, {v.operand}, v.fallback,
                              v.tags, v.exact, tail);
         }
@@ -9233,6 +9284,7 @@ struct Exec {
         case Op::Neg:
         case Op::BitNot:
         case Op::Not:
+        case Op::Truth:
         case Op::WrapI8: case Op::WrapI16: case Op::WrapI32:
         case Op::WrapU8: case Op::WrapU16: case Op::WrapU32: {
           const UnOp uop = unop_of(in.op);
