@@ -299,9 +299,8 @@ struct Binder {
   std::map<const Ast*, ClassInfo> class_info;
   std::map<int32_t, const Ast*> class_by_var;  // name binding -> its classdef
   std::vector<const Ast*> class_stack;
-  std::map<std::string, int32_t> rt;
+  HelperTable rt{m};  // the runtime helpers, by name
   std::map<std::string, int32_t> builtin_fn;
-  int32_t empty_cmap = -1;
 
   // ==== Pass A: scopes, declarations, captures =============================
   //
@@ -801,23 +800,9 @@ struct Binder {
     return names;
   }
 
-  // The front end's own additions to coreir::FuncWriter: the helpers
-  // that have to reach this binder's own tables.
-  struct RT : FuncWriter {
-    Binder& bd;
-
-    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
-
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
-    }
-
-    // The counts and the name table come from param()/local().
-    void finish(const std::string& name, int32_t ncells = 0,
-                int32_t ncaps = 0) {
-      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
-            ncaps);
-    }
+  // One helper of the runtime above under construction.
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
   // -- The bignum recipe ---------------------------------------------------
@@ -3105,24 +3090,6 @@ struct Binder {
     rt_asort(); rt_dpop(); rt_delitem(); rt_alldigits(); rt_specerr(); rt_fmt();
   }
 
-  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
-  // sets it), so all these MakeClosures name the one closure the executor
-  // built at the first of them -- which is what the array of pre-built
-  // closures at file scope used to buy, at the cost of a synthetic variable
-  // every function had to capture. One that *does* take captures is built at
-  // the site that has them (RT::clos) and never reaches here; saying so
-  // beats the "cannot call nil" it would otherwise be at run time.
-  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
-                SrcPos p) {
-    const auto it = rt.find(name);
-    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
-      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-    }
-    auto b = Builder(m).at(p);
-    return b.call_value(b.make_closure(it->second, empty_cmap), args);
-  }
-
   // ==== Pass B: emit ======================================================
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
@@ -3164,7 +3131,7 @@ struct Binder {
     if (es->nodes.size() == 1) return emit_expr(*es->nodes[0], ctx);
     std::vector<NodeId> items;
     for (const auto& c : es->nodes) items.push_back(emit_expr(*c, ctx));
-    return helper("$tuple", {b.array_lit(items)}, p);
+    return rt.call("$tuple", {b.array_lit(items)}, p);
   }
 
   // -- A builtin's arguments ----------------------------------------------
@@ -3244,7 +3211,7 @@ struct Binder {
       std::vector<NodeId> run(g.pos);
       for (const auto& [k, v] : g.kw) run.push_back(v);
       run.push_back(
-          helper("$exc", {b.str_literal(kind), b.str_literal(msg)}, p));
+          rt.call("$exc", {b.str_literal(kind), b.str_literal(msg)}, p));
       return b.block(run);
     };
     const auto has = [](const std::vector<std::string>& v, const std::string& k) {
@@ -3362,7 +3329,7 @@ struct Binder {
       for (const Ast* e : pos) {
         steps.push_back(
             e->tag == "splat"_
-                ? helper("$aext", {T, emit_expr(*e->nodes[0], ctx)}, p)
+                ? rt.call("$aext", {T, emit_expr(*e->nodes[0], ctx)}, p)
                 : b.intrinsic(IntrinsicId::ArrayPush, {T, emit_expr(*e, ctx)}));
       }
       steps.push_back(T);
@@ -3385,7 +3352,7 @@ struct Binder {
       for (const Ast* e : kw) {
         steps.push_back(
             e->tag == "kwsplat"_
-                ? helper("$kwmerge", {T, emit_expr(*e->nodes[0], ctx)}, p)
+                ? rt.call("$kwmerge", {T, emit_expr(*e->nodes[0], ctx)}, p)
                 : b.set_index(T, b.str_literal(std::string(e->nodes[0]->token)),
                               emit_expr(*e->nodes[1], ctx)));
       }
@@ -3479,11 +3446,12 @@ struct Binder {
         const NodeId S = b.varref(VarKind::Local, st);
         return b.block(
             {b.assign(VarKind::Local, it,
-                      helper("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
+                      rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
              b.make_while(
                  b.bool_literal(true),
                  b.block(
-                     {b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+                     {b.assign(VarKind::Local, st,
+                               rt.call("$iternext", {I}, p)),
                       b.make_if(b.index(S, b.str_literal("done")),
                                 b.make_break(), NodeId{}),
                       b.make_yield(b.index(S, b.str_literal("value")))}))});
@@ -3499,22 +3467,23 @@ struct Binder {
       case "assertstmt"_:
         return b.make_if(
             b.binary(BinOp::Eq,
-                     helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                     rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
                      b.bool_literal(false)),
-            helper("$exc",
-                   {b.str_literal("AssertionError"),
-                    a.nodes.size() > 1
-                        ? helper("$str", {emit_expr(*a.nodes[1], ctx)}, p)
-                        : b.str_literal("")},
-                   p),
+            rt.call("$exc",
+                    {b.str_literal("AssertionError"),
+                     a.nodes.size() > 1
+                         ? rt.call("$str", {emit_expr(*a.nodes[1], ctx)}, p)
+                         : b.str_literal("")},
+                    p),
             NodeId{});
       case "exprstmt"_:
         return emit_expr(*a.nodes[0], ctx);
       case "ifstmt"_:
         return emit_if(a, ctx);
       case "whilestmt"_:
-        return b.make_while(helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-                            emit_block(*a.nodes[1], ctx));
+        return b.make_while(
+            rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+            emit_block(*a.nodes[1], ctx));
       case "forstmt"_:
         return emit_for(a, ctx);
       case "trystmt"_:
@@ -3540,10 +3509,10 @@ struct Binder {
         sub.tag == "slicehi"_ || sub.tag == "sliceall"_) {
       fail(sub, "deleting a slice is not supported here");
     }
-    return helper("$delitem",
-                  {emit_postfix(t, t.nodes.size() - 1, ctx),
-                   emit_expr(sub, ctx)},
-                  p);
+    return rt.call("$delitem",
+                   {emit_postfix(t, t.nodes.size() - 1, ctx),
+                    emit_expr(sub, ctx)},
+                   p);
   }
 
   NodeId emit_if(const Ast& a, FnCtx& ctx) {
@@ -3551,14 +3520,14 @@ struct Binder {
     auto b = Builder(m).at(p);
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
-        helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+        rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
         emit_block(*a.nodes[1], ctx));
     NodeId els;
     for (size_t i = 2; i < a.nodes.size(); ++i) {
       const Ast& c = *a.nodes[i];
       if (c.tag == "elifpart"_) {
         arms.emplace_back(
-            helper("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+            rt.call("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
             emit_block(*c.nodes[1], ctx));
       } else {
         els = emit_block(*c.nodes[0], ctx);
@@ -3579,7 +3548,7 @@ struct Binder {
     const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *a.nodes[0];
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
         b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
     const NodeId value = b.index(S, b.str_literal("value"));
     if (tg.nodes.size() == 1) {
@@ -3590,9 +3559,9 @@ struct Binder {
       const NodeId U = b.varref(VarKind::Local, u);
       loop.push_back(b.assign(
           VarKind::Local, u,
-          helper("$unpack",
-                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
-                 p)));
+          rt.call("$unpack",
+                  {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
+                  p)));
       for (size_t k = 0; k < tg.nodes.size(); ++k) {
         loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
                                  b.index(U, b.literal(static_cast<int64_t>(k))),
@@ -3601,7 +3570,8 @@ struct Binder {
     }
     loop.push_back(emit_block(*a.nodes[2], ctx));
     return b.block({b.assign(VarKind::Local, it,
-                             helper("$iter", {emit_expr(*a.nodes[1], ctx)}, p)),
+                             rt.call("$iter", {emit_expr(*a.nodes[1], ctx)},
+                                     p)),
                     b.make_while(b.bool_literal(true), b.block(loop))});
   }
 
@@ -3649,7 +3619,7 @@ struct Binder {
       const NodeId cls = ref_of.count(&caught)
                              ? read_var(ref_of.at(&caught), ctx, p)
                              : b.str_literal(std::string(caught.token));
-      handler = b.make_if(helper("$isexc", {E, cls}, p), b.block(hs), handler);
+      handler = b.make_if(rt.call("$isexc", {E, cls}, p), b.block(hs), handler);
     }
     out.push_back(b.make_try(slot, body, handler));
     const int32_t n = ctx.mark();
@@ -3669,7 +3639,7 @@ struct Binder {
         b.cell_fresh(cell),
         b.assign(VarKind::Cell, cell, emit_expr(*a.nodes[0], ctx))};
     const NodeId entered =
-        b.call_value(helper("$getattr", {C, b.str_literal("__enter__")}, p),
+        b.call_value(rt.call("$getattr", {C, b.str_literal("__enter__")}, p),
                      {b.array_lit({C}), b.nil_literal()});
     if (a.nodes.size() > 2 && a.nodes[1]->tag == "ident"_) {
       out.push_back(
@@ -3707,8 +3677,7 @@ struct Binder {
     f.body = b.scope(
         0, 1,
         b.call_value(
-            b.call_value(b.make_closure(rt.at("$getattr"), empty_cmap, p),
-                         {C, b.str_literal("__exit__", p)}, p),
+            rt.call("$getattr", {C, b.str_literal("__exit__", p)}, p),
             {b.array_lit({C, b.nil_literal(p), b.nil_literal(p),
                           b.nil_literal(p)},
                          p),
@@ -3734,10 +3703,10 @@ struct Binder {
       const NodeId U = b.varref(VarKind::Local, u);
       std::vector<NodeId> out{b.assign(
           VarKind::Local, u,
-          helper("$unpack",
-                 {emit_expr(*values.nodes[0], ctx),
-                  b.literal(static_cast<int64_t>(targets.nodes.size()))},
-                 p))};
+          rt.call("$unpack",
+                  {emit_expr(*values.nodes[0], ctx),
+                   b.literal(static_cast<int64_t>(targets.nodes.size()))},
+                  p))};
       for (size_t i = 0; i < targets.nodes.size(); ++i) {
         out.push_back(emit_store(*targets.nodes[i],
                                  b.index(U, b.literal(static_cast<int64_t>(i))),
@@ -3788,14 +3757,14 @@ struct Binder {
             pre, b.make_if(b.binary(BinOp::Eq,
                                     b.intrinsic(IntrinsicId::TypeOf, {now()}),
                                     b.str_literal("array")),
-                           helper("$aext", {now(), v}, p),
-                           helper("$add", {now(), v}, p)));
+                           rt.call("$aext", {now(), v}, p),
+                           rt.call("$add", {now(), v}, p)));
       }
-      if (op == "-=") return helper("$sub", {cur(), v}, p);
-      if (op == "*=") return helper("$mul", {cur(), v}, p);
-      if (op == "//=") return helper("$idiv", {cur(), v}, p);
-      if (op == "/=") return helper("$fdiv", {cur(), v}, p);
-      return helper("$mod", {cur(), v}, p);
+      if (op == "-=") return rt.call("$sub", {cur(), v}, p);
+      if (op == "*=") return rt.call("$mul", {cur(), v}, p);
+      if (op == "//=") return rt.call("$idiv", {cur(), v}, p);
+      if (op == "/=") return rt.call("$fdiv", {cur(), v}, p);
+      return rt.call("$mod", {cur(), v}, p);
     };
 
     if (target.tag == "ident"_) {
@@ -3827,10 +3796,13 @@ struct Binder {
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const auto cur = [&] { return helper(attr ? "$getattr" : "$idx", {R, K}, p); };
+    const auto cur = [&] {
+      return rt.call(attr ? "$getattr" : "$idx", {R, K}, p);
+    };
     return b.block(
         {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         helper(attr ? "$setattr" : "$setidx", {R, K, combine(cur, false)}, p)});
+         rt.call(attr ? "$setattr" : "$setidx", {R, K, combine(cur, false)},
+                 p)});
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
@@ -3847,10 +3819,10 @@ struct Binder {
     const bool attr = last.tag == "dotsfx"_;
     const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
                             : emit_expr(*last.nodes[0], ctx);
-    return helper(attr ? "$setattr" : "$setidx",
-                  {emit_postfix(target, target.nodes.size() - 1, ctx), key,
-                   value},
-                  p);
+    return rt.call(attr ? "$setattr" : "$setidx",
+                   {emit_postfix(target, target.nodes.size() - 1, ctx), key,
+                    value},
+                   p);
   }
 
   // class C: -- a method table in a cell, and a constructor closure over
@@ -3922,23 +3894,20 @@ struct Binder {
     const NodeId K = b.varref(VarKind::Local, 1, p);
     const NodeId O = b.varref(VarKind::Local, 2, p);
     const NodeId F = b.varref(VarKind::Local, 3, p);
-    const auto rtc = [&](const std::string& name,
-                         const std::vector<NodeId>& as) {
-      return b.call_value(b.make_closure(rt.at(name), empty_cmap, p), as, p);
-    };
     // `__init__` may be the base's, so it is looked up rather than indexed.
     std::vector<NodeId> body{
         b.assign(VarKind::Local, 2,
                  b.object_lit({{b.str_literal(kClassKey, p), C}}, p), p),
         b.assign(VarKind::Local, 3,
-                 rtc("$clsfind", {C, b.str_literal("\x02__init__", p)}), p),
+                 rt.call("$clsfind", {C, b.str_literal("\x02__init__", p)}, p),
+                 p),
         b.make_if(
             b.binary(BinOp::Ne,
                      b.intrinsic(IntrinsicId::TypeOf, {F}, p),
                      b.str_literal("nil", p), p),
-            b.call_value(F, {rtc("$acons", {O, A}), K}, p),
-            is_exc ? rtc("$excinit", {O, A})
-                   : rtc("$noinit", {b.str_literal(cname, p), A}),
+            b.call_value(F, {rt.call("$acons", {O, A}, p), K}, p),
+            is_exc ? rt.call("$excinit", {O, A}, p)
+                   : rt.call("$noinit", {b.str_literal(cname, p), A}, p),
             p)};
     body.push_back(b.make_return(O, p));
 
@@ -3987,7 +3956,7 @@ struct Binder {
         // of its own instead, made once and shared.
         const std::string g(a.token);
         if (is_value_builtin(g)) {
-          return b.make_closure(builtin_func(g), empty_cmap);
+          return b.make_closure(builtin_func(g), rt.empty_cmap());
         }
         fail(a, "'" + g + "' must be called here");
       }
@@ -4009,8 +3978,8 @@ struct Binder {
                 spec = std::string(c->nodes[i]->token);
               }
             }
-            if (as_repr) v = helper("$repr", {v}, p);
-            piece = helper("$fmt", {v, b.str_literal(spec)}, p);
+            if (as_repr) v = rt.call("$repr", {v}, p);
+            piece = rt.call("$fmt", {v, b.str_literal(spec)}, p);
           } else {
             piece = b.str_literal(unescape_ftext(std::string(c->token)));
           }
@@ -4028,13 +3997,13 @@ struct Binder {
         // resolve_comp).
         return b.call_value(
             emit_closure(fn_of.at(&a), ctx, p),
-            {b.array_lit({helper(
+            {b.array_lit({rt.call(
                  "$iter", {emit_expr(*first_for(a).nodes[1], ctx)}, p)}),
              b.nil_literal()});
       case "tuplelit"_: {
         std::vector<NodeId> items;
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
-        return helper("$tuple", {b.array_lit(items)}, p);
+        return rt.call("$tuple", {b.array_lit(items)}, p);
       }
       case "lambda"_: {
         const int32_t g = fn_of.at(&a);
@@ -4045,19 +4014,19 @@ struct Binder {
         return b.block(out);
       }
       case "negexp"_:
-        return helper("$neg", {emit_expr(*a.nodes[0], ctx)}, p);
+        return rt.call("$neg", {emit_expr(*a.nodes[0], ctx)}, p);
       case "notop"_:
         return b.binary(BinOp::Eq,
-                        helper("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+                        rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
                         b.bool_literal(false));
       case "powexp"_:
-        return helper("$pow",
-                      {emit_expr(*a.nodes[0], ctx),
-                       emit_expr(*a.nodes[1]->nodes[0], ctx)},
-                      p);
+        return rt.call("$pow",
+                       {emit_expr(*a.nodes[0], ctx),
+                        emit_expr(*a.nodes[1]->nodes[0], ctx)},
+                       p);
       case "ternary"_:
         // `a if c else b`: the condition is the middle child.
-        return b.make_if(helper("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
+        return b.make_if(rt.call("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
                          emit_expr(*a.nodes[0], ctx),
                          emit_expr(*a.nodes[2], ctx));
       case "orexp"_:
@@ -4069,7 +4038,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
           const NodeId keep = b.varref(VarKind::Local, t);
           acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(helper("$truthy", {keep}, p),
+                         b.make_if(rt.call("$truthy", {keep}, p),
                                    is_or ? keep : rhs, is_or ? rhs : keep)});
         }
         return acc;
@@ -4100,9 +4069,10 @@ struct Binder {
           const SrcPos op_p = pos_of(op);
           const NodeId lhs = b.varref(VarKind::Local, slots[k]);
           const NodeId rhs = b.varref(VarKind::Local, slots[k + 1]);
-          if (t == "==") return helper("$eq", {lhs, rhs}, op_p);
+          if (t == "==") return rt.call("$eq", {lhs, rhs}, op_p);
           if (t == "!=") {
-            return b.at(op_p).binary(BinOp::Eq, helper("$eq", {lhs, rhs}, op_p),
+            return b.at(op_p).binary(BinOp::Eq,
+                                     rt.call("$eq", {lhs, rhs}, op_p),
                                      b.bool_literal(false));
           }
           // `is` is identity, which `Same` answers.
@@ -4113,16 +4083,17 @@ struct Binder {
                              : b.at(op_p).binary(BinOp::Eq, same,
                                                  b.bool_literal(false));
           }
-          if (t == "in") return helper("$in", {lhs, rhs}, op_p);
+          if (t == "in") return rt.call("$in", {lhs, rhs}, op_p);
           if (t == "not in") {
-            return b.at(op_p).binary(BinOp::Eq, helper("$in", {lhs, rhs}, op_p),
+            return b.at(op_p).binary(BinOp::Eq,
+                                     rt.call("$in", {lhs, rhs}, op_p),
                                      b.bool_literal(false));
           }
           const BinOp o = t == "<"    ? BinOp::Lt
                           : t == "<=" ? BinOp::Le
                           : t == ">"  ? BinOp::Gt
                                       : BinOp::Ge;
-          return b.at(op_p).binary(o, helper("$cmp", {lhs, rhs}, op_p),
+          return b.at(op_p).binary(o, rt.call("$cmp", {lhs, rhs}, op_p),
                                    b.literal(0));
         };
         // Link k compares operands k and k+1; operand k+1 is set just
@@ -4148,7 +4119,7 @@ struct Binder {
                           : t == "//" ? "$idiv"
                           : t == "/"  ? "$fdiv"
                                       : "$mod";
-          acc = helper(h, {acc, rhs}, op_p);
+          acc = rt.call(h, {acc, rhs}, op_p);
         }
         return acc;
       }
@@ -4227,13 +4198,13 @@ struct Binder {
       const auto [A, K] = emit_callargs(
           callnode.nodes.empty() ? nullptr : callnode.nodes[0].get(), ctx, {},
           pos_of(prim));
-      cur = helper(
+      cur = rt.call(
           "$supercall",
           {read_var(params[0].var, ctx, pos_of(prim)),
            b.index(table, b.str_literal(kBaseKey, pos_of(prim)),
-                   pos_of(prim)),
+                    pos_of(prim)),
            b.str_literal("\x02" + std::string(a.nodes[2]->nodes[0]->token),
-                         pos_of(prim)),
+                          pos_of(prim)),
            A, K},
           pos_of(prim));
       i = 4;
@@ -4253,7 +4224,7 @@ struct Binder {
             ++i;
             break;
           }
-          cur = helper("$getattr", {cur, b.str_literal(name, p)}, p);
+          cur = rt.call("$getattr", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_: {
@@ -4262,32 +4233,32 @@ struct Binder {
           // a position: `slicelo` and `slicehi` are separate rules for
           // exactly that reason, since one child says nothing on its own.
           if (sub.tag == "sliceboth"_) {
-            cur = helper("$slice",
-                         {cur, emit_expr(*sub.nodes[0], ctx),
-                          emit_expr(*sub.nodes[1], ctx)},
-                         p);
+            cur = rt.call("$slice",
+                          {cur, emit_expr(*sub.nodes[0], ctx),
+                           emit_expr(*sub.nodes[1], ctx)},
+                          p);
             break;
           }
           if (sub.tag == "slicelo"_) {
-            cur = helper("$slice",
-                         {cur, emit_expr(*sub.nodes[0], ctx),
-                          b.nil_literal(p)},
-                         p);
+            cur = rt.call("$slice",
+                          {cur, emit_expr(*sub.nodes[0], ctx),
+                           b.nil_literal(p)},
+                          p);
             break;
           }
           if (sub.tag == "slicehi"_) {
-            cur = helper("$slice",
-                         {cur, b.nil_literal(p),
-                          emit_expr(*sub.nodes[0], ctx)},
-                         p);
+            cur = rt.call("$slice",
+                          {cur, b.nil_literal(p),
+                           emit_expr(*sub.nodes[0], ctx)},
+                          p);
             break;
           }
           if (sub.tag == "sliceall"_) {
-            cur = helper("$slice",
-                         {cur, b.nil_literal(p), b.nil_literal(p)}, p);
+            cur = rt.call("$slice",
+                          {cur, b.nil_literal(p), b.nil_literal(p)}, p);
             break;
           }
-          cur = helper("$idx", {cur, emit_expr(sub, ctx)}, p);
+          cur = rt.call("$idx", {cur, emit_expr(sub, ctx)}, p);
           break;
         }
         default:  // callsfx
@@ -4312,8 +4283,8 @@ struct Binder {
     if (!is_method_name(name)) {
       return b.block(
           {b.assign(VarKind::Local, t, recv),
-           emit_pycall(helper("$getattr", {T, b.str_literal(name)}, p), argnode,
-                       ctx, {T}, p)});
+           emit_pycall(rt.call("$getattr", {T, b.str_literal(name)}, p),
+                       argnode, ctx, {T}, p)});
     }
     // The arguments run once, in source order, whichever method takes them.
     const Given g = emit_given(argnode, ctx);
@@ -4324,7 +4295,7 @@ struct Binder {
     std::vector<std::pair<NodeId, NodeId>> kvs;
     for (const auto& [k, v] : g.kw) kvs.emplace_back(b.str_literal(k), v);
     const NodeId user =
-        b.call_value(helper("$getattr", {T, b.str_literal(name)}, p),
+        b.call_value(rt.call("$getattr", {T, b.str_literal(name)}, p),
                      {b.array_lit(front),
                       kvs.empty() ? b.nil_literal() : b.object_lit(kvs)});
 
@@ -4338,7 +4309,7 @@ struct Binder {
           want, takes(g, t, std::string(tname) + "." + name, ctx, p, make));
     };
     const auto h = [&](const char* n, std::vector<NodeId> as) {
-      return helper(n, as, p);
+      return rt.call(n, as, p);
     };
     const auto opt = [&](Args v, size_t k, NodeId dflt) {
       return k < v.size() && v[k].valid() ? v[k] : dflt;
@@ -4479,7 +4450,7 @@ struct Binder {
           cls.tag == "ident"_ && !ref_of.count(&cls)
               ? b.str_literal(std::string(cls.token), p)
               : emit_expr(cls, ctx);
-      return helper("$isinst", {emit_expr(what, ctx), cv}, p);
+      return rt.call("$isinst", {emit_expr(what, ctx), cv}, p);
     }
     // Every other builtin: its arguments run once, in source order, and
     // each states what it takes beside the call it builds (see takes).
@@ -4507,7 +4478,7 @@ struct Binder {
       return call_it(Takes{0, any, any}, [&](Args a, Args) {
         return b.object_lit({{b.str_literal(kExcKey, p), b.str_literal(g, p)},
                              {b.str_literal(kMsgKey, p),
-                              helper("$excmsg", {b.array_lit(a, p)}, p)}},
+                              rt.call("$excmsg", {b.array_lit(a, p)}, p)}},
                             p);
       });
     }
@@ -4515,10 +4486,10 @@ struct Binder {
       Takes t{1, 1, 1, Shape::Clinic, {"key", "reverse"}};
       t.kw_owner = "sort";
       return call_it(t, [&](Args a, Args kw) {
-        return helper("$sorted",
-                      {a[0], opt(kw, 0, b.nil_literal(p)),
-                       opt(kw, 1, b.bool_literal(false, p))},
-                      p);
+        return rt.call("$sorted",
+                       {a[0], opt(kw, 0, b.nil_literal(p)),
+                        opt(kw, 1, b.bool_literal(false, p))},
+                       p);
       });
     }
     if (g == "print") {
@@ -4526,18 +4497,20 @@ struct Binder {
       t.py_kw = {"sep", "end", "file", "flush"};
       return call_it(t, [&](Args a, Args) {
         std::vector<NodeId> parts;
-        for (const NodeId v : a) parts.push_back(helper("$str", {v}, p));
+        for (const NodeId v : a) parts.push_back(rt.call("$str", {v}, p));
         return native("print", {b.array_lit(parts, p)}, p);
       });
     }
     // A conversion called with nothing answers its type's empty value.
     const auto convert = [&](const Takes& t, const char* fn, NodeId empty) {
       return call_it(t, [&, fn, empty](Args a, Args) {
-        return a.empty() ? empty : helper(fn, {a[0]}, p);
+        return a.empty() ? empty : rt.call(fn, {a[0]}, p);
       });
     };
     if (g == "len") {
-      return call_it(one, [&](Args a, Args) { return helper("$len", {a[0]}, p); });
+      return call_it(one, [&](Args a, Args) {
+        return rt.call("$len", {a[0]}, p);
+      });
     }
     if (g == "str") {
       Takes t = old(0, 1, 3);
@@ -4554,31 +4527,37 @@ struct Binder {
     if (g == "bool") return convert(clinic(0, 1, 1), "$truthy", b.bool_literal(false, p));
     if (g == "tuple") {
       return call_it(clinic(0, 1, 1), [&](Args a, Args) {
-        return helper("$tuple",
-                      {a.empty() ? b.array_lit({}, p)
-                                 : helper("$tolist", {a[0]}, p)},
-                      p);
+        return rt.call("$tuple",
+                       {a.empty() ? b.array_lit({}, p)
+                                  : rt.call("$tolist", {a[0]}, p)},
+                       p);
       });
     }
     if (g == "abs") {
-      return call_it(one, [&](Args a, Args) { return helper("$pyabs", {a[0]}, p); });
+      return call_it(one, [&](Args a, Args) {
+        return rt.call("$pyabs", {a[0]}, p);
+      });
     }
     if (g == "repr") {
-      return call_it(one, [&](Args a, Args) { return helper("$repr", {a[0]}, p); });
+      return call_it(one, [&](Args a, Args) {
+        return rt.call("$repr", {a[0]}, p);
+      });
     }
     if (g == "type") {
       // type takes one argument or three, never two; type(name, bases,
       // dict) makes a class, which is not implemented.
       Takes t{1, 1, given.pos.size() == 3 ? size_t{3} : size_t{1}};
       t.few = t.many = "type() takes 1 or 3 arguments";
-      return call_it(t, [&](Args a, Args) { return helper("$type", {a[0]}, p); });
+      return call_it(t, [&](Args a, Args) {
+        return rt.call("$type", {a[0]}, p);
+      });
     }
     if (g == "next") {
       return call_it(clinic(1, 2, 2), [&](Args a, Args) {
-        return helper("$next",
-                      {a[0], opt(a, 1, b.nil_literal(p)),
-                       b.bool_literal(a.size() > 1, p)},
-                      p);
+        return rt.call("$next",
+                       {a[0], opt(a, 1, b.nil_literal(p)),
+                        b.bool_literal(a.size() > 1, p)},
+                       p);
       });
     }
     if (g == "enumerate") {
@@ -4586,12 +4565,12 @@ struct Binder {
       t.py_kw = {"iterable", "start"};
       t.few = "enumerate() missing required argument 'iterable'";
       return call_it(t, [&](Args a, Args) {
-        return helper("$enumerate", {a[0], opt(a, 1, b.literal(0, p))}, p);
+        return rt.call("$enumerate", {a[0], opt(a, 1, b.literal(0, p))}, p);
       });
     }
     if (g == "zip") {
       return call_it(Takes{2, 2, any}, [&](Args a, Args) {
-        return helper("$zip", {a[0], a[1]}, p);
+        return rt.call("$zip", {a[0], a[1]}, p);
       });
     }
     if (g == "sum") {
@@ -4599,7 +4578,7 @@ struct Binder {
       t.py_kw = {"start"};
       t.few = "sum() takes at least 1 positional argument (0 given)";
       return call_it(t, [&](Args a, Args) {
-        return helper("$sum", {a[0], opt(a, 1, b.literal(0, p))}, p);
+        return rt.call("$sum", {a[0], opt(a, 1, b.literal(0, p))}, p);
       });
     }
     if (g == "min" || g == "max") {
@@ -4607,18 +4586,18 @@ struct Binder {
       t.py_kw = {"key", "default"};
       return call_it(t, [&](Args a, Args) {
         // `min(xs)` scans one iterable; `min(a, b)` scans its own arguments.
-        return helper("$minmax",
-                      {a.size() == 1 ? a[0] : b.array_lit(a, p),
-                       b.bool_literal(g == "max", p)},
-                      p);
+        return rt.call("$minmax",
+                       {a.size() == 1 ? a[0] : b.array_lit(a, p),
+                        b.bool_literal(g == "max", p)},
+                       p);
       });
     }
     if (g == "range") {
       return call_it(clinic(1, 3, 3), [&](Args a, Args) {
         if (a.size() == 1) {
-          return helper("$range", {b.literal(0, p), a[0], b.literal(1, p)}, p);
+          return rt.call("$range", {b.literal(0, p), a[0], b.literal(1, p)}, p);
         }
-        return helper("$range", {a[0], a[1], opt(a, 2, b.literal(1, p))}, p);
+        return rt.call("$range", {a[0], a[1], opt(a, 2, b.literal(1, p))}, p);
       });
     }
     fail(prim, "'" + g + "' is not supported here");
@@ -4637,7 +4616,7 @@ struct Binder {
     const NodeId arg =
         b.index(b.varref(VarKind::Local, 0, p), b.literal(0, p), p);
     const auto rtc = [&](const std::string& n) {
-      return b.call_value(b.make_closure(rt.at(n), empty_cmap, p), {arg}, p);
+      return rt.call(n, {arg}, p);
     };
     NodeId body;
     if (g == "len") {
@@ -4657,8 +4636,7 @@ struct Binder {
     } else if (g == "type") {
       body = rtc("$type");
     } else if (g == "tuple") {
-      body = b.call_value(b.make_closure(rt.at("$tuple"), empty_cmap, p),
-                          {rtc("$tolist")}, p);
+      body = rt.call("$tuple", {rtc("$tolist")}, p);
     } else {  // abs
       body = rtc("$pyabs");
     }
@@ -4817,24 +4795,25 @@ struct Binder {
       NodeId value;
       if (pi.kind == ParamInfo::Rest) {
         // A tuple, as Python's `*args` is.
-        value = helper("$tuple", {helper("$rest", {A, b.literal(pos)}, p)}, p);
+        value = rt.call("$tuple", {rt.call("$rest", {A, b.literal(pos)}, p)},
+                        p);
         kwonly = true;
       } else if (pi.kind == ParamInfo::KwRest) {
-        value = helper("$kwrest", {K, all_names}, p);
+        value = rt.call("$kwrest", {K, all_names}, p);
       } else if (kwonly) {
         // By name, then the default, and a TypeError naming every
         // keyword-only parameter that neither answered.
         const NodeId fallback =
             pi.kind == ParamInfo::Default
                 ? read_var(pi.def_var, ctx, p)
-                : helper("$missing",
-                         {b.str_literal(fi.name), b.str_literal("keyword-only"),
-                          b.array_lit(kwreqname),
-                          b.array_lit(std::vector<NodeId>(kwreqname.size(),
-                                                          b.literal(-1))),
-                          A, K},
-                         p);
-        value = b.make_if(helper("$kwhas", {K, b.str_literal(pi.name)}, p),
+                : rt.call("$missing",
+                          {b.str_literal(fi.name), b.str_literal("keyword-only"),
+                           b.array_lit(kwreqname),
+                           b.array_lit(std::vector<NodeId>(kwreqname.size(),
+                                                           b.literal(-1))),
+                           A, K},
+                          p);
+        value = b.make_if(rt.call("$kwhas", {K, b.str_literal(pi.name)}, p),
                           b.index(K, b.str_literal(pi.name)), fallback);
       } else {
         // Positional, then by name, then the default -- and a TypeError
@@ -4844,14 +4823,14 @@ struct Binder {
         const NodeId fallback =
             pi.kind == ParamInfo::Default
                 ? read_var(pi.def_var, ctx, p)
-                : helper("$missing",
-                         {b.str_literal(fi.name), b.str_literal("positional"),
-                          b.array_lit(reqname), b.array_lit(reqidx), A, K},
-                         p);
+                : rt.call("$missing",
+                          {b.str_literal(fi.name), b.str_literal("positional"),
+                           b.array_lit(reqname), b.array_lit(reqidx), A, K},
+                          p);
         value = b.make_if(
             b.binary(BinOp::Gt, alen(), b.literal(at)),
             b.index(A, b.literal(at)),
-            b.make_if(helper("$kwhas", {K, b.str_literal(pi.name)}, p),
+            b.make_if(rt.call("$kwhas", {K, b.str_literal(pi.name)}, p),
                       b.index(K, b.str_literal(pi.name)), fallback));
         ++at;
       }
@@ -4867,15 +4846,15 @@ struct Binder {
     if (!has_rest) {
       pre.push_back(
           b.make_if(b.binary(BinOp::Gt, alen(), b.literal(pos)),
-                    helper("$toomany",
-                           {b.str_literal(fi.name), b.literal(required),
-                            b.literal(pos), alen()},
-                           p),
+                    rt.call("$toomany",
+                            {b.str_literal(fi.name), b.literal(required),
+                             b.literal(pos), alen()},
+                            p),
                     NodeId{}));
     }
     if (!has_kwrest) {
       pre.push_back(
-          helper("$kwcheck", {K, all_names, b.str_literal(fi.name)}, p));
+          rt.call("$kwcheck", {K, all_names, b.str_literal(fi.name)}, p));
     }
   }
 
@@ -4909,7 +4888,7 @@ struct Binder {
     for (size_t k = clauses.size(); k-- > 0;) {
       const Ast& c = *clauses[k];
       if (c.tag == "compif"_) {
-        inner = b.make_if(helper("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+        inner = b.make_if(rt.call("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
                           inner, NodeId{});
         continue;
       }
@@ -4941,7 +4920,7 @@ struct Binder {
     const NodeId S = b.varref(VarKind::Local, st);
     const Ast& tg = *c.nodes[0];
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
         b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{})};
     const NodeId value = b.index(S, b.str_literal("value"));
     if (tg.nodes.size() == 1) {
@@ -4951,9 +4930,9 @@ struct Binder {
       const NodeId U = b.varref(VarKind::Local, u);
       loop.push_back(b.assign(
           VarKind::Local, u,
-          helper("$unpack",
-                 {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
-                 p)));
+          rt.call("$unpack",
+                  {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
+                  p)));
       for (size_t k = 0; k < tg.nodes.size(); ++k) {
         loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
                                  b.index(U, b.literal(static_cast<int64_t>(k))),
@@ -4963,7 +4942,8 @@ struct Binder {
     loop.push_back(inner);
     const NodeId iter = given.valid()
                             ? given
-                            : helper("$iter", {emit_expr(*c.nodes[1], ctx)}, p);
+                            : rt.call("$iter",
+                                      {emit_expr(*c.nodes[1], ctx)}, p);
     return b.block({b.assign(VarKind::Local, it, iter),
                     b.make_while(b.bool_literal(true), b.block(loop))});
   }
@@ -4979,10 +4959,7 @@ struct Binder {
 
     m.funcs.push_back({});
     rs.fns[static_cast<size_t>(top)].index = 0;
-    for (const std::string& n : rt_names()) {
-      rt[n] = static_cast<int32_t>(m.funcs.size());
-      m.funcs.push_back({});
-    }
+    rt.reserve(rt_names());
     const size_t declared = fns.size();
     for (size_t f = 1; f < declared; ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
@@ -4991,8 +4968,6 @@ struct Binder {
 
 
     rs.number_captures(m);
-    empty_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back({});
     emit_runtime();
 
     for (size_t f = 0; f < declared; ++f) {

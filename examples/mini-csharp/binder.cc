@@ -207,8 +207,7 @@ struct Binder {
   // alone, the same way `$mfind` dispatches a method call -- a property
   // never needs to know which class it is reached through.
   std::set<std::string> property_names;
-  std::map<std::string, int32_t> rt;
-  int32_t empty_cmap = -1;
+  HelperTable rt{m};  // the runtime helpers, by name
   int32_t main_fn = -1;
 
   static bool has_mod(const Ast& member, const std::string& want) {
@@ -780,31 +779,9 @@ struct Binder {
     return names;
   }
 
-  // The front end's own additions to coreir::FuncWriter: the helpers
-  // that have to reach this binder's own tables.
-  struct RT : FuncWriter {
-    Binder& bd;
-
-    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
-
-    NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
-      std::vector<CaptureSrc> cs;
-      for (const int32_t c : cells) cs.push_back({VarKind::Cell, c});
-      const int32_t cm = static_cast<int32_t>(bd.m.capture_maps.size());
-      bd.m.capture_maps.push_back(cs);
-      return b.make_closure(bd.rt.at(name), cm);
-    }
-
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
-    }
-
-    // The counts and the name table come from param()/local().
-    void finish(const std::string& name, int32_t ncells = 0,
-                int32_t ncaps = 0) {
-      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
-            ncaps);
-    }
+  // One helper of the runtime above under construction.
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
   // Object.ToString, for the values this subset has. Note the double: no
@@ -902,7 +879,7 @@ struct Binder {
     const auto [recv, name] = r.params("recv", "name");
     method_walk(r, recv, name);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
-                r.ret(r.b.make_closure(rt.at("$nullcall"), empty_cmap))));
+                r.ret(r.ref("$nullcall"))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
@@ -1191,13 +1168,6 @@ struct Binder {
     rt_tresolve(); rt_adopt(); rt_await(); rt_mainwrap();
   }
 
-  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
-  // sets it), so all these MakeClosures name the one closure the executor
-  // built at the first of them -- which is what the array of pre-built
-  // closures at file scope used to buy, at the cost of a synthetic variable
-  // every function had to capture. One that *does* take captures is built at
-  // the site that has them (RT::clos) and never reaches here; saying so
-  // beats the "cannot call nil" it would otherwise be at run time.
   NodeId default_of(const Ast* type, SrcPos p) {
     auto b = Builder(m).at(p);
     // The type's text is captured with the space its last identifier
@@ -1212,17 +1182,6 @@ struct Binder {
     }
     if (t == "bool") return b.bool_literal(false);
     return b.nil_literal();  // a reference type's null
-  }
-
-  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
-                SrcPos p) {
-    const auto it = rt.find(name);
-    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
-      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-    }
-    auto b = Builder(m).at(p);
-    return b.call_value(b.make_closure(it->second, empty_cmap), args);
   }
 
   // ==== Pass B: emit ======================================================
@@ -1390,14 +1349,14 @@ struct Binder {
     const NodeId I = b.varref(VarKind::Local, it);
     const NodeId S = b.varref(VarKind::Local, st);
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
         b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
         bind_decl(decl_of.at(a.nodes[1].get()),
                   b.index(S, b.str_literal("value")), ctx, p),
         emit_stmt(*a.nodes[3], ctx)};
     const NodeId body =
         b.block({b.assign(VarKind::Local, it,
-                          helper("$iter", {emit_expr(*a.nodes[2], ctx)}, p)),
+                          rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p)),
                  b.make_while(b.bool_literal(true), b.block(loop))});
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
@@ -1444,8 +1403,7 @@ struct Binder {
     f.body = b.scope(
         0, 1,
         b.call_value(
-            b.call_value(b.make_closure(rt.at("$mfind"), empty_cmap, p),
-                         {C, b.str_literal("Dispose", p)}, p),
+            rt.call("$mfind", {C, b.str_literal("Dispose", p)}, p),
             {C}, p),
         p);
     m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
@@ -1511,16 +1469,16 @@ struct Binder {
         const auto it = ref_of.find(&a);
         if (it != ref_of.end()) return read_var(it->second, ctx, p);
         if (field_refs.count(&a)) {
-          return helper("$getf",
-                        {this_of(ctx, p), b.str_literal(std::string(a.token))},
-                        p);
+          return rt.call("$getf",
+                         {this_of(ctx, p), b.str_literal(std::string(a.token))},
+                         p);
         }
         if (prop_refs.count(&a)) {
           return emit_prop_get(this_of(ctx, p), std::string(a.token), ctx, p);
         }
         const auto sf = static_field_refs.find(&a);
         if (sf != static_field_refs.end()) {
-          return helper(
+          return rt.call(
               "$getf",
               {read_var(classes[static_cast<size_t>(sf->second)].var, ctx, p),
                b.str_literal(std::string(a.token))},
@@ -1554,7 +1512,7 @@ struct Binder {
         if (!fns[static_cast<size_t>(ctx.fn)].is_async) {
           fail(a, "'await' outside an async method");
         }
-        return helper("$await", {emit_expr(*a.nodes[0], ctx)}, p);
+        return rt.call("$await", {emit_expr(*a.nodes[0], ctx)}, p);
       }
       case "newexp"_:
         return emit_new(a, ctx);
@@ -1578,7 +1536,7 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = helper("$eq", {acc, rhs}, pos_of(op));
+          const NodeId eq = rt.call("$eq", {acc, rhs}, pos_of(op));
           acc = op.token == "=="
                     ? eq
                     : b.at(pos_of(op))
@@ -1612,7 +1570,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
           if (t == "+") {
-            acc = helper("$add", {acc, rhs}, op_p);
+            acc = rt.call("$add", {acc, rhs}, op_p);
           } else {
             const BinOp o = t == "-"   ? BinOp::Sub
                             : t == "*" ? BinOp::Mul
@@ -1665,7 +1623,7 @@ struct Binder {
       const int32_t t = ctx.alloc_local("$list");
       const NodeId T = b.varref(VarKind::Local, t);
       std::vector<NodeId> out{
-          b.assign(VarKind::Local, t, helper("$newlist", {args[0]}, p))};
+          b.assign(VarKind::Local, t, rt.call("$newlist", {args[0]}, p))};
       for (const NodeId v : items) {
         out.push_back(b.intrinsic(IntrinsicId::ArrayPush, {T, v}));
       }
@@ -1674,13 +1632,13 @@ struct Binder {
     }
     if (base == "Dictionary") {
       if (args.empty()) return b.intrinsic(IntrinsicId::MapNew, {});
-      return helper("$newdict", {args[0]}, p);
+      return rt.call("$newdict", {args[0]}, p);
     }
     // new Exception(), (message) or (message, inner): .NET's own words
     // without a message, and the inner exception, which this subset does
     // not keep, still runs.
     if (base == "Exception") {
-      const NodeId made = helper(
+      const NodeId made = rt.call(
           "$mkexc",
           {args.empty()
                ? b.str_literal("Exception of type 'System.Exception' was thrown.")
@@ -1759,18 +1717,18 @@ struct Binder {
           // `.Count`, `.Length`, `.Message` and `.Result` are the four
           // properties this subset has; everything else is a field.
           if (name == "Count" || name == "Length") {
-            cur = helper("$len", {cur}, p);
+            cur = rt.call("$len", {cur}, p);
           } else if (name == "Message") {
-            cur = helper("$str", {cur}, p);
+            cur = rt.call("$str", {cur}, p);
           } else if (name == "Result") {
-            cur = helper("$await", {cur}, p);
+            cur = rt.call("$await", {cur}, p);
           } else {
-            cur = helper("$getf", {cur, b.str_literal(name, p)}, p);
+            cur = rt.call("$getf", {cur, b.str_literal(name, p)}, p);
           }
           break;
         }
         case "indexsfx"_:
-          cur = helper("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = rt.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_: {
           std::vector<NodeId> args{b.nil_literal(p)};
@@ -1800,7 +1758,7 @@ struct Binder {
     std::vector<NodeId> callargs{T};
     callargs.insert(callargs.end(), args.begin(), args.end());
     return b.block({b.assign(VarKind::Local, t, recv),
-                    b.call_value(helper("$mfind", {T, b.str_literal(name)}, p),
+                    b.call_value(rt.call("$mfind", {T, b.str_literal(name)}, p),
                                  callargs)});
   }
 
@@ -1813,7 +1771,7 @@ struct Binder {
       return k < args.size() ? args[k] : b.nil_literal();
     };
     // ToString is $str's to resolve, an override included.
-    if (name == "ToString") return helper("$str", {recv}, p);
+    if (name == "ToString") return rt.call("$str", {recv}, p);
     // List.Add, Dictionary.Add and Task.Wait are also ordinary method
     // names: a class instance's own method of the name wins, found by the
     // walk a call uses, and only a receiver without one gets the
@@ -1827,11 +1785,11 @@ struct Binder {
       std::vector<NodeId> callargs{T};
       callargs.insert(callargs.end(), args.begin(), args.end());
       const NodeId library = name == "Add"
-                                 ? helper("$dictadd", {T, a0(0), a0(1)}, p)
-                                 : helper("$await", {T}, p);
+                                 ? rt.call("$dictadd", {T, a0(0), a0(1)}, p)
+                                 : rt.call("$await", {T}, p);
       NodeId call = b.block(
           {b.assign(VarKind::Local, mt,
-                    helper("$mlookup", {T, b.str_literal(name)}, p)),
+                    rt.call("$mlookup", {T, b.str_literal(name)}, p)),
            b.make_if(b.binary(BinOp::Ne,
                               b.intrinsic(IntrinsicId::TypeOf, {M}),
                               b.str_literal("nil")),
@@ -1892,20 +1850,20 @@ struct Binder {
     };
     if (g == "Console" && (mem == "WriteLine" || mem == "Write")) {
       NodeId s = args.empty() ? b.str_literal("", p)
-                              : helper("$str", {args[0]}, p);
+                              : rt.call("$str", {args[0]}, p);
       if (mem == "WriteLine") {
         s = b.binary(BinOp::Add, s, b.str_literal("\n", p), p);
       }
       return native("write", {s}, p);
     }
     if ((g == "string" || g == "String") && mem == "Join") {
-      return helper("$join", {helper("$str", {a0(0)}, p), a0(1)}, p);
+      return rt.call("$join", {rt.call("$str", {a0(0)}, p), a0(1)}, p);
     }
     if (g == "Task" && (mem == "Yield" || mem == "CompletedTask")) {
-      return helper("$totask", {b.nil_literal(p)}, p);
+      return rt.call("$totask", {b.nil_literal(p)}, p);
     }
     if (g == "Task" && mem == "FromResult") {
-      return helper("$totask", {a0(0)}, p);
+      return rt.call("$totask", {a0(0)}, p);
     }
     // A static method reached through its class name: `Probe.Helper(x)`.
     if (class_by_name.count(g)) {
@@ -1958,9 +1916,9 @@ struct Binder {
                 : this_of(ctx, p);
         const int32_t t = ctx.alloc_local("$owner");
         const NodeId T = b.varref(VarKind::Local, t);
-        const auto read = [&] { return helper("$getf", {T, key}, p); };
+        const auto read = [&] { return rt.call("$getf", {T, key}, p); };
         return b.block({b.assign(VarKind::Local, t, owner),
-                        helper("$setf", {T, key, combine(read)}, p)});
+                        rt.call("$setf", {T, key, combine(read)}, p)});
       }
       if (prop_refs.count(&target)) {
         const std::string name(target.token);
@@ -1995,11 +1953,11 @@ struct Binder {
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
     const auto read = [&] {
-      return helper(member ? "$getf" : "$idx", {R, K}, p);
+      return rt.call(member ? "$getf" : "$idx", {R, K}, p);
     };
     return b.block(
         {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         helper(member ? "$setf" : "$setidx", {R, K, combine(read)}, p)});
+         rt.call(member ? "$setf" : "$setidx", {R, K, combine(read)}, p)});
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
@@ -2012,7 +1970,7 @@ struct Binder {
                       [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(*a.nodes[2], ctx);
       if (op == "=") return v;
-      if (op == "+=") return helper("$add", {cur(), v}, p);
+      if (op == "+=") return rt.call("$add", {cur(), v}, p);
       const BinOp o = op == "-="   ? BinOp::Sub
                       : op == "*=" ? BinOp::Mul
                       : op == "/=" ? BinOp::Div
@@ -2058,7 +2016,7 @@ struct Binder {
       for (const Ast* fd : ci.static_fields) {
         const FieldParts sf = field_parts(*fd);
         if (sf.init == nullptr) continue;
-        body.push_back(helper(
+        body.push_back(rt.call(
             "$setf",
             {read_var(ci.var, ctx, p), b.str_literal(std::string(sf.name->token)),
              emit_expr(*sf.init, ctx)},
@@ -2097,14 +2055,14 @@ struct Binder {
     for (const Ast* fd : ci.fields) {
       const FieldParts f = field_parts(*fd);
       if (f.name == nullptr) continue;
-      out.push_back(helper(
+      out.push_back(rt.call(
           "$setf",
           {this_of(ctx, p), b.str_literal(std::string(f.name->token)),
            f.init != nullptr ? emit_expr(*f.init, ctx) : default_of(f.type, p)},
           p));
     }
     for (const auto& ap : ci.auto_props) {
-      out.push_back(helper(
+      out.push_back(rt.call(
           "$setf",
           {this_of(ctx, p), b.str_literal(auto_field_key(ap.name)),
            ap.init != nullptr ? emit_expr(*ap.init, ctx)
@@ -2141,13 +2099,8 @@ struct Binder {
     const int32_t run_idx = static_cast<int32_t>(m.funcs.size());
     m.funcs.push_back({});
 
-    const auto rtcall = [&](const std::string& name,
-                            const std::vector<NodeId>& args) {
-      return b.call_value(b.make_closure(rt.at(name), empty_cmap), args);
-    };
-
-    std::vector<NodeId> launch{b.cell_fresh(0),
-                               b.assign(VarKind::Cell, 0, rtcall("$tnew", {}))};
+    std::vector<NodeId> launch{
+        b.cell_fresh(0), b.assign(VarKind::Cell, 0, rt.call("$tnew", {}, p))};
     std::vector<CaptureSrc> fwd;
     for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
     const int32_t fwd_cmap = static_cast<int32_t>(m.capture_maps.size());
@@ -2206,11 +2159,13 @@ struct Binder {
         0, 1,
         b.make_try(
             0,
-            rtcall("$tresolve",
-                   {b.varref(VarKind::Capture, 1),
-                    b.call_value(b.varref(VarKind::Capture, 0), callargs)}),
-            rtcall("$tsettle", {b.varref(VarKind::Capture, 1), b.literal(2),
-                                b.varref(VarKind::Local, 0)})));
+            rt.call("$tresolve",
+                    {b.varref(VarKind::Capture, 1),
+                     b.call_value(b.varref(VarKind::Capture, 0), callargs)},
+                    p),
+            rt.call("$tsettle", {b.varref(VarKind::Capture, 1), b.literal(2),
+                                 b.varref(VarKind::Local, 0)},
+                    p)));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
   }
 
@@ -2219,10 +2174,7 @@ struct Binder {
 
     m.funcs.push_back({});
     rs.fns[0].index = 0;
-    for (const std::string& n : rt_names()) {
-      rt[n] = static_cast<int32_t>(m.funcs.size());
-      m.funcs.push_back({});
-    }
+    rt.reserve(rt_names());
     const size_t declared = fns.size();
     for (size_t f = 1; f < declared; ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
@@ -2246,8 +2198,6 @@ struct Binder {
     // it.
     for (const ClassInfo& ci : classes) rs.force_cell(ci.var);
     rs.number_captures(m);
-    empty_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back({});
     emit_runtime();
 
     for (size_t f = 1; f < declared; ++f) {
@@ -2332,7 +2282,7 @@ struct Binder {
     out.push_back(
         b.intrinsic(IntrinsicId::Enqueue,
                     {b.intrinsic(IntrinsicId::CoroCreate,
-                                 {b.make_closure(rt.at("$mainwrap"), cm)})}));
+                                 {b.make_closure(rt.func("$mainwrap"), cm)})}));
 
     Func f;
     f.name = "main";
@@ -2363,7 +2313,7 @@ struct Binder {
                 b.make_return(b.index(b.varref(VarKind::Local, 0),
                                       b.str_literal(auto_field_key(name)))));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);
-    return b.make_closure(idx, empty_cmap);
+    return b.make_closure(idx, rt.empty_cmap());
   }
 
   NodeId emit_auto_set(const std::string& name, SrcPos p) {
@@ -2382,7 +2332,7 @@ struct Binder {
                                           b.varref(VarKind::Local, 1)),
                               b.make_return(b.nil_literal())}));
     m.funcs[static_cast<size_t>(idx)] = std::move(f);
-    return b.make_closure(idx, empty_cmap);
+    return b.make_closure(idx, rt.empty_cmap());
   }
 
 };

@@ -163,8 +163,7 @@ struct Binder {
   std::map<const Ast*, int32_t> ref_of;   // an ident in expression position
   std::map<const Ast*, int32_t> decl_of;  // an ident in declaring position
   std::map<const Ast*, int32_t> fn_of;    // a function-shaped node
-  std::map<std::string, int32_t> rt;      // $helper name -> Module::funcs index
-  int32_t empty_cmap = -1;
+  HelperTable rt{m};  // the runtime helpers, by name
 
   // ==== Pass A: scopes, declarations, captures =============================
 
@@ -499,37 +498,12 @@ struct Binder {
     return names;
   }
 
-  // One runtime func under construction. The short names are deliberate:
-  // these bodies are dense trees, and spelling `b.binary(BinOp::Eq, ...)`
-  // at every node buries what the code says under how it is built.
-  // The front end's own additions to coreir::FuncWriter: the helpers
-  // that have to reach this binder's own tables.
-  struct RT : FuncWriter {
-    Binder& bd;
-
-    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
-
-    // A closure over this func's own cells: the capture map belongs to the
-    // site building it, which is here.
-    NodeId clos(const std::string& name, const std::vector<int32_t>& cells) {
-      std::vector<CaptureSrc> cs;
-      cs.reserve(cells.size());
-      for (const int32_t c : cells) cs.push_back({VarKind::Cell, c});
-      const int32_t cm = static_cast<int32_t>(bd.m.capture_maps.size());
-      bd.m.capture_maps.push_back(cs);
-      return b.make_closure(bd.rt.at(name), cm);
-    }
-
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
-    }
-
-    // The counts and the name table come from param()/local().
-    void finish(const std::string& name, int32_t ncells = 0,
-                int32_t ncaps = 0) {
-      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
-            ncaps);
-    }
+  // One runtime func under construction. The short names (coreir's
+  // HelperWriter) are deliberate: these bodies are dense trees, and
+  // spelling `b.binary(BinOp::Eq, ...)` at every node buries what the code
+  // says under how it is built.
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
   // ToBoolean, ES2023 7.1.2. The VM's own Value::truthy() is close but
@@ -1249,24 +1223,6 @@ struct Binder {
     rt_prejected();
   }
 
-  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
-  // sets it), so all these MakeClosures name the one closure the executor
-  // built at the first of them -- which is what the array of pre-built
-  // closures at file scope used to buy, at the cost of a synthetic variable
-  // every function had to capture. One that *does* take captures is built at
-  // the site that has them (RT::clos) and never reaches here; saying so
-  // beats the "cannot call nil" it would otherwise be at run time.
-  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
-                SrcPos p) {
-    const auto it = rt.find(name);
-    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
-      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-    }
-    auto b = Builder(m).at(p);
-    return b.call_value(b.make_closure(it->second, empty_cmap), args);
-  }
-
   // ==== Pass B: emit ======================================================
 
   // A value used as a condition. A comparison already produced a bool, and
@@ -1278,7 +1234,7 @@ struct Binder {
       return v;
     }
     if (n.tag == Tag::Literal && m.const_kind(v) == ConstKind::Bool) return v;
-    return helper("$truthy", {v}, p);
+    return rt.call("$truthy", {v}, p);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
@@ -1424,7 +1380,7 @@ struct Binder {
       }
       if (!run.empty()) segs.push_back(b.array_lit(run));
       run.clear();
-      const NodeId arrayof = b.make_closure(rt.at("$arrayof"), empty_cmap);
+      const NodeId arrayof = rt.ref("$arrayof", pos_of(list));
       segs.push_back(b.call_spread(arrayof, {}, emit_expr(*c.nodes[0], ctx)));
     }
     if (!run.empty() || segs.empty()) segs.push_back(b.array_lit(run));
@@ -1546,7 +1502,7 @@ struct Binder {
     auto b = Builder(m).at(p);
     const bool up = a.nodes.back()->token == "++";
     return emit_store(a, a.nodes.size() - 1, ctx, p, false, [&](auto&& cur) {
-      return up ? helper("$add", {cur(), b.double_literal(1.0)}, p)
+      return up ? rt.call("$add", {cur(), b.double_literal(1.0)}, p)
                 : b.binary(BinOp::Sub, cur(), b.double_literal(1.0));
     });
   }
@@ -1629,11 +1585,11 @@ struct Binder {
     const int32_t st = ctx.alloc_local("$step");
     std::vector<NodeId> out;
     out.push_back(b.assign(VarKind::Local, it,
-                           helper("$iter", {emit_expr(*a.nodes[2], ctx)}, p)));
+                           rt.call("$iter", {emit_expr(*a.nodes[2], ctx)}, p)));
     std::vector<NodeId> loop;
     loop.push_back(
         b.assign(VarKind::Local, st,
-                 helper("$iternext", {b.varref(VarKind::Local, it)}, p)));
+                 rt.call("$iternext", {b.varref(VarKind::Local, it)}, p)));
     loop.push_back(
         b.make_if(b.index(b.varref(VarKind::Local, st), b.str_literal("done")),
                   b.make_break(), NodeId{}));
@@ -1736,14 +1692,14 @@ struct Binder {
       case "negexpr"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "typeofexpr"_:
-        return helper("$typeof", {emit_expr(*a.nodes[0], ctx)}, p);
+        return rt.call("$typeof", {emit_expr(*a.nodes[0], ctx)}, p);
       case "newexpr"_:
         return emit_new(*a.nodes[0], ctx);
       case "awaitexpr"_: {
         if (!fns[static_cast<size_t>(ctx.fn)].is_async) {
           fail(a, "'await' outside an async function");
         }
-        return helper("$await", {emit_expr(*a.nodes[0], ctx)}, p);
+        return rt.call("$await", {emit_expr(*a.nodes[0], ctx)}, p);
       }
       case "cond"_:
         return b.make_if(truthy(emit_expr(*a.nodes[0], ctx), p),
@@ -1775,7 +1731,7 @@ struct Binder {
                          "==' -- see README.md");
           }
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = helper("$seq", {acc, rhs}, pos_of(op));
+          const NodeId eq = rt.call("$seq", {acc, rhs}, pos_of(op));
           acc = t == "===" ? eq
                            : b.at(pos_of(op))
                                  .binary(BinOp::Eq, eq, b.bool_literal(false));
@@ -1801,7 +1757,7 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          acc = op.token == "+" ? helper("$add", {acc, rhs}, pos_of(op))
+          acc = op.token == "+" ? rt.call("$add", {acc, rhs}, pos_of(op))
                                 : b.at(pos_of(op)).binary(BinOp::Sub, acc, rhs);
         }
         return acc;
@@ -1924,8 +1880,8 @@ struct Binder {
       const NodeId made =
           xs.args.empty()
               ? empty
-              : helper(n == "Map" ? "$mfill" : "$sfill", {empty, xs.args[0]},
-                       p);
+              : rt.call(n == "Map" ? "$mfill" : "$sfill", {empty, xs.args[0]},
+                        p);
       return chain(b.sequence(xs.pre, made));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
@@ -1944,10 +1900,10 @@ struct Binder {
       return chain(b.sequence(
           xs.pre,
           b.block({b.cell_fresh(c),
-                   b.assign(VarKind::Cell, c, helper("$pnew", {}, p)),
+                   b.assign(VarKind::Cell, c, rt.call("$pnew", {}, p)),
                    b.call_value(arg_or_nil(args, 0, p),
-                                {b.make_closure(rt.at("$presolve1"), cm1),
-                                 b.make_closure(rt.at("$preject1"), cm2)}),
+                                {b.make_closure(rt.func("$presolve1"), cm1),
+                                 b.make_closure(rt.func("$preject1"), cm2)}),
                    b.varref(VarKind::Cell, c)})));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
@@ -1956,7 +1912,7 @@ struct Binder {
           xs.pre,
           b.object_lit({{b.str_literal("name"), b.str_literal(n)},
                         {b.str_literal("message"),
-                         helper("$str", {arg_or_nil(xs.args, 0, p)}, p)}})));
+                         rt.call("$str", {arg_or_nil(xs.args, 0, p)}, p)}})));
     }
     // `new SomeClass(...)`: not a builtin, so it has to be a class -- and
     // one this call site can see statically, because binding `this` needs
@@ -2023,17 +1979,17 @@ struct Binder {
       const int32_t wcm = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(
           {{VarKind::Cell, ccell}, {VarKind::Cell, tcell}});
-      steps.push_back(helper(
+      steps.push_back(rt.call(
           "$setidx", {T, b.str_literal(name), b.make_closure(widx, wcm)}, p));
     }
-    steps.push_back(helper(
+    steps.push_back(rt.call(
         "$setidx",
         {T, b.str_literal("constructor"), K}, p));
     if (ci.ctor_fn >= 0) {
-      const NodeId ctorClosure = helper(
+      const NodeId ctorClosure = rt.call(
           "$index",
           {b.varref(VarKind::Cell, ccell), b.str_literal("constructor")}, p);
-      steps.push_back(helper(
+      steps.push_back(rt.call(
           "$newresult",
           {call_with(ctorClosure, {T}, emit_call_args(arglist, ctx), p), T},
           p));
@@ -2071,11 +2027,11 @@ struct Binder {
             ++i;
             break;
           }
-          cur = helper("$index", {cur, b.str_literal(name, p)}, p);
+          cur = rt.call("$index", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_:
-          cur = helper("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = rt.call("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_:
           cur = call_with(cur, {}, emit_call_args(*sfx.nodes[0], ctx), p);
@@ -2125,7 +2081,7 @@ struct Binder {
       i = 2;
       const BuiltinArgs xs = emit_args(*c->nodes[0], 1, ctx);
       return b.sequence(xs.pre,
-                        helper("$str", {arg_or_nil(xs.args, 0, p)}, p), p);
+                        rt.call("$str", {arg_or_nil(xs.args, 0, p)}, p), p);
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
@@ -2134,7 +2090,7 @@ struct Binder {
       i = 3;
       return b.intrinsic(
           IntrinsicId::Print,
-          {helper("$logjoin", {emit_items(*c->nodes[0], 0, ctx, false)}, p)},
+          {rt.call("$logjoin", {emit_items(*c->nodes[0], 0, ctx, false)}, p)},
           p);
     }
     if (!mem.empty() && c != nullptr) {
@@ -2154,7 +2110,7 @@ struct Binder {
         for (size_t k = 0; k < args.size(); ++k) {
           if (k > 0) msg = b.binary(BinOp::Add, msg, b.str_literal(" ", p), p);
           msg = b.binary(BinOp::Add, msg,
-                         helper("$str", {args[k]}, p), p);
+                         rt.call("$str", {args[k]}, p), p);
         }
         return b.intrinsic(IntrinsicId::Print, {msg}, p);
       }
@@ -2163,10 +2119,10 @@ struct Binder {
                                 {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Promise" && mem == "resolve") {
-        return done(helper("$topromise", {arg_or_nil(args, 0, p)}, p));
+        return done(rt.call("$topromise", {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Promise" && mem == "reject") {
-        return done(helper("$prejected", {arg_or_nil(args, 0, p)}, p));
+        return done(rt.call("$prejected", {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Array" && mem == "isArray") {
         return done(b.binary(BinOp::Eq,
@@ -2201,10 +2157,10 @@ struct Binder {
     // push takes any number of values, and a spread among them.
     if (name == "push") {
       if (arglist.nodes.size() == 1 && !has_spread(arglist)) {
-        return helper("$push", {recv, emit_expr(*arglist.nodes[0], ctx)}, p);
+        return rt.call("$push", {recv, emit_expr(*arglist.nodes[0], ctx)}, p);
       }
-      return helper("$pushall", {recv, emit_items(arglist, 0, ctx, false)},
-                    p);
+      return rt.call("$pushall", {recv, emit_items(arglist, 0, ctx, false)},
+                     p);
     }
     if (name == "pop") {
       return builtin(0, [&](NodeId r, auto) {
@@ -2213,14 +2169,14 @@ struct Binder {
     }
     if (name == "slice") {
       return builtin(2, [&](NodeId r, auto at) {
-        return helper("$slice", {r, at(0), at(1)}, p);
+        return rt.call("$slice", {r, at(0), at(1)}, p);
       });
     }
     if (name == "join") {
       return builtin(1, [&](NodeId r, auto at) {
-        return helper("$join",
-                      {r, arglist.nodes.empty() ? b.str_literal(",") : at(0)},
-                      p);
+        return rt.call("$join",
+                       {r, arglist.nodes.empty() ? b.str_literal(",") : at(0)},
+                       p);
       });
     }
     // The generator protocol is GenResume/GenReturn/GenThrow, whose
@@ -2240,17 +2196,17 @@ struct Binder {
     // written in IR above.
     if (name == "then") {
       return builtin(2, [&](NodeId r, auto at) {
-        return helper("$then", {r, at(0), at(1)}, p);
+        return rt.call("$then", {r, at(0), at(1)}, p);
       });
     }
     if (name == "catch") {
       return builtin(1, [&](NodeId r, auto at) {
-        return helper("$then", {r, b.nil_literal(), at(0)}, p);
+        return rt.call("$then", {r, b.nil_literal(), at(0)}, p);
       });
     }
     if (name == "set") {
       return builtin(2, [&](NodeId r, auto at) {
-        return helper("$mset", {r, at(0), at(1)}, p);
+        return rt.call("$mset", {r, at(0), at(1)}, p);
       });
     }
     for (const auto& [js, helper_name] :
@@ -2258,11 +2214,11 @@ struct Binder {
           std::pair{"delete", "$mdel"}, std::pair{"add", "$sadd"}}) {
       if (name != js) continue;
       return builtin(1, [&](NodeId r, auto at) {
-        return helper(helper_name, {r, at(0)}, p);
+        return rt.call(helper_name, {r, at(0)}, p);
       });
     }
 
-    return call_with(helper("$index", {recv, b.str_literal(name)}, p), {},
+    return call_with(rt.call("$index", {recv, b.str_literal(name)}, p), {},
                      emit_call_args(arglist, ctx), p);
   }
 
@@ -2319,10 +2275,10 @@ struct Binder {
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const auto read = [&] { return helper("$index", {R, K}, p); };
+    const auto read = [&] { return rt.call("$index", {R, K}, p); };
     return b.block({b.assign(VarKind::Local, tr, recv),
                     b.assign(VarKind::Local, tk, key),
-                    helper("$setidx", {R, K, combine(read)}, p)});
+                    rt.call("$setidx", {R, K, combine(read)}, p)});
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
@@ -2336,7 +2292,7 @@ struct Binder {
                       [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(rhs, ctx);
       if (op == "=") return v;
-      if (op == "+=") return helper("$add", {cur(), v}, p);
+      if (op == "+=") return rt.call("$add", {cur(), v}, p);
       if (op == "-=") return b.binary(BinOp::Sub, cur(), v);
       if (op == "*=") return b.binary(BinOp::Mul, cur(), v);
       if (op == "/=") return b.binary(BinOp::Div, cur(), v);
@@ -2447,17 +2403,12 @@ struct Binder {
     const int32_t run_idx = static_cast<int32_t>(m.funcs.size());
     m.funcs.push_back({});
 
-    const auto rtcall = [&](const std::string& name,
-                            const std::vector<NodeId>& args) {
-      return b.call_value(b.make_closure(rt.at(name), empty_cmap), args);
-    };
-
     // f: cells 0 = the promise, 1 = the body closure, 2.. = the arguments.
     // The arguments are copied out at the call, JavaScript's own rule, and
     // into fresh cells so that two calls in flight at once do not share.
     std::vector<NodeId> launch;
     launch.push_back(b.cell_fresh(0));
-    launch.push_back(b.assign(VarKind::Cell, 0, rtcall("$pnew", {})));
+    launch.push_back(b.assign(VarKind::Cell, 0, rt.call("$pnew", {}, p)));
     std::vector<CaptureSrc> fwd;
     fwd.reserve(static_cast<size_t>(ncaps));
     for (int32_t i = 0; i < ncaps; ++i) fwd.push_back({VarKind::Capture, i});
@@ -2538,9 +2489,11 @@ struct Binder {
         0, 1,
         b.make_try(
             0,
-            rtcall("$presolve", {b.varref(VarKind::Capture, 1), call_body}),
-            rtcall("$psettle", {b.varref(VarKind::Capture, 1), b.literal(2),
-                                b.varref(VarKind::Local, 0)})));
+            rt.call("$presolve", {b.varref(VarKind::Capture, 1), call_body},
+                    p),
+            rt.call("$psettle", {b.varref(VarKind::Capture, 1), b.literal(2),
+                                 b.varref(VarKind::Local, 0)},
+                    p)));
     m.funcs[static_cast<size_t>(run_idx)] = std::move(run);
   }
 
@@ -2559,10 +2512,7 @@ struct Binder {
     // source declared.
     m.funcs.push_back({});
     rs.fns[static_cast<size_t>(top)].index = 0;
-    for (const std::string& n : rt_names()) {
-      rt[n] = static_cast<int32_t>(m.funcs.size());
-      m.funcs.push_back({});
-    }
+    rt.reserve(rt_names());
     for (size_t f = 1; f < fns.size(); ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
@@ -2570,8 +2520,6 @@ struct Binder {
 
 
     rs.number_captures(m);
-    empty_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back({});
     emit_runtime();
 
     for (size_t f = 0; f < fns.size(); ++f) {

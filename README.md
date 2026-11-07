@@ -237,14 +237,15 @@ capture map the table keeps -- and, being a singleton, every call names
 the one closure the executor made first. A name never reserved, or a
 helper that takes captures called by name, is reported by name.
 
-`examples/pl0/` deliberately uses none of the three: it is the binder
+`examples/pl0/` deliberately uses none of the four: it is the binder
 written against `Builder` and `verify()` alone, and short enough that its
 own block table and capture fixpoint are clearer spelled out -- though its
 case, captures that travel through calls rather than through nesting, is
 the one `declare_var` and `note_call`/`close_over_calls` exist for.
 [examples/mini-go/](examples/mini-go/) uses only `Builder::at`: its funcs
-are all top-level, so there is nothing to closure-convert. The other seven
-front ends use all three.
+are all top-level, so there is nothing to closure-convert, and its few
+helpers sit in its own table of funcs. The other seven front ends use all
+four.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.

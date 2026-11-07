@@ -158,8 +158,7 @@ struct Binder {
   std::map<const Ast*, int32_t> fn_of;
   // A classdecl's methods, by name, in declaration order.
   std::map<const Ast*, std::vector<std::pair<std::string, int32_t>>> class_of;
-  std::map<std::string, int32_t> rt;
-  int32_t empty_cmap = -1;
+  HelperTable rt{m};  // the runtime helpers, by name
 
   // ==== Pass A: scopes, declarations, captures =============================
 
@@ -412,16 +411,10 @@ struct Binder {
     return names;
   }
 
-  // The front end's own additions to coreir::FuncWriter: the helpers
-  // that have to reach this binder's own tables.
-  struct RT : FuncWriter {
-    Binder& bd;
-
-    explicit RT(Binder& bd_) : FuncWriter(bd_.m), bd(bd_) {}
-
-    NodeId call(const std::string& name, const std::vector<NodeId>& a) {
-      return b.call_value(b.make_closure(bd.rt.at(name), bd.empty_cmap), a);
-    }
+  // One helper of the runtime above, with the front end's own addition to
+  // coreir::HelperWriter.
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
 
     // The three checks `xs[i]` owes before the Index itself, shared by the
     // read and the write helper.
@@ -434,13 +427,6 @@ struct Binder {
               ret(call("$err", {S("IndexError"), S("index out of range")}))),
           iff(bin(BinOp::Ge, ix, len(arr)),
               ret(call("$err", {S("IndexError"), S("index out of range")})))};
-    }
-
-    // The counts and the name table come from param()/local().
-    void finish(const std::string& name, int32_t ncells = 0,
-                int32_t ncaps = 0) {
-      write(bd.m.funcs[static_cast<size_t>(bd.rt.at(name))], name, ncells,
-            ncaps);
     }
   };
 
@@ -823,24 +809,6 @@ struct Binder {
     rt_iternext();
   }
 
-  // A helper call. Every capture-free helper is a Func::singleton (RT::finish
-  // sets it), so all these MakeClosures name the one closure the executor
-  // built at the first of them -- which is what the array of pre-built
-  // closures at file scope used to buy, at the cost of a synthetic variable
-  // every function had to capture. One that *does* take captures is built at
-  // the site that has them (RT::clos) and never reaches here; saying so
-  // beats the "cannot call nil" it would otherwise be at run time.
-  NodeId helper(const std::string& name, const std::vector<NodeId>& args,
-                SrcPos p) {
-    const auto it = rt.find(name);
-    if (it == rt.end()) coreir_rt::fail("unknown runtime helper " + name, 0, 0);
-    if (m.funcs[static_cast<size_t>(it->second)].num_captures != 0) {
-      coreir_rt::fail("runtime helper " + name + " takes captures", 0, 0);
-    }
-    auto b = Builder(m).at(p);
-    return b.call_value(b.make_closure(it->second, empty_cmap), args);
-  }
-
   // ==== Pass B: emit ======================================================
 
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
@@ -1009,12 +977,12 @@ struct Binder {
     const NodeId I = b.varref(VarKind::Local, it);
     const NodeId S = b.varref(VarKind::Local, st);
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
         b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
         b.make_yield(b.index(S, b.str_literal("value")))};
     const NodeId body =
         b.block({b.assign(VarKind::Local, it,
-                          helper("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
+                          rt.call("$iter", {emit_expr(*a.nodes[0], ctx)}, p)),
                  b.make_while(b.bool_literal(true), b.block(loop))});
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
@@ -1052,12 +1020,12 @@ struct Binder {
             : b.scope(emark, emark, b.block(elem), release_list({v}, ctx, p));
 
     std::vector<NodeId> loop{
-        b.assign(VarKind::Local, st, helper("$iternext", {I}, p)),
+        b.assign(VarKind::Local, st, rt.call("$iternext", {I}, p)),
         b.make_if(b.index(S, b.str_literal("done")), b.make_break(), NodeId{}),
         elem_scope};
     const NodeId body =
         b.block({b.assign(VarKind::Local, it,
-                          helper("$iter", {emit_expr(*a.nodes[1], ctx)}, p)),
+                          rt.call("$iter", {emit_expr(*a.nodes[1], ctx)}, p)),
                  b.make_while(b.bool_literal(true), b.block(loop))});
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, body);
@@ -1177,7 +1145,7 @@ struct Binder {
           const NodeId piece =
               part->tag == "itext"_
                   ? b.str_literal(unescape(std::string(part->token)))
-                  : helper("$disp", {emit_expr(*part->nodes[0], ctx)}, p);
+                  : rt.call("$disp", {emit_expr(*part->nodes[0], ctx)}, p);
           acc = b.binary(BinOp::Add, acc, piece);
         }
         return acc;
@@ -1262,7 +1230,7 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = helper("$eq", {acc, rhs}, pos_of(op));
+          const NodeId eq = rt.call("$eq", {acc, rhs}, pos_of(op));
           acc = op.token == "=="
                     ? eq
                     : b.at(pos_of(op))
@@ -1355,7 +1323,7 @@ struct Binder {
         // run. `println()` alone is an empty line, as in culebra; `print()`
         // takes its one argument.
         std::vector<NodeId> shown;
-        for (const NodeId v : args) shown.push_back(helper("$disp", {v}, gp));
+        for (const NodeId v : args) shown.push_back(rt.call("$disp", {v}, gp));
         if (shown.empty() && g == "println") shown.push_back(b.str_literal("", gp));
         cur = native(g, shown, gp);
       } else {
@@ -1395,7 +1363,7 @@ struct Binder {
             std::vector<NodeId> args = emit_args(arglist, ctx);
             const NodeId self = b.varref(VarKind::Local, t, p);
             const NodeId f =
-                helper("$methodof", {self, b.str_literal(name, p)}, p);
+                rt.call("$methodof", {self, b.str_literal(name, p)}, p);
             args.insert(args.begin(), self);
             const NodeId call =
                 b.block({b.assign(VarKind::Local, t, cur, p),
@@ -1405,11 +1373,11 @@ struct Binder {
             cur = b.scope(mark, end, call, p);
             break;
           }
-          cur = helper("$mem", {cur, b.str_literal(name, p)}, p);
+          cur = rt.call("$mem", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_:
-          cur = helper("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = rt.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         default: {  // callsfx: a plain call, with nil for `self`
           std::vector<NodeId> args = emit_args(*sfx.nodes[0], ctx);
@@ -1491,11 +1459,11 @@ struct Binder {
     const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
                               : emit_expr(*last.nodes[0], ctx);
     const NodeId cur =
-        op == "=" ? NodeId{} : helper(member ? "$mem" : "$idx", {R, K}, p);
+        op == "=" ? NodeId{} : rt.call(member ? "$mem" : "$idx", {R, K}, p);
     return b.block(
         {b.assign(VarKind::Local, tv, value), b.assign(VarKind::Local, tr, recv),
          b.assign(VarKind::Local, tk, key),
-         helper(member ? "$setmem" : "$setidx", {R, K, apply(cur, V)}, p)});
+         rt.call(member ? "$setmem" : "$setidx", {R, K, apply(cur, V)}, p)});
   }
 
   // -- One function's body -------------------------------------------------
@@ -1565,10 +1533,7 @@ struct Binder {
 
     m.funcs.push_back({});
     rs.fns[static_cast<size_t>(top)].index = 0;
-    for (const std::string& n : rt_names()) {
-      rt[n] = static_cast<int32_t>(m.funcs.size());
-      m.funcs.push_back({});
-    }
+    rt.reserve(rt_names());
     for (size_t f = 1; f < fns.size(); ++f) {
       rs.fns[f].index = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back({});
@@ -1576,8 +1541,6 @@ struct Binder {
 
 
     rs.number_captures(m);
-    empty_cmap = static_cast<int32_t>(m.capture_maps.size());
-    m.capture_maps.push_back({});
     emit_runtime();
 
     for (size_t f = 0; f < fns.size(); ++f) {
