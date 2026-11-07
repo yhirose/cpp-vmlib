@@ -1,21 +1,15 @@
 # PL/0's programs, checked the way every front end's are
 # (front_end_tests, examples/common/CMakeLists.txt) but as the main suite's
 # own, unprefixed: `samples`, each against a golden captured from an oracle
-# this repository does not contain -- culebra's own PL/0 interpreter -- and
-# `effects`. Its diagnostics are checked against fixed transcripts below.
+# this repository does not contain -- culebra's own PL/0 interpreter --
+# `effects`, and `errors`, its diagnostics against fixed transcripts
+# (examples/pl0/errors/). Those are not golden-compared against culebra:
+# the binder reports undefined names, constant assignment and duplicate
+# declarations at bind time where pl0.cul reports them at run time, and
+# this runtime writes to stderr where pl0.cul writes to stdout. Both are
+# deliberate.
 front_end_tests("" pl0 DIR ${PROJECT_SOURCE_DIR}/examples/pl0 EXT pas
                 LANG pl0)
-
-# The errors are not golden-compared against culebra: the binder reports
-# undefined names, constant assignment and duplicate declarations at bind
-# time where pl0.cul reports them at run time, and this runtime writes to
-# stderr where pl0.cul writes to stdout. Both are deliberate.
-add_test(NAME errors
-         COMMAND ${CMAKE_COMMAND}
-                 -DBIN=$<TARGET_FILE:pl0>
-                 -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/errors
-                 -DEXT=pas
-                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_errors.cmake)
 
 # Not PL/0 tests: these exercise coreir/vm directly, building their Core-IR by
 # hand and supplying their own coreir_rt host, to pin properties the samples

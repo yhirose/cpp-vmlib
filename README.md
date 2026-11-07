@@ -1076,8 +1076,8 @@ install in that action.
 A failing program is checked the same way from the other side:
 `test/run_errors.cmake` runs a directory of programs that each end in an
 error and requires each report -- message, position and exit code -- to
-match its transcript, for PL/0's diagnostics (`test/errors/`), for the
-uncaught exceptions of the five front ends that word their own
+match its transcript, for PL/0's diagnostics (`examples/pl0/errors/`),
+for the uncaught exceptions of the five front ends that word their own
 (`RunOptions::describe`, `examples/mini-*/uncaught/`), and for a program
 a front end refuses to bind because its language refuses it
 (`examples/mini-*/errors/`). And `test/run_effects.cmake` binds every

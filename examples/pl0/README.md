@@ -63,19 +63,19 @@ That interpreter runs on the culebra release `test/languages.sh` pins (the
 one mini-culebra is checked against too), and `PL0_CUL` names its
 `pl0.cul`, from that release's tag.
 
-`ctest -R errors` covers the diagnostics (`test/errors/`). These are not
+`ctest -R '^errors$'` covers the diagnostics (`errors/`). These are not
 golden-compared: the binder reports undefined names, constant assignment and
 duplicate declarations at bind time where culebra's interpreter reports them
 at run time, and this runtime writes to stderr where that one writes to
 stdout. Both departures are deliberate. What is checked is that message,
-position and exit code match `test/errors/expected/`.
+position and exit code match `errors/expected/`.
 
 `samples/nested.pas`, `unary.pas`, `odd.pas` and `read.pas` exist because the
 three samples inherited from culebra's own example never nest a procedure
 inside another, never use a leading sign, and never read input -- so the parts
 of the design that exist specifically for those shapes (capture chains two
 frames deep, sign folding, `?x`) would otherwise ship untested.
-`test/errors/recursion.pas` exists because none of the samples recurse
+`errors/recursion.pas` exists because none of the samples recurse
 without terminating, so the executor's recursion-depth guard would otherwise
 ship untested too.
 

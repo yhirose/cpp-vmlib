@@ -76,9 +76,11 @@ endfunction()
 #                     nothing catches is reported in the language's own
 #                     words (RunOptions::describe), as uncaught/expected/
 #                     holds each case's report (test/run_errors.cmake).
-#   <prefix>errors    Only with an errors/ directory: a program the
-#                     language refuses is refused at bind time in its
-#                     words, as errors/expected/ holds each case's report
+#   <prefix>errors    Only with an errors/ directory: programs that each
+#                     end in a diagnostic of the front end's own -- a
+#                     program the language refuses, refused at bind time
+#                     in its words, or PL/0's errors at run time -- as
+#                     errors/expected/ holds each case's report
 #                     (test/run_errors.cmake).
 #   <prefix>effects   Nothing a program could observe is evaluated twice
 #                     (coreir::shared_effects) or built and dropped
