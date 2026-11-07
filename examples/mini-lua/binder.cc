@@ -404,6 +404,10 @@ struct Binder {
   //                  do; anything else looks for a metamethod.
   //   $idiv $mod     `//` and `%` on two integers, Lua's own floor; a float
   //                  or a zero divisor is the helper's.
+  //   $div           `/` on two floats, IEEE as Lua's is; an integer,
+  //                  which `/` makes a float first, is $div's.
+  //   $cat           `..` on two strings; a number, written the way
+  //                  tostring writes it, is $cat's.
   //   $eq            `==` (equality_tags), a table's being the helper's,
   //                  for __eq.
   //   $one           the first of a call's results, Index's on an array
@@ -417,6 +421,8 @@ struct Binder {
         {"$mulm", VmOp::binary(BinOp::Mul, number_tags())},
         {"$idiv", VmOp::binary(BinOp::FloorDiv, ints)},
         {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
+        {"$div", VmOp::binary(BinOp::Div, tags_named("double"))},
+        {"$cat", VmOp::binary(BinOp::Add, tags_named("string"))},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
         {"$one", VmOp::index(tags_named({"array", "int"}))},
     };
@@ -1253,7 +1259,7 @@ struct Binder {
       case "concatexp"_: {
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          acc = rt.call("$cat", {acc, emit_expr(*a.nodes[i], ctx)}, p);
+          acc = ops.call("$cat", {acc, emit_expr(*a.nodes[i], ctx)}, p);
         }
         return {acc};
       }
@@ -1268,7 +1274,7 @@ struct Binder {
           if (t == "+") acc = ops.call("$add", {acc, rhs}, op_p);
           else if (t == "-") acc = ops.call("$subm", {acc, rhs}, op_p);
           else if (t == "*") acc = ops.call("$mulm", {acc, rhs}, op_p);
-          else if (t == "/") acc = rt.call("$div", {acc, rhs}, op_p);
+          else if (t == "/") acc = ops.call("$div", {acc, rhs}, op_p);
           else if (t == "//")
             acc = ops.call("$idiv", {acc, rhs}, op_p);
           else acc = ops.call("$mod", {acc, rhs}, op_p);

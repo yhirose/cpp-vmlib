@@ -786,10 +786,14 @@ struct Binder {
   //   $eq    `==` (equality_tags), a long and a double meeting as numbers;
   //          two types Eq refuses, and an object, compared by identity,
   //          are $eq's.
+  //   $idx   `a[i]` on an array or a string and an index in range; one out
+  //          of range, and a Dictionary (whose missing key throws, where
+  //          Index answers null), are $idx's.
   static Operators::Table operators() {
     return {
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
+        {"$idx", VmOp::index(tags_named({"array", "string", "int"}))},
     };
   }
 
@@ -1637,7 +1641,7 @@ struct Binder {
           break;
         }
         case "indexsfx"_:
-          cur = rt.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = ops.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_: {
           std::vector<NodeId> args{b.nil_literal(p)};

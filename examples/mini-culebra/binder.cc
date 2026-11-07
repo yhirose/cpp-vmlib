@@ -167,6 +167,7 @@ struct Binder {
   // A classdecl's methods, by name, in declaration order.
   std::map<const Ast*, std::vector<std::pair<std::string, int32_t>>> class_of;
   HelperTable rt{m};  // the runtime helpers, by name
+  Operators ops{rt, operators()};  // the VM's operations standing in for them
 
   // ==== Pass A: scopes, declarations, captures =============================
 
@@ -417,6 +418,23 @@ struct Binder {
         "$iter", "$iternext",
     };
     return names;
+  }
+
+  // culebra's rules that are the VM's own operation on some values: the
+  // VM's answer where the two agree, the helper's on the rest
+  // (runtime_parts.h's Operators).
+  //
+  //   $eq   `==` (equality_tags): two numbers numerically, two types Eq
+  //         refuses unequal; arrays and objects, compared structurally,
+  //         are $eq's.
+  //   $idx  `xs[i]` on an array and an index in range; one out of range
+  //         or not a Long, and an object (whose missing key is a
+  //         KeyError, where Index answers nil), are $idx's.
+  static Operators::Table operators() {
+    return {
+        {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
+        {"$idx", VmOp::index(tags_named({"array", "int"}))},
+    };
   }
 
   // One helper of the runtime above, with the front end's own addition to
@@ -1159,11 +1177,8 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = rt.call("$eq", {acc, rhs}, pos_of(op));
-          acc = op.token == "=="
-                    ? eq
-                    : b.at(pos_of(op))
-                          .binary(BinOp::Eq, eq, b.bool_literal(false));
+          const NodeId eq = ops.call("$eq", {acc, rhs}, pos_of(op));
+          acc = op.token == "==" ? eq : b.at(pos_of(op)).unary(UnOp::Not, eq);
         }
         return acc;
       }
@@ -1306,7 +1321,7 @@ struct Binder {
           break;
         }
         case "indexsfx"_:
-          cur = rt.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = ops.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         default: {  // callsfx: a plain call, with nil for `self`
           std::vector<NodeId> args = emit_args(*sfx.nodes[0], ctx);
