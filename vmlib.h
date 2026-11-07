@@ -2244,6 +2244,21 @@ std::vector<SharedEffect> shared_effects(const Module& m);
 // "line:col: callvalue runs twice in block@line:col".
 std::string to_string(const Module& m, const SharedEffect& e);
 
+// The mirror image: a node of that kind that no function body reaches, and
+// so never runs at all. verify() looks only at what a body reaches, and a
+// node built and then left unused costs nothing but its space; this kind
+// is a front end dropping something the language runs -- an argument a
+// library function lowered by name never reads, which the audits found in
+// six front ends. dropped_effects lists the top of each subtree so dropped,
+// a node nothing holds, whose subtree has an observable node no body
+// reaches.
+struct DroppedEffect {
+  NodeId node;
+};
+std::vector<DroppedEffect> dropped_effects(const Module& m);
+// "line:col: callvalue is built but no function body reaches it".
+std::string to_string(const Module& m, const DroppedEffect& e);
+
 // A readable dump of the IR, for --dump-ir.
 std::string to_string(const Module& m);
 
@@ -5770,6 +5785,36 @@ inline constexpr bool observable(IntrinsicId id) {
   return true;
 }
 
+// Whether running `x` can be told from not running it, its children aside.
+inline bool observable(const Node& x) {
+  return x.tag == Tag::Intrinsic ? observable(static_cast<IntrinsicId>(x.op))
+                                 : observable(x.tag);
+}
+
+// Which nodes run: the ones a function body reaches. A node built and then
+// left unused is reached by nothing. `edge(parent, child)` hears of each
+// use on the way, once per parent reached.
+template <class Edge>
+std::vector<char> reached(const Module& m, Edge edge) {
+  std::vector<char> live(m.nodes.size(), 0);
+  std::vector<uint32_t> work;
+  for (const Func& f : m.funcs) {
+    if (f.body.valid()) work.push_back(f.body.v);
+  }
+  while (!work.empty()) {
+    const uint32_t x = work.back();
+    work.pop_back();
+    if (live[x]) continue;
+    live[x] = 1;
+    for (uint32_t i = 0; i < m.nodes[x].num_children; ++i) {
+      const uint32_t c = m.child(NodeId{x}, i).v;
+      edge(x, c);
+      work.push_back(c);
+    }
+  }
+  return live;
+}
+
 struct SharingScan {
   const Module& m;
   std::vector<std::vector<uint32_t>> parents;  // per node, one per use
@@ -5777,33 +5822,15 @@ struct SharingScan {
 
   explicit SharingScan(const Module& mod)
       : m(mod), parents(mod.nodes.size()), effect(mod.nodes.size(), -1) {
-    // Only what a function body reaches runs: a node built and then left
-    // unused is nobody's child.
-    std::vector<char> live(m.nodes.size(), 0);
-    std::vector<uint32_t> work;
-    for (const Func& f : m.funcs) {
-      if (f.body.valid()) work.push_back(f.body.v);
-    }
-    while (!work.empty()) {
-      const uint32_t x = work.back();
-      work.pop_back();
-      if (live[x]) continue;
-      live[x] = 1;
-      for (uint32_t i = 0; i < m.nodes[x].num_children; ++i) {
-        const uint32_t c = m.child(NodeId{x}, i).v;
-        parents[c].push_back(x);
-        work.push_back(c);
-      }
-    }
+    // Only what a function body reaches runs, so only its uses count.
+    reached(m, [&](uint32_t p, uint32_t c) { parents[c].push_back(p); });
   }
 
   // Whether running `n` can be told from not running it.
   bool observable_node(uint32_t n) {
     if (effect[n] >= 0) return effect[n] != 0;
     const Node& x = m.nodes[n];
-    bool r = x.tag == Tag::Intrinsic
-                 ? observable(static_cast<IntrinsicId>(x.op))
-                 : observable(x.tag);
+    bool r = observable(x);
     for (uint32_t i = 0; !r && i < x.num_children; ++i) {
       r = observable_node(m.child(NodeId{n}, i).v);
     }
@@ -5865,6 +5892,59 @@ struct SharingScan {
   }
 };
 
+// What dropped_effects asks of a node: whether it runs, and if not,
+// whether what it holds was observable.
+struct DropScan {
+  const Module& m;
+  std::vector<char> live;
+  std::vector<signed char> loss;  // per node: -1 not yet known, 0, 1
+
+  explicit DropScan(const Module& mod)
+      : m(mod),
+        live(reached(mod, [](uint32_t, uint32_t) {})),
+        loss(mod.nodes.size(), -1) {}
+
+  // Whether a node no body reaches can be read through. verify() looks
+  // only at what a body reaches, so the rest has its position and its
+  // children in range only because a Builder made it; one that has not is
+  // nothing a run could reach, and adds nothing here.
+  bool readable(uint32_t n) const {
+    const Node& x = m.nodes[n];
+    // 64-bit: first_child + num_children can wrap in 32.
+    if (x.pos >= m.positions.size() ||
+        static_cast<uint64_t>(x.first_child) + x.num_children >
+            m.child_ids.size()) {
+      return false;
+    }
+    for (uint32_t i = 0; i < x.num_children; ++i) {
+      if (m.child(NodeId{n}, i).v >= m.nodes.size()) return false;
+    }
+    return true;
+  }
+
+  // Whether `n`'s subtree has an observable node no function body reaches:
+  // what building `n` and then dropping it lost. Everything below a live
+  // node is live, so the walk ends at one.
+  bool lost(uint32_t n) {
+    if (live[n] || !readable(n)) return false;
+    if (loss[n] >= 0) return loss[n] != 0;
+    loss[n] = 0;  // a cycle, which verify() never saw, adds nothing
+    const Node& x = m.nodes[n];
+    bool r = observable(x);
+    for (uint32_t i = 0; !r && i < x.num_children; ++i) {
+      r = lost(m.child(NodeId{n}, i).v);
+    }
+    loss[n] = r ? 1 : 0;
+    return r;
+  }
+};
+
+// "line:col", where a finding's node stands.
+inline std::string line_col(const Module& m, NodeId id) {
+  const SrcPos p = m.pos_of(id);
+  return std::to_string(p.line) + ":" + std::to_string(p.col);
+}
+
 }  // namespace detail
 
 inline std::vector<SharedEffect> shared_effects(const Module& m) {
@@ -5878,12 +5958,32 @@ inline std::vector<SharedEffect> shared_effects(const Module& m) {
 }
 
 inline std::string to_string(const Module& m, const SharedEffect& e) {
-  const auto pos = [&](NodeId id) {
-    const SrcPos p = m.pos_of(id);
-    return std::to_string(p.line) + ":" + std::to_string(p.col);
-  };
-  return pos(e.node) + ": " + name_of(m.at(e.node).tag) + " runs twice in " +
-         name_of(m.at(e.at).tag) + "@" + pos(e.at);
+  return detail::line_col(m, e.node) + ": " + name_of(m.at(e.node).tag) +
+         " runs twice in " + name_of(m.at(e.at).tag) + "@" +
+         detail::line_col(m, e.at);
+}
+
+inline std::vector<DroppedEffect> dropped_effects(const Module& m) {
+  detail::DropScan scan(m);
+  // The top of a dropped subtree is a node nothing holds: whatever holds a
+  // node no body reaches is not reached either.
+  std::vector<char> held(m.nodes.size(), 0);
+  for (uint32_t n = 0; n < m.nodes.size(); ++n) {
+    if (!scan.readable(n)) continue;
+    for (uint32_t i = 0; i < m.nodes[n].num_children; ++i) {
+      held[m.child(NodeId{n}, i).v] = 1;
+    }
+  }
+  std::vector<DroppedEffect> out;
+  for (uint32_t n = 0; n < m.nodes.size(); ++n) {
+    if (!held[n] && scan.lost(n)) out.push_back({NodeId{n}});
+  }
+  return out;
+}
+
+inline std::string to_string(const Module& m, const DroppedEffect& e) {
+  return detail::line_col(m, e.node) + ": " + name_of(m.at(e.node).tag) +
+         " is built but no function body reaches it";
 }
 
 inline std::string to_string(const Module& m) {

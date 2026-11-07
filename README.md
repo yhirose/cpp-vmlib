@@ -195,6 +195,15 @@ compiles to the very code the sharing did. Every front end here takes
 `--check-sharing` to print them, and its tests ask it of every program it
 ships.
 
+`dropped_effects(m)` is the mirror image: a node of that kind which no
+function body reaches, built and then left out of the tree, so it never
+runs at all. `verify()` looks only at what a body reaches, and a node
+dropped costs nothing but its space -- but a call dropped is how an
+argument a library function never reads goes missing. Each finding is the
+top of what was dropped, a node nothing holds. A node built on the chance
+it is needed and then discarded is reported the same way, though it loses
+nothing; build it on the path that uses it instead.
+
 **`FuncWriter`** writes a whole function directly in IR -- the shape a front
 end's own runtime library takes, the `$truthy`/`$str`/`$iternext` a
 dynamically typed language needs and the IR has no opinion about. The

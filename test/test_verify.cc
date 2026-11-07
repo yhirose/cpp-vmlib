@@ -3,7 +3,9 @@
 // way the compiler or the executor would otherwise read out of bounds. And
 // the one shape that looks suspicious and is fine -- a node shared between
 // two parents -- stays accepted; shared_effects is what tells the sharing
-// that runs something twice from the sharing that is harmless.
+// that runs something twice from the sharing that is harmless. Its mirror,
+// dropped_effects, is what tells a node built and dropped that a program
+// would have seen run from one that costs only the space.
 
 #include <cstdio>
 #include <functional>
@@ -43,18 +45,31 @@ std::string verdict(const std::function<NodeId(Module&, Builder&)>& build,
   return err ? *err : "";
 }
 
-// shared_effects over a one-function module whose body `build` makes, its
-// findings joined by "|".
-std::string shared(const std::function<NodeId(Builder&)>& build) {
+// shared_effects or dropped_effects (`list`) over a module whose main body
+// `build` makes -- leaving out of it whatever it builds and drops -- its
+// findings joined by "|". `edit`, if any, then corrupts the module.
+template <class List>
+std::string findings(List list, const std::function<NodeId(Builder&)>& build,
+                     const std::function<void(Module&)>& edit = {}) {
   Module m;
   Builder b(m);
   m.capture_maps.push_back({});
   m.funcs.push_back({"main", 0, 0, NodeId{}, {}, {}});
   m.funcs.push_back({"f", 0, 0, b.literal(1, {9, 9}), {}, {}});
   m.funcs[0].body = build(b);
+  if (edit) edit(m);
   std::string out;
-  for (const SharedEffect& e : shared_effects(m)) out += to_string(m, e) + "|";
+  for (const auto& e : list(m)) out += to_string(m, e) + "|";
   return out;
+}
+
+std::string shared(const std::function<NodeId(Builder&)>& build) {
+  return findings(shared_effects, build);
+}
+
+std::string dropped(const std::function<NodeId(Builder&)>& build,
+                    const std::function<void(Module&)>& edit = {}) {
+  return findings(dropped_effects, build, edit);
 }
 
 }  // namespace
@@ -223,6 +238,68 @@ int main() {
              return b.array_lit({s, s, x, x}, {4, 4});
            }),
            "", "a read, or a string built from one, is not");
+
+  // dropped_effects: what a body leaves out. The call is at 2:2 again,
+  // and main's body is `print(1)` beside it.
+  const auto print_one = [&](Builder& b) {
+    return b.intrinsic(IntrinsicId::Print, {b.literal(1, p)}, p);
+  };
+  check_eq(dropped([&](Builder& b) {
+             call(b);
+             return print_one(b);
+           }),
+           "2:2: callvalue is built but no function body reaches it|",
+           "a call no body reaches is dropped");
+  check_eq(dropped([&](Builder& b) {
+             b.binary(BinOp::Add, call(b), b.literal(1, p), {3, 3});
+             return print_one(b);
+           }),
+           "3:3: binary is built but no function body reaches it|",
+           "what was dropped is reported at its top, once");
+  check_eq(dropped([&](Builder& b) {
+             b.intrinsic(IntrinsicId::MapNew, {}, {2, 2});
+             b.intrinsic(IntrinsicId::ToStr, {b.varref(VarKind::Local, 0, p)},
+                         {3, 3});
+             return print_one(b);
+           }),
+           "2:2: intrinsic is built but no function body reaches it|",
+           "a dropped fresh map is lost, a dropped string built from a read "
+           "is not");
+  check_eq(dropped([&](Builder& b) {
+             const NodeId c = call(b);
+             b.binary(BinOp::Add, c, b.literal(1, p), {3, 3});
+             return b.block({c}, p);
+           }),
+           "", "a call kept in the body and dropped from a wrapper still runs");
+  {
+    // f's body is reached as much as main's: each runs when it is called.
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 0, 0, print_one(b), {}, {}});
+    m.funcs.push_back({"f", 0, 0, b.block({call(b)}, p), {}, {}});
+    check_eq(std::to_string(dropped_effects(m).size()), "0",
+             "a call in any function's body is not dropped");
+  }
+  // A node no body reaches is one verify() never looked at, and one whose
+  // children or position are out of range is read no further.
+  const auto corrupt = [&](const std::function<void(Node&, Module&)>& edit) {
+    NodeId c;
+    return dropped(
+        [&](Builder& b) {
+          c = call(b);
+          return print_one(b);
+        },
+        [&](Module& m) { edit(m.nodes[c.v], m); });
+  };
+  check_eq(corrupt([](Node& n, Module&) { n.first_child = 0xFFFFFFFFu; }), "",
+           "a dropped node whose children wrap around 32 bits");
+  check_eq(corrupt([](Node& n, Module& m) {
+             m.child_ids[n.first_child] = NodeId{1000};
+           }),
+           "", "a dropped node whose child is past the end");
+  check_eq(corrupt([](Node& n, Module&) { n.pos = 1000; }), "",
+           "a dropped node whose position is past the end");
 
   if (g_failures != 0) {
     std::fprintf(stderr, "verify: %d failure(s)\n", g_failures);
