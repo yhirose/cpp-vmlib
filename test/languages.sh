@@ -65,8 +65,7 @@ declare -A LANG_NAME=(
 #   releases, and mini-culebra's is 0.4.0's. 0.5.0 began answering
 #   type_of with an object's class ("Point", and "Class" for the class)
 #   where 0.4.0 says "Object" for both, and printing a class value with
-#   its name; 0.8.0 also takes a class named Range for its own built-in
-#   range. mini-culebra has not followed (see its README).
+#   its name. mini-culebra has not followed (see its README).
 # pl0 0.8.0: culebra 0.8.0 running pl0.cul from the same release tag, a
 #   different culebra from mini-culebra's. pl0.cul is written against its
 #   own release's PEG API, which keeps changing (0.8.0 runs no earlier

@@ -279,8 +279,8 @@ reason that script states. They are culebra 0.4.0's output, the release
 culebra is not at 1.0, and later ones have moved. Since 0.5.0, `type_of`
 answers an object's class (`Point`, and `Class` for the class itself)
 where this says `Object`, and a class value prints with its name, so
-`classes.cul` differs; 0.8.0 also takes a class named `Range` for its own
-built-in range, which `iterators.cul` declares.
+`classes.cul` differs. (`iterators.cul` names its class `Span`: 0.8.0
+takes a class named `Range` for its own built-in range.)
 
 All eight samples are also clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --
