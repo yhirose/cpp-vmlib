@@ -69,15 +69,18 @@ namespace mini_culebra {
 namespace {
 
 // Classes are runtime_parts.h's layout, less the base culebra does not
-// have: an instance's meta is its class, and the class's own facts are in
-// its kind record -- its name, which is what an instance prints and what
-// `type_of` answers for one, the declared `new` the synthesized
-// constructor calls, and its methods. The methods are there, not on the
-// class value, because a class value is a program object: it prints as
-// `{new: [function], name: 'Point'}`, its methods being no more enumerable
-// than an Error's fields are in JavaScript, and a program can index and
-// write it like any object -- so a method named `new` or `name` meets
-// neither field, and nothing a program writes on the class reaches one.
+// have: an instance's meta is its class's method table, holding the
+// methods by name, and the class's own facts are the table's kind record
+// -- its name, which is what an instance prints and what `type_of`
+// answers for one, the declared `new` the synthesized constructor calls,
+// and the method table itself. The class value is a third object, the
+// one its name evaluates to, because it is a program object: it prints as
+// `{new: [function], name: 'Point'}`, its methods being no more
+// enumerable than an Error's fields are in JavaScript, and a program can
+// index and write it like any object -- so a method named `new` or `name`
+// meets neither field, and nothing a program writes on the class reaches
+// one. Its meta is the same kind record, which is what makes it a class
+// to `type_of`, and how the constructor reaches the method table.
 constexpr int64_t kClassInit = kClassOwn;
 constexpr int64_t kClassMethods = kClassOwn + 1;
 // The two fields a class value shows a program, in the order culebra
@@ -680,22 +683,18 @@ struct Binder {
   }
 
   // Method lookup: the object's own properties first (an object literal
-  // holding a function is how culebra writes a protocol), then the methods
-  // of the class that is the instance's meta.
+  // holding a function is how culebra writes a protocol), then the method
+  // table that is the instance's meta.
   void rt_methodof() {
     RT r(*this);
     const auto [recv, name] = r.params("recv", "name");
-    const auto [cls, ms] = r.locals("cls", "ms");
+    const auto [cls] = r.locals("cls");
     r.add(r.iff(
         r.is(r.typ(recv), "object"),
         r.iff(r.in(IntrinsicId::ObjectHas, {r.L(recv), r.L(name)}),
               r.ret(r.idx(r.L(recv), r.L(name))))));
     r.add(r.set(cls, instance_class(r, recv)));
-    r.add(r.iff(r.is(r.typ(cls), "object"),
-                r.blk({r.set(ms, kind_field(r, r.L(cls), kClassMethods)),
-                       r.iff(r.in(IntrinsicId::ObjectHas,
-                                  {r.L(ms), r.L(name)}),
-                             r.ret(r.idx(r.L(ms), r.L(name))))})));
+    r.add(find_in_chain(r, cls, name));
     r.add(r.ret(r.call(
         "$err",
         {r.S("NameError"), r.bin(BinOp::Add, r.S("no method "), r.L(name))})));
@@ -715,18 +714,17 @@ struct Binder {
   void rt_iter() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [cls, ms] = r.locals("cls", "ms");
+    const auto [cls] = r.locals("cls");
     r.add(r.iff(r.is(r.typ(v), "generator"),
                 r.ret(generator_cursor(r, r.L(v)))));
     r.add(r.iff(r.is(r.typ(v), "array"), r.ret(sequence_cursor(r, r.L(v)))));
     r.add(r.set(cls, instance_class(r, v)));
     r.add(r.iff(
         r.is(r.typ(cls), "object"),
-        r.blk({r.set(ms, kind_field(r, r.L(cls), kClassMethods)),
-               r.iff(r.in(IntrinsicId::ObjectHas, {r.L(ms), r.S("iter")}),
-                     r.ret(cursor(r, "c",
-                                  r.b.call_value(r.idx(r.L(ms), r.S("iter")),
-                                                 {r.L(v)}))))})));
+        r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.S("iter")}),
+              r.ret(cursor(r, "c",
+                           r.b.call_value(r.idx(r.L(cls), r.S("iter")),
+                                          {r.L(v)}))))));
     r.add(r.ret(r.call("$err", {r.S("TypeError"),
                                 r.S("value is not iterable")})));
     r.finish("$iter");
@@ -982,8 +980,9 @@ struct Binder {
 
   // class C { new(...) {...} m(...) {...} drop() {...} }
   //
-  //   C = {}   -- a cell, with the kind record
-  //       ["class", "C", nil, <new>, { m: <m>, drop: <drop> }]
+  //   M = { m: <m>, drop: <drop> }    -- the method table
+  //   R = ["class", "C", nil, <new>, M]
+  //   C = {}   -- a cell; C's meta and M's are both R
   //   C["new"] = MakeClosure(<synthesized constructor>, over C)
   //   C["name"] = "C"
   //
@@ -991,7 +990,7 @@ struct Binder {
   // culebra prints a class value.
   //
   // The constructor is what turns the class into an instance: a fresh
-  // object whose meta is C (so a method call can find its methods) and,
+  // object whose meta is M (so a method call can find its methods) and,
   // when the class declares one, `drop` as its destructor (DropSet, so the
   // object *is* a resource). Giving it one is what puts it on the owned
   // stack; everything about when its destructor runs follows from that.
@@ -1023,10 +1022,16 @@ struct Binder {
     std::vector<CaptureSrc> cs{{VarKind::Cell, cell}};
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back(cs);
+    // The class value first, its record holding the method table; then
+    // the method table's meta, the same record.
+    const NodeId C = b.varref(VarKind::Cell, cell);
     return b.block(
         {b.assign(VarKind::Cell, cell,
                   class_table(b, b.object_lit({}), cname, b.nil_literal(),
                               {init, b.object_lit(kvs)})),
+         b.intrinsic(IntrinsicId::MetaSet,
+                     {kind_field(b, C, kClassMethods),
+                      b.intrinsic(IntrinsicId::MetaGet, {C})}),
          b.set_index(
              b.varref(VarKind::Cell, cell), b.str_literal(kNewField),
              b.make_closure(rs.fns[static_cast<size_t>(ctor_fn)].index, cm)),
@@ -1043,13 +1048,14 @@ struct Binder {
     const NodeId C = b.varref(VarKind::Capture, 0, p);
     const NodeId O = b.varref(VarKind::Local, inst, p);
     auto bp = b.at(p);
-    std::vector<NodeId> body{
-        b.assign(VarKind::Local, inst, new_instance(bp, C), p)};
+    std::vector<NodeId> body{b.assign(
+        VarKind::Local, inst,
+        new_instance(bp, kind_field(bp, C, kClassMethods)), p)};
     if (has_drop) {
       body.push_back(bp.intrinsic(
           IntrinsicId::DropSet,
           {O, bp.index(kind_field(bp, C, kClassMethods),
-                       bp.str_literal("drop"))}));
+                       bp.str_literal(kDropField))}));
     }
     std::vector<NodeId> init_args{O};
     for (int32_t i = 1; i < nparams; ++i) {
@@ -1238,44 +1244,46 @@ struct Binder {
         // literal; that one and any after it are given or stored in
         // source order, as the literal would have run them, on the
         // object in a slot of a scope around the literal alone -- which
-        // a literal ending in its `drop`, the usual shape, needs not.
+        // a literal ending in its `drop`, the usual shape, needs not:
+        // DropSet answers the object it gave the destructor, so the
+        // literal and its `drop` are one expression, and no scope's exit
+        // runs the owned analysis over an object it has just made.
         const auto key_of = [](const Ast& c) {
           const Ast& key = *c.nodes[0];
           return key.tag == "string"_ ? unescape(std::string(key.token))
                                       : std::string(key.token);
         };
-        size_t first = a.nodes.size();
-        for (size_t i = 0; i < a.nodes.size(); ++i) {
+        const size_t n = a.nodes.size();
+        size_t first = n;
+        for (size_t i = 0; i < n; ++i) {
           if (key_of(*a.nodes[i]) == kDropField) {
             first = i;
             break;
           }
         }
-        const int32_t mark = ctx.mark();
-        const bool slot = first + 1 < a.nodes.size();
-        const int32_t t = slot ? ctx.alloc_local("$obj") : -1;
         std::vector<std::pair<NodeId, NodeId>> kvs;
         for (size_t i = 0; i < first; ++i) {
           kvs.emplace_back(b.str_literal(key_of(*a.nodes[i])),
                            emit_expr(*a.nodes[i]->nodes[1], ctx));
         }
-        NodeId obj = b.object_lit(kvs);
-        if (first == a.nodes.size()) return obj;
-        if (!slot) {
+        const NodeId obj = b.object_lit(kvs);
+        if (first == n) return obj;
+        if (first + 1 == n) {
           return b.intrinsic(IntrinsicId::DropSet,
                              {obj, emit_expr(*a.nodes[first]->nodes[1], ctx)});
         }
-        const NodeId O = b.varref(VarKind::Local, t);
+        const int32_t mark = ctx.mark();
+        const int32_t t = ctx.alloc_local("$obj");
+        const auto O = [&] { return b.varref(VarKind::Local, t); };
         std::vector<NodeId> steps{b.assign(VarKind::Local, t, obj)};
-        for (size_t i = first; i < a.nodes.size(); ++i) {
+        for (size_t i = first; i < n; ++i) {
           const std::string k = key_of(*a.nodes[i]);
           const NodeId v = emit_expr(*a.nodes[i]->nodes[1], ctx);
-          steps.push_back(
-              k == kDropField
-                  ? b.intrinsic(IntrinsicId::DropSet, {O, v})
-                  : b.set_index(O, b.str_literal(k), v));
+          steps.push_back(k == kDropField
+                              ? b.intrinsic(IntrinsicId::DropSet, {O(), v})
+                              : b.set_index(O(), b.str_literal(k), v));
         }
-        steps.push_back(O);
+        steps.push_back(O());
         const int32_t end = ctx.release(mark);
         return b.scope(mark, end, b.block(steps));
       }
