@@ -22,7 +22,7 @@ added for it.
 ## Running
 
 ```
-build/examples/mini-csharp/mini-csharp [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.cs
+build/examples/mini-csharp/mini-csharp [--dump-ir] [--dump-bc] [--check-effects] [--profile] PROGRAM.cs
 ```
 
 ## A class is an object, and dispatch is a walk

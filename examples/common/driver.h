@@ -2,14 +2,18 @@
 
 // The command line every front end under examples/ shares:
 //
-//   <name> [--dump-ir] [--dump-bc] [--check-effects] PROGRAM
+//   <name> [--dump-ir] [--dump-bc] [--check-effects] [--profile] PROGRAM
 //
 // It reads the program, binds it, compiles it and runs it -- or stops at
 // the bound module (--dump-ir), at the compiled program (--dump-bc), or at
 // the list of what one run would evaluate twice and what was built and
-// dropped (--check-effects). It exits 0 when the program ran (or a dump
-// was printed), 1 when the program failed or --check-effects found
-// something, and 2 when the command line names no program it can read.
+// dropped (--check-effects). With --profile the run is counted (vm::run's
+// Profile overload), and once the program has finished, where its
+// instructions went -- function by function, helpers included -- is
+// printed to stderr as vm::to_string's table; a program that fails prints
+// its failure and no table. It exits 0 when the program ran (or a dump was
+// printed), 1 when the program failed or --check-effects found something,
+// and 2 when the command line names no program it can read.
 //
 // A front end's main.cc says only what is its own -- its name, its binder,
 // what its programs run with and why -- and hands the rest to

@@ -38,7 +38,7 @@ prove.
 ## Running
 
 ```
-build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.go
+build/examples/mini-go/mini-go [--dump-ir] [--dump-bc] [--check-effects] [--profile] PROGRAM.go
 ```
 
 ## A worked example: one closure, two calls

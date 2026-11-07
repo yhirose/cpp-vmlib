@@ -18,7 +18,7 @@ interpreter and mini-go's have to `go run`.
 ## Running
 
 ```
-build/examples/mini-js/mini-js [--dump-ir] [--dump-bc] [--check-effects] FILE.js [FILE.js ...]
+build/examples/mini-js/mini-js [--dump-ir] [--dump-bc] [--check-effects] [--profile] FILE.js [FILE.js ...]
 ```
 
 More than one file is concatenated, in order, into one program. That is

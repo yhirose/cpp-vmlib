@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -23,7 +24,8 @@ namespace {
 
 void usage(const FrontEnd& fe) {
   std::cerr << "usage: " << fe.name
-            << " [--dump-ir] [--dump-bc] [--check-effects] " << fe.program;
+            << " [--dump-ir] [--dump-bc] [--check-effects] [--profile] "
+            << fe.program;
   if (fe.concatenate) std::cerr << " [" << fe.program << " ...]";
   std::cerr << "\n";
 }
@@ -33,6 +35,7 @@ void usage(const FrontEnd& fe) {
 int main(int argc, char** argv, const FrontEnd& fe) {
   std::vector<std::string> paths;
   bool dump_ir = false, dump_bc = false, check_effects = false;
+  bool profile = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -42,6 +45,8 @@ int main(int argc, char** argv, const FrontEnd& fe) {
       check_effects = true;
     } else if (a == "--dump-bc") {
       dump_bc = true;
+    } else if (a == "--profile") {
+      profile = true;
     } else if (a.rfind("--", 0) == 0) {
       usage(fe);
       return 2;
@@ -105,7 +110,15 @@ int main(int argc, char** argv, const FrontEnd& fe) {
   }
 
   coreir::Runtime rt;
-  vm::run(p, rt, fe.run);
+  if (!profile) {
+    vm::run(p, rt, fe.run);
+    return 0;
+  }
+  vm::Profile counts;
+  vm::run(p, rt, fe.run, counts);
+  // After everything the program printed, wherever the two streams go.
+  std::fflush(stdout);
+  std::cerr << vm::to_string(p, counts);
   return 0;
 }
 

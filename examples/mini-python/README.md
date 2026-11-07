@@ -28,7 +28,7 @@ end here whose *lexical* structure a PEG cannot express.
 ## Running
 
 ```
-build/examples/mini-python/mini-python [--dump-ir] [--dump-bc] [--check-effects] PROGRAM.py
+build/examples/mini-python/mini-python [--dump-ir] [--dump-bc] [--check-effects] [--profile] PROGRAM.py
 ```
 
 ## The bignum, and the two rules around it

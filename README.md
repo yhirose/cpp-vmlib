@@ -908,7 +908,22 @@ stack (`total`, a recursion counted once, cProfile's cumulative time as a
 count); the host functions' calls, by name; and every instruction by
 opcode. `vm::to_string(p, profile)` prints it as a table, the most self
 instructions first, a function with source positions labelled by its
-first one.
+first one. Every front end here takes `--profile`, which runs the program
+that way and prints the table to stderr once the program has finished:
+
+```
+$ build/examples/mini-lua/mini-lua --profile bench/languages/fib.lua
+317811
+86904584 instructions, 4628056 calls
+
+    self   self%     total  total%     calls    per call  function
+30853694   35.5%  86904557  100.0%   1028457        30.0  fib 2:3
+21597576   24.9%  21597576   24.9%   1028456        21.0  $subm
+12341472   14.2%  12341472   14.2%   1028456        12.0  $one
+11313027   13.0%  11313027   13.0%   1028457        11.0  $truthy
+10798788   12.4%  10798788   12.4%    514228        21.0  $add
+...
+```
 
 The numbers are counts, not times, and that is what makes them worth
 having: they are the same on every run and every machine, so a guess about
@@ -953,7 +968,8 @@ listens; this is that, decided at compile time.
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
 -- under `examples/<name>/`. The rest is shared: its `main.cc` names the
 binder and whatever `vm::RunOptions` its programs need, and hands them to
-the command line every front end here runs (`examples/common/driver.h`);
+the command line every front end here runs (`examples/common/driver.h`:
+`--dump-ir`, `--dump-bc`, `--check-sharing`, `--profile`);
 its `CMakeLists.txt` is one `add_front_end()` call
 (`examples/common/CMakeLists.txt`), which builds it and registers its
 tests -- `samples/` against their `golden/` transcripts, `uncaught/` and
