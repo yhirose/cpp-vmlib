@@ -1379,16 +1379,16 @@ struct Binder {
       Func f;
       f.name = ri.type_name + "?";
       f.num_params = 1;
-      f.num_locals = 1;
-      f.local_names = {"v"};
+      f.num_locals = 3;
+      f.local_names = {"v", "$meta", "$type"};
       f.lenient_arity = true;
       const NodeId V = b.varref(VarKind::Local, 0);
       const NodeId cond = b.make_if(
-          is_kind(b, V, kRecordKind),
+          is_kind(b, V, 1, 2, kRecordKind),
           b.binary(BinOp::Eq, kind_field(b, V, kRecordType),
                    b.str_literal(ri.type_name)),
           b.bool_literal(false));
-      f.body = b.scope(0, 1, b.make_return(cond));
+      f.body = b.scope(0, 3, b.make_return(cond));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(f));
       out.push_back(
@@ -1540,6 +1540,8 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     const int32_t exc = ctx.alloc_local("$exc");
+    const int32_t meta = ctx.alloc_local("$meta");
+    const int32_t type = ctx.alloc_local("$type");
     const int32_t cell = ctx.next_cell++;
     const NodeId TAG = b.varref(VarKind::Cell, cell);
     const NodeId E = b.varref(VarKind::Local, exc);
@@ -1551,7 +1553,7 @@ struct Binder {
     const NodeId body = b.call_value(emit_form(*a.nodes[1], ctx),
                                      {b.make_closure(rt.func("$escape"), cm)});
     const NodeId mine = b.make_if(
-        is_kind(b, E, kEscapeKind),
+        is_kind(b, E, meta, type, kEscapeKind),
         b.intrinsic(IntrinsicId::Same, {kind_field(b, E, kEscapeTag), TAG}),
         b.bool_literal(false));
     const NodeId handler = b.make_if(mine, kind_field(b, E, kEscapeValue),
@@ -1622,10 +1624,12 @@ struct Binder {
       // nothing; with it, it says what the program asked for and why it
       // cannot have it.
       const int32_t slot = ctx.alloc_local("$exc");
+      const int32_t meta = ctx.alloc_local("$meta");
+      const int32_t type = ctx.alloc_local("$type");
       const NodeId E = b.varref(VarKind::Local, slot);
       stmts.push_back(b.make_try(
           slot, value,
-          b.make_if(is_kind(b, E, kEscapeKind),
+          b.make_if(is_kind(b, E, meta, type, kEscapeKind),
                     b.make_throw(b.str_literal(
                         "call/cc: a continuation was invoked after the "
                         "call/cc that made it had already returned. This "

@@ -65,12 +65,10 @@ namespace {
 
 // What the implementation keeps on an object is its meta
 // (runtime_parts.h's Hidden state), where no key reaches it: an
-// exception's kind and message, a Range's two ends, and -- the class
-// layout's -- an instance's class and a class's name and base. So an
-// exception or a Range has no keys at all, and a method's key is its name.
-constexpr char kExcKind[] = "exc";
-constexpr int64_t kExcName = 1;
-constexpr int64_t kExcMessage = 2;
+// exception's kind and message (runtime_parts.h's Exceptions), a Range's
+// two ends, and -- the class layout's -- an instance's class and a class's
+// name and base. So an exception or a Range has no keys at all, and a
+// method's key is its name.
 constexpr char kRangeKind[] = "range";
 constexpr int64_t kRangeLo = 1;
 constexpr int64_t kRangeHi = 2;
@@ -1227,7 +1225,7 @@ struct Binder {
   void rt_mkexc() {
     one("$mkexc",
         [&](RT& r) {
-          return of_kind(r, r.obj({}), kExcKind, {r.L(0), r.L(1)});
+          return exception(r, r.S(kExcKind), r.L(0), r.L(1));
         },
         {"kind", "msg"});
   }
@@ -2757,7 +2755,7 @@ const std::vector<vm::NativeDef>& stdlib() {
 // ruby's own wording after the position: the message, then the class in
 // parentheses.
 std::string describe(const Value& v) {
-  if (const auto* exc = runtime_parts::kind_record(v, kExcKind)) {
+  if (const auto* exc = runtime_parts::exception_record(v)) {
     const Value& kind = (*exc)[kExcName];
     if (kind.is_str()) {
       return to_display((*exc)[kExcMessage]) + " (" + kind.as_str() + ")";

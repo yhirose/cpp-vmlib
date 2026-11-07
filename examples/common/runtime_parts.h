@@ -70,26 +70,40 @@ inline std::string program_key(const std::string& name) {
 
 // ---- Hidden state ----------------------------------------------------------
 //
-// What the implementation keeps on an object a program holds -- the mark
-// that makes an object a tuple or a range, a promise's state, a record's
-// type -- is the object's meta (vmlib.h's MetaGet/MetaSet), the slot no
-// key reaches: a program can neither read, forge nor strip it by spelling
-// a key, and nothing that lists, counts or compares keys has anything to
-// step over. An instance's meta is its class (Classes, below); any other
-// object's is its *kind record*: an Array whose element 0 names the kind
-// and whose other elements are the kind's state, at positions the front
-// end numbers. A kind record is never an Object, so it is never taken for
-// a class; and no program holds one, so a position needs no prefix to
-// keep it apart from anything.
+// What the implementation keeps on an object a program holds -- an
+// instance's class, the mark that makes an object a tuple or a range, a
+// promise's state -- is the object's meta (vmlib.h's MetaGet/MetaSet), the
+// slot no key reaches: a program can neither read, forge nor strip it by
+// spelling a key, and nothing that lists, counts or compares keys has
+// anything to step over. The head of a meta is always the object's type,
+// and what follows it is the state the implementation keeps beside that,
+// the way CPython's struct follows ob_type:
+//
+//   * an Object: a class's method table (Classes, below), and no state --
+//     an instance of a program's class, its fields all its own;
+//   * an Array, [type, state...], at positions the front end numbers: a
+//     *kind record*, whose type is a kind's name (a string) for a kind of
+//     the implementation's own -- a tuple, a Map, a promise -- or a class's
+//     method table for an instance of a program's class that keeps state
+//     beside its fields, which only an exception does here (its message).
+//
+// So a meta is never taken for what it is not: a class is an Object, and a
+// kind record an Array. Only an Object carries a kind record. No program
+// holds a meta, so a position in one needs no prefix to keep it apart
+// from anything.
 
-// `obj` with a kind record of `kind` over `state` as its meta -- the
-// object, answered, as MetaSet answers it.
+// `obj` with [type, state...] as its meta -- the object, answered, as
+// MetaSet answers it; of_kind for a kind of the implementation's own.
+inline NodeId with_meta(coreir::Builder::At& b, NodeId obj, NodeId type,
+                        const std::vector<NodeId>& state) {
+  std::vector<NodeId> rec{type};
+  rec.insert(rec.end(), state.begin(), state.end());
+  return b.intrinsic(IntrinsicId::MetaSet, {obj, b.array_lit(rec)});
+}
 inline NodeId of_kind(coreir::Builder::At& b, NodeId obj,
                       const std::string& kind,
                       const std::vector<NodeId>& state) {
-  std::vector<NodeId> rec{b.str_literal(kind)};
-  rec.insert(rec.end(), state.begin(), state.end());
-  return b.intrinsic(IntrinsicId::MetaSet, {obj, b.array_lit(rec)});
+  return with_meta(b, obj, b.str_literal(kind), state);
 }
 inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
                       const std::vector<NodeId>& state) {
@@ -97,29 +111,37 @@ inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
 }
 
 // Whether `v` carries a kind record of `kind`: any value can be asked, and
-// one with no meta, or with a meta that is no kind record, is of none. A
-// kind record is an object's, so anything else is answered by the one
-// test of its type that answered it before there was a meta to read --
-// on the paths that ask of every number, `$add`'s "is this a tuple", it
-// is the whole cost. `v` is a read, and runs more than once.
-inline NodeId is_kind(coreir::Builder::At& b, NodeId v,
+// one that is no Object, or whose meta is no kind record of a kind's name,
+// is of none -- anything but an Object is answered by its first test,
+// which on the paths that ask of every number (`$add`'s "is this a
+// tuple") is the whole cost. The meta, and its head, are each read once,
+// into the two locals `m` and `h` the caller lends.
+inline NodeId is_kind(coreir::Builder::At& b, NodeId v, int32_t m, int32_t h,
                       const std::string& kind) {
+  using coreir::VarKind;
   const auto is = [&](NodeId x, const char* type) {
     return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {x}),
                     b.str_literal(type));
   };
-  const auto meta = [&] { return b.intrinsic(IntrinsicId::MetaGet, {v}); };
+  const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
+  const NodeId no = b.bool_literal(false);
   return b.make_if(
       is(v, "object"),
-      b.make_if(is(meta(), "array"),
-                b.binary(BinOp::Eq, b.index(meta(), b.literal(0)),
-                         b.str_literal(kind)),
-                b.bool_literal(false)),
-      b.bool_literal(false));
+      b.block(
+          {b.assign(VarKind::Local, m, b.intrinsic(IntrinsicId::MetaGet, {v})),
+           b.make_if(is(L(m), "array"),
+                     b.block({b.assign(VarKind::Local, h,
+                                       b.index(L(m), b.literal(0))),
+                              b.make_if(is(L(h), "string"),
+                                        b.binary(BinOp::Eq, L(h),
+                                                 b.str_literal(kind)),
+                                        b.bool_literal(false))}),
+                     b.bool_literal(false))}),
+      no);
 }
 inline NodeId is_kind(FuncWriter& w, FuncWriter::Slot v,
                       const std::string& kind) {
-  return is_kind(w.b, w.L(v), kind);
+  return is_kind(w.b, w.L(v), w.local("$meta").i, w.local("$type").i, kind);
 }
 
 // Element `i` of the kind record `v` carries, read and written.
@@ -137,13 +159,12 @@ inline NodeId set_kind_field(FuncWriter& w, NodeId v, int64_t i, NodeId x) {
   return set_kind_field(w.b, v, i, x);
 }
 
-// The same question, asked in C++ by a host function: the kind record `v`
-// carries when it is of `kind`, or null.
+// The same questions, asked in C++ by a host function. The kind record `v`
+// carries when it is of `kind`, or null -- of an Object only, as is_kind.
 inline const std::vector<coreir::Value>* kind_record(const coreir::Value& v,
                                                      std::string_view kind) {
-  const coreir::Value* m = coreir::meta_slot(v);
-  if (!m || !m->is_array()) return nullptr;
-  const std::vector<coreir::Value>& rec = m->as_array()->items;
+  if (!v.is_object() || !v.as_object()->meta.is_array()) return nullptr;
+  const std::vector<coreir::Value>& rec = v.as_object()->meta.as_array()->items;
   if (rec.empty() || !rec[0].is_str() || rec[0].as_str() != kind) {
     return nullptr;
   }
@@ -187,11 +208,23 @@ inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
   return b.intrinsic(IntrinsicId::MetaSet, {b.object_lit({}), cls});
 }
 
-// The class of `v`: its table when it is an instance, nil for anything
-// else.
+// The class of `v`: the method table at the head of its meta when it is
+// an instance -- the meta itself, or the type of a kind record that keeps
+// state beside its fields -- and nil for anything else. Only an Object
+// is an instance, as only an Object has a kind record (is_kind), so any
+// other value -- a receiver of a builtin type, the common case in a
+// method call -- is answered by its one type test. The meta is read once,
+// into a local of the writer's.
 inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
-  return w.iff(w.is(w.typ(w.meta(w.L(v))), "object"), w.meta(w.L(v)),
-               w.Nil());
+  const auto m = w.local("$meta");
+  return w.iff(
+      w.is(w.typ(v), "object"),
+      w.blk({w.set(m, w.meta(w.L(v))),
+             w.iff(w.is(w.typ(m), "object"), w.L(m),
+                   w.iff(w.both(w.is(w.typ(m), "array"),
+                                w.is(w.typ(w.idx(w.L(m), w.I(0))), "object")),
+                         w.idx(w.L(m), w.I(0)), w.Nil()))}),
+      w.Nil());
 }
 
 // A class's name, from its table.
@@ -199,15 +232,28 @@ inline NodeId class_name(FuncWriter& w, NodeId table) {
   return kind_field(w, table, kClassName);
 }
 
-// The name of `v`'s class, asked in C++ by a host function: null when `v`
-// is no instance.
-inline const std::string* instance_class_name(const coreir::Value& v) {
-  const coreir::Value* cls = coreir::meta_slot(v);
-  if (!cls || !cls->is_object()) return nullptr;
-  const auto* rec = kind_record(*cls, kClassKind);
+// The same, asked in C++ by a host function: the class of `v`, or null
+// when `v` is no instance; a class's name, from its table, or null when
+// `table` is none; and the name of `v`'s class.
+inline const coreir::Value* instance_class(const coreir::Value& v) {
+  if (!v.is_object()) return nullptr;
+  const coreir::Value* m = &v.as_object()->meta;
+  if (m->is_object()) return m;
+  if (m->is_array() && !m->as_array()->items.empty() &&
+      m->as_array()->items[0].is_object()) {
+    return &m->as_array()->items[0];
+  }
+  return nullptr;
+}
+inline const std::string* class_name(const coreir::Value& table) {
+  const auto* rec = kind_record(table, kClassKind);
   constexpr auto at = static_cast<size_t>(kClassName);
   if (!rec || rec->size() <= at || !(*rec)[at].is_str()) return nullptr;
   return &(*rec)[at].as_str();
+}
+inline const std::string* instance_class_name(const coreir::Value& v) {
+  const coreir::Value* cls = instance_class(v);
+  return cls ? class_name(*cls) : nullptr;
 }
 
 // The walk, as the While it is: from the table in `c`, each table up the
@@ -230,6 +276,58 @@ inline void find_in_chain(FuncWriter& w) {
                    w.iff(w.has(w.L(c), w.L(key)),
                          w.ret(w.idx(w.L(c), w.L(key))))));
   w.add(w.ret(w.Nil()));
+}
+
+// ---- Exceptions ------------------------------------------------------------
+//
+// An exception the implementation raises or a program builds is an object
+// whose meta is [type, name, message]: the type kExcKind for a builtin
+// one, or -- in a language whose programs derive their own -- the class
+// of one of the program's, which keeps its message beside its fields (the
+// one instance here with state of its own; see Hidden state). The name is
+// the one a report gives it, its class's for one of the program's; the
+// message is nil until one is given. What a report says, and in which
+// shape, is each language's (RunOptions::describe).
+inline constexpr char kExcKind[] = "exc";
+inline constexpr int64_t kExcName = 1;
+inline constexpr int64_t kExcMessage = 2;
+
+// A fresh exception of `type` (a kind's name node, or a class's table).
+inline NodeId exception(coreir::Builder::At& b, NodeId type, NodeId name,
+                        NodeId message) {
+  return with_meta(b, b.object_lit({}), type, {name, message});
+}
+inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
+                        NodeId message) {
+  return exception(w.b, type, name, message);
+}
+
+// Whether `v` is an exception: a builtin one, or an instance of a
+// program's class that keeps a message. The meta and its head are each
+// read once, into locals of the writer's.
+inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
+  const auto m = w.local("$meta");
+  const auto h = w.local("$type");
+  return w.both(
+      w.is(w.typ(v), "object"),
+      w.blk({w.set(m, w.meta(w.L(v))),
+             w.both(w.is(w.typ(m), "array"),
+                    w.blk({w.set(h, w.idx(w.L(m), w.I(0))),
+                           w.iff(w.is(w.typ(h), "string"),
+                                 w.bin(BinOp::Eq, w.L(h), w.S(kExcKind)),
+                                 w.is(w.typ(h), "object"))}))}));
+}
+
+// The same, asked in C++ by a host function -- a report's: the exception's
+// [type, name, message], or null when `v` is none.
+inline const std::vector<coreir::Value>* exception_record(
+    const coreir::Value& v) {
+  if (const auto* rec = kind_record(v, kExcKind)) return rec;
+  if (!v.is_object() || !v.as_object()->meta.is_array()) return nullptr;
+  const std::vector<coreir::Value>& rec = v.as_object()->meta.as_array()->items;
+  return rec.size() > static_cast<size_t>(kExcMessage) && rec[0].is_object()
+             ? &rec
+             : nullptr;
 }
 
 // ---- Iteration -------------------------------------------------------------
@@ -852,5 +950,10 @@ inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
 //   $iternext builds its cursors and its steps with the shared parts, but
 //   runs its own step: iter_step would add a generator test to every
 //   `.each`, a hot path, for a kind Ruby does not have.
+// * An error in JavaScript, culebra, Lua and Scheme. What it holds is the
+//   program's to read, so none keeps it in a record: a JavaScript Error's
+//   name and message are properties, a culebra error's kind and message
+//   are fields, and a Lua or Scheme program raises any value, which the
+//   implementation's own errors match by being strings.
 
 }  // namespace runtime_parts

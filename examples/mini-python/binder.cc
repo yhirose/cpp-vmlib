@@ -67,16 +67,10 @@ namespace {
 constexpr char kBigKind[] = "big";
 constexpr int64_t kBigLimbs = 1;
 constexpr int64_t kBigSign = 2;
-// An exception: a builtin's name -- nil for one of the program's classes,
-// whose class names it -- the message, nil until one is given, and the
-// program's class -- nil for a builtin. An exception of the program's is
-// an instance, but its meta is this record rather than its class, since
-// it has a message of its own to keep beside the class: value_class reads
-// either shape.
-constexpr char kExcKind[] = "exc";
-constexpr int64_t kExcName = 1;
-constexpr int64_t kExcMessage = 2;
-constexpr int64_t kExcClass = 3;
+// An exception is runtime_parts.h's: [kExcKind, name, message] for a
+// builtin one, and [its class, nil, message] for an instance of a class of
+// the program's, which keeps its message beside its fields and is named
+// by its class -- runtime_parts' instance_class reads either shape.
 // Inheritance: a class's kind record holds its base's table
 // (kClassBase), the builtin exception it is rooted at -- `Exception` is not
 // a class here, so a class that derives from one is marked rather than
@@ -867,15 +861,6 @@ struct Binder {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
-  // The class of `v` -- a read, which runs more than once -- or nil: an
-  // instance's meta, or the class an exception of the program's carries
-  // in its kind record beside its message. Every question about a value's
-  // class starts here, so that both shapes are one rule.
-  static NodeId value_class(RT& r, NodeId v) {
-    return r.iff(r.is(r.typ(r.meta(v)), "object"), r.meta(v),
-                 r.iff(is_kind(r.b, v, kExcKind),
-                       kind_field(r, v, kExcClass), r.Nil()));
-  }
 
   // -- The bignum recipe ---------------------------------------------------
   //
@@ -888,9 +873,6 @@ struct Binder {
   void rt_isbig() {
     RT r(*this);
     const auto [v] = r.params("v");
-    // Asked of every number `-` and `str()` meet: anything but an object
-    // returns at the first test.
-    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.ret(is_kind(r, v, kBigKind)));
     r.finish("$isbig");
   }
@@ -1556,8 +1538,7 @@ struct Binder {
                              {kind_field(r, r.L(v), kTupleItems)}))));
     // A builtin exception displays as its message.
     r.add(r.iff(
-        r.both(is_kind(r, v, kExcKind),
-               r.is(r.typ(kind_field(r, r.L(v), kExcClass)), "nil")),
+        is_kind(r, v, kExcKind),
         r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("__str__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
@@ -1566,7 +1547,7 @@ struct Binder {
     // A class of the program's own that derives from a builtin exception
     // displays as its message, the way the builtin ones do.
     r.add(r.iff(
-        r.both(is_kind(r, v, kExcKind),
+        r.both(is_exception(r, v),
                r.isnt(r.typ(kind_field(r, r.L(v), kExcMessage)), "nil")),
         r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
     r.add(r.iff(is_kind(r, v, kTypeKind),
@@ -1574,7 +1555,7 @@ struct Binder {
                             r.bin(BinOp::Add, r.S("<class '"),
                                   r.idx(r.L(v), r.S("__name__"))),
                             r.S("'>")))));
-    r.add(r.set(f, value_class(r, r.L(v))));
+    r.add(r.set(f, instance_class(r, v)));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<"), class_name(r, r.L(f))),
@@ -1690,7 +1671,7 @@ struct Binder {
     RT r(*this);
     const auto [name, msg] = r.params("name", "msg");
     r.add(r.b.make_throw(
-        of_kind(r, r.obj({}), kExcKind, {r.L(name), r.L(msg), r.Nil()})));
+        exception(r, r.S(kExcKind), r.L(name), r.L(msg))));
     r.finish("$exc");
   }
 
@@ -1855,7 +1836,7 @@ struct Binder {
         r.blk(
             {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
              r.set(found,
-                   r.call("$clsfind", {value_class(r, r.L(o)), r.L(name)})),
+                   r.call("$clsfind", {instance_class(r, o), r.L(name)})),
              r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found)))})));
     r.add(r.ret(
         r.call("$exc", {r.S("AttributeError"),
@@ -1929,10 +1910,9 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "generator"), r.ret(r.S("generator"))));
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.S("int"))));
     r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.S("tuple"))));
-    r.add(r.iff(r.both(is_kind(r, v, kExcKind),
-                       r.is(r.typ(kind_field(r, r.L(v), kExcName)), "string")),
+    r.add(r.iff(is_kind(r, v, kExcKind),
                 r.ret(kind_field(r, r.L(v), kExcName))));
-    r.add(r.set(c, value_class(r, r.L(v))));
+    r.add(r.set(c, instance_class(r, v)));
     r.add(r.iff(r.isnt(r.typ(c), "nil"), r.ret(class_name(r, r.L(c)))));
     r.add(r.ret(r.S("object")));
     r.finish("$typename");
@@ -2281,11 +2261,10 @@ struct Binder {
     const auto [v, name] = r.params("v", "name");
     const auto [t] = r.locals("t");
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.both(is_kind(r, v, kExcKind),
-                       r.is(r.typ(kind_field(r, r.L(v), kExcName)), "string")),
+    r.add(r.iff(is_kind(r, v, kExcKind),
                 r.ret(r.bin(BinOp::Eq, kind_field(r, r.L(v), kExcName),
                             r.L(name)))));
-    r.add(r.set(t, value_class(r, r.L(v))));
+    r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(
         r, t,
         r.iff(r.both(r.is(r.typ(kind_field(r, r.L(t), kClassRoot)), "string"),
@@ -2302,7 +2281,7 @@ struct Binder {
     RT r(*this);
     const auto [v, cls] = r.params("v", "cls");
     const auto [t] = r.locals("t");
-    r.add(r.set(t, value_class(r, r.L(v))));
+    r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(r, t,
                      r.iff(r.in(IntrinsicId::Same,
                                 {kind_field(r, r.L(t), kClassId), r.L(cls)}),
@@ -2364,7 +2343,7 @@ struct Binder {
     const auto [self, a] = r.params("self", "a");
     // Only an exception has a message to keep: `super().__init__()` from a
     // class with no base reaches here too.
-    r.add(r.iff(is_kind(r, self, kExcKind),
+    r.add(r.iff(is_exception(r, self),
                 set_kind_field(r, r.L(self), kExcMessage,
                                r.call("$excmsg", {r.L(a)}))));
     r.add(r.ret(r.Nil()));
@@ -2387,7 +2366,7 @@ struct Binder {
   void rt_dunder() {
     RT r(*this);
     const auto [v, key] = r.params("v", "key");
-    r.add(r.ret(r.call("$clsfind", {value_class(r, r.L(v)), r.L(key)})));
+    r.add(r.ret(r.call("$clsfind", {instance_class(r, v), r.L(key)})));
     r.finish("$dunder");
   }
 
@@ -2417,9 +2396,6 @@ struct Binder {
   void rt_istup() {
     RT r(*this);
     const auto [v] = r.params("v");
-    // Asked of every operand `+` and every sequence an index meets:
-    // anything but an object returns at the first test.
-    r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.Bo(false))));
     r.add(r.ret(is_kind(r, v, kTupleKind)));
     r.finish("$istup");
   }
@@ -3939,8 +3915,7 @@ struct Binder {
     auto bp = b.at(p);
     std::vector<NodeId> body{
         b.assign(VarKind::Local, 2,
-                 is_exc ? of_kind(bp, bp.object_lit({}), kExcKind,
-                                  {bp.nil_literal(), bp.nil_literal(), C})
+                 is_exc ? exception(bp, C, bp.nil_literal(), bp.nil_literal())
                         : new_instance(bp, C),
                  p),
         b.assign(VarKind::Local, 3,
@@ -4515,10 +4490,8 @@ struct Binder {
     if (is_exception_name(g)) {
       return call_it(Takes{0, any, any}, [&](Args a, Args) {
         auto bp = b.at(p);
-        return of_kind(bp, bp.object_lit({}), kExcKind,
-                       {bp.str_literal(g),
-                        rt.call("$excmsg", {bp.array_lit(a)}, p),
-                        bp.nil_literal()});
+        return exception(bp, bp.str_literal(kExcKind), bp.str_literal(g),
+                         rt.call("$excmsg", {bp.array_lit(a)}, p));
       });
     }
     if (g == "sorted") {
@@ -5072,15 +5045,14 @@ const std::vector<vm::NativeDef>& stdlib() {
 // message when there is one -- a builtin's name travels in the object, a
 // program's own class names itself in its table.
 std::string describe(const Value& v) {
-  const auto* exc = runtime_parts::kind_record(v, kExcKind);
+  const auto* exc = runtime_parts::exception_record(v);
   if (!exc) return to_display(v);
   const Value& msg = (*exc)[kExcMessage];
   std::string name;
   if (const Value& k = (*exc)[kExcName]; k.is_str()) {
     name = k.as_str();
-  } else if (const auto* cls = runtime_parts::kind_record((*exc)[kExcClass],
-                                                         kClassKind)) {
-    name = (*cls)[kClassName].as_str();
+  } else if (const std::string* n = runtime_parts::class_name((*exc)[0])) {
+    name = *n;
   }
   if (name.empty() || msg.is_nil()) return to_display(v);
   const std::string text = to_display(msg);

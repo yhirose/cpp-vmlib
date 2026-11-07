@@ -63,11 +63,10 @@ namespace {
 // second namespace of the program's beside the methods, its static fields,
 // so the methods are under program_key(name) and the statics bare: a
 // static field and a method of one name, in one class or across a base,
-// never meet. An exception's message is in its kind record the same way,
-// where no key reaches it.
+// never meet. An exception is runtime_parts.h's, named for .NET's only
+// one here, there being no hierarchy.
 constexpr int64_t kClassCtor = kClassOwn;
-constexpr char kExcKind[] = "exc";
-constexpr int64_t kExcMessage = 1;
+constexpr char kExceptionName[] = "System.Exception";
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -1056,7 +1055,7 @@ struct Binder {
   void rt_mkexc() {
     RT r(*this);
     const auto [msg] = r.params("msg");
-    r.add(r.ret(of_kind(r, r.obj({}), kExcKind, {r.L(msg)})));
+    r.add(r.ret(exception(r, r.S(kExcKind), r.S(kExceptionName), r.L(msg))));
     r.finish("$mkexc");
   }
 
@@ -2203,11 +2202,12 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
-// What .NET prints after "Unhandled exception." -- every exception here is
-// a System.Exception, there being no hierarchy.
+// What .NET prints after "Unhandled exception.": the exception's name,
+// then its message.
 std::string describe(const Value& v) {
-  if (const auto* exc = runtime_parts::kind_record(v, kExcKind)) {
-    return "System.Exception: " + to_display((*exc)[kExcMessage]);
+  if (const auto* exc = runtime_parts::exception_record(v)) {
+    return to_display((*exc)[kExcName]) + ": " +
+           to_display((*exc)[kExcMessage]);
   }
   return to_display(v);
 }

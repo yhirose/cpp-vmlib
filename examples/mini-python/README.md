@@ -168,8 +168,8 @@ A class that derives from a builtin exception (`class AppError(Exception)`)
 gets no table to inherit from -- `Exception` is not a class here -- so it
 is marked with the name it is rooted at instead, and `$isname` walks the
 same chain checking that mark. An instance of one has a message of its own
-to keep beside its class, so its meta is an exception's kind record naming
-the class, and every question about a value's class starts from the one
+to keep beside its class, so its meta is an exception's record whose type
+is the class, and every question about a value's class starts from the one
 helper that reads either shape. `__str__`, `__repr__` and `__eq__` are
 found by `$clsfind` exactly like any other method and called through the
 same convention as everything else; `$str`, `$repr` and `$eq` each try one
