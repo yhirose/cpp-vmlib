@@ -4482,10 +4482,17 @@ struct Profile {
 // goes into `profile`, which starts from zero. The counting costs this run
 // time and every other run nothing: the executor that counts is a second
 // instantiation of the one the other overloads run (vm::detail::Exec),
-// compiled only into a program that calls this one. The counts are kept as
-// the run goes, so a run a host exception ends leaves those it had made.
+// compiled only into a program that calls this one. That is why this is a
+// template, though P can only be Profile: an inline function would
+// instantiate the counting executor wherever vmlib.h is included, which
+// costs every translation unit compile time, and would give NativeExec a
+// second implementation everywhere, so that a compiler no longer
+// devirtualizes a native's call back to the one it can see. The counts are
+// kept as the run goes, so a run a host exception ends leaves those it had
+// made.
+template <class P, class = std::enable_if_t<std::is_same_v<P, Profile>>>
 void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
-         Profile& profile);
+         P& profile);
 
 // A profile as a table: the functions that ran, the most self instructions
 // first -- each by its name and, if its code has a source position, by the
@@ -9576,8 +9583,9 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
   detail::run_watched(p, rt, opts, detail::NoProfiler{});
 }
 
-inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
-                Profile& profile) {
+template <class P, class>
+void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
+         P& profile) {
   detail::run_watched(p, rt, opts, detail::Profiler(profile, p));
 }
 
