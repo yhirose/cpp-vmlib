@@ -1086,6 +1086,26 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
+  // `+` and `==`, whose types are erased by the time they run, are the
+  // VM's own operator on the values where it is C#'s, and the runtime's
+  // helper on the rest (runtime_parts.h's op_or_helper).
+  //
+  // `+` on two numbers adds, and on two strings concatenates, as Add does;
+  // a string beside anything else is $add's, which formats the other.
+  NodeId add(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, BinOp::Add, x, y,
+                        tags_named({"int", "double", "string"}), "$add", p);
+  }
+
+  // `==` on null, bools, numbers and strings is Eq's, a long and a double
+  // meeting as numbers; two different types, which Eq refuses, and an
+  // object, which is compared by identity, are $eq's.
+  NodeId equal(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(
+        rt, BinOp::Eq, x, y,
+        tags_named({"nil", "bool", "int", "double", "string"}), "$eq", p);
+  }
+
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
     auto b = Builder(m).at(p);
@@ -1432,11 +1452,8 @@ struct Binder {
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const NodeId eq = rt.call("$eq", {acc, rhs}, pos_of(op));
-          acc = op.token == "=="
-                    ? eq
-                    : b.at(pos_of(op))
-                          .binary(BinOp::Eq, eq, b.bool_literal(false));
+          const NodeId eq = equal(acc, rhs, pos_of(op));
+          acc = op.token == "==" ? eq : b.at(pos_of(op)).unary(UnOp::Not, eq);
         }
         return acc;
       }
@@ -1466,7 +1483,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
           if (t == "+") {
-            acc = rt.call("$add", {acc, rhs}, op_p);
+            acc = add(acc, rhs, op_p);
           } else {
             const BinOp o = t == "-"   ? BinOp::Sub
                             : t == "*" ? BinOp::Mul
@@ -1867,7 +1884,7 @@ struct Binder {
                       [&](auto&& cur) -> NodeId {
       const NodeId v = emit_expr(*a.nodes[2], ctx);
       if (op == "=") return v;
-      if (op == "+=") return rt.call("$add", {cur(), v}, p);
+      if (op == "+=") return add(cur(), v, p);
       const BinOp o = op == "-="   ? BinOp::Sub
                       : op == "*=" ? BinOp::Mul
                       : op == "/=" ? BinOp::Div
