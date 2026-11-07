@@ -4255,6 +4255,19 @@ struct Program {
     return str_consts[static_cast<size_t>(
         consts[static_cast<size_t>(const_index)].bits)];
   }
+
+  // Where chunk `ch`'s instruction `pc` came from. Two side tables deep --
+  // a chunk's code_pos indexes this program's shared position pool -- so
+  // the walk is written once, here, for the dump and the profile, and the
+  // executor's own copy (Exec::pos_at) says why it is one.
+  coreir::SrcPos pos_at(const Chunk& ch, size_t pc) const {
+    return positions[ch.code_pos[pc]];
+  }
+
+  // Which of this program's chunks `ch` is.
+  size_t index_of(const Chunk& ch) const {
+    return static_cast<size_t>(&ch - chunks.data());
+  }
 };
 
 std::string to_string(const Program& p);
@@ -6196,7 +6209,7 @@ inline std::string to_string(const Program& p) {
     out << "\n";
     for (size_t j = 0; j < ch.code.size(); ++j) {
       const Insn& in = ch.code[j];
-      const coreir::SrcPos sp = p.positions[ch.code_pos[j]];
+      const coreir::SrcPos sp = p.pos_at(ch, j);
       out << "  " << j << "\t" << detail::name_of(in.op);
       // Every opcode listed, no default: an opcode added without a format
       // here is a -Wswitch warning (an error in test_verify's build), not
@@ -7422,7 +7435,7 @@ class Profiler {
   Profiler() = default;
   Profiler(Profile& out, const Program& p)
       : out_(&out),
-        chunks_(p.chunks.data()),
+        p_(&p),
         depth_(p.chunks.size()),
         since_(p.chunks.size()) {
     out = Profile{};
@@ -7449,11 +7462,11 @@ class Profiler {
 
  private:
   size_t index(const Chunk& c) const {
-    return static_cast<size_t>(&c - chunks_);
+    return p_->index_of(c);
   }
 
   Profile* out_ = nullptr;
-  const Chunk* chunks_ = nullptr;
+  const Program* p_ = nullptr;
   std::vector<size_t> depth_;    // per chunk: its frames on the stack now
   std::vector<uint64_t> since_;  // per chunk: the count when depth_ left 0
 };
@@ -7800,7 +7813,7 @@ struct Exec {
     for (size_t i = bottom; i < frames.size(); ++i) {
       Frame& fr = *frames[i];
       GenFrame gf;
-      gf.func = static_cast<int32_t>(fr.chunk - p.chunks.data());
+      gf.func = static_cast<int32_t>(p.index_of(*fr.chunk));
       gf.pc = static_cast<int64_t>(fr.pc);
       gf.yield_reg = i + 1 == frames.size() ? yield_reg : -1;
       gf.argc = fr.argc;
@@ -8044,9 +8057,11 @@ struct Exec {
     frames.push_back(std::move(f));
   }
 
-  // Where an instruction came from. Two side tables deep -- a chunk's
-  // code_pos indexes the program's shared position pool -- so the walk is
-  // written once here rather than at each of the arms that report a trap.
+  // Where an instruction came from: Program::pos_at's walk, written out
+  // rather than called. The dispatch loop inlines it at every arm that
+  // reports a position, and GCC allocates that loop's registers
+  // differently around a call one level deeper -- a change to the hottest
+  // code here for nothing.
   SrcPos pos_at(const Chunk& ch, size_t pc) const {
     return p.positions[ch.code_pos[pc]];
   }
@@ -9619,8 +9634,8 @@ namespace detail {
 // has a position. {0, 0} for code with none anywhere, which is what a
 // front end's helpers, written in IR, are.
 inline coreir::SrcPos first_pos(const Program& p, const Chunk& ch) {
-  for (const uint32_t i : ch.code_pos) {
-    if (p.positions[i].line != 0) return p.positions[i];
+  for (size_t pc = 0; pc < ch.code.size(); ++pc) {
+    if (p.pos_at(ch, pc).line != 0) return p.pos_at(ch, pc);
   }
   return {};
 }
