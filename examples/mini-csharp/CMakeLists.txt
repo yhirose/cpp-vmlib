@@ -3,7 +3,7 @@
 add_executable(mini-csharp main.cc binder.cc)
 target_include_directories(mini-csharp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-csharp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-csharp PRIVATE vmlib vmlib_warnings)
+target_link_libraries(mini-csharp PRIVATE vmlib)
 
 add_test(NAME mini-csharp-samples
         COMMAND ${CMAKE_COMMAND}

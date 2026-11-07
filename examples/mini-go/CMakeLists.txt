@@ -4,7 +4,7 @@
 add_executable(mini-go main.cc binder.cc)
 target_include_directories(mini-go PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mini-go SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../pl0/vendor)
-target_link_libraries(mini-go PRIVATE vmlib vmlib_warnings)
+target_link_libraries(mini-go PRIVATE vmlib)
 
 # Self-contained: unlike PL/0's samples (wired into the top-level test/,
 # since PL/0 doubles as that suite's oracle harness), this example is not

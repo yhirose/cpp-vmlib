@@ -18,14 +18,16 @@ endif()
 add_library(vmlib INTERFACE)
 target_include_directories(vmlib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# -Wall -Wextra -Werror for the code this repository owns and builds: each
-# example front end, and test_verify, which holds vmlib.h itself to it. Not
-# a property of vmlib -- an INTERFACE target's options would land in every
-# host's build -- and not of peglib.h, which the front ends include as a
-# system header: a warning there is upstream's to fix.
-add_library(vmlib_warnings INTERFACE)
+# -Wall -Wextra -Werror for everything this repository builds -- the front
+# ends, the tests, the bench -- set once for the directory, so a target
+# added later cannot be left out. A host that includes vmlib.h with -Werror
+# builds whatever of it these instantiate, so a warning here is that host's
+# broken build. Directory options reach this project's own targets only:
+# not vmlib's INTERFACE, which carries no options into a host, and not
+# peglib.h, which the front ends include as a system header -- a warning
+# there is upstream's to fix.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(vmlib_warnings INTERFACE -Wall -Wextra -Werror)
+  add_compile_options(-Wall -Wextra -Werror)
 endif()
 
 option(VMLIB_BUILD_TESTS "Build cpp-vmlib tests" ON)
