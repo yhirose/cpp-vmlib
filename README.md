@@ -897,6 +897,45 @@ browser (`gh run view --job=<id> --log`; `.claude/commands/ci-bench.md` is
 that, as a `/ci-bench` slash command that resolves the run and reads the
 tables out for you).
 
+## Profiling
+
+`vm::run(p, rt, opts, profile)` runs the program as `vm::run(p, rt, opts)`
+does and fills a `vm::Profile` with where its work went: for each function
+of the program -- a front end's helpers included, which is the point --
+the calls that entered it, the instructions its own frames dispatched
+(`self`), and the instructions dispatched while it was anywhere on the
+stack (`total`, a recursion counted once, cProfile's cumulative time as a
+count); the host functions' calls, by name; and every instruction by
+opcode. `vm::to_string(p, profile)` prints it as a table, the most self
+instructions first, a function with source positions labelled by its
+first one.
+
+The numbers are counts, not times, and that is what makes them worth
+having: they are the same on every run and every machine, so a guess about
+where the time goes -- every `+` is a helper call, say -- is confirmed or
+refuted by one run, and a change is measured by exactly the instructions
+it removed, the way callgrind's instruction counts are. What a count cannot
+see is what an instruction costs: a call is one instruction and a frame,
+and a host function is a call with no instructions at all, so a profile
+says where to look and the benchmarks say what a change bought. A frame is
+counted however it comes and goes -- a call, a generator's resume and
+yield, a coroutine's frames parking and coming back, a job, a destructor
+or a defer, an unwind -- since each of those passes through the
+executor's frame stack, which is where the profiler hears of it; a tail
+call, which keeps its frame, reports the change of function itself
+(`test/test_profile.cc` pins each).
+
+Counting costs the run that asks for it up to a sixth more time (on
+`bench/languages`' fib and loop, through three front ends), and a run
+that does not, nothing. The executor is a template over what watches it
+(`vm::detail::Exec`), and every report it makes sits under
+`if constexpr`, so the executor the other `vm::run` overloads instantiate
+compiles none of them -- its dispatch loop is the one there was before the
+profiler, instruction for instruction -- and the counting one is compiled
+only into a program that calls the profiling overload. CPython 3.12 has
+the same property by swapping instrumented opcodes in only while a tool
+listens; this is that, decided at compile time.
+
 ## Front ends
 
 | Front end | Parser | Notes |

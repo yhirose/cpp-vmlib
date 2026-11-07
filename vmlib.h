@@ -47,6 +47,14 @@
 #define VMLIB_NOINLINE
 #endif
 
+// A member that takes no room when its type is empty: C++20's
+// [[no_unique_address]], which MSVC ignores and spells its own way.
+#if defined(_MSC_VER)
+#define VMLIB_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+#else
+#define VMLIB_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#endif
+
 // ===== coreir/value.h =====
 
 // A tagged runtime value, reference counted.
@@ -4267,7 +4275,10 @@ namespace coreir {
 
 // The executor running a host function, as NativeCall reaches back into
 // it: an interface rather than the executor's own type, so that a native
-// need not know which executor is running it.
+// need not know which executor is running it -- vm::detail::Exec is a
+// template over what watches the run, and a profiling run's is a
+// different type from vm::run's -- and a translation unit holding a native
+// that calls back does not compile an executor along with it.
 class NativeExec {
  public:
   virtual Value call(const Value& callee, const Value* argv, int32_t argc,
@@ -4431,6 +4442,57 @@ void run(const Program& p, coreir::Runtime& rt, Depth max_call_depth);
 void run(const Program& p);
 template <class Depth, class = std::enable_if_t<std::is_integral_v<Depth>>>
 void run(const Program& p, Depth max_call_depth);
+
+// Where one run's work went, function by function: what the profiling
+// overload of run, below, fills in. Every number is a count -- of the
+// bytecode instructions dispatched and of the calls made -- and not a time,
+// so it does not move with the machine's load: two runs of one program
+// agree exactly, and a run before a change and one after differ by what
+// the change did, the way callgrind's instruction counts (Ir) do.
+struct Profile {
+  struct Counts {
+    // Times the function was called, whoever called it: a call or a tail
+    // call, the run's entry, a job, a destructor, a defer, a host function
+    // calling back, a coroutine's first resume. A later resume is not a
+    // call, and calling a generator function is one, though its body runs
+    // only as it is resumed.
+    uint64_t calls = 0;
+    // Instructions the function's own frames dispatched.
+    uint64_t self = 0;
+    // Instructions dispatched while a frame of the function was anywhere on
+    // the stack: its own, and those of everything it called. A recursion
+    // counts once, not once per level -- cProfile's cumulative time, as a
+    // count -- and a suspended generator or coroutine is off the stack, so
+    // what runs while it waits is not its.
+    uint64_t total = 0;
+  };
+  std::vector<Counts> chunks;  // parallel to Program::chunks
+  // Host functions' calls, by name. A native runs no bytecode, so it has
+  // no instructions to count: what one costs is time, which a profile of
+  // counts cannot see -- a native called often is the place to look with a
+  // clock.
+  std::map<std::string, uint64_t> natives;
+  // Instructions dispatched, by opcode (a vm::Op's value): what the
+  // executor itself spends the run on.
+  std::array<uint64_t, 256> ops{};
+  uint64_t instructions = 0;  // every one the run dispatched
+};
+
+// Run the bytecode as the first overload does, and count where its work
+// goes into `profile`, which starts from zero. The counting costs this run
+// time and every other run nothing: the executor that counts is a second
+// instantiation of the one the other overloads run (vm::detail::Exec),
+// compiled only into a program that calls this one. The counts are kept as
+// the run goes, so a run a host exception ends leaves those it had made.
+void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
+         Profile& profile);
+
+// A profile as a table: the functions that ran, the most self instructions
+// first -- each by its name and, if its code has a source position, by the
+// first one, which tells the program's own functions apart from a front
+// end's helpers ($add) -- then the host functions' calls, then the opcodes
+// the instructions were.
+std::string to_string(const Program& p, const Profile& profile);
 
 }  // namespace vm
 
@@ -7325,12 +7387,83 @@ struct FrameDeleter {
 
 using FramePtr = std::unique_ptr<Frame, FrameDeleter>;
 
+// What watches a run. The executor is compiled once per kind of watcher --
+// Exec's template parameter -- and, when the watcher is on, tells it of
+// every frame that comes onto the stack or leaves it, every call it makes
+// and every instruction it dispatches. This one, vm::run's, is off. Each
+// report sits under `if constexpr (Prof::kOn)`, so with this watcher not one
+// of them is compiled -- not even the reading of its arguments, which an
+// empty inline hook would still leave to the optimizer to discard -- and
+// the executor is the one there was before there were reports, instruction
+// for instruction. CPython 3.12 gets the same property by swapping
+// instrumented opcodes in only while a tool is listening (PEP 669); a
+// second instantiation is that, decided at compile time.
+struct NoProfiler {
+  static constexpr bool kOn = false;
+};
+
+// The profiling run's watcher (vm::run's Profile overload): it keeps the
+// counts in the run's Profile as the executor reports them. A function's
+// total is counted from the moment its first frame comes onto the stack to
+// the moment its last one leaves, so a recursion is not counted once per
+// level -- fib's total is what ran under the outermost fib, not the sum of
+// that over every depth.
+class Profiler {
+ public:
+  static constexpr bool kOn = true;
+
+  Profiler() = default;
+  Profiler(Profile& out, const Program& p)
+      : out_(&out),
+        chunks_(p.chunks.data()),
+        depth_(p.chunks.size()),
+        since_(p.chunks.size()) {
+    out = Profile{};
+    out.chunks.resize(p.chunks.size());
+  }
+
+  void step(const Chunk& c, Op op) {
+    ++out_->instructions;
+    ++out_->chunks[index(c)].self;
+    ++out_->ops[static_cast<uint8_t>(op)];
+  }
+  void call(const Chunk& c) { ++out_->chunks[index(c)].calls; }
+  void call(const NativeObj& n) { ++out_->natives[n.name]; }
+  void enter(const Chunk& c) {
+    const size_t i = index(c);
+    if (depth_[i]++ == 0) since_[i] = out_->instructions;
+  }
+  void leave(const Chunk& c) {
+    const size_t i = index(c);
+    if (--depth_[i] == 0) {
+      out_->chunks[i].total += out_->instructions - since_[i];
+    }
+  }
+
+ private:
+  size_t index(const Chunk& c) const {
+    return static_cast<size_t>(&c - chunks_);
+  }
+
+  Profile* out_ = nullptr;
+  const Chunk* chunks_ = nullptr;
+  std::vector<size_t> depth_;    // per chunk: its frames on the stack now
+  std::vector<uint64_t> since_;  // per chunk: the count when depth_ left 0
+};
+
 // The executor's stack of frames. A frame leaves it only through pop() and
 // truncate(), which move it out of the vector before it is destroyed: the
 // frame's releases can run a drop hook, the hook pushes frames onto this
 // same stack, and a vector in the middle of destroying one of its own
 // elements would be written to under it. With no pop_back or erase to reach
 // for, no call site can bring that back.
+//
+// The same two doors, and push_back, are why the watcher lives here: every
+// way a frame comes or goes -- a call, a return, a generator's resume and
+// yield, a coroutine's whole slice parking and coming back, an unwind, a
+// destructor's frame -- passes through them, so `prof` hears of each from
+// the one place that sees them all rather than from a hook at each site.
+template <class Prof>
 class FrameStack {
  public:
   // Top first, like any other way frames leave -- not in the order the
@@ -7344,12 +7477,18 @@ class FrameStack {
   const FramePtr& back() const { return v_.back(); }
   FramePtr& operator[](size_t i) { return v_[i]; }
   const FramePtr& operator[](size_t i) const { return v_[i]; }
-  void push_back(FramePtr f) { v_.push_back(std::move(f)); }
+  void push_back(FramePtr f) {
+    v_.push_back(std::move(f));
+    if constexpr (Prof::kOn) prof.enter(*v_.back()->chunk);
+  }
 
   // Drops the top frame without pop_frame's ordered release of its locals.
+  // The frame has left the stack before its releases run, so a destructor
+  // they call is not inside it.
   void pop() {
     FramePtr dead = std::move(v_.back());
     v_.pop_back();
+    if constexpr (Prof::kOn) prof.leave(*dead->chunk);
   }
   // Drops frames, top first, until `n` remain.
   void truncate(size_t n) {
@@ -7358,10 +7497,18 @@ class FrameStack {
 
  private:
   std::vector<FramePtr> v_;
+
+ public:
+  VMLIB_NO_UNIQUE_ADDRESS Prof prof{};
 };
+
+// The watcher that watches nothing takes no room either: the stack, and so
+// every Exec member after it, is laid out as it was before there was one.
+static_assert(sizeof(FrameStack<NoProfiler>) == sizeof(std::vector<FramePtr>));
 
 // Built from its first five members (vm::run); every later one has an
 // initializer, which -Wextra checks and test_verify's -Werror enforces.
+template <class Prof>
 struct Exec {
   const Program& p;
   size_t max_frames;  // live at once, the bottom frame included
@@ -7380,7 +7527,7 @@ struct Exec {
   // aimed at them, and a deque owns its elements outright, which leaves no
   // way to hand one frame's ownership elsewhere -- what a call that can
   // suspend and be resumed later would need. The indirection buys both.
-  FrameStack frames{};
+  FrameStack<Prof> frames{};
 
   // The job queue (IntrinsicId::Enqueue): closures and coroutines waiting
   // to run after the entry frame, FIFO. C++-side handles, so the collector
@@ -7863,6 +8010,7 @@ struct Exec {
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
     TakenArgs taken = take_args(ch, args, argc, pos);
+    if constexpr (Prof::kOn) frames.prof.call(ch);
     // Calling a generator function runs none of it: the arguments and
     // captures are packaged into a Start-state activation and that is the
     // call's value. No frame, so no depth check.
@@ -8306,6 +8454,7 @@ struct Exec {
                      " argument(s), given " + std::to_string(argc),
                  pos);
     }
+    if constexpr (Prof::kOn) frames.prof.call(*n);
     coreir_rt_poll();
     NativeCall call;
     call.args = args;
@@ -8429,7 +8578,13 @@ struct Exec {
     // a position: the frame that made it is gone, and a helper
     // tail-calling a helper must not erase the place that led into both.
     if (pos.line != 0) f.call_pos = pos;
+    // The one way a frame changes activation without leaving the stack.
+    if constexpr (Prof::kOn) frames.prof.leave(*f.chunk);
     f.chunk = &nch;
+    if constexpr (Prof::kOn) {
+      frames.prof.enter(nch);
+      frames.prof.call(nch);
+    }
     f.pc = 0;
     f.locals.assign(static_cast<size_t>(nch.num_locals), Value::uninit());
     fill_params(nch, args, std::move(taken), f.locals);
@@ -8602,6 +8757,7 @@ struct Exec {
       }
 
       const Insn& in = ch.code[f.pc];
+      if constexpr (Prof::kOn) frames.prof.step(ch, in.op);
       switch (in.op) {
         case Op::LoadConst:
           f.regs[in.a] = const_value(in.b);
@@ -9370,13 +9526,20 @@ struct Exec {
 
 namespace vm {
 
-inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
+namespace detail {
+
+// vm::run under either watcher: NoProfiler for the overloads that only run,
+// a Profiler counting into the caller's Profile for the one that profiles.
+template <class Prof>
+void run_watched(const Program& p, coreir::Runtime& rt,
+                 const RunOptions& opts, Prof prof) {
   coreir::Runtime::Scope scope(rt);
   // A frame cap, not a call count: the bottom frame (this entry frame, or
   // later a job's) is not a call, so it comes on top of the bound.
   const size_t max_frames =
       static_cast<size_t>(std::max(opts.max_call_depth, 0)) + 1;
-  detail::Exec e{p, max_frames, rt, opts.entry_frame_drops, opts.describe};
+  Exec<Prof> e{p, max_frames, rt, opts.entry_frame_drops, opts.describe};
+  e.frames.prof = std::move(prof);
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
   // run, not something to discover at the one call site that reaches it.
@@ -9393,7 +9556,9 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
     e.natives.push_back(
         coreir::Value::make_native(def->name, def->arity, def->ctx, def->fn));
   }
-  rt.set_drop_fn(&e, &detail::Exec::drop_hook);
+  rt.set_drop_fn(&e, &Exec<Prof>::drop_hook);
+  // The entry frame is the run's one call of chunk 0.
+  if constexpr (Prof::kOn) e.frames.prof.call(p.chunks[0]);
   e.frames.push_back(e.make_frame(p.chunks[0]));
   e.frames.back()->entry = true;
   try {
@@ -9403,6 +9568,17 @@ inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
     throw;
   }
   rt.set_drop_fn(nullptr, nullptr);
+}
+
+}  // namespace detail
+
+inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts) {
+  detail::run_watched(p, rt, opts, detail::NoProfiler{});
+}
+
+inline void run(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
+                Profile& profile) {
+  detail::run_watched(p, rt, opts, detail::Profiler(profile, p));
 }
 
 inline void run(const Program& p, coreir::Runtime& rt) {
@@ -9427,6 +9603,124 @@ template <class Depth, class>
 void run(const Program& p, Depth max_call_depth) {
   coreir::Runtime rt;
   run(p, rt, max_call_depth);
+}
+
+namespace detail {
+
+// Where a chunk's code starts in the source: its first instruction that
+// has a position. {0, 0} for code with none anywhere, which is what a
+// front end's helpers, written in IR, are.
+inline coreir::SrcPos first_pos(const Program& p, const Chunk& ch) {
+  for (const uint32_t i : ch.code_pos) {
+    if (p.positions[i].line != 0) return p.positions[i];
+  }
+  return {};
+}
+
+// A line of a profile table: each cell right-aligned in its width, two
+// spaces after it, and the label last, as it is.
+inline std::string profile_row(
+    std::initializer_list<std::pair<std::string, size_t>> cells,
+    const std::string& label) {
+  std::string out;
+  for (const auto& [text, width] : cells) {
+    if (text.size() < width) out.append(width - text.size(), ' ');
+    out += text + "  ";
+  }
+  return out + label + "\n";
+}
+
+inline std::string profile_percent(uint64_t n, uint64_t of) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "%.1f%%",
+                of == 0 ? 0.0
+                        : 100.0 * static_cast<double>(n) /
+                              static_cast<double>(of));
+  return buf;
+}
+
+}  // namespace detail
+
+inline std::string to_string(const Program& p, const Profile& profile) {
+  using detail::profile_percent;
+  using detail::profile_row;
+  const uint64_t all = profile.instructions;
+  uint64_t calls = 0;
+  for (const Profile::Counts& c : profile.chunks) calls += c.calls;
+  for (const auto& [name, n] : profile.natives) calls += n;
+  // No count is more than the run's instructions or its calls, and no
+  // instructions per call more than the instructions and ".0".
+  const size_t w =
+      std::max<size_t>(5, std::to_string(std::max(all, calls)).size());
+  const size_t per_w = std::max<size_t>(8, w + 2);
+  std::string out = std::to_string(all) + " instructions, " +
+                    std::to_string(calls) + " calls\n";
+
+  std::vector<size_t> ran;
+  for (size_t i = 0; i < profile.chunks.size(); ++i) {
+    if (profile.chunks[i].calls != 0 || profile.chunks[i].self != 0) {
+      ran.push_back(i);
+    }
+  }
+  std::stable_sort(ran.begin(), ran.end(), [&](size_t a, size_t b) {
+    const Profile::Counts& x = profile.chunks[a];
+    const Profile::Counts& y = profile.chunks[b];
+    return x.self != y.self ? x.self > y.self : x.total > y.total;
+  });
+  out += "\n" + profile_row({{"self", w}, {"self%", 6}, {"total", w},
+                             {"total%", 6}, {"calls", w}, {"per call", per_w}},
+                            "function");
+  for (const size_t i : ran) {
+    const Profile::Counts& c = profile.chunks[i];
+    char per_call[32] = "-";
+    if (c.calls != 0) {
+      std::snprintf(per_call, sizeof per_call, "%.1f",
+                    static_cast<double>(c.self) /
+                        static_cast<double>(c.calls));
+    }
+    std::string label = p.chunks[i].name;
+    if (const coreir::SrcPos sp = detail::first_pos(p, p.chunks[i]);
+        sp.line != 0) {
+      label += " " + std::to_string(sp.line) + ":" + std::to_string(sp.col);
+    }
+    out += profile_row({{std::to_string(c.self), w},
+                        {profile_percent(c.self, all), 6},
+                        {std::to_string(c.total), w},
+                        {profile_percent(c.total, all), 6},
+                        {std::to_string(c.calls), w},
+                        {per_call, per_w}},
+                       label);
+  }
+
+  if (!profile.natives.empty()) {
+    std::vector<std::pair<std::string, uint64_t>> natives(
+        profile.natives.begin(), profile.natives.end());
+    std::stable_sort(natives.begin(), natives.end(),
+                     [](const auto& a, const auto& b) {
+                       return a.second > b.second;
+                     });
+    out += "\n" + profile_row({{"calls", w}}, "native");
+    for (const auto& [name, n] : natives) {
+      out += profile_row({{std::to_string(n), w}}, name);
+    }
+  }
+
+  std::vector<size_t> ops;
+  for (size_t op = 0; op < profile.ops.size(); ++op) {
+    if (profile.ops[op] != 0) ops.push_back(op);
+  }
+  std::stable_sort(ops.begin(), ops.end(), [&](size_t a, size_t b) {
+    return profile.ops[a] > profile.ops[b];
+  });
+  if (!ops.empty()) {
+    out += "\n" + profile_row({{"count", w}, {"share", 6}}, "opcode");
+    for (const size_t op : ops) {
+      out += profile_row({{std::to_string(profile.ops[op]), w},
+                          {profile_percent(profile.ops[op], all), 6}},
+                         detail::name_of(static_cast<Op>(op)));
+    }
+  }
+  return out;
 }
 
 }  // namespace vm
