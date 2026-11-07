@@ -521,12 +521,8 @@ struct Binder {
     r.finish("$arrstr");
   }
 
-  // An object's own keys, in insertion order -- skipping the two this
-  // front end adds for itself. Their names start with a 0x01 byte, which
-  // no source-level key can, so one byte test tells them apart.
   // An object's own keys, in insertion order, skipping the ones this front
-  // end adds for itself -- their names start with a byte below 0x20, which
-  // no source-level key can, so one byte test tells them apart. A class
+  // end adds for itself (runtime_parts.h's hidden_key). A class
   // instance prints its class name first and marks its fields `mut`, which
   // is culebra's own rendering and the reason the class table has to be
   // reachable from the instance at all.
@@ -551,9 +547,7 @@ struct Binder {
         r.blk({
             r.set(k, r.idx(r.L(ks), r.L(i))),
             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
-            r.iff(r.bin(BinOp::Lt, r.in(IntrinsicId::StrByte, {r.L(k), r.I(0)}),
-                        r.I(32)),
-                  r.b.make_continue()),
+            r.iff(hidden_key(r, k), r.b.make_continue()),
             r.iff(r.bin(BinOp::Gt, r.L(n), r.I(0)),
                   r.set(out, r.bin(BinOp::Add, r.L(out), r.S(", ")))),
             r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1))),
@@ -1537,8 +1531,12 @@ bool native_size(NativeCall& c) {
     c.result =
         Value::make_int(static_cast<int64_t>(v.as_array()->items.size()));
   } else if (v.is_object()) {
-    c.result =
-        Value::make_int(static_cast<int64_t>(v.as_object()->props.size()));
+    // What keys() lists: an instance's class is none of its fields.
+    int64_t n = 0;
+    for (const auto& kv : v.as_object()->props) {
+      if (!runtime_parts::hidden_key(kv.first)) ++n;
+    }
+    c.result = Value::make_int(n);
   } else {
     c.error = c.trap("size() wants a String, an Array or an Object");
     return false;
@@ -1574,12 +1572,8 @@ bool native_keys(NativeCall& c) {
   }
   std::vector<Value> out;
   for (const auto& kv : c.arg(0).as_object()->props) {
-    // The two keys this front end adds for itself start with a byte no
-    // source-level key can contain; a program must not see them.
-    if (!kv.first.empty() &&
-        static_cast<unsigned char>(kv.first[0]) < 0x20) {
-      continue;
-    }
+    // The keys this front end adds for itself; a program must not see them.
+    if (runtime_parts::hidden_key(kv.first)) continue;
     out.push_back(Value::make_str(kv.first));
   }
   c.result = Value::make_array(std::move(out));

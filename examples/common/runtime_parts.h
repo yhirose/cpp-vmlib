@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -65,6 +66,41 @@ inline std::string program_key(const std::string& name) {
 // The same, for a name only known at run time: `name` is a string value.
 inline NodeId program_key(FuncWriter& w, NodeId name) {
   return w.bin(BinOp::Add, w.S(std::string(1, kProgramPrefix)), name);
+}
+
+// Whether a key is one of these: a key the implementation keeps on an
+// object, under either prefix, which is none of the object's properties --
+// so listing an object's keys, counting them or printing them skips it.
+// (A key a program writes with an escape its language has, JavaScript's
+// "\0" say, begins with neither byte.) The C++ form is for a host
+// function; the IR form takes the key in a local, of any type, since a
+// value-keyed table's keys need not be strings.
+inline bool hidden_key(std::string_view k) {
+  return !k.empty() && (k[0] == kImplPrefix || k[0] == kProgramPrefix);
+}
+inline NodeId hidden_key(coreir::Builder::At& b, int32_t k) {
+  using coreir::VarKind;
+  const auto first_is = [&](char c) {
+    return b.binary(BinOp::Eq,
+                    b.intrinsic(IntrinsicId::StrByte,
+                                {b.varref(VarKind::Local, k), b.literal(0)}),
+                    b.literal(static_cast<unsigned char>(c)));
+  };
+  return b.make_if(
+      b.binary(BinOp::Eq,
+               b.intrinsic(IntrinsicId::TypeOf, {b.varref(VarKind::Local, k)}),
+               b.str_literal("string")),
+      b.make_if(b.binary(BinOp::Gt,
+                         b.intrinsic(IntrinsicId::Len,
+                                     {b.varref(VarKind::Local, k)}),
+                         b.literal(0)),
+                b.make_if(first_is(kImplPrefix), b.bool_literal(true),
+                          first_is(kProgramPrefix)),
+                b.bool_literal(false)),
+      b.bool_literal(false));
+}
+inline NodeId hidden_key(FuncWriter& w, FuncWriter::Slot k) {
+  return hidden_key(w.b, k.i);
 }
 
 // ---- Classes ---------------------------------------------------------------

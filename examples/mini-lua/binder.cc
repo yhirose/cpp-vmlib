@@ -1822,9 +1822,10 @@ struct Binder {
       body.push_back(
           b.assign(VarKind::Local, ix, b.binary(BinOp::Add, X, b.literal(1))));
       // The metatable hangs on the same map, under a key no program can
-      // spell -- so `pairs` has to step over it.
-      body.push_back(b.make_if(rt.call("$eq", {C, b.str_literal(kMetaKey)}, p),
-                               b.make_continue(), NodeId{}));
+      // spell -- so `pairs` has to step over it (runtime_parts.h's
+      // hidden_key, which any key, of any type, can be asked about).
+      body.push_back(
+          b.make_if(hidden_key(b, cur), b.make_continue(), NodeId{}));
       const int32_t bmark = ctx.mark();
       std::vector<NodeId> inner;
       fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}

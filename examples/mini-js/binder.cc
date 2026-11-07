@@ -506,7 +506,7 @@ struct Binder {
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
         "$mfill",  "$sfill",   "$newresult",
         "$then",    "$react",    "$presolve1", "$preject1", "$prejected",
-        "$arrayof", "$pushall", "$logjoin",
+        "$arrayof", "$pushall", "$logjoin", "$keys",
     };
     return names;
   }
@@ -964,6 +964,26 @@ struct Binder {
     r.finish(name);
   }
 
+  // Object.keys: an object's own keys, less the ones this implementation
+  // keeps on it (runtime_parts.h's hidden_key) -- the collection a Map or a
+  // Set wraps, a class's table of methods -- which are none of its
+  // properties, and which node does not list.
+  void rt_keys() {
+    RT r(*this);
+    const auto [o] = r.params("o");
+    const auto [ks, out, i, k] = r.locals("ks", "out", "i", "k");
+    r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(o)})));
+    r.add(r.set(out, r.arr({})));
+    r.add(r.set(i, r.I(0)));
+    r.add(r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
+               r.blk({r.set(k, r.idx(r.L(ks), r.L(i))),
+                      r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
+                      r.iff(r.bin(BinOp::Eq, hidden_key(r, k), r.Bo(false)),
+                            r.push(r.L(out), r.L(k)))})));
+    r.add(r.ret(r.L(out)));
+    r.finish("$keys");
+  }
+
   // What `new` evaluates to, ES2023 10.2.2 [[Construct]]: what the
   // constructor returned when that is an object -- anything but a
   // primitive -- and otherwise the instance it was handed.
@@ -1109,6 +1129,7 @@ struct Binder {
     rt_fill("$mfill", true);
     rt_fill("$sfill", false);
     rt_newresult();
+    rt_keys();
     write_promise_helpers(rt);
     rt_then();
     rt_react();
@@ -1998,8 +2019,7 @@ struct Binder {
         return b.intrinsic(IntrinsicId::Print, {msg}, p);
       }
       if (g == "Object" && mem == "keys") {
-        return done(b.intrinsic(IntrinsicId::ObjectKeys,
-                                {arg_or_nil(args, 0, p)}, p));
+        return done(rt.call("$keys", {arg_or_nil(args, 0, p)}, p));
       }
       if (g == "Promise" && mem == "resolve") {
         return done(rt.call("$topromise", {arg_or_nil(args, 0, p)}, p));

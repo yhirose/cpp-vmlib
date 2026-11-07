@@ -67,3 +67,7 @@ try {
   walked = e.name;
 }
 show('lookalike', [lookalike.size, walked, lookalike.$map]);
+
+// And a Map or a Set has no own keys to list.
+show('own keys', [Object.keys(new Map([['a', 1]])).length,
+                  Object.keys(new Set([1])).length]);

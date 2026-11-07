@@ -971,7 +971,7 @@ struct Binder {
   void rt_disp() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [out, keys, i] = r.locals("out", "keys", "i");
+    const auto [out, keys, i, k] = r.locals("out", "keys", "i", "k");
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("()"))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("#t"), r.S("#f")))));
@@ -987,14 +987,13 @@ struct Binder {
     // A record: `#<type field: value ...>`, guile's own form, fields in
     // the order they were declared.
     {
-      const NodeId key = r.idx(r.L(keys), r.L(i));
       const NodeId field =
-          r.bin(BinOp::Add, r.bin(BinOp::Add, r.S(" "), key),
+          r.bin(BinOp::Add, r.bin(BinOp::Add, r.S(" "), r.L(k)),
                 r.bin(BinOp::Add, r.S(": "),
-                      r.call("$disp", {r.idx(r.L(v), r.idx(r.L(keys),
-                                                           r.L(i)))})));
+                      r.call("$disp", {r.idx(r.L(v), r.L(k))})));
       const NodeId each = r.blk(
-          {r.iff(r.bin(BinOp::Ne, r.idx(r.L(keys), r.L(i)), r.S(kRecKey)),
+          {r.set(k, r.idx(r.L(keys), r.L(i))),
+           r.iff(r.bin(BinOp::Eq, hidden_key(r, k), r.Bo(false)),
                  r.set(out, r.bin(BinOp::Add, r.L(out), field))),
            r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))});
       r.add(r.iff(

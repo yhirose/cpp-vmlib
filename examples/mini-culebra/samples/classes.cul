@@ -71,3 +71,7 @@ class Labeled {
 }
 let labeled = Labeled.new(1)
 println("{labeled.init()} {labeled.name()} {labeled.x}")
+
+# An instance's fields are what keys() lists and size() counts: the class it
+# points back at is none of them.
+println("fields: {labeled.keys()} {labeled.size()}")

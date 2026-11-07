@@ -112,6 +112,8 @@ show('static apart', [early.hello(), late.hello(), Greeter.hello()]);
 // Even one named like where the class keeps its methods.
 Greeter.$methods = {};
 show('static named like the table', [new Greeter().hello()]);
+// A class's own keys are its statics, and nothing it keeps for itself.
+show('class keys', Object.keys(Greeter));
 
 // A constructor that returns an object makes that the result of `new`;
 // one that returns anything else still gives the instance.
