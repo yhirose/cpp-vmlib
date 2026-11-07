@@ -476,9 +476,10 @@ int main() {
     check_eq(joined(), "parent|child|end|", "collect: child destructor output");
   }
 
-  // --- 10. A destructor that throws out of collect() leaves the Runtime
-  //         able to collect: the pins and in_collect_ come off, and the
-  //         cycle it was about to free is still there to be freed. --------
+  // --- 10. A destructor whose host function throws is reported and
+  //         swallowed, as a trap in one is: nothing a destructor does
+  //         leaves it, whichever path ran it. So the collection running it
+  //         goes on, and frees the cycle. ---------------------------------
   // dp(self) { boom() }; P = {drop: dp}; P.self = P; P = nil; collect()
   {
     const SrcPos p{1, 1};
@@ -524,11 +525,8 @@ int main() {
       } catch (const std::runtime_error&) {
         threw = true;
       }
-      check(threw, "collect throw: the host exception escaped the run");
-      check(!rt.in_collect(), "collect throw: in_collect_ was reset");
-      check(rt.live_objects() == 2, "collect throw: the cycle is still there");
-      check(rt.collect() == 2, "collect throw: a later collect frees it");
-      check(rt.live_objects() == 0, "collect throw: and nothing is left");
+      check(!threw, "drop throw: the host exception stayed in the destructor");
+      check(rt.live_objects() == 0, "drop throw: the collection freed the cycle");
     }
   }
 

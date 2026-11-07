@@ -198,7 +198,9 @@ class Runtime {
   // installs one for the lifetime of a run (it is what can call a
   // closure), and every one of those paths reaches it through run_drop.
   // The hook runs over a pinned object; if it stores the object somewhere
-  // (a resurrection), the free is skipped.
+  // (a resurrection), the free is skipped. It runs inside a release, which
+  // cannot pass an exception on, so it must not throw: the executor's own
+  // reports and swallows whatever a destructor raises.
   void set_drop_fn(void* ctx, void (*fn)(void* ctx, HeapObj* o)) {
     drop_ctx_ = ctx;
     drop_ = fn;
@@ -7919,8 +7921,11 @@ struct Exec {
   // "\x01" "drop" closure with the object itself as the argument. A throwing
   // destructor is reported on stderr as "drop: <value>" (a trap: its own
   // message) and swallowed -- an object going away must not fail the
-  // program that let go of it.
-  static void drop_hook(void* ctx, HeapObj* h) {
+  // program that let go of it. So is any other exception: an allocation
+  // that failed ("drop: out of memory") or a host's own. Nothing can leave
+  // here, since this runs inside a release, and a release runs inside
+  // Value's destructor and its move assignment.
+  static void drop_hook(void* ctx, HeapObj* h) noexcept {
     auto* self = static_cast<Exec*>(ctx);
     auto* o = static_cast<ObjectObj*>(h);
     Value* dv = o->find(kDropKey);
@@ -7930,14 +7935,22 @@ struct Exec {
     ExitHeadroom room(*self);
     const size_t floor = self->frames.size();
     try {
-      self->push_closure(closure, &arg, 1, -1, self->running_pos());
-      self->run_nested(floor);
-    } catch (Raise& r) {
-      const auto d = coreir::trap_diagnostic(r.value);
-      const std::string what = d ? d->message : self->worded(r.value);
-      std::fprintf(stderr, "drop: %s\n", what.c_str());
-      self->frames.truncate(floor);
+      try {
+        self->push_closure(closure, &arg, 1, -1, self->running_pos());
+        self->run_nested(floor);
+      } catch (Raise& r) {
+        const auto d = coreir::trap_diagnostic(r.value);
+        const std::string what = d ? d->message : self->worded(r.value);
+        std::fprintf(stderr, "drop: %s\n", what.c_str());
+      }
+    } catch (const std::bad_alloc&) {
+      std::fputs("drop: out of memory\n", stderr);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "drop: %s\n", e.what());
+    } catch (...) {
+      std::fputs("drop: unknown exception\n", stderr);
     }
+    self->frames.truncate(floor);
   }
 
   // Walks frames top-down, and within each the cleanup regions holding its
