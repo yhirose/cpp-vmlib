@@ -45,9 +45,13 @@
 # total once it stops fitting. Every element stored along the way is still
 # the real, un-reduced square; only the accumulator is bounded.
 #
-# A real language's own toolchain not found on PATH is skipped (reported as
-# "-") rather than failing the comparison: not every machine -- this
-# repository's CI included -- has all eight installed.
+# How each real language runs, and at which version, is
+# test/languages.sh's to say -- the same commands test/goldens.sh checks
+# every front end's goldens with, so the program timed here is run the
+# way the samples' oracle is. A language not found on PATH is skipped
+# (reported as "-") rather than failing the comparison: not every machine
+# has all eight installed (CI's bench job does, through
+# .github/actions/languages).
 #
 # C# and Go are the two languages here with a real compile step, and
 # `dotnet build` on a scratch project costs on the order of a second on its
@@ -59,11 +63,11 @@
 # (there is none to pay -- see bench/bench.cc's own comment on the same
 # principle for the executor's Core-IR compile step). Go gets the same
 # treatment for the same reason: `go run` compiles and links on every
-# invocation, so timing it would report a compiler, not a runtime -- this
-# builds each workload once with `go build` and times the binary. What is
-# left in Go's `real_ms` really is a native executable's own time, which is
-# why its `startup` row is the floor everything else here is measured
-# against.
+# invocation, so timing it would report a compiler, not a runtime -- each
+# workload is built once with `go build` and the binary is what is timed.
+# What is left in Go's `real_ms` really is a native executable's own time,
+# which is why its `startup` row is the floor everything else here is
+# measured against.
 #
 # Usage: bench/languages/run.sh [--reps N]
 # BUILD_DIR overrides where the mini-* binaries are looked for (default:
@@ -76,6 +80,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
 fi
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
+. "$ROOT/test/languages.sh"
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build"}
 REPS=3
 if [ "${1:-}" = "--reps" ]; then REPS=$2; fi
@@ -86,6 +91,7 @@ SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
 WORKLOADS=(startup fib loop array strings)
+LANGS=(python ruby lua scheme culebra js csharp go)
 declare -A EXPECT=(
   [startup]=1
   [fib]=317811
@@ -94,11 +100,10 @@ declare -A EXPECT=(
   [strings]=40000
 )
 
-# Runs the shell function named "$1" with the workload name "$2" REPS
-# times and prints the best wall time in milliseconds, or "-" if the
-# command does not exist or a run fails outright (including "not
-# installed"). The last run's output is then checked against that
-# workload's known answer (a warning, not a failure, on mismatch -- a
+# Runs the command "$2"... REPS times and prints the best wall time in
+# milliseconds, or "-" if a run fails outright (including "not
+# installed"). The last run's output is then checked against workload
+# "$1"'s known answer (a warning, not a failure, on mismatch -- a
 # wrong-but-fast number is worse than a slow one). The check reads a timed
 # run's output rather than running the program once more just for it: the
 # runs are nearly all of this script's time.
@@ -108,10 +113,11 @@ declare -A EXPECT=(
 # leaves microseconds. Reading a variable needs no GNU date for a
 # sub-second format, and starts no process -- `$(date ...)` would leave
 # the exit of the date reading t0 and the startup of the one reading t1
-# inside the timed span. For the same reason, the functions below that
-# best_ms times start no process but the program itself.
+# inside the timed span. For the same reason, what is timed is the
+# program's own command line and nothing around it.
 best_ms() {
-  local fn=$1 workload=$2 out best="" t0 t1 dt
+  local workload=$1 out best="" t0 t1 dt
+  shift
   for _ in $(seq 1 "$REPS"); do
     t0=${EPOCHREALTIME/[^0-9]/}
     # stdout goes to a file, not through $(...), so every rep times the
@@ -119,7 +125,7 @@ best_ms() {
     # stderr (guile's "source newer than compiled" note is the one that
     # actually shows up) is not part of the answer, and merging it in
     # would fail the check for a program that is behaving correctly.
-    if ! "$fn" "$workload" >"$SCRATCH/out" 2>/dev/null; then
+    if ! "$@" >"$SCRATCH/out" 2>/dev/null; then
       echo "-"
       return
     fi
@@ -130,107 +136,27 @@ best_ms() {
   out=$(<"$SCRATCH/out")
   local want=${EXPECT[$workload]}
   if [ "$out" != "$want" ]; then
-    echo "warning: $fn($workload) printed '$out', expected $want" >&2
+    echo "warning: '$*' printed '$out', expected $want" >&2
   fi
   echo $(((best + 500) / 1000))
 }
 
-mini_python() { "$BUILD_DIR/examples/mini-python/mini-python" "$1.py"; }
-real_python() { command -v python3 >/dev/null && python3 "$1.py"; }
-
-mini_ruby() { "$BUILD_DIR/examples/mini-ruby/mini-ruby" "$1.rb"; }
-real_ruby() { command -v ruby >/dev/null && ruby "$1.rb"; }
-
-mini_lua() { "$BUILD_DIR/examples/mini-lua/mini-lua" "$1.lua"; }
-# Looked up once, out here: a $(...) inside real_lua would be a subshell
-# in every timed run.
-LUA=$(command -v lua5.4 || command -v lua || true)
-real_lua() { [ -n "$LUA" ] && "$LUA" "$1.lua"; }
-
-mini_scheme() { "$BUILD_DIR/examples/mini-scheme/mini-scheme" "$1.scm"; }
-real_scheme() { command -v guile >/dev/null && guile --no-auto-compile -s "$1.scm"; }
-
-mini_culebra() { "$BUILD_DIR/examples/mini-culebra/mini-culebra" "$1.cul"; }
-real_culebra() { command -v culebra >/dev/null && culebra "$1.cul"; }
-
-mini_js() { "$BUILD_DIR/examples/mini-js/mini-js" "$1.js"; }
-real_js() { command -v node >/dev/null && node "$1.js"; }
-
-mini_csharp() { "$BUILD_DIR/examples/mini-csharp/mini-csharp" "$1.cs"; }
-
-mini_go() { "$BUILD_DIR/examples/mini-go/mini-go" "$1.go"; }
-
-declare -A GO_EXE
-
-# Compiles "$1.go" once and remembers the binary in GO_EXE[$1]. As with
-# build_csharp, failure (go missing, or the build failing) just leaves the
-# entry unset, which real_go below reports as "not installed".
-build_go() {
-  local workload=$1
-  command -v go >/dev/null || return 0
-  local exe=$SCRATCH/go-$workload
-  if go build -o "$exe" "$workload.go" >/dev/null 2>&1; then
-    GO_EXE[$workload]=$exe
-  fi
-}
-
-real_go() {
-  local exe=${GO_EXE[$1]:-}
-  [ -n "$exe" ] && [ -f "$exe" ] || return 1
-  "$exe"
-}
-
-declare -A CSHARP_DLL
-
-# Builds "$1.cs" once into a scratch project's Release output and remembers
-# the compiled dll's path in CSHARP_DLL[$1]. Failure (dotnet missing, or
-# the build itself failing) just leaves that workload's entry unset, which
-# real_csharp below treats as "not installed".
-build_csharp() {
-  local workload=$1
-  command -v dotnet >/dev/null || return 0
-  local dir=$SCRATCH/cs-$workload
-  mkdir "$dir"
-  cp "$workload.cs" "$dir/Program.cs"
-  cat > "$dir/s.csproj" <<'EOP'
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>disable</Nullable>
-    <AssemblyName>s</AssemblyName>
-    <InvariantGlobalization>true</InvariantGlobalization>
-  </PropertyGroup>
-</Project>
-EOP
-  if dotnet build "$dir/s.csproj" -c Release -o "$dir/out" >/dev/null 2>&1; then
-    CSHARP_DLL[$workload]="$dir/out/s.dll"
-  fi
-}
-
-real_csharp() {
-  local dll=${CSHARP_DLL[$1]:-}
-  [ -n "$dll" ] && [ -f "$dll" ] || return 1
-  dotnet "$dll"
-}
-
+# One workload through one language: its front end's own binary, then the
+# real language -- compiled first, outside the timed runs, where it has a
+# compile step, and "-" where that compile fails or it is not installed.
 row() {
-  local workload=$1 lang=$2 real_label=$3
-  printf '%s\t%s\t%s\t%s\t%s\n' "$workload" "$lang" \
-    "$(best_ms "mini_$lang" "$workload")" "$real_label" \
-    "$(best_ms "real_$lang" "$workload")"
+  local workload=$1 lang=$2 file=$1.${LANG_EXT[$2]} mini_ms real_ms=-
+  mini_ms=$(best_ms "$workload" "$BUILD_DIR/examples/mini-$lang/mini-$lang" "$file")
+  if lang_command "$lang" "$SCRATCH/$lang-$workload" "$file" 2>/dev/null; then
+    real_ms=$(best_ms "$workload" "${CMD[@]}")
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$workload" "$lang" "$mini_ms" \
+    "${LANG_NAME[$lang]}" "$real_ms"
 }
 
 printf 'task\tlang\tmini\treal\treal_ms\n'
 for w in "${WORKLOADS[@]}"; do
-  build_csharp "$w"
-  build_go "$w"
-  row "$w" python python3
-  row "$w" ruby ruby
-  row "$w" lua lua
-  row "$w" scheme guile
-  row "$w" culebra culebra
-  row "$w" js node
-  row "$w" csharp dotnet
-  row "$w" go go
+  for lang in "${LANGS[@]}"; do
+    row "$w" "$lang"
+  done
 done

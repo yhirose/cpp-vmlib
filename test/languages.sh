@@ -1,7 +1,8 @@
 # The real language each example front end imitates, and how to run a
 # program under it -- the one place that knows. test/goldens.sh runs every
-# front end's samples through it to make and check their golden files.
-# Sourced, not run.
+# front end's samples through it to make and check their golden files,
+# and bench/languages/run.sh times it next to the front end. Sourced, not
+# run.
 #
 # A language is named as its front end is, less the `mini-`:
 # examples/mini-python's is `python`, and examples/pl0's is `pl0` --
@@ -24,7 +25,8 @@
 #                        what mini-js's own CLI does with the prelude its
 #                        samples share. Fails, with the reason on stderr,
 #                        when the compile does. Running CMD starts nothing
-#                        but the program itself.
+#                        but the program itself, so bench/languages times
+#                        the language rather than this file.
 #
 # Each implementation is the command in a variable of its own -- PYTHON,
 # RUBY, LUA, GUILE, CULEBRA, NODE, DOTNET, GO, and for PL/0 PL0_CULEBRA
