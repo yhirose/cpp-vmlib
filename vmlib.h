@@ -7254,12 +7254,16 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         const auto v = view_unary(m, id);
-        return !v.fallback.valid() &&
-               (v.op == UnOp::Not || v.op == UnOp::Truth);
+        return !v.fallback.valid() && tests_truth(v.op);
       }
       default:
         return false;
     }
+  }
+
+  // Not and Truth, the two operators that answer a value's truth.
+  static bool tests_truth(UnOp op) {
+    return op == UnOp::Not || op == UnOp::Truth;
   }
 
   // Whether a Not or a Truth with a fallback never calls it: its operand
@@ -7267,8 +7271,14 @@ struct FnCompiler {
   // the plain operator -- a condition that is a comparison, handed to a
   // language's truthiness, costs only the comparison.
   bool answers_alone(const UnaryView& v) const {
-    return (v.op == UnOp::Not || v.op == UnOp::Truth) &&
-           has_tag(v.fallback.tags, ValueTag::Bool) && yields_bool(v.operand);
+    return tests_truth(v.op) && has_tag(v.fallback.tags, ValueTag::Bool) &&
+           yields_bool(v.operand);
+  }
+
+  // Whether a unary operator compiles with its fallback's call: it names
+  // one, and its operand does not leave the call unreachable.
+  bool calls_fallback(const UnaryView& v) const {
+    return v.fallback.valid() && !answers_alone(v);
   }
 
   // A condition, compiled as the jumps it decides between rather than as a
@@ -7293,16 +7303,10 @@ struct FnCompiler {
   //
   // Nothing is evaluated that the value path would not evaluate, in the
   // same order: the arm a test skips is the arm the If would not have
-  // taken. Anything else is compiled as a value and tested.
+  // taken. Anything else is compiled as a value and tested -- a statement
+  // as the nil compile_value makes it.
   void compile_branch(NodeId id, bool when, std::vector<size_t>& jumps) {
     const Node& n = m.at(id);
-    if (!yields_value(n.tag)) {
-      // A statement in value position is nil (compile_value), which is
-      // false.
-      compile_stmt(id);
-      if (!when) jumps.push_back(emit(Op::Jump, 0, 0, 0, n.pos));
-      return;
-    }
     switch (n.tag) {
       case Tag::Literal:
         if (literal_truthy(id) == when) {
@@ -7311,8 +7315,7 @@ struct FnCompiler {
         return;
       case Tag::Unary: {
         const auto v = view_unary(m, id);
-        if (v.op != UnOp::Not && v.op != UnOp::Truth) break;
-        if (v.fallback.valid() && !answers_alone(v)) break;
+        if (!tests_truth(v.op) || calls_fallback(v)) break;
         compile_branch(v.operand, v.op == UnOp::Not ? !when : when, jumps);
         return;
       }
@@ -7388,9 +7391,7 @@ struct FnCompiler {
       }
       case Tag::Unary: {
         auto v = view_unary(m, id);
-        if (v.fallback.valid() && !answers_alone(v)) {
-          return compile_or_call(id, tail);
-        }
+        if (calls_fallback(v)) return compile_or_call(id, tail);
         return compile_op(op_of(v.op), n.pos, v.operand);
       }
       case Tag::Scope:
