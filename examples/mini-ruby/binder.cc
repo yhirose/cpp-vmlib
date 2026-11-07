@@ -2209,12 +2209,18 @@ struct Binder {
       fns[static_cast<size_t>(g)].strict = n == "lambda";
       return emit_closure(g, ctx, p);
     }
-    NodeId blk = blockn != nullptr ? emit_closure(fn_of.at(blockn), ctx, p)
-                                   : b.nil_literal();
+    // The block is written after the call, or handed over among its
+    // arguments as `f(&blk)` -- Ruby's own way of forwarding one -- and
+    // Ruby refuses a call that does both.
+    const NodeId written =
+        blockn != nullptr ? emit_closure(fn_of.at(blockn), ctx, p) : NodeId{};
     const Args args = emit_call_args(argsn, ctx);
-    // `f(&blk)` hands a callable over as the block rather than as an
-    // argument -- Ruby's own way of forwarding one.
-    if (args.block.valid()) blk = args.block;
+    if (written.valid() && args.block.valid()) {
+      fail(*blockn, "both block arg and actual block given");
+    }
+    const NodeId blk = written.valid()      ? written
+                       : args.block.valid() ? args.block
+                                            : b.nil_literal();
     const auto it = ref_of.find(&id);
     if (it == ref_of.end()) {
       fail(id, "undefined method '" + n + "'");
@@ -2322,18 +2328,22 @@ struct Binder {
     }
     const std::string name(sfx.nodes[0]->token);
     Args cargs;
-    NodeId blk = b.nil_literal();
+    // The block, handed over among the arguments as `&blk` or written
+    // after them, but not both, which Ruby refuses; nil without one.
+    NodeId blk;
     for (size_t i = 1; i < sfx.nodes.size(); ++i) {
       const Ast& c = *sfx.nodes[i];
       if (c.tag == "callargs"_) {
         if (!c.nodes.empty()) {
           cargs = emit_call_args(c.nodes[0].get(), ctx);
-          if (cargs.block.valid()) blk = cargs.block;
+          blk = cargs.block;
         }
       } else {
+        if (blk.valid()) fail(c, "both block arg and actual block given");
         blk = emit_closure(fn_of.at(&c), ctx, p);
       }
     }
+    if (!blk.valid()) blk = b.nil_literal();
     const std::vector<NodeId>& args = cargs.fixed;
     // The receiver runs once, into `$self`, and everything after reads
     // that: the method lookup, a method of the program's own, and the
