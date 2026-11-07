@@ -4265,6 +4265,19 @@ Program compile(const coreir::Module& m);
 
 namespace coreir {
 
+// The executor running a host function, as NativeCall reaches back into
+// it: an interface rather than the executor's own type, so that a native
+// need not know which executor is running it.
+class NativeExec {
+ public:
+  virtual Value call(const Value& callee, const Value* argv, int32_t argc,
+                     SrcPos pos) = 0;
+  virtual SrcPos attributed(SrcPos pos) const = 0;
+
+ protected:
+  ~NativeExec() = default;
+};
+
 // What a host function is handed when a program calls it (value.h's
 // NativeFn). The function reads its arguments here, writes its answer to
 // `result` and returns true -- or writes what the call should throw to
@@ -4295,7 +4308,9 @@ struct NativeCall {
   // nearest handler in the *calling* program -- so a native that calls
   // back keeps what it owns in RAII handles (a Value is one) rather than
   // in raw pointers it would have to free on that path.
-  Value call(const Value& callee, const Value* argv, int32_t argc);
+  Value call(const Value& callee, const Value* argv, int32_t argc) {
+    return exec->call(callee, argv, argc, pos);
+  }
 
   // A trap at this call's position, attributed like any raise
   // (Exec::attributed), for a native that wants to fail the way a divide
@@ -4304,7 +4319,7 @@ struct NativeCall {
   // wording.
   Value trap(const std::string& msg) const;
 
-  void* exec = nullptr;  // vm::detail::Exec*, set by the executor
+  NativeExec* exec = nullptr;  // set by the executor
 };
 
 // The value a trap carries: a fresh {message, line, col} object, marked as
@@ -4318,6 +4333,10 @@ inline Value make_trap(const std::string& msg, SrcPos pos) {
   o->set("col", Value::make_int(pos.col));
   o->trap = true;
   return e;
+}
+
+inline Value NativeCall::trap(const std::string& msg) const {
+  return make_trap(msg, exec->attributed(pos));
 }
 
 // What an uncaught raise of `v` reports when `v` is a trap: its message and
@@ -7397,6 +7416,21 @@ struct Exec {
   // finish_coro.
   std::unordered_map<const CoroObj*, Value> scheduled{};
 
+  // What a native this run calls gets back in through (NativeCall::exec):
+  // call_sync, for NativeCall::call, and attributed, for NativeCall::trap.
+  // The last member, so that the members before it sit where they did
+  // before there was one.
+  struct Reentry final : coreir::NativeExec {
+    explicit Reentry(Exec& x) : e(x) {}
+    Value call(const Value& callee, const Value* argv, int32_t argc,
+               SrcPos pos) override {
+      return e.call_sync(callee, argv, argc, pos);
+    }
+    SrcPos attributed(SrcPos pos) const override { return e.attributed(pos); }
+    Exec& e;
+  };
+  Reentry reentry{*this};
+
   // The one place a coroutine becomes Done: from its bottom frame's Ret or
   // an unwind past it, from CoroClose, or from a first resume whose
   // function completed on the spot. Drops the scheduler's reference if it
@@ -8278,7 +8312,7 @@ struct Exec {
     call.argc = argc;
     call.ctx = n->ctx;
     call.pos = pos;
-    call.exec = this;
+    call.exec = &reentry;
     if (!n->fn(call)) raise(std::move(call.error), pos);
     deliver(ret_reg, std::move(call.result));
   }
@@ -9333,19 +9367,6 @@ struct Exec {
 }  // namespace detail
 
 }  // namespace vm
-
-namespace coreir {
-
-inline Value NativeCall::call(const Value& callee, const Value* argv,
-                              int32_t n) {
-  return static_cast<vm::detail::Exec*>(exec)->call_sync(callee, argv, n, pos);
-}
-
-inline Value NativeCall::trap(const std::string& msg) const {
-  return make_trap(msg, static_cast<vm::detail::Exec*>(exec)->attributed(pos));
-}
-
-}  // namespace coreir
 
 namespace vm {
 
