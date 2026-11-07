@@ -99,16 +99,18 @@ Profiled run_profiled(const coreir::Module& m, const std::string& what,
   return r;
 }
 
-// Every function the case names has exactly its counts, every other one
-// none, and the run dispatched `instructions` in all -- of which each
-// function's self is its share, so the selves add up to it.
+// Every function the case names has exactly its counts and every other one
+// none, and the run dispatched `instructions` in all: as the selves add up,
+// which are settled whenever the top of the stack changes, and as the
+// opcodes count them, one at each instruction.
 void expect(const Profiled& r, const std::string& what, uint64_t instructions,
             const std::vector<Want>& want) {
   const vm::Program& p = r.program;
   const vm::Profile& got = r.profile;
-  bool ok = got.instructions == instructions &&
+  uint64_t ops = 0;
+  for (const uint64_t n : got.ops) ops += n;
+  bool ok = got.instructions() == instructions && ops == instructions &&
             got.chunks.size() == p.chunks.size();
-  uint64_t selves = 0;
   for (size_t i = 0; ok && i < p.chunks.size(); ++i) {
     vm::Profile::Counts w;
     for (const Want& x : want) {
@@ -116,9 +118,7 @@ void expect(const Profiled& r, const std::string& what, uint64_t instructions,
     }
     const vm::Profile::Counts& c = got.chunks[i];
     ok = c.calls == w.calls && c.self == w.self && c.total == w.total;
-    selves += c.self;
   }
-  if (ok && selves != instructions) ok = false;
   if (!ok) {
     fail(what + ": profile", vm::to_string(p, got) + "\n" + vm::to_string(p));
   }

@@ -4489,7 +4489,13 @@ struct Profile {
   // Instructions dispatched, by opcode (a vm::Op's value): what the
   // executor itself spends the run on.
   std::array<uint64_t, 256> ops{};
-  uint64_t instructions = 0;  // every one the run dispatched
+
+  // Every instruction the run dispatched: each is one function's self.
+  uint64_t instructions() const {
+    uint64_t n = 0;
+    for (const Counts& c : chunks) n += c.self;
+    return n;
+  }
 };
 
 // Run the bytecode as the first overload does, and count where its work
@@ -7424,11 +7430,15 @@ struct NoProfiler {
 };
 
 // The profiler that counts (vm::run's Profile overload): it keeps the
-// counts in the run's Profile as the executor reports them. A function's
-// total is counted from the moment its first frame comes onto the stack to
-// the moment its last one leaves, so a recursion is not counted once per
-// level -- fib's total is what ran under the outermost fib, not the sum of
-// that over every depth.
+// counts in the run's Profile as the executor reports them.
+//
+// An instruction only ticks a clock (and its opcode's count); whose it was
+// is settled when the top of the stack changes, which the executor reports
+// anyway: the function on top is credited with the ticks since it got
+// there. A function's total runs from the moment its first frame comes
+// onto the stack to the moment its last one leaves, so a recursion is not
+// counted once per level -- fib's total is what ran under the outermost
+// fib, not the sum of that over every depth.
 class Profiler {
  public:
   static constexpr bool kOn = true;
@@ -7437,35 +7447,63 @@ class Profiler {
       : out_(&out),
         p_(&p),
         depth_(p.chunks.size()),
-        since_(p.chunks.size()) {
+        since_(p.chunks.size()),
+        native_calls_(p.natives.size()) {
     out = Profile{};
     out.chunks.resize(p.chunks.size());
   }
 
-  void step(const Chunk& c, Op op) {
-    ++out_->instructions;
-    ++out_->chunks[index(c)].self;
+  void step(Op op) {
+    ++clock_;
     ++out_->ops[static_cast<uint8_t>(op)];
   }
   void call(const Chunk& c) { ++out_->chunks[index(c)].calls; }
-  void call(const NativeObj& n) { ++out_->natives[n.name]; }
-  void enter(const Chunk& c) {
-    const size_t i = index(c);
-    if (depth_[i]++ == 0) since_[i] = out_->instructions;
+  // A host function's call: one of the run's own natives by its slot, and
+  // by name only one a host function made itself, which this run did not
+  // link and might free -- so its address could come back as another's.
+  void call(const NativeObj& n) {
+    if (const auto it = native_slots_.find(&n); it != native_slots_.end()) {
+      ++native_calls_[it->second];
+    } else {
+      ++out_->natives[n.name];
+    }
   }
-  void leave(const Chunk& c) {
-    const size_t i = index(c);
-    if (--depth_[i] == 0) {
-      out_->chunks[i].total += out_->instructions - since_[i];
+  // The run's natives, linked: Program::natives' order, alive as long as
+  // the run.
+  void link(const std::vector<Value>& natives) {
+    for (size_t i = 0; i < natives.size(); ++i) {
+      native_slots_.emplace(natives[i].as_native(), i);
     }
   }
 
-  // The stack is empty when the run ends -- ~FrameStack empties it before
-  // this -- so every function has left it as often as it came, and every
-  // total is closed. A frame that changed function behind FrameStack's
-  // back would leave one open, and its time silently uncounted.
+  // A frame of `c` has come onto the stack, on top.
+  void enter(const Chunk& c) {
+    settle_top(&c);
+    const size_t i = index(c);
+    if (depth_[i]++ == 0) since_[i] = clock_;
+  }
+  // A frame of `c` has left the top of the stack, and `top` is on it now
+  // (null: nothing is).
+  void leave(const Chunk& c, const Chunk* top) {
+    settle_top(top);
+    const size_t i = index(c);
+    if (--depth_[i] == 0) out_->chunks[i].total += clock_ - since_[i];
+  }
+
+  // The run is over: its own natives' calls go into the Profile by name.
+  // And the stack is empty -- ~FrameStack empties it before this -- so
+  // every function has left it as often as it came, every total is closed
+  // and every instruction is some function's. A frame that changed
+  // function behind FrameStack's back would leave one open, and its time
+  // silently uncounted.
   ~Profiler() {
+    for (size_t i = 0; i < native_calls_.size(); ++i) {
+      if (native_calls_[i] != 0) {
+        out_->natives[p_->natives[i]] += native_calls_[i];
+      }
+    }
     for ([[maybe_unused]] const size_t d : depth_) assert(d == 0);
+    assert(out_->instructions() == clock_);
   }
   // Built in place in its FrameStack, and never copied or moved: one
   // profiler counts one run into one Profile.
@@ -7473,14 +7511,25 @@ class Profiler {
   Profiler& operator=(const Profiler&) = delete;
 
  private:
-  size_t index(const Chunk& c) const {
-    return p_->index_of(c);
+  size_t index(const Chunk& c) const { return p_->index_of(c); }
+
+  // The function on top so far is credited with the ticks it was there
+  // for, and `top` takes its place.
+  void settle_top(const Chunk* top) {
+    if (top_) out_->chunks[index(*top_)].self += clock_ - top_since_;
+    top_ = top;
+    top_since_ = clock_;
   }
 
-  Profile* out_ = nullptr;
-  const Program* p_ = nullptr;
+  Profile* out_;
+  const Program* p_;
+  uint64_t clock_ = 0;           // instructions dispatched so far
+  const Chunk* top_ = nullptr;   // the function on top, since top_since_
+  uint64_t top_since_ = 0;
   std::vector<size_t> depth_;    // per chunk: its frames on the stack now
-  std::vector<uint64_t> since_;  // per chunk: the count when depth_ left 0
+  std::vector<uint64_t> since_;  // per chunk: the clock when depth_ left 0
+  std::vector<uint64_t> native_calls_;  // per Program::natives slot
+  std::unordered_map<const NativeObj*, size_t> native_slots_;
 };
 
 // The executor's stack of frames. A frame leaves it only through pop() and
@@ -7527,7 +7576,9 @@ class FrameStack {
   void pop() {
     FramePtr dead = std::move(v_.back());
     v_.pop_back();
-    if constexpr (Prof::kOn) prof.leave(*dead->chunk);
+    if constexpr (Prof::kOn) {
+      prof.leave(*dead->chunk, v_.empty() ? nullptr : v_.back()->chunk);
+    }
   }
   // Drops frames, top first, until `n` remain.
   void truncate(size_t n) {
@@ -7539,7 +7590,9 @@ class FrameStack {
   // chunk, so that the profiler hears of it as the end of one function's
   // time on the stack and the start of another's.
   void retarget(Frame& top, const Chunk& ch) {
-    if constexpr (Prof::kOn) prof.leave(*top.chunk);
+    // Between the two reports the frame is neither function's, and
+    // nothing runs.
+    if constexpr (Prof::kOn) prof.leave(*top.chunk, nullptr);
     top.chunk = &ch;
     if constexpr (Prof::kOn) prof.enter(ch);
   }
@@ -8808,7 +8861,7 @@ struct Exec {
       }
 
       const Insn& in = ch.code[f.pc];
-      if constexpr (Prof::kOn) frames.prof.step(ch, in.op);
+      if constexpr (Prof::kOn) frames.prof.step(in.op);
       switch (in.op) {
         case Op::LoadConst:
           f.regs[in.a] = const_value(in.b);
@@ -9613,6 +9666,7 @@ void run_with(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
     e.natives.push_back(
         coreir::Value::make_native(def->name, def->arity, def->ctx, def->fn));
   }
+  if constexpr (Prof::kOn) e.frames.prof.link(e.natives);
   rt.set_drop_fn(&e, &Exec<Prof>::drop_hook);
   // The entry frame is the run's one call of chunk 0.
   if constexpr (Prof::kOn) e.frames.prof.call(p.chunks[0]);
@@ -9702,7 +9756,7 @@ inline std::string profile_percent(uint64_t n, uint64_t of) {
 inline std::string to_string(const Program& p, const Profile& profile) {
   using detail::profile_percent;
   using detail::profile_row;
-  const uint64_t all = profile.instructions;
+  const uint64_t all = profile.instructions();
   uint64_t calls = 0;
   for (const Profile::Counts& c : profile.chunks) calls += c.calls;
   for (const auto& [name, n] : profile.natives) calls += n;
