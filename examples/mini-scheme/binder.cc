@@ -173,6 +173,19 @@ const std::vector<Builtin>& builtins() {
   return v;
 }
 
+// The helpers that are one BinOp over their two arguments: Scheme's
+// arithmetic and ordering are eval_binop's on two numbers, two exact
+// integers staying exact. Each helper's body is written from here, and a
+// direct call of one is that BinOp on two numbers (Binder::apply2).
+const std::map<std::string, BinOp>& binop_helpers() {
+  static const std::map<std::string, BinOp> v = {
+      {"$add", BinOp::Add}, {"$sub", BinOp::Sub}, {"$mul", BinOp::Mul},
+      {"$lt", BinOp::Lt},   {"$gt", BinOp::Gt},   {"$le", BinOp::Le},
+      {"$ge", BinOp::Ge},   {"$numeq", BinOp::Eq},
+  };
+  return v;
+}
+
 const Builtin* find_builtin(const std::string& s) {
   for (const auto& b : builtins()) {
     if (s == b.scheme) return &b;
@@ -593,26 +606,15 @@ struct Binder {
     // Numbers. Two exact integers stay exact, which is eval_binop's own
     // rule; `/` on two exact integers would be a *rational* in Scheme, and
     // this subset has none -- see README.md.
-    one("$add", 2, [&](RT& r) { return r.bin(BinOp::Add, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$sub", 2, [&](RT& r) { return r.bin(BinOp::Sub, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$mul", 2, [&](RT& r) { return r.bin(BinOp::Mul, r.L(0), r.L(1)); },
-        {"a", "b"});
+    for (const auto& h : binop_helpers()) {
+      const BinOp op = h.second;
+      one(h.first, 2, [&](RT& r) { return r.bin(op, r.L(0), r.L(1)); },
+          {"a", "b"});
+    }
     one("$div", 2, [&](RT& r) {
       return r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(0)}),
                    r.in(IntrinsicId::ToDouble, {r.L(1)}));
     }, {"a", "b"});
-    one("$lt", 2, [&](RT& r) { return r.bin(BinOp::Lt, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$gt", 2, [&](RT& r) { return r.bin(BinOp::Gt, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$le", 2, [&](RT& r) { return r.bin(BinOp::Le, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$ge", 2, [&](RT& r) { return r.bin(BinOp::Ge, r.L(0), r.L(1)); },
-        {"a", "b"});
-    one("$numeq", 2, [&](RT& r) { return r.bin(BinOp::Eq, r.L(0), r.L(1)); },
-        {"a", "b"});
     one("$zerop", 1, [&](RT& r) { return r.bin(BinOp::Eq, r.L(0), r.I(0)); },
         {"v"});
     one("$abs", 1,
@@ -1062,8 +1064,23 @@ struct Binder {
     return b.assign(k, i, value);
   }
 
+  // A value as a condition: only #f is false, which a bool's own truth
+  // answers; everything else is $true's, which says true -- '() and 0
+  // included, where the VM's truth calls both false. A comparison is a
+  // bool already, and costs no test of its own (runtime_parts.h's truth).
   NodeId truthy(NodeId v, SrcPos p) {
-    return rt.call("$true", {v}, p);
+    return truth(rt, v, tags_named("bool"), p, "$true");
+  }
+
+  // A two-argument helper's call -- or, for one that is a single BinOp
+  // (binop_helpers), that BinOp on two numbers, the helper behind it for
+  // anything else, which it refuses as it always did, at the call
+  // (runtime_parts.h's op_or_helper).
+  NodeId apply2(const std::string& helper, NodeId x, NodeId y, SrcPos p) {
+    const auto it = binop_helpers().find(helper);
+    if (it == binop_helpers().end()) return rt.call(helper, {x, y}, p);
+    return op_or_helper(rt, it->second, x, y, tags_named({"int", "double"}),
+                        helper, p);
   }
 
   // A quoted datum, built at bind time: a list becomes a chain of pairs, a
@@ -1226,11 +1243,11 @@ struct Binder {
       }
       if (args.size() == 1) {
         if (bi.one_lhs == Unit::None) return args[0];
-        return rt.call(bi.rt, {unit_literal(bi.one_lhs, b), args[0]}, p);
+        return apply2(bi.rt, unit_literal(bi.one_lhs, b), args[0], p);
       }
       NodeId acc = args[0];
       for (size_t i = 1; i < args.size(); ++i) {
-        acc = rt.call(bi.rt, {acc, args[i]}, p);
+        acc = apply2(bi.rt, acc, args[i], p);
       }
       return acc;
     }
@@ -1242,7 +1259,7 @@ struct Binder {
       // comparisons read those.
       if (args.empty()) return b.bool_literal(true);
       if (args.size() == 1) return b.block({args[0], b.bool_literal(true)});
-      if (args.size() == 2) return rt.call(bi.rt, {args[0], args[1]}, p);
+      if (args.size() == 2) return apply2(bi.rt, args[0], args[1], p);
       std::vector<NodeId> out;
       std::vector<NodeId> vals;
       for (const NodeId v : args) {
@@ -1252,9 +1269,9 @@ struct Binder {
         out.push_back(b.assign(VarKind::Local, t, v));
         vals.push_back(b.varref(VarKind::Local, t));
       }
-      NodeId acc = rt.call(bi.rt, {vals[0], vals[1]}, p);
+      NodeId acc = apply2(bi.rt, vals[0], vals[1], p);
       for (size_t i = 2; i < vals.size(); ++i) {
-        acc = b.make_if(acc, rt.call(bi.rt, {vals[i - 1], vals[i]}, p),
+        acc = b.make_if(acc, apply2(bi.rt, vals[i - 1], vals[i], p),
                         b.bool_literal(false));
       }
       out.push_back(acc);
