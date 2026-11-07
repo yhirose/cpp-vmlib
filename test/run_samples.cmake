@@ -21,6 +21,14 @@
 # is bound ahead of each case in its own directory, as
 # test/run_sharing.cmake binds it, and is not a case.
 
+# Every argument is required: the cases are a recursive glob of DIR, and a
+# call that left DIR out would walk the whole filesystem from its root.
+foreach(arg BIN DIR EXT ORACLE)
+  if("${${arg}}" STREQUAL "")
+    message(FATAL_ERROR "run_samples.cmake: -D${arg} is required")
+  endif()
+endforeach()
+
 file(GLOB_RECURSE sources ${DIR}/*.${EXT})
 if(LEAD)
   list(REMOVE_ITEM sources ${LEAD})

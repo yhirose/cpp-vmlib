@@ -12,6 +12,14 @@
 # Every DIR/*.EXT is a case, run from DIR so its position names it by its
 # file name alone. DIR/<case>.stdin, when there is one, is its input.
 
+# Every argument is required: the cases are a glob of DIR, and a call
+# that left DIR out would glob the filesystem's root instead.
+foreach(arg BIN DIR EXT)
+  if("${${arg}}" STREQUAL "")
+    message(FATAL_ERROR "run_errors.cmake: -D${arg} is required")
+  endif()
+endforeach()
+
 file(GLOB sources RELATIVE ${DIR} ${DIR}/*.${EXT})
 list(SORT sources)
 if(NOT sources)

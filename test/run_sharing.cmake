@@ -11,6 +11,15 @@
 # BENCH's own programs, every *.EXT among them. LEAD -- mini-js's prelude --
 # is bound ahead of each case in its own directory, and is not a case.
 
+# Every argument is required: the cases are recursive globs of SRC and
+# BENCH, and a call that left BENCH out would walk the whole filesystem
+# from its root.
+foreach(arg BIN SRC BENCH EXT)
+  if("${${arg}}" STREQUAL "")
+    message(FATAL_ERROR "run_sharing.cmake: -D${arg} is required")
+  endif()
+endforeach()
+
 file(GLOB_RECURSE sources ${SRC}/samples/*.${EXT} ${SRC}/uncaught/*.${EXT}
      ${BENCH}/*.${EXT})
 if(LEAD)
