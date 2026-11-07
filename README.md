@@ -700,7 +700,9 @@ bound.
 An allocation that fails is, to the executor, a host's own exception:
 `std::bad_alloc` leaves `vm::compile` or `vm::run` with every frame
 released and nothing left pinned, and the `Runtime` collects what the run
-left behind as it would after any other throw. A destructor is the one
+left behind as it would after any other throw. (`ArrayFill`, whose size
+the program chooses, makes its own failure a trap the program can catch,
+as it always has.) A destructor is the one
 place nothing can leave, since it runs inside a release; a failure there
 of any kind -- a trap, an allocation, a host function's exception -- is
 reported on stderr (`drop: out of memory`) and swallowed, the way Python,

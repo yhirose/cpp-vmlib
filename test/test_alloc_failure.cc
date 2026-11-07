@@ -3,8 +3,9 @@
 // the Nth call -- that one only, and then that one and every one after it,
 // the way memory that has run out stays out. Whatever N is, the run must
 // end the way a host's own throw ends it -- the exception leaves vm::run
-// with every frame released -- or, where the failure was absorbed (a
-// destructor's is reported and swallowed), finish; afterwards a collection
+// with every frame released -- or as a trap (an ArrayFill's is one), or,
+// where the failure was absorbed (a destructor's is reported and
+// swallowed, a trap can be caught), finish; afterwards a collection
 // must leave no object alive, and the Runtime's end must free every block.
 // A crash, a std::terminate, an object left pinned or a leak at any N fails
 // the case.
@@ -13,8 +14,11 @@
 // allocation it makes. Between them they reach every kind of heap object
 // and every way into and out of an activation: values and containers,
 // calls of every shape, throws through frames and defers, destructors run
-// by a release, a scope exit, a collection and an unwind, and generators,
-// coroutines and the job queue.
+// by a release, a scope exit, a collection and an unwind, generators,
+// coroutines and the job queue -- and the intrinsics, control and
+// collector paths that allocate on their own way: a filled array, a map
+// that compacts, a break out of a try, a tail call with a spread, a
+// generator ended or thrown into, a cycle a scope cannot free.
 
 #include <climits>
 #include <cstdint>
@@ -186,7 +190,7 @@ void sweep(const char* name, const Module& m, const char* want,
     ++g_failures;
   }
 
-  long ends[2][3] = {};
+  long ends[2][3] = {};  // per mode: done, out of memory, trap
   for (const bool after : {false, true}) {
     g_alloc.after = after;
     for (long n = 1; n <= total; ++n) {
@@ -205,10 +209,10 @@ void sweep(const char* name, const Module& m, const char* want,
   }
   g_alloc.after = false;
   std::printf(
-      "%s: %ld allocations; failing one, %ld done and %ld out of memory; "
-      "failing the rest, %ld and %ld\n",
-      name, total, ends[0][0], ends[0][1], ends[1][0], ends[1][1]);
-  check(ends[0][2] + ends[1][2] == 0, "a run trapped", 0);
+      "%s: %ld allocations; failing one, %ld done, %ld out of memory, %ld "
+      "trapped; failing the rest, %ld, %ld, %ld\n",
+      name, total, ends[0][0], ends[0][1], ends[0][2], ends[1][0], ends[1][1],
+      ends[1][2]);
 }
 
 // -- the programs -----------------------------------------------------------
@@ -472,6 +476,276 @@ Module suspension() {
   return m;
 }
 
+// The intrinsics that build something -- a filled array (whose failure is a
+// trap the program catches), a map emptied until it compacts and its keys,
+// strings cased and from bytes, a heap census, a coroutine's status -- and
+// struct fields and both kinds of switch table.
+Module intrinsics() {
+  Module m;
+  m.capture_maps.push_back({});
+  m.funcs.resize(2);
+  {  // 1: idle() = nil, a coroutine body never resumed
+    FuncWriter w(m);
+    w.singleton = false;
+    w.add(w.ret(w.Nil()));
+    w.write(m.funcs[1], "idle");
+  }
+  FuncWriter w(m);
+  w.lenient_arity = false;
+  w.singleton = false;
+  const auto [a, mp, i, e, o, s] = w.locals("a", "mp", "i", "e", "o", "s");
+  const auto count_to = [&](NodeId limit, NodeId body) {
+    return w.blk({w.set(i, w.I(0)),
+                  w.wh(w.bin(BinOp::Lt, w.L(i), limit),
+                       w.blk({body, w.set(i, w.bin(BinOp::Add, w.L(i),
+                                                   w.I(1)))}))});
+  };
+  w.add(w.set(a, w.in(I::ArrayFill, {w.I(3), w.S("x")})));
+  w.add(print(w, w.len(w.L(a))));
+  w.add(w.b.make_try(e.i, w.set(a, w.in(I::ArrayFill, {w.I(4), w.S("y")})),
+                     print(w, w.idx(w.L(e), "message"))));
+  w.add(w.set(mp, w.in(I::MapNew, {})));
+  w.add(count_to(w.I(10), w.sidx(w.L(mp), w.in(I::ToStr, {w.L(i)}), w.L(i))));
+  w.add(count_to(w.I(6), w.in(I::ObjectRemove,
+                             {w.L(mp), w.in(I::ToStr, {w.L(i)})})));
+  w.add(print(w, w.len(w.in(I::ObjectKeys, {w.L(mp)}))));
+  w.add(w.set(s, w.bin(BinOp::Add,
+                       w.bin(BinOp::Add, w.in(I::StrUpper, {w.S("ab")}),
+                             w.in(I::StrLower, {w.S("CD")})),
+                       w.in(I::StrFromByte, {w.I(69)}))));
+  w.add(print(w, w.L(s)));
+  w.add(print(w, w.in(I::StrByte, {w.L(s), w.I(4)})));
+  w.add(print(w, w.typ(w.L(a))));
+  w.add(print(w, w.typ(w.in(I::HeapStats, {}))));
+  w.add(print(w, w.in(I::CoroStatus,
+                      {w.in(I::CoroCreate, {w.b.make_closure(1, 0)})})));
+  w.add(w.set(o, w.obj({{"x", w.I(1)}, {"y", w.S("why")}})));
+  w.add(w.b.field_set(w.L(o), 0, "x", w.S("ex")));
+  w.add(print(w, w.bin(BinOp::Add, w.b.field_get(w.L(o), 0, "x"),
+                       w.b.field_get(w.L(o), 1, "y"))));
+  w.add(w.b.make_switch(w.I(1),
+                        {{w.I(0), print(w, w.S("zero"))},
+                         {w.I(1), print(w, w.bin(BinOp::Add, w.S("o"), w.S("ne")))},
+                         {w.I(2), print(w, w.S("two"))}},
+                        NodeId{}));
+  w.add(w.b.make_switch(w.I(1000),
+                        {{w.I(1), print(w, w.S("1"))},
+                         {w.I(1000), print(w, w.bin(BinOp::Add, w.S("k"), w.S("!")))},
+                         {w.I(100), print(w, w.S("100"))}},
+                        NodeId{}));
+  w.add(w.b.make_switch(w.S("b"),
+                        {{w.S("a"), print(w, w.S("ay"))},
+                         {w.S("b"), print(w, w.bin(BinOp::Add, w.S("b"), w.S("ee")))}},
+                        print(w, w.S("none"))));
+  w.write(m.funcs[0], "main");
+  return m;
+}
+
+// Control the first programs do not reach: a break and a continue out of a
+// try inside a loop, and out of a try inside a scope inside one -- the
+// scope's release then runs outside the try's protection -- a tail call
+// with a spread, and a scope that releases a cell.
+Module control() {
+  Module m;
+  m.capture_maps.push_back({});
+  m.funcs.resize(6);
+  {  // 1: loopy() { i = 0; while true { try { if i == 3 break; i++; continue } catch {} } return i }
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    const auto [i, e] = w.locals("i", "e");
+    w.add(w.set(i, w.I(0)));
+    w.add(w.wh(w.Bo(true),
+               w.b.make_try(e.i,
+                            w.blk({w.iff(w.bin(BinOp::Eq, w.L(i), w.I(3)),
+                                         w.b.make_break()),
+                                   w.set(i, w.bin(BinOp::Add, w.L(i), w.I(1))),
+                                   w.b.make_continue()}),
+                            w.Nil())));
+    w.add(w.ret(w.L(i)));
+    w.write(m.funcs[1], "loopy");
+  }
+  {  // 2: spread(n, ...rest) = n == 0 ? len(rest) : spread(n - 1, ...[n, "x"])
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    w.rest_param = true;
+    const auto [n, rest] = w.params("n", "rest");
+    w.add(w.iff(w.bin(BinOp::Eq, w.L(n), w.I(0)), w.ret(w.len(w.L(rest)))));
+    w.add(w.ret(w.b.call_spread(w.b.make_closure(2, 0),
+                                {w.bin(BinOp::Sub, w.L(n), w.I(1))},
+                                w.arr({w.L(n), w.S("x")}))));
+    w.write(m.funcs[2], "spread");
+    m.funcs[2].tail_calls = true;
+  }
+  {  // 3: cells() { scope [release cell 0] { cell 0 = "c"; print(get()) } }
+    FuncWriter w(m);
+    w.singleton = false;
+    const NodeId body =
+        w.blk({w.setc(0, w.bin(BinOp::Add, w.S("c"), w.S("ell"))),
+               print(w, w.b.call_value(w.clos(4, {0}), {})),
+               print(w, w.b.varref(VarKind::Cell, 0))});
+    w.add(w.b.scope(0, 0, body, {w.b.varref(VarKind::Cell, 0)}));
+    w.write(m.funcs[3], "cells", 1);
+  }
+  {  // 4: get() = the captured cell + "!"
+    FuncWriter w(m);
+    w.singleton = false;
+    w.add(w.ret(w.bin(BinOp::Add, w.P(0), w.S("!"))));
+    w.write(m.funcs[4], "get", 0, 1);
+  }
+  {  // 5: scoped() { while true { scope { z = "z" + "!"; try { break } catch {} } } return z-less "s" }
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    const auto [z, e] = w.locals("z", "e");
+    w.add(w.wh(w.Bo(true),
+               w.b.scope(z.i, z.i + 1,
+                         w.blk({w.set(z, w.bin(BinOp::Add, w.S("z"), w.S("!"))),
+                                w.b.make_try(e.i, w.b.make_break(), w.Nil())}))));
+    w.add(w.ret(w.S("s")));
+    w.write(m.funcs[5], "scoped");
+  }
+  FuncWriter w(m);
+  w.lenient_arity = false;
+  w.singleton = false;
+  w.add(print(w, w.b.call_value(w.b.make_closure(1, 0), {})));
+  w.add(print(w, w.b.call_value(w.b.make_closure(2, 0), {w.I(3)})));
+  w.add(w.b.call_value(w.b.make_closure(3, 0), {}));
+  w.add(print(w, w.b.call_value(w.b.make_closure(5, 0), {})));
+  w.write(m.funcs[0], "main");
+  return m;
+}
+
+// A generator with arguments, ended early by GenReturn while a defer is
+// pending in it; one that catches what GenThrow raises at its yield; a
+// coroutine closed while a defer is parked in it; and two coroutine bodies
+// called by their first resume, which lends its argument rather than
+// handing it over: one collects it in a rest param, the other is a
+// generator function, so the call packages a generator.
+Module generators() {
+  Module m;
+  m.capture_maps.push_back({});
+  m.funcs.resize(7);
+  printer(m, 1, "gd");
+  printer(m, 2, "cd");
+  {  // 3: gen2(a, b) { x = a + b; scope { defer gd; yield x; yield x + "2" } return "r" }
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    const auto [pa, pb] = w.params("a", "b");
+    const auto [x] = w.locals("x");
+    w.add(w.set(x, w.bin(BinOp::Add, w.L(pa), w.L(pb))));
+    w.add(w.b.scope(x.i + 1, x.i + 1,
+                    w.blk({w.b.make_defer(w.b.make_closure(1, 0)),
+                           w.b.make_yield(w.L(x)),
+                           w.b.make_yield(w.bin(BinOp::Add, w.L(x), w.S("2")))})));
+    w.add(w.ret(w.S("r")));
+    w.write(m.funcs[3], "gen2");
+    m.funcs[3].is_generator = true;
+  }
+  {  // 4: gen3() { try { yield "t1" } catch e { yield e + "!" } return "end" }
+    FuncWriter w(m);
+    w.singleton = false;
+    const auto [e] = w.locals("e");
+    w.add(w.b.make_try(e.i, w.b.make_yield(w.S("t1")),
+                       w.b.make_yield(w.bin(BinOp::Add, w.L(e), w.S("!")))));
+    w.add(w.ret(w.S("end")));
+    w.write(m.funcs[4], "gen3");
+    m.funcs[4].is_generator = true;
+  }
+  {  // 5: co2() { scope { defer cd; yield "y" } }
+    FuncWriter w(m);
+    w.singleton = false;
+    w.add(w.b.scope(0, 0,
+                    w.blk({w.b.make_defer(w.b.make_closure(2, 0)),
+                           w.in(I::CoroYield, {w.S("y")})})));
+    w.write(m.funcs[5], "co2");
+  }
+  {  // 6: co3(...xs) = len(xs)
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    w.rest_param = true;
+    const auto [xs] = w.params("xs");
+    w.add(w.ret(w.len(w.L(xs))));
+    w.write(m.funcs[6], "co3");
+  }
+  FuncWriter w(m);
+  w.lenient_arity = false;
+  w.singleton = false;
+  const auto [g, c] = w.locals("g", "c");
+  const auto value = [&](NodeId r) { return w.idx(r, "value"); };
+  w.add(w.set(g, w.b.call_value(w.b.make_closure(3, 0), {w.S("p"), w.S("q")})));
+  w.add(print(w, value(w.in(I::GenResume, {w.L(g), w.Nil()}))));
+  w.add(print(w, value(w.in(I::GenReturn, {w.L(g), w.S("early")}))));
+  w.add(w.set(g, w.b.call_value(w.b.make_closure(4, 0), {})));
+  w.add(print(w, value(w.in(I::GenResume, {w.L(g), w.Nil()}))));
+  w.add(print(w, value(w.in(I::GenThrow, {w.L(g), w.S("boom")}))));
+  w.add(print(w, value(w.in(I::GenResume, {w.L(g), w.Nil()}))));
+  w.add(w.set(c, w.in(I::CoroCreate, {w.b.make_closure(5, 0)})));
+  w.add(w.in(I::CoroResume, {w.L(c), w.Nil()}));
+  w.add(w.in(I::CoroClose, {w.L(c)}));
+  w.add(print(w, w.in(I::CoroStatus, {w.L(c)})));
+  w.add(print(w, value(w.in(I::CoroResume,
+                            {w.in(I::CoroCreate, {w.b.make_closure(6, 0)}),
+                             w.S("v")}))));
+  w.add(print(w, w.typ(value(w.in(
+                     I::CoroResume,
+                     {w.in(I::CoroCreate, {w.b.make_closure(4, 0)}), w.Nil()})))));
+  w.write(m.funcs[0], "main");
+  return m;
+}
+
+// The collector and the owned stack over what stays reachable: a
+// collection marking through a nested structure, and a scope's cycle that
+// something outside still holds, which goes back on the stack for the
+// frame's own exit to resolve.
+Module reachable() {
+  Module m;
+  m.capture_maps.push_back({});
+  m.funcs.resize(3);
+  {  // 1: drop(self) = print(self.name + "!")
+    FuncWriter w(m);
+    w.singleton = false;
+    const auto [self] = w.params("self");
+    w.add(print(w, w.bin(BinOp::Add, w.idx(w.L(self), "name"), w.S("!"))));
+    w.write(m.funcs[1], "drop");
+  }
+  {  // 2: held(d) { k = {}; scope { g = {g}; h = {h}; g.o = h; h.o = g; k.g = g } print("out") }
+    FuncWriter w(m);
+    w.singleton = false;
+    w.lenient_arity = false;
+    const auto [d] = w.params("d");
+    const auto [k, g, h] = w.locals("k", "g", "h");
+    const auto obj = [&](const char* name) {
+      return w.obj({{"name", w.S(name)}, {"\x01" "drop", w.L(d)}});
+    };
+    w.add(w.set(k, w.obj({})));
+    w.add(w.b.scope(g.i, h.i + 1,
+                    w.blk({w.set(g, obj("g")), w.set(h, obj("h")),
+                           w.sidx(w.L(g), "o", w.L(h)),
+                           w.sidx(w.L(h), "o", w.L(g)),
+                           w.sidx(w.L(k), "g", w.L(g))})));
+    w.add(print(w, w.S("out")));
+    w.write(m.funcs[2], "held");
+  }
+  FuncWriter w(m);
+  w.lenient_arity = false;
+  w.singleton = false;
+  const auto [keep, x] = w.locals("keep", "x");
+  w.add(w.set(keep, w.obj({{"a", w.obj({{"b", w.arr({w.S("c"), w.arr({})})}})}})));
+  w.add(w.set(x, w.obj({})));
+  w.add(w.sidx(w.L(x), "self", w.L(x)));
+  w.add(w.set(x, w.Nil()));
+  w.add(print(w, w.in(I::Collect, {})));
+  w.add(print(w, w.len(w.idx(w.idx(w.idx(w.L(keep), "a"), "b"), w.I(1)))));
+  w.add(w.b.call_value(w.b.make_closure(2, 0),
+                       {w.b.make_closure(1, 0)}));
+  w.write(m.funcs[0], "main");
+  return m;
+}
+
 }  // namespace
 
 int main() {
@@ -489,6 +763,12 @@ int main() {
         "boom|divide by zero|body|d1!|d2!|2|");
   sweep("drops", drops(), "a!|b!|d!|c!|4|h!|g!|f!|x|");
   sweep("suspension", suspension(), "ab|1|end|in!|back|job!|");
+  sweep("intrinsics", intrinsics(),
+        "3|4|ABcdE|69|array|object|start|exwhy|one|k!|bee|");
+  sweep("control", control(), "3|2|cell!|cell|s|");
+  sweep("generators", generators(),
+        "pq|gd!|early|t1|boom!|end|cd!|done|1|generator|");
+  sweep("reachable", reachable(), "1|0|out|h!|g!|");
 
   if (g_failures != 0) {
     std::fprintf(stderr, "alloc_failure: %d failure(s)\n", g_failures);
