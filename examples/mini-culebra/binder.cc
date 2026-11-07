@@ -740,51 +740,42 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [cls, key] = r.locals("cls", "key");
     r.add(r.iff(r.is(r.typ(v), "generator"),
-                r.ret(r.obj({{"k", r.S("g")}, {"v", r.L(v)}}))));
-    r.add(r.iff(r.is(r.typ(v), "array"),
-                r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}))));
+                r.ret(generator_cursor(r, r.L(v)))));
+    r.add(r.iff(r.is(r.typ(v), "array"), r.ret(sequence_cursor(r, r.L(v)))));
     r.add(r.iff(
         r.is(r.typ(v), "object"),
         r.iff(r.in(IntrinsicId::ObjectHas, {r.L(v), r.S(kClassKey)}),
               r.blk({r.set(cls, r.idx(r.L(v), kClassKey)),
                      r.set(key, r.S(program_key("iter"))),
                      r.iff(r.in(IntrinsicId::ObjectHas, {r.L(cls), r.L(key)}),
-                           r.ret(r.obj(
-                               {{"k", r.S("c")},
-                                {"v", r.b.call_value(r.idx(r.L(cls), r.L(key)),
-                                                     {r.L(v)})}})))}))));
+                           r.ret(cursor(
+                               r, "c",
+                               r.b.call_value(r.idx(r.L(cls), r.L(key)),
+                                              {r.L(v)}))))}))));
     r.add(r.ret(r.call("$err", {r.S("TypeError"),
                                 r.S("value is not iterable")})));
     r.finish("$iter");
   }
 
+  // The shared step (runtime_parts.h), with culebra's own kind of cursor:
+  // "c", an object whose class answered `iter`, driven by `has_next` and
+  // `next`.
   void rt_iternext() {
     RT r(*this);
-    const auto [it] = r.params("it");
-    const auto [a, i, obj, hn] = r.locals("a", "i", "obj", "hn");
-    r.add(r.iff(
-        r.is(r.idx(r.L(it), "k"), "g"),
-        r.ret(r.in(IntrinsicId::GenResume, {r.idx(r.L(it), "v"), r.Nil()}))));
-    r.add(r.iff(
-        r.is(r.idx(r.L(it), "k"), "c"),
-        r.blk({r.set(a, r.idx(r.L(it), "v")),
-               r.set(hn, r.b.call_value(
-                             r.call("$methodof", {r.L(a), r.S("has_next")}),
-                             {r.L(a)})),
-               r.iff(r.bin(BinOp::Eq, r.L(hn), r.Bo(false)),
-                     r.ret(r.obj({{"value", r.Nil()}, {"done", r.Bo(true)}}))),
-               r.ret(r.obj(
-                   {{"value",
-                     r.b.call_value(r.call("$methodof", {r.L(a), r.S("next")}),
-                                    {r.L(a)})},
-                    {"done", r.Bo(false)}}))})));
-    r.add(r.set(a, r.idx(r.L(it), "v")));
-    r.add(r.set(i, r.idx(r.L(it), "i")));
-    r.add(r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(a))),
-                r.ret(r.obj({{"value", r.Nil()}, {"done", r.Bo(true)}}))));
-    r.add(r.b.set_index(r.L(it), r.S("i"), r.bin(BinOp::Add, r.L(i), r.I(1))));
-    r.add(r.ret(
-        r.obj({{"value", r.idx(r.L(a), r.L(i))}, {"done", r.Bo(false)}})));
+    iter_step(r, [&](FuncWriter::Slot it, FuncWriter::Slot a) {
+      const auto [hn] = r.locals("hn");
+      r.add(r.iff(
+          cursor_is(r, it, "c"),
+          r.blk({r.set(a, cursor_source(r, it)),
+                 r.set(hn, r.b.call_value(
+                               r.call("$methodof", {r.L(a), r.S("has_next")}),
+                               {r.L(a)})),
+                 r.iff(r.bin(BinOp::Eq, r.L(hn), r.Bo(false)),
+                       r.ret(step_done(r))),
+                 r.ret(step(r, r.b.call_value(
+                                   r.call("$methodof", {r.L(a), r.S("next")}),
+                                   {r.L(a)})))})));
+    });
     r.finish("$iternext");
   }
 
