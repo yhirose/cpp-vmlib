@@ -326,6 +326,13 @@ inline void truthy_nil_false(FuncWriter& w) {
   w.add(w.ret(w.Bo(true)));
 }
 
+// Where that truthiness is Value::truthy()'s own -- nil false, a bool
+// itself -- so truth() takes the VM's answer there and calls the helper
+// only for the rest.
+inline uint32_t nil_false_tags() {
+  return coreir::tags_named({"nil", "bool"});
+}
+
 // ---- How a float prints ----------------------------------------------------
 //
 // `(d)`: a double as shortest round trip -- ToStr, which is to_display --

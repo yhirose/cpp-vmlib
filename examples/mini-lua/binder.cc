@@ -984,6 +984,34 @@ struct Binder {
 
   // ==== Pass B: emit ======================================================
 
+  // Three of Lua's rules are the VM's own operator on some values, and the
+  // runtime's helper on the rest (runtime_parts.h's op_or_helper). Each set
+  // is where the two agree.
+  //
+  // A value used as a condition: nil and a bool are Value::truthy()'s,
+  // the rest $truthy's -- 0, which the VM calls false, is true in Lua. A
+  // comparison is a bool already, and costs no test of its own.
+  NodeId truthy(NodeId v, SrcPos p) {
+    return truth(rt, v, nil_false_tags(), p);
+  }
+
+  // `+`, `-` and `*` on two numbers are the VM's, integers wrapping and a
+  // float on either side making a float, as Lua's do; anything else is the
+  // helper's, which looks for a metamethod.
+  NodeId arith(BinOp op, const char* helper, NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(rt, op, x, y, tags_named({"int", "double"}), helper,
+                        p);
+  }
+
+  // `==` on two values of these types is Eq's -- an integer and a float
+  // compare as numbers -- and on two of different types, which Eq refuses,
+  // $eq's, which says they differ. A table is $eq's, for __eq.
+  NodeId equal(NodeId x, NodeId y, SrcPos p) {
+    return op_or_helper(
+        rt, BinOp::Eq, x, y,
+        tags_named({"nil", "bool", "int", "double", "string"}), "$eq", p);
+  }
+
   NodeId native(const std::string& name, const std::vector<NodeId>& args,
                 SrcPos p) {
     auto b = Builder(m).at(p);
@@ -1180,9 +1208,7 @@ struct Binder {
       case "funcexpr"_:
         return {emit_closure(fn_of.at(&a), ctx, p)};
       case "notexp"_:
-        return {b.binary(BinOp::Eq,
-                         rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
-                         b.bool_literal(false))};
+        return {b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p))};
       case "negexp"_:
       case "negexpr"_:
         return {b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx))};
@@ -1202,7 +1228,7 @@ struct Binder {
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
           const NodeId keep = b.varref(VarKind::Local, t);
           acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(rt.call("$truthy", {keep}, p),
+                         b.make_if(truthy(keep, p),
                                    is_or ? keep : rhs, is_or ? rhs : keep)});
         }
         return {acc};
@@ -1214,11 +1240,10 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           if (t == "==") {
-            acc = rt.call("$eq", {acc, rhs}, pos_of(op));
+            acc = equal(acc, rhs, pos_of(op));
           } else if (t == "~=") {
-            acc = b.at(pos_of(op))
-                      .binary(BinOp::Eq, rt.call("$eq", {acc, rhs}, pos_of(op)),
-                              b.bool_literal(false));
+            acc = b.at(pos_of(op)).unary(UnOp::Not,
+                                         equal(acc, rhs, pos_of(op)));
           } else {
             const BinOp o = t == "<"    ? BinOp::Lt
                             : t == "<=" ? BinOp::Le
@@ -1244,9 +1269,9 @@ struct Binder {
           const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const SrcPos op_p = pos_of(op);
-          if (t == "+") acc = rt.call("$add", {acc, rhs}, op_p);
-          else if (t == "-") acc = rt.call("$subm", {acc, rhs}, op_p);
-          else if (t == "*") acc = rt.call("$mulm", {acc, rhs}, op_p);
+          if (t == "+") acc = arith(BinOp::Add, "$add", acc, rhs, op_p);
+          else if (t == "-") acc = arith(BinOp::Sub, "$subm", acc, rhs, op_p);
+          else if (t == "*") acc = arith(BinOp::Mul, "$mulm", acc, rhs, op_p);
           else if (t == "/") acc = rt.call("$div", {acc, rhs}, op_p);
           else if (t == "//") acc = rt.call("$idiv", {acc, rhs}, op_p);
           else acc = rt.call("$mod", {acc, rhs}, op_p);
@@ -1648,7 +1673,7 @@ struct Binder {
         return emit_if(a, ctx);
       case "whilestat"_:
         return b.make_while(
-            rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+            truthy(emit_expr(*a.nodes[0], ctx), p),
             emit_block(*a.nodes[1], ctx));
       case "repeatstat"_:
         return emit_repeat(a, ctx);
@@ -1680,14 +1705,14 @@ struct Binder {
     auto b = Builder(m).at(p);
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
-        rt.call("$truthy", {emit_expr(*a.nodes[0], ctx)}, p),
+        truthy(emit_expr(*a.nodes[0], ctx), p),
         emit_block(*a.nodes[1], ctx));
     NodeId els;
     for (size_t i = 2; i < a.nodes.size(); ++i) {
       const Ast& c = *a.nodes[i];
       if (c.tag == "elseifpart"_) {
         arms.emplace_back(
-            rt.call("$truthy", {emit_expr(*c.nodes[0], ctx)}, p),
+            truthy(emit_expr(*c.nodes[0], ctx), p),
             emit_block(*c.nodes[1], ctx));
       } else {
         els = emit_block(*c.nodes[0], ctx);
@@ -1709,7 +1734,7 @@ struct Binder {
     fresh_cells(block_decls.at(a.nodes[0].get()), ctx, body, p);
     for (const auto& s : a.nodes[0]->nodes) body.push_back(emit_stmt(*s, ctx));
     body.push_back(
-        b.make_if(rt.call("$truthy", {emit_expr(*a.nodes[1], ctx)}, p),
+        b.make_if(truthy(emit_expr(*a.nodes[1], ctx), p),
                   b.make_break(), NodeId{}));
     const int32_t end = ctx.release(mark);
     const NodeId loop = b.make_while(b.bool_literal(true), b.block(body));
