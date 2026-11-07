@@ -108,12 +108,16 @@ bool is_global(const std::string& n) {
          n == "rawset" || n == "rawget";
 }
 
-// How many arguments a library function that takes one value each reads;
-// npos for one that reads its own (the string natives). The arguments past
-// those still run -- FrameLayout::spill_unread. One that takes every value
-// as one array (print, io.write, select, pcall, table.pack) has none past
-// them, and is not asked.
-size_t library_reads(const std::string& g, const std::string& mem) {
+// How many arguments each library function that takes one value each
+// reads, by its qualified name: kReadsEvery for one that reads all it is
+// given, the string natives, which check their own. The arguments past
+// those still run -- FrameLayout::spill_unread. A function missing here is
+// not bound at all, rather than lowered without its count and so losing
+// the arguments it does not read. One that takes every value as one array
+// (print, io.write, select, pcall, table.pack) has none past them, and is
+// not asked.
+constexpr size_t kReadsEvery = std::string::npos;
+std::optional<size_t> library_reads(const std::string& name) {
   static const std::map<std::string, size_t> reads = {
       {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
       {"getmetatable", 1}, {"error", 1},         {"rawset", 3},
@@ -121,19 +125,22 @@ size_t library_reads(const std::string& g, const std::string& mem) {
       {"coroutine.resume", 2},                   {"coroutine.yield", 1},
       {"coroutine.status", 1},                   {"coroutine.wrap", 1},
       {"table.concat", 2}, {"table.insert", 3},  {"table.unpack", 3},
-      {"string.upper", 1}, {"string.lower", 1},  {"math.floor", 1},
-      {"math.type", 1},
+      {"string.upper", 1}, {"string.lower", 1},
+      {"string.rep", kReadsEvery},               {"string.sub", kReadsEvery},
+      {"string.len", kReadsEvery},               {"string.byte", kReadsEvery},
+      {"math.floor", 1},   {"math.type", 1},
   };
-  const auto it = reads.find(mem.empty() ? g : g + "." + mem);
-  return it == reads.end() ? std::string::npos : it->second;
+  const auto it = reads.find(name);
+  if (it == reads.end()) return std::nullopt;
+  return it->second;
 }
 
-// A `:name(...)` whose receiver is a string. Resolved by name at bind time,
-// because a subset without a string metatable has no runtime lookup to do
-// it with -- README.md lists the consequence.
+// A `:name(...)` whose receiver is a string: one of the string library's.
+// Resolved by name at bind time, because a subset without a string
+// metatable has no runtime lookup to do it with -- README.md lists the
+// consequence.
 bool is_string_method(const std::string& n) {
-  return n == "rep" || n == "sub" || n == "upper" || n == "lower" ||
-         n == "len" || n == "byte";
+  return library_reads("string." + n).has_value();
 }
 
 // What this front end knows about a function beyond the closure conversion
@@ -1344,7 +1351,7 @@ struct Binder {
             // Every argument runs, read or not (FrameLayout::spill_unread).
             auto bp = b.at(p);
             const std::vector<NodeId> pre = ctx.spill_unread(
-                bp, one_each, library_reads("string", name));
+                bp, one_each, *library_reads("string." + name));
             cur = {bp.sequence(pre, string_call(name, one_each, p)), false};
             break;
           }
@@ -1434,11 +1441,13 @@ struct Binder {
     // The rest take one value each, the expanding last argument cut to its
     // first. Lua runs every argument of a call, whether the function reads
     // it or not: `type(1, f())` still calls f, after the 1 and before type.
+    const std::string name = mem.empty() ? g : g + "." + mem;
+    const std::optional<size_t> reads = library_reads(name);
+    if (!reads) fail(prim, "'" + name + "' is not supported here");
     std::vector<NodeId> args = vals.firsts;
     if (vals.rest.valid()) args.push_back(rt.call("$one", {vals.rest}, p));
     auto bp = b.at(p);
-    const std::vector<NodeId> pre =
-        ctx.spill_unread(bp, args, library_reads(g, mem));
+    const std::vector<NodeId> pre = ctx.spill_unread(bp, args, *reads);
     const auto a0 = [&](size_t k) {
       return k < args.size() ? args[k] : b.nil_literal(p);
     };
