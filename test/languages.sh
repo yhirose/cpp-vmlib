@@ -1,23 +1,24 @@
 # The real language each example front end imitates, and how to run a
-# program under it -- the one place that knows. test/goldens.sh runs every
-# front end's samples through it to make and check their golden files,
-# bench/languages/run.sh times it next to the front end, and
-# .github/actions/languages installs it in CI at the versions below.
-# Sourced, not run.
+# program under it -- the one place that knows. test/oracle.sh runs it on
+# a front end's samples, in that front end's goldens test, to check the
+# goldens against it; bench/languages/run.sh times it next to the front
+# end; and .github/actions/languages installs it in CI at the versions
+# below. Sourced, not run.
 #
-# A language is named as its front end is, less the `mini-`:
-# examples/mini-python's is `python`, and examples/pl0's is `pl0` --
-# culebra running its own PL/0 interpreter, pl0.cul, which this repository
-# does not contain.
+# A language is known by the key its front end's add_front_end gives as
+# LANG: mini-python's is `python`, and PL/0's is `pl0` -- culebra running
+# its own PL/0 interpreter, pl0.cul, which this repository does not
+# contain.
 #
 #   LANG_BIN[lang]       the variable holding its implementation's command
 #                        (below).
 #   LANG_VERSION[lang]   the version whose output the goldens are, and the
-#                        only one test/goldens.sh accepts (CI installs
-#                        exactly these). Below is why each is pinned as
-#                        tightly as it is.
+#                        only one lang_pinned accepts (CI installs exactly
+#                        these). Below is why each is pinned as tightly as
+#                        it is.
 #   lang_name LANG       prints what its implementation is called.
 #   lang_version LANG    prints the version of LANG that would run.
+#   lang_pinned LANG     the version gate test/oracle.sh runs behind.
 #   lang_command LANG SCRATCH FILE...
 #                        sets the array CMD to the command that runs the
 #                        program FILE... (paths as the caller's directory
