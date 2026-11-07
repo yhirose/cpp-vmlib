@@ -2,8 +2,11 @@
 # defaults.
 
 print(1 + 2 * 3, 7 - 2, 3 * 4, 2 ** 3)
-# `//` and `%` floor, where BinOp::Div truncates and BinOp::Mod is C's.
+# `//` and `%` floor, where BinOp::Div truncates and BinOp::Mod is C's --
+# and which way to round is the signs' to say, not their product's, which
+# wraps past 2^63.
 print(7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)
+print(-3 % 4611686018427387904, -3 // 4611686018427387904)
 # `/` is always a float, even on two ints.
 print(7 / 2, 6 / 3, 1 / 4)
 print(-3, - -3, abs(-5), abs(5))

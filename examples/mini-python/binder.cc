@@ -1234,8 +1234,12 @@ struct Binder {
     r.finish("$fdiv");
   }
 
-  // `//` and `%` floor, like Lua's and unlike C's, so both correct the
-  // truncating forms BinOp gives when the signs disagree.
+  // `//` and `%` floor, like Lua's and unlike C's: on two ints they are
+  // FloorDiv and FloorMod, and the operators in the program are those, with
+  // these behind them (Binder::arith) for a zero divisor and the rest. A
+  // float's `//` is Div, stepped down when it was inexact and the signs
+  // disagree; a float's `%`, and a bignum's, this subset leaves out, and
+  // Mod refuses them.
   void rt_idiv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
@@ -1243,6 +1247,8 @@ struct Binder {
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("division by zero")}))));
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
     r.add(r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))));
     r.add(r.iff(
         r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
@@ -1255,16 +1261,12 @@ struct Binder {
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [m] = r.locals("m");
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("division by zero")}))));
-    r.add(r.set(m, r.bin(BinOp::Mod, r.L(a), r.L(b))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Ne, r.L(m), r.I(0)),
-               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(m), r.L(b)), r.I(0))),
-        r.set(m, r.bin(BinOp::Add, r.L(m), r.L(b)))));
-    r.add(r.ret(r.L(m)));
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
+    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
     r.finish("$mod");
   }
 
@@ -3037,8 +3039,9 @@ struct Binder {
 
   // `+`, `-` and `*` on two numbers, and `+` on two strings, are the VM's
   // -- an int answer exactly, since an int that would wrap is $add's, and
-  // the limbs' (the promotion rule, at rt_add). The rest, and `/`, `//`,
-  // `%`, are the helpers' throughout.
+  // the limbs' (the promotion rule, at rt_add). `//` and `%` on two ints
+  // are FloorDiv and FloorMod, a zero divisor being the helper's
+  // ZeroDivisionError. The rest, and `/`, are the helpers' throughout.
   NodeId arith(const char* helper, NodeId x, NodeId y, SrcPos p) {
     const std::string h = helper;
     const uint32_t num = tags_named({"int", "double"});
@@ -3048,6 +3051,9 @@ struct Binder {
     }
     if (h == "$sub") return op_or_helper(rt, BinOp::Sub, x, y, num, h, p, true);
     if (h == "$mul") return op_or_helper(rt, BinOp::Mul, x, y, num, h, p, true);
+    const uint32_t ints = tags_named("int");
+    if (h == "$idiv") return op_or_helper(rt, BinOp::FloorDiv, x, y, ints, h, p);
+    if (h == "$mod") return op_or_helper(rt, BinOp::FloorMod, x, y, ints, h, p);
     return rt.call(h, {x, y}, p);
   }
 
@@ -3729,9 +3735,9 @@ struct Binder {
       }
       if (op == "-=") return arith("$sub", cur(), v, p);
       if (op == "*=") return arith("$mul", cur(), v, p);
-      if (op == "//=") return rt.call("$idiv", {cur(), v}, p);
+      if (op == "//=") return arith("$idiv", cur(), v, p);
       if (op == "/=") return rt.call("$fdiv", {cur(), v}, p);
-      return rt.call("$mod", {cur(), v}, p);
+      return arith("$mod", cur(), v, p);
     };
 
     if (target.tag == "ident"_) {
