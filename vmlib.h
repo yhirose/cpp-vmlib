@@ -1223,9 +1223,10 @@ enum class UnOp : uint8_t {
   Not,
   // That truthiness itself, as a bool: what a condition tests, as a value.
   // Its use is with a fallback (Tag::Unary), as a language's own
-  // truthiness, which the VM's already is on some tags -- nil and bool for
-  // Lua and Ruby, the numbers too for Python -- so a condition on one of
-  // those costs no call of the language's helper.
+  // truthiness, which the VM's already is on every tag but the few the
+  // language decides for itself -- a number for Lua and Ruby, a double and
+  // a string for JavaScript -- so a condition on any other costs no call
+  // of the language's helper.
   Truth,
   WrapI8, WrapI16, WrapI32, WrapU8, WrapU16, WrapU32,
 };

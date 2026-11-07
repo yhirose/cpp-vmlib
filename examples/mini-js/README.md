@@ -38,11 +38,11 @@ and its own comment says why: *"JavaScript calls both falsy, Lua calls
 neither, and that disagreement is what makes it a language's decision
 rather than the VM's."* So `$truthy` is a func this binder writes in IR,
 and every condition, `!`, `&&` and `||` is decided by it -- though it is
-called only where the VM's answer is not JavaScript's: on undefined, a
-bool or an int the two agree, and a condition on one of those is the
-VM's own test, a comparison costing nothing beyond itself (an operator
-with a fallback, vmlib.h's `Tag::Unary`; see `Binder::truthy`). `+` and
-`===` below are arranged the same way.
+called only on a double or a string, where the VM's answer is not
+JavaScript's: on anything else the two agree, and a condition on it is
+the VM's own test, a comparison costing nothing beyond itself (an
+operator with a fallback, vmlib.h's `Tag::Unary`; see
+`Binder::operators`). `+` and `===` below are arranged the same way.
 
 **What is equal.** `BinOp::Eq` refuses two values of different types --
 *"a question a language answers, not the VM"* -- which is a trap where

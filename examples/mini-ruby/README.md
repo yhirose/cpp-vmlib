@@ -135,10 +135,10 @@ checked against `ruby`.
 * **Only `nil` and `false` are false.** `0` and `""` are true, where
   `Value::truthy()` calls `0` false -- and its comment names Lua and
   JavaScript disagreeing as the reason it refuses to decide. Ruby is a
-  third answer. `$truthy` is called only where the two differ, though: a
-  condition on nil or a bool is the VM's own test, and a comparison costs
-  nothing beyond itself (an operator with a fallback, vmlib.h's
-  `Tag::Unary`). `+`, `-`, `*` and `==` are the VM's operators on numbers
+  third answer. `$truthy` is called only where the two differ, though, on
+  a number: a condition on anything else is the VM's own test, and a
+  comparison costs nothing beyond itself (an operator with a fallback,
+  vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are the VM's operators on numbers
   and strings, where they are Ruby's, the same way.
 * **`/` and `%` on two Integers floor**, where `BinOp::Div` truncates and
   `BinOp::Mod` is C's: they are `BinOp::FloorDiv` and `BinOp::FloorMod`,

@@ -178,9 +178,10 @@ in tail position, so a tail call through it stays one too.
   `Value::truthy()` calls both false -- its comment fixes nil, false and
   zero as false and leaves only a string's emptiness and NaN to the
   language. So Scheme overrides it with `$true`, and every condition is
-  decided by it -- called only past a bool, though, whose own truth is
-  Scheme's, so a comparison costs nothing beyond itself (an operator with
-  a fallback, vmlib.h's `Tag::Unary`). `+`, `-`, `*`, `<` and the rest of
+  decided by it -- called only on `'()` and a number, though, where the
+  two differ: on anything else the VM's own test is Scheme's, so a
+  comparison costs nothing beyond itself (an operator with a fallback,
+  vmlib.h's `Tag::Unary`). `+`, `-`, `*`, `<` and the rest of
   the arithmetic are the VM's operators on two numbers the same way, each
   with its helper behind it.
 * **A whole inexact number prints with a point.** `to_display` gives `"1"`

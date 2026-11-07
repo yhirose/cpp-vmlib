@@ -92,10 +92,10 @@ mini-js needed for JavaScript and mini-culebra needed for almost nothing:
 language only what its comment names -- a string's emptiness and NaN:
 *"JavaScript calls both falsy, Lua calls neither."* Lua disagrees about
 zero too, so `$truthy`, and every condition is decided by it -- called,
-though, only where the VM's answer is not Lua's: on nil and a bool the
-two agree, and a condition on one of those is the VM's own test, a
-comparison costing nothing beyond itself (an operator with a fallback,
-vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are arranged the same
+though, only on a number, where the VM's answer is not Lua's: on
+anything else the two agree, and a condition on it is the VM's own
+test, a comparison costing nothing beyond itself (an operator with a
+fallback, vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are arranged the same
 way: the VM's operator on the values where it is Lua's, the helper,
 with its metamethods, on the rest.
 

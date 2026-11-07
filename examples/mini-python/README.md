@@ -54,8 +54,8 @@ That is what keeps a loop counter a loop counter, at the cost of one
 instruction rather than a call. The VM answers the same way for two floats
 or a float and an int, for `+` on two strings, for an ordering of two ints
 or two strings, for `==` on None, bools, ints and strings, for `-x`, and
-for the truth of None, a bool or a number; everything else is the
-helper's, as it always was.
+for the truth of anything but a string, a list, a dict or an object;
+everything else is the helper's, as it always was.
 
 **The demotion rule.** `$mkbig` strips leading zero limbs and, at two limbs
 or fewer, hands back an ordinary `Int` -- 10^18 fits an int64 with room to
