@@ -348,6 +348,55 @@ void test_to_float32_boundaries() {
   }
 }
 
+// FloorDiv and FloorMod over every pair of interesting int64s (both
+// signs, both ends, the least int but over -1, which traps) and a random
+// tail, checked against what defines them rather than against the formula
+// that computes them: q * b + r == a, r is 0 or has b's sign, and |r| <
+// |b| -- one (q, r) satisfies all three. The product and the sum wrap, as
+// the identity holds mod 2^64; the magnitudes compare unsigned, so the
+// least int has one.
+void test_floor_division() {
+  constexpr int64_t lo = std::numeric_limits<int64_t>::min();
+  constexpr int64_t hi = std::numeric_limits<int64_t>::max();
+  std::vector<std::pair<int64_t, int64_t>> pairs;
+  for (const auto& ab :
+       pairs_of({0, 1, -1, 2, -2, 7, -7, hi, lo, lo + 1, int64_t{1} << 62,
+                 -(int64_t{1} << 62) + 3},
+                rand_u64_bits, true)) {
+    if (ab.first != lo || ab.second != -1) pairs.push_back(ab);
+  }
+  Module m;
+  Builder b(m);
+  const SrcPos p{1, 1};
+  std::vector<NodeId> exprs;
+  for (const auto& [a, bb] : pairs) {
+    for (const BinOp op : {BinOp::FloorDiv, BinOp::FloorMod}) {
+      exprs.push_back(b.binary(op, b.literal(a, p), b.literal(bb, p), p));
+    }
+  }
+  const auto lines = run_batch(exprs, m, b, p, "floor division");
+  if (lines.size() != exprs.size()) return;
+  const auto mag = [](int64_t v) {
+    return v < 0 ? 0 - static_cast<uint64_t>(v) : static_cast<uint64_t>(v);
+  };
+  for (size_t i = 0; i < pairs.size(); ++i) {
+    const auto [a, bb] = pairs[i];
+    const int64_t q = parse_line(lines[2 * i]);
+    const int64_t r = parse_line(lines[2 * i + 1]);
+    const uint64_t sum = static_cast<uint64_t>(q) * static_cast<uint64_t>(bb) +
+                         static_cast<uint64_t>(r);
+    const bool ok = sum == static_cast<uint64_t>(a) &&
+                    (r == 0 || (r < 0) == (bb < 0)) && mag(r) < mag(bb);
+    if (!ok) {
+      std::fprintf(stderr,
+                   "FAIL: floor division of %lld by %lld: q %lld r %lld\n",
+                   static_cast<long long>(a), static_cast<long long>(bb),
+                   static_cast<long long>(q), static_cast<long long>(r));
+      ++g_failures;
+    }
+  }
+}
+
 }  // namespace
 
 extern "C" {
@@ -357,8 +406,10 @@ void coreir_rt_out_str(const char* bytes, int64_t len) {
 }
 void coreir_rt_out_raw(const char*, int64_t) {}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
-[[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
-  throw Failure(msg);
+// The position goes into the message, so a trap's can be checked too.
+[[noreturn]] void coreir_rt_fail(const char* msg, int64_t line, int64_t col) {
+  throw Failure(std::string(msg) + " @" + std::to_string(line) + ":" +
+                std::to_string(col));
 }
 void coreir_rt_poll(void) {}
 }
@@ -545,6 +596,9 @@ int main() {
                         ? 1 : 0;
             });
 
+  // --- FloorDiv/FloorMod: rounding toward negative infinity ---------------
+  test_floor_division();
+
   // --- ToFloat32 ------------------------------------------------------
   test_to_float32();
   test_to_float32_boundaries();
@@ -564,6 +618,36 @@ int main() {
     const SrcPos p{1, 1};
     check_trap({b.binary(BinOp::UMod, b.literal(5, p), b.literal(0, p), p)},
               m, b, p, "divide by zero", "UMod by zero");
+  }
+  // FloorDiv and FloorMod trap where Div and Mod do -- a zero divisor,
+  // the least int over -1 -- and, int-only, on a double.
+  for (const BinOp op : {BinOp::FloorDiv, BinOp::FloorMod}) {
+    const std::string name = name_of(op);
+    {
+      // Reported at the divisor, as Div's and Mod's are.
+      Module m;
+      Builder b(m);
+      const SrcPos p{1, 1};
+      check_trap({b.binary(op, b.literal(5, p), b.literal(0, {2, 7}), p)}, m,
+                 b, p, "divide by zero @2:7", name + " by zero");
+    }
+    {
+      Module m;
+      Builder b(m);
+      const SrcPos p{1, 1};
+      check_trap({b.binary(op,
+                           b.literal(std::numeric_limits<int64_t>::min(), p),
+                           b.literal(-1, p), p)},
+                 m, b, p, "division overflow",
+                 name + " of the least int by -1");
+    }
+    {
+      Module m;
+      Builder b(m);
+      const SrcPos p{1, 1};
+      check_trap({b.binary(op, b.double_literal(7.5, p), b.literal(2, p), p)},
+                 m, b, p, ("cannot " + name).c_str(), name + " of a double");
+    }
   }
   {
     Module m;

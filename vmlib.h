@@ -1234,12 +1234,20 @@ enum class BinOp : uint8_t {
   // comparison does not care about sign -- and neither does Add/Sub/Mul,
   // whose wrapping result is the same bits either way.
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,
+  // Int-only too: division rounding toward negative infinity, and the
+  // remainder that goes with it, which takes the divisor's sign -- Python's
+  // and Lua's `//` and `%`, Ruby's `/` and `%`, Scheme's `floor/` and
+  // `modulo`, where Div and Mod are C's, truncating. Each of those front
+  // ends had written the correction over Div and Mod for itself, and each
+  // had tested the signs by multiplying them, which wraps past 2^63. A zero
+  // divisor traps, and so does the least int over -1, as for Div and Mod.
+  FloorDiv, FloorMod,
 };
 
 // The last enumerator of each, for the scans (from_name, test_names) that
 // walk the enum's range -- kLastTag's own reason, one enum further.
 inline constexpr UnOp kLastUnOp = UnOp::WrapU32;
-inline constexpr BinOp kLastBinOp = BinOp::UGe;
+inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 
 // An operator's flags, in Node::b when it has a fallback (Tag::Unary).
 // kExact: an int Add, Sub, Mul or Neg whose result wrapped is the
@@ -3494,6 +3502,7 @@ inline bool is_int_only(BinOp op) {
     case BinOp::Shl: case BinOp::Shr:
     case BinOp::UDiv: case BinOp::UMod: case BinOp::UShr:
     case BinOp::ULt: case BinOp::ULe: case BinOp::UGt: case BinOp::UGe:
+    case BinOp::FloorDiv: case BinOp::FloorMod:
       return true;
     default:
       return false;
@@ -3572,12 +3581,13 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
       case BinOp::Sub: out = Value::make_int(wrap_sub(a, b)); return {};
       case BinOp::Mul: out = Value::make_int(wrap_mul(a, b)); return {};
       case BinOp::Div: case BinOp::Mod:
-      case BinOp::UDiv: case BinOp::UMod: {
+      case BinOp::UDiv: case BinOp::UMod:
+      case BinOp::FloorDiv: case BinOp::FloorMod: {
         // Every division form traps on a zero divisor -- one statement of
-        // that, since UDiv/UMod differ from Div/Mod only in the overflow
+        // that, since UDiv/UMod differ from the others only in the overflow
         // case they do not have (no negative dividend for -1 to misfire on).
         if (b == 0) return "divide by zero";
-        if ((op == BinOp::Div || op == BinOp::Mod) &&
+        if (op != BinOp::UDiv && op != BinOp::UMod &&
             a == std::numeric_limits<int64_t>::min() && b == -1) {
           return "division overflow";
         }
@@ -3590,6 +3600,21 @@ inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
         switch (op) {
           case BinOp::Div:  out = Value::make_int(a / b); break;
           case BinOp::Mod:  out = Value::make_int(a % b); break;
+          // The truncated quotient and remainder, a step toward negative
+          // infinity when the division was inexact and the signs differ.
+          // The remainder's sign is the test -- it is nonzero and the
+          // dividend's -- so nothing is multiplied, and m + b cannot
+          // leave int64: the two have different signs.
+          case BinOp::FloorDiv: {
+            const int64_t m = a % b;
+            out = Value::make_int(a / b - (m != 0 && (m < 0) != (b < 0)));
+            break;
+          }
+          case BinOp::FloorMod: {
+            const int64_t m = a % b;
+            out = Value::make_int(m != 0 && (m < 0) != (b < 0) ? m + b : m);
+            break;
+          }
           case BinOp::UDiv: out = Value::make_int(static_cast<int64_t>(ua / ub)); break;
           default:          out = Value::make_int(static_cast<int64_t>(ua % ub)); break;
         }
@@ -3954,6 +3979,7 @@ enum class Op : uint8_t {
   // coreir::BinOp's u64 group, same offset scheme as Add..Ge -- see
   // kBinOpOffset.
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,  // a = dst, b = lhs, c = rhs
+  FloorDiv, FloorMod,                    // a = dst, b = lhs, c = rhs
   // Which storage class a variable lives in is a compile-time fact -- the
   // coreir::VarKind on the VarRef the compiler is lowering -- so it is an
   // opcode here rather than an operand the executor switches on a second
@@ -4132,6 +4158,7 @@ static_assert(op_of(coreir::BinOp::Add) == Op::Add);
 static_assert(op_of(coreir::BinOp::Ge) == Op::Ge);
 static_assert(op_of(coreir::BinOp::Shr) == Op::Shr);
 static_assert(op_of(coreir::BinOp::UGe) == Op::UGe);
+static_assert(op_of(coreir::BinOp::FloorMod) == Op::FloorMod);
 
 // The same trick for coreir::UnOp's Neg..WrapU32 against vm::Op's own
 // Neg..WrapU32 -- the pair Exec used to tell apart with a two-way ternary
@@ -5300,6 +5327,8 @@ inline const char* name_of(BinOp op) {
     case BinOp::ULe:  return "ule";
     case BinOp::UGt:  return "ugt";
     case BinOp::UGe:  return "uge";
+    case BinOp::FloorDiv: return "floordiv";
+    case BinOp::FloorMod: return "floormod";
   }
   return "?";
 }
@@ -6310,6 +6339,7 @@ inline const char* name_of(Op op) {
     case Op::Shl: case Op::Shr:
     case Op::UDiv: case Op::UMod: case Op::UShr:
     case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
+    case Op::FloorDiv: case Op::FloorMod:
       return coreir::name_of(binop_of(op));
     case Op::LoadLocal:   return "loadlocal";
     case Op::LoadCell:    return "loadcell";
@@ -6435,6 +6465,7 @@ inline std::string to_string(const Program& p) {
         case Op::Ge: case Op::BitAnd: case Op::BitOr: case Op::BitXor:
         case Op::Shl: case Op::Shr: case Op::UDiv: case Op::UMod:
         case Op::UShr: case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
+        case Op::FloorDiv: case Op::FloorMod:
         case Op::Index: case Op::SetIndex: case Op::SameType:
           out << " r" << in.a << ", r" << in.b << ", r" << in.c;
           break;
@@ -7328,9 +7359,10 @@ struct FnCompiler {
         if (const auto r = compile_type_test(v, n.pos)) return *r;
         // A failing division reports at its right operand, so that is the
         // position stamped on the instruction that can trap.
-        const uint32_t pos = (v.op == BinOp::Div || v.op == BinOp::Mod)
-                                 ? m.at(v.rhs).pos
-                                 : n.pos;
+        const bool divides = v.op == BinOp::Div || v.op == BinOp::Mod ||
+                             v.op == BinOp::FloorDiv ||
+                             v.op == BinOp::FloorMod;
+        const uint32_t pos = divides ? m.at(v.rhs).pos : n.pos;
         return compile_op(op_of(v.op), pos, v.lhs, v.rhs);
       }
       case Tag::Intrinsic:
@@ -9299,7 +9331,8 @@ struct Exec {
         case Op::BitAnd: case Op::BitOr: case Op::BitXor:
         case Op::Shl: case Op::Shr:
         case Op::UDiv: case Op::UMod: case Op::UShr:
-        case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe: {
+        case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
+        case Op::FloorDiv: case Op::FloorMod: {
           // Straight into the destination register: eval_binop computes
           // the whole result before it assigns, so the compiler reusing an
           // operand's register as the destination -- which it does freely --
