@@ -516,9 +516,10 @@ struct Binder {
   // the VM's answer where the two agree, the helper's on the rest
   // (runtime_parts.h's Operators).
   //
-  //   $truthy  ToBoolean: undefined, a bool and an int are false or true
-  //            as Value::truthy() says; "" and NaN, false here and true to
-  //            the VM, are $truthy's.
+  //   $truthy  ToBoolean: everything but a double and a string is false
+  //            or true as Value::truthy() says -- undefined, a bool, an
+  //            int, and an array, an object or a function, always true;
+  //            "" and NaN, false here and true to the VM, are $truthy's.
   //   $add     `+`: two numbers add and two strings concatenate, as Add
   //            does; a string beside anything else makes the other a
   //            string first, which is $add's.
@@ -527,8 +528,8 @@ struct Binder {
   //            compares the types first, says not -- so an int is $seq's.
   static Operators::Table operators() {
     return {
-        {"$truthy",
-         VmOp::unary(UnOp::Truth, tags_named({"nil", "bool", "int"}))},
+        {"$truthy", VmOp::unary(UnOp::Truth,
+                                truthy_tags_except({"double", "string"}))},
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},

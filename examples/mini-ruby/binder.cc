@@ -581,9 +581,9 @@ struct Binder {
   // answer where the two agree, the helper's on the rest (runtime_parts.h's
   // Operators).
   //
-  //   $truthy       a condition: nil and a bool are Value::truthy()'s, the
-  //                 rest $truthy's -- 0, which the VM calls false, is true
-  //                 in Ruby.
+  //   $truthy       a condition: everything but a number is
+  //                 Value::truthy()'s (nil_false_tags), a number $truthy's
+  //                 -- 0, which the VM calls false, is true in Ruby.
   //   $add          `+` (add_tags), an Integer wrapping, as this subset's
   //                 does; anything else repeats, joins or asks a class.
   //   $sub $mul     `-` and `*` on two numbers.

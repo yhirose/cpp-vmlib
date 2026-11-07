@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <string>
@@ -410,11 +411,21 @@ inline void truthy_nil_false(FuncWriter& w) {
   w.add(w.ret(w.Bo(true)));
 }
 
-// Where that truthiness is Value::truthy()'s own -- nil false, a bool
-// itself -- so truth() takes the VM's answer there and calls the helper
-// only for the rest.
+// The tags on which Value::truthy() already is a language's truthiness:
+// every one but those `differ` names, the ones the language decides for
+// itself. A truth test (UnOp::Truth with the language's helper behind it)
+// takes the VM's answer on these and calls the helper only for the rest --
+// so a condition on a table, a function or a list where the language,
+// like the VM, calls every one true asks no helper.
+inline uint32_t truthy_tags_except(
+    std::initializer_list<std::string_view> differ) {
+  return coreir::kAllTags & ~coreir::tags_named(differ);
+}
+
+// Where nil-and-false truthiness is Value::truthy()'s: everywhere but a
+// number, whose 0 the VM calls false.
 inline uint32_t nil_false_tags() {
-  return coreir::tags_named({"nil", "bool"});
+  return truthy_tags_except({"int", "double"});
 }
 
 // ---- How a float prints ----------------------------------------------------

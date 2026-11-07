@@ -559,17 +559,18 @@ struct Binder {
   //   binop_helpers  arithmetic and ordering on two numbers (number_tags),
   //                  each helper that BinOp and nothing else.
   //   $modulo        `modulo` on two exact integers, FloorMod -- its rule.
-  //   $true          a condition: only #f is false, which a bool's own
-  //                  truth answers; everything else is $true's, which says
-  //                  true -- '() and 0 included, where the VM's truth
-  //                  calls both false.
+  //   $true          a condition: only #f is false. Value::truthy()
+  //                  answers that for everything but '(), 0 and 0.0, which
+  //                  it calls false and Scheme true -- those are $true's.
   static Operators::Table operators() {
     Operators::Table t;
     for (const auto& h : binop_helpers()) {
       t.emplace(h.first, VmOp::binary(h.second, number_tags()));
     }
     t.emplace("$modulo", VmOp::binary(BinOp::FloorMod, tags_named("int")));
-    t.emplace("$true", VmOp::unary(UnOp::Truth, tags_named("bool")));
+    t.emplace("$true",
+              VmOp::unary(UnOp::Truth,
+                          truthy_tags_except({"nil", "int", "double"})));
     return t;
   }
 

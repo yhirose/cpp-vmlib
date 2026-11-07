@@ -806,9 +806,10 @@ struct Binder {
   // VM's answer where the two agree, the helper's on the rest
   // (runtime_parts.h's Operators).
   //
-  //   $truthy         a condition: None, a bool and a number are false or
-  //                   true as Value::truthy() says; a string, a list and a
-  //                   dict, false when empty, are $truthy's.
+  //   $truthy         a condition: None, a bool, a number and a function
+  //                   are false or true as Value::truthy() says; a string,
+  //                   a list and a dict, false when empty, and an object,
+  //                   which may say for itself, are $truthy's.
   //   $add $sub $mul  `+`, `-` and `*` on two numbers, and `+` on two
   //   $neg            strings, and `-x` on a number -- an int answer
   //                   exactly, since one that would wrap goes to the limbs
@@ -829,8 +830,9 @@ struct Binder {
     const uint32_t ints = tags_named("int");
     const uint32_t order = tags_named({"int", "string"});
     return {
-        {"$truthy", VmOp::unary(UnOp::Truth,
-                                tags_named({"nil", "bool", "int", "double"}))},
+        {"$truthy",
+         VmOp::unary(UnOp::Truth, truthy_tags_except(
+                                      {"string", "array", "map", "object"}))},
         {"$add", VmOp::binary(BinOp::Add, add_tags(), true)},
         {"$sub", VmOp::binary(BinOp::Sub, number_tags(), true)},
         {"$mul", VmOp::binary(BinOp::Mul, number_tags(), true)},
