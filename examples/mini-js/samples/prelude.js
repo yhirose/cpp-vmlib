@@ -1,5 +1,5 @@
 // The one formatting function every sample prints through, prepended to
-// each of them (for Node by samples/gen_golden.sh, for this front end by
+// each of them (for Node by test/languages.sh, for this front end by
 // the CLI's own multi-file form). Why it exists: `console.log` of an array
 // or an object is Node's util.inspect, a renderer with its own rules about
 // quoting, spacing, depth and colour that has nothing to do with the

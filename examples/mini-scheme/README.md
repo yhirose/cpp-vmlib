@@ -243,10 +243,11 @@ one's output to match a golden file captured from `guile` -- see PL/0's own
 README for why an external, independent oracle is what "passing" means
 here.
 
-`samples/gen_golden.sh` regenerates the goldens, by hand and never from the
-build. It passes `--no-auto-compile`, because without it Guile writes
-progress notes to stderr the first time it sees a file and the golden
-becomes a record of the cache's state rather than of the program.
+`test/goldens.sh mini-scheme` checks the goldens against `guile`, and
+`--update` regenerates them -- by hand, never from the build. Guile runs
+with `--no-auto-compile` (`test/languages.sh`), because without it it
+writes progress notes the first time it sees a file, a record of the
+cache's state rather than of the program.
 
 All seven samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.scm`

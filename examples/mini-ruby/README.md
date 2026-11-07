@@ -285,8 +285,10 @@ Quietly different:
 output to match a golden file captured from `ruby` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
-`samples/gen_golden.sh` regenerates the goldens, by hand and never from the
-build.
+`test/goldens.sh mini-ruby` checks the goldens against `ruby`, and
+`--update` regenerates them -- by hand, never from the build. They are Ruby
+3.3's output, the version `test/languages.sh` pins: 3.4 prints a Hash as
+`{"a" => 1}`, and this front end prints 3.3's `{"a"=>1}`.
 
 All nine samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1`.

@@ -4,6 +4,6 @@
 # RunOptions::entry_frame_drops -- and its standard library is the Host
 # functions recipe, vm::RunOptions::natives.
 #
-# The goldens are `culebra`'s own output (samples/gen_golden.sh): the
+# The goldens are `culebra`'s own output (test/goldens.sh): the
 # language this front end is a slice of.
 add_front_end(mini-culebra EXT cul ORACLE culebra)

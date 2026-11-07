@@ -3,5 +3,5 @@
 # erases them, and then wants nothing the runtime does not already have,
 # classes and inheritance included. Its oracle is `dotnet`.
 #
-# The goldens are `dotnet`'s output (samples/gen_golden.sh).
+# The goldens are `dotnet`'s output (test/goldens.sh).
 add_front_end(mini-csharp EXT cs ORACLE dotnet)

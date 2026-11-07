@@ -26,6 +26,13 @@ bench *args: build
 bench-lang *args: build
     bench/languages/run.sh {{args}}
 
+# Every front end's goldens against the real language they are the output
+# of, at the versions test/languages.sh pins (test/goldens.sh). `just
+# goldens --update mini-lua` rewrites one front end's from the language.
+# Needs no build.
+goldens *args:
+    test/goldens.sh {{args}}
+
 # ASan/UBSan/LeakSanitizer, in their own build directory so this never
 # touches the normal one.
 sanitizers:

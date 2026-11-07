@@ -2,5 +2,5 @@
 # makes both program-visible, as `Proc#arity` and as the proc/lambda
 # distinction (lenient_arity plus one ArgCount test).
 #
-# The goldens are `ruby`'s output (samples/gen_golden.sh).
+# The goldens are `ruby`'s output (test/goldens.sh).
 add_front_end(mini-ruby EXT rb ORACLE ruby)

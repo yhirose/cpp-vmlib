@@ -4,6 +4,6 @@
 # coroutines to the program the way CoroCreate/CoroResume/CoroYield were
 # named for.
 #
-# The goldens are `lua`'s output (samples/gen_golden.sh) -- whose language
+# The goldens are `lua`'s output (test/goldens.sh) -- whose language
 # specification *requires* the behaviour samples/tailcalls.lua checks.
 add_front_end(mini-lua EXT lua ORACLE lua)

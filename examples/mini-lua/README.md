@@ -279,9 +279,10 @@ Quietly different:
 output to match a golden file captured from `lua` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
-`samples/gen_golden.sh` regenerates the goldens, by hand and never from the
-build. Both sides are run from the samples directory with a bare filename,
-because Lua's error messages name the chunk as it was given.
+`test/goldens.sh mini-lua` checks the goldens against `lua`, and
+`--update` regenerates them -- by hand, never from the build. Both sides
+are run from the samples directory with a bare filename, because Lua's
+error messages name the chunk as it was given.
 
 All nine samples are clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.lua`

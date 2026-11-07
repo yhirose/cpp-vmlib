@@ -8,7 +8,7 @@ int main(int argc, char** argv) {
   // share one prelude (samples/prelude.js) without this subset needing a
   // module system it has no other use for. The oracle side of the same
   // comparison is `cat prelude.js sample.js > tmp.js && node tmp.js`; see
-  // samples/gen_golden.sh.
+  // test/languages.sh.
   fe.concatenate = true;
   fe.run.describe = mini_js::describe;
   return driver::main(argc, argv, fe);

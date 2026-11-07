@@ -59,6 +59,12 @@ implementations get wrong" below for a case where two lanes of a different
 independent implementation agree with each other and are both wrong, which
 a self-consistency check alone would never catch.
 
+`test/goldens.sh pl0` checks the goldens against that interpreter --
+`PL0_CUL` names its `pl0.cul`, from the culebra release `test/languages.sh`
+pins, and `PL0_CULEBRA` the culebra it runs on when that is not the one on
+`PATH` -- and `--update` regenerates them, by hand and never from the
+build.
+
 `ctest -R errors` covers the diagnostics (`test/errors/`). These are not
 golden-compared: the binder reports undefined names, constant assignment and
 duplicate declarations at bind time where culebra's interpreter reports them

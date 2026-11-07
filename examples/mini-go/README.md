@@ -252,5 +252,8 @@ independent oracle is what "passing" means here, not just this binary
 agreeing with itself. Each
 sample lives in its own subdirectory because it is a real, standalone `go
 run`-able `package main`; two of them sharing a directory would both
-declare `func main`, which `go build` (though not the single-file `go run`
-the goldens were captured with) rejects.
+declare `func main`, which `go build` of the directory (though not of the
+single file, which is how the goldens are made) rejects.
+
+`test/goldens.sh mini-go` checks the goldens against `go`, and `--update`
+regenerates them -- by hand, never from the build.
