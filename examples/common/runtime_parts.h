@@ -44,44 +44,39 @@ using coreir::UnOp;
 
 // ---- Keys, by who chose the name -------------------------------------------
 //
-// An object a front end builds holds names from two choosers, and two
-// prefixes keep them apart. The implementation's own names -- an instance's
-// class, a class's base and name, the runtime's destructor key (vmlib.h's
-// kDropKey) -- start with vmlib.h's kImplPrefix, 0x01. The program's names that have to sit beside
-// them or beside its own fields -- its methods on a class table, the field
-// behind a C# auto property -- start with 0x02. Neither byte can begin a
-// name any of these languages lets a program write, so the program's own
-// fields, unprefixed, meet neither; and the two never meet each other, so
-// a method named `drop`, `init`, `name` or `ctor` is not the
-// implementation's key of the same name. mini-culebra arrived at this rule
-// (its methods once sat under the runtime's own prefix, which made a class
-// with a `drop` method a resource), and mini-csharp, whose class tables kept
-// their name and constructor under the methods' prefix, had the bug from
-// the other side until it took the rule from here: a method named `name`
-// overwrote the class's name, and one named `ctor` was the constructor.
+// What the implementation keeps on an object is in its meta (Hidden state,
+// below), under no key, so an object's keys are the program's. Most
+// objects hold one namespace of the program's -- an instance's fields, a
+// class's methods -- under the names themselves. One that holds two keeps
+// the second under program_key, a prefix no identifier can start with, so
+// that a name in one never meets the same name in the other: mini-csharp's
+// class table holds its static fields bare and its methods prefixed, and
+// an instance the field behind an auto property prefixed beside the fields
+// the source declared. A program that spells a prefixed key as a string
+// reaches a name of its own and nothing of the implementation's.
+// mini-csharp's class tables once kept their name and constructor beside
+// the methods, under the same prefix: a method named `name` overwrote the
+// class's name, and one named `ctor` was the constructor.
+//
+// The one name of the implementation's still kept as a key is the
+// runtime's destructor, vmlib.h's kDropKey, which starts with
+// kImplPrefix, 0x01.
 using coreir::kImplPrefix;
 inline constexpr char kProgramPrefix = '\x02';
 
-// The key for a name the program chose, kept apart from the
-// implementation's keys and from the program's fields.
+// The key for a name the program chose in a second namespace of one
+// object.
 inline std::string program_key(const std::string& name) {
   return kProgramPrefix + name;
 }
 
-// The same, for a name only known at run time: `name` is a string value.
-inline NodeId program_key(FuncWriter& w, NodeId name) {
-  return w.bin(BinOp::Add, w.S(std::string(1, kProgramPrefix)), name);
-}
-
-// Whether a key is one of these: a key the implementation keeps on an
-// object, under either prefix, which is none of the object's properties --
-// so listing an object's keys, counting them or printing them skips it.
-// The prefixes keep the implementation's names apart from the program's
-// names; they do not stop a program from spelling such a key as a string,
-// with a raw 0x01 byte or an escape for one, and a key it spells that way
-// is hidden too. The C++ form is for a host function; the IR form takes
-// the key in a local, of any type, since a value-keyed table's keys need
-// not be strings.
+// Whether a key is the implementation's or a second namespace's -- under
+// either prefix -- and so none of the object's properties: listing an
+// object's keys, counting them or printing them skips it. A program can
+// still spell such a key, with a raw 0x01 byte, and a key it spells that
+// way is hidden too. The C++ form is for a host function; the IR form
+// takes the key in a local, of any type, since a value-keyed table's keys
+// need not be strings.
 inline bool hidden_key(std::string_view k) {
   return !k.empty() && (k[0] == kImplPrefix || k[0] == kProgramPrefix);
 }
@@ -117,10 +112,12 @@ inline NodeId hidden_key(FuncWriter& w, FuncWriter::Slot k) {
 // type -- is the object's meta (vmlib.h's MetaGet/MetaSet), the slot no
 // key reaches: a program can neither read, forge nor strip it by spelling
 // a key, and nothing that lists, counts or compares keys has anything to
-// step over. Such an object's meta is its *kind record*: an Array whose
-// element 0 names the kind and whose other elements are the kind's state,
-// at positions the front end numbers. No program holds one, so a position
-// needs no prefix to keep it apart from anything.
+// step over. An instance's meta is its class (Classes, below); any other
+// object's is its *kind record*: an Array whose element 0 names the kind
+// and whose other elements are the kind's state, at positions the front
+// end numbers. A kind record is never an Object, so it is never taken for
+// a class; and no program holds one, so a position needs no prefix to
+// keep it apart from anything.
 
 // `obj` with a kind record of `kind` over `state` as its meta -- the
 // object, answered, as MetaSet answers it.
@@ -169,49 +166,99 @@ inline NodeId kind_field(coreir::Builder::At& b, NodeId v, int64_t i) {
 inline NodeId kind_field(FuncWriter& w, NodeId v, int64_t i) {
   return kind_field(w.b, v, i);
 }
+inline NodeId set_kind_field(coreir::Builder::At& b, NodeId v, int64_t i,
+                             NodeId x) {
+  return b.set_index(b.intrinsic(IntrinsicId::MetaGet, {v}), b.literal(i), x);
+}
 inline NodeId set_kind_field(FuncWriter& w, NodeId v, int64_t i, NodeId x) {
-  return w.sidx(w.meta(v), w.I(i), x);
+  return set_kind_field(w.b, v, i, x);
+}
+
+// The same question, asked in C++ by a host function: the kind record `v`
+// carries when it is of `kind`, or null.
+inline const std::vector<coreir::Value>* kind_record(const coreir::Value& v,
+                                                     std::string_view kind) {
+  const coreir::Value* m = coreir::meta_slot(v);
+  if (!m || !m->is_array()) return nullptr;
+  const std::vector<coreir::Value>& rec = m->as_array()->items;
+  if (rec.empty() || !rec[0].is_str() || rec[0].as_str() != kind) {
+    return nullptr;
+  }
+  return &rec;
 }
 
 // ---- Classes ---------------------------------------------------------------
 //
 // There is no class in the IR, and none was needed. A class is an object --
-// its table -- holding its methods and its base's table, and an instance is
-// an object pointing back at its class:
+// its table -- holding its methods by name, with its name and its base's
+// table in its kind record; an instance is an object of the program's
+// fields whose meta is its class:
 //
-//   table:    { kNameKey: "C", kBaseKey: <the base's table>,
-//               program_key("m"): <m>, ... }
-//   instance: { kClassKey: <table>, <the program's fields> }
+//   table:    { m: <m>, ... }       ["class", "C", <the base's table>, ...]
+//   instance: { <fields> }          meta: <table>
 //
-// A front end adds what else its classes need under kImplPrefix -- a
+// So the meta of an instance is an Object and every kind record is an
+// Array: nothing is taken for a class that is not one. A front end adds
+// what else its classes need to the record, from kClassOwn on -- a
 // constructor, an identity to compare -- and every question a class system
-// asks is a walk up kBaseKey: which method a name means, whether a value is
-// an instance of a class.
-inline constexpr char kClassKey[] = "\x01" "c";
-inline constexpr char kBaseKey[] = "\x01" "p";
-inline constexpr char kNameKey[] = "\x01" "n";
-static_assert(kClassKey[0] == kImplPrefix && kBaseKey[0] == kImplPrefix &&
-              kNameKey[0] == kImplPrefix);
+// asks is a walk up kClassBase: which method a name means, whether a value
+// is an instance of a class. A table that holds a second namespace of the
+// program's beside its methods (mini-csharp's static fields) keeps its
+// methods under program_key, so that neither meets the other.
+inline constexpr char kClassKind[] = "class";
+inline constexpr int64_t kClassName = 1;
+inline constexpr int64_t kClassBase = 2;
+inline constexpr int64_t kClassOwn = 3;
+
+// A class table: `methods` (an ObjectLit) with its kind record.
+inline NodeId class_table(coreir::Builder::At& b, NodeId methods,
+                          const std::string& name, NodeId base,
+                          const std::vector<NodeId>& own = {}) {
+  std::vector<NodeId> state{b.str_literal(name), base};
+  state.insert(state.end(), own.begin(), own.end());
+  return of_kind(b, methods, kClassKind, state);
+}
+
+// A fresh instance of the class `cls`, with no fields yet.
+inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
+  return b.intrinsic(IntrinsicId::MetaSet, {b.object_lit({}), cls});
+}
 
 // The class of `v`: its table when it is an instance, nil for anything
-// else -- an object that is no instance has no kClassKey, and Index reads
-// a missing key as nil.
+// else.
 inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
-  return w.iff(w.is(w.typ(v), "object"), w.idx(w.L(v), kClassKey), w.Nil());
+  return w.iff(w.is(w.typ(w.meta(w.L(v))), "object"), w.meta(w.L(v)),
+               w.Nil());
+}
+
+// A class's name, from its table.
+inline NodeId class_name(FuncWriter& w, NodeId table) {
+  return kind_field(w, table, kClassName);
+}
+
+// The name of `v`'s class, asked in C++ by a host function: null when `v`
+// is no instance.
+inline const std::string* instance_class_name(const coreir::Value& v) {
+  const coreir::Value* cls = coreir::meta_slot(v);
+  if (!cls || !cls->is_object()) return nullptr;
+  const auto* rec = kind_record(*cls, kClassKind);
+  constexpr auto at = static_cast<size_t>(kClassName);
+  if (!rec || rec->size() <= at || !(*rec)[at].is_str()) return nullptr;
+  return &(*rec)[at].as_str();
 }
 
 // The walk, as the While it is: from the table in `c`, each table up the
-// chain in turn, nearest first, until one has no base -- whose kBaseKey
-// reads as nil, which ends the loop. `visit` runs at each and returns from
-// the helper when it finds what it is after; a walk that falls off the end
+// chain in turn, nearest first, until one has no base -- whose kClassBase
+// is nil, which ends the loop. `visit` runs at each and returns from the
+// helper when it finds what it is after; a walk that falls off the end
 // found nothing.
 inline NodeId walk_bases(FuncWriter& w, FuncWriter::Slot c, NodeId visit) {
   return w.wh(w.is(w.typ(c), "object"),
-              w.blk({visit, w.set(c, w.idx(w.L(c), kBaseKey))}));
+              w.blk({visit, w.set(c, kind_field(w, w.L(c), kClassBase))}));
 }
 
 // `(t, key)`: what `key` names in the table `t` or in its nearest ancestor
-// that has it, or nil -- method lookup, with `key` already a program_key.
+// that has it, or nil -- method lookup.
 inline void find_in_chain(FuncWriter& w) {
   const auto [t, key] = w.params("t", "key");
   const auto [c] = w.locals("c");

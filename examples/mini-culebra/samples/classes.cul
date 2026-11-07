@@ -78,3 +78,9 @@ println("{labeled.init()} {labeled.name()} {labeled.x} {Labeled.name}")
 # An instance's fields are what keys() lists and size() counts: the class it
 # points back at is none of them.
 println("fields: {labeled.keys()} {labeled.size()}")
+
+# A key is the program's whatever its bytes. The one below starts with
+# byte 1, written raw: it is a field like any other, and reaches nothing of
+# the class's own -- the instance is still a Labeled, with its methods.
+labeled['c'] = 'odd'
+println("{type_of(labeled)} {labeled.init()} {labeled['c']}")

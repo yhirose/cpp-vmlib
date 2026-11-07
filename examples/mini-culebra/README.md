@@ -121,44 +121,45 @@ as the drop key verbatim.
 
 ## Classes, without a class in the IR
 
-There is no class tag. A class value is an object holding its methods; an
-instance is an object pointing back at it; `C.new(...)` is a constructor
-this binder synthesizes:
+There is no class tag. A class value is an object whose kind record --
+in its meta, the slot no key reaches (`MetaGet`/`MetaSet`) -- holds its
+name, its declared `new` and its methods; an instance is an object of its
+fields whose meta is its class; `C.new(...)` is a constructor this binder
+synthesizes:
 
 ```
-C = { "\x01init": <new>, "\x01n": "C", "\x02m": <m>, "\x02drop": <drop> }
+C = {}, kind record ["class", "C", nil, <new>, { m: <m>, drop: <drop> }]
 C["new"] = MakeClosure(<synthesized ctor>, over the cell holding C)
 C["name"] = "C"
 
 ctor(self, args...):
-  inst = { "\x01c": C }
-  inst["\x01drop"] = C["\x02drop"]        ; when the class declares one
-  C["\x01init"](inst, args...)
+  inst = {}, meta C
+  inst["\x01drop"] = record(C).methods["drop"]   ; when the class declares one
+  record(C).new(inst, args...)
   return inst
 ```
 
-Two prefixes, by who chose the name after them: `0x01` for the
-implementation's (the instance's `"\x01c"`, the runtime's `"\x01drop"`,
-and the class table's own `init` and name), `0x02` for the program's, its
-methods. The split matters: a method stored under the first would be the
-same key as those -- a method named `drop` would make the *class itself* a
-resource, one named `init` would overwrite the constructor -- and one
-stored bare would be the class's own `new` or `name`. `0x02` also keeps
-methods out of `keys()` and out of a printed object, which is what culebra
-shows: a class value's fields are `new` and its `name`, and it prints as
-`{new: [function], name: 'Point'}`. The rule and the layout are
-[examples/common/runtime_parts.h](../common/runtime_parts.h)'s, which
-mini-ruby, mini-python and mini-csharp share, with a base link this front
-end has no use for.
+That is [examples/common/runtime_parts.h](../common/runtime_parts.h)'s
+layout, which mini-ruby, mini-python and mini-csharp share, with a base
+link this front end has no use for -- and with the methods in the record
+rather than on the class value, because a class value is a program
+object: its fields are `new` and its `name`, it prints as `{new:
+[function], name: 'Point'}`, and a program can index and write it like
+any object. So a method named `new` or `name` meets neither field, one
+named `drop` makes no *class* a resource, and nothing a program writes on
+the class -- under whatever key -- reaches a method, the constructor or
+the class's name.
 
-The name is there twice. The program's `name` field is a copy;
-`"\x01n"` is the class's own, where culebra keeps it, in data a program
+The name is there twice. The program's `name` field is a copy; the
+record's is the class's own, where culebra keeps it, in data a program
 cannot write. That one is what an instance prints and what `type_of` (a
 host function, below) answers for it, so a write to `Point.name` -- an
 error in culebra, unchecked here -- cannot change every `Point`'s type. A
-class table is the object holding it, which `type_of` answers `Class`;
-any other object -- a literal with a `new` and a `name` of its own
-included -- is an `Object`.
+class is the object carrying that record, which `type_of` answers
+`Class`; any other object -- a literal with a `new` and a `name` of its
+own included -- is an `Object`. And `==`, which compares objects field by
+field, asks first that the two have one meta: an instance equals no
+literal, and no other class's instance, whatever their fields.
 
 The class binding is forced into a cell because its own constructor
 captures it. That is the chicken-and-egg of building the table and the

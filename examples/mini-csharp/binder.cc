@@ -57,15 +57,17 @@ using namespace runtime_parts;
 namespace mini_csharp {
 namespace {
 
-// Classes are runtime_parts.h's layout: a table holding its methods under
-// program_key(name), its base under kBaseKey and its name under kNameKey,
-// and an instance pointing back at it under kClassKey. The rest are names
-// this front end chose, under the implementation's prefix with them -- the
-// constructor on a class table, the kind and message on an exception --
-// where no method can be the same key.
+// Classes are runtime_parts.h's layout: a table holding its methods, with
+// its name, its base and -- this front end's own -- its constructor in its
+// kind record, and an instance whose meta is its class. The table holds a
+// second namespace of the program's beside the methods, its static fields,
+// so the methods are under program_key(name) and the statics bare: a
+// static field and a method of one name, in one class or across a base,
+// never meet. The rest are names this front end chose, under the
+// implementation's prefix -- the kind and message on an exception.
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
-constexpr char kCtorKey[] = "\x01" "ctor";
+constexpr int64_t kClassCtor = kClassOwn;
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -821,8 +823,8 @@ struct Binder {
     r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S(program_key("ToString"))})));
     r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
-    r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
-                r.ret(r.idx(r.idx(r.L(v), kClassKey), kNameKey))));
+    r.add(r.iff(r.is(r.typ(r.meta(r.L(v))), "object"),
+                r.ret(class_name(r, r.meta(r.L(v))))));
     r.add(r.ret(r.S("<object>")));
     r.finish("$str");
   }
@@ -892,7 +894,7 @@ struct Binder {
     method_walk(r, recv, key);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
                 r.ret(r.ref("$nullcall"))));
-    r.add(r.iff(r.b.unary(UnOp::Not, r.has(r.L(recv), r.S(kClassKey))),
+    r.add(r.iff(r.isnt(r.typ(r.meta(r.L(recv))), "object"),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
         "$exc", {r.bin(BinOp::Add, r.S("no such method: "),
@@ -1573,10 +1575,9 @@ struct Binder {
     std::vector<NodeId> callargs{T};
     callargs.insert(callargs.end(), args.begin(), args.end());
     return b.block({b.assign(VarKind::Local, t,
-                             b.object_lit({{b.str_literal(kClassKey),
-                                            read_var(ci.var, ctx, p)}})),
-                    b.call_value(b.index(read_var(ci.var, ctx, p),
-                                         b.str_literal(kCtorKey)),
+                             new_instance(b, read_var(ci.var, ctx, p))),
+                    b.call_value(kind_field(b, read_var(ci.var, ctx, p),
+                                            kClassCtor),
                                  callargs),
                     T});
   }
@@ -1994,8 +1995,10 @@ struct Binder {
       for (const auto& x : bi->nodes[0]->nodes) args.push_back(emit_expr(*x, ctx));
     }
     out.push_back(b.call_value(
-        b.index(read_var(classes[static_cast<size_t>(it->second)].var, ctx, p),
-                b.str_literal(kCtorKey)),
+        kind_field(b,
+                   read_var(classes[static_cast<size_t>(it->second)].var,
+                            ctx, p),
+                   kClassCtor),
         args));
   }
 
@@ -2067,11 +2070,10 @@ struct Binder {
       out.push_back(b.cell_fresh(c));
     }
     // After the freshes above, which would otherwise reset it.
-    // The tables first, then their kBaseKey links, so a class may name
-    // one declared after it.
+    // The tables first, then their links to their bases, so a class may
+    // name one declared after it.
     for (const ClassInfo& ci : classes) {
-      std::vector<std::pair<NodeId, NodeId>> kvs{
-          {b.str_literal(kNameKey), b.str_literal(ci.name)}};
+      std::vector<std::pair<NodeId, NodeId>> kvs;
       for (const auto& [name, g] : ci.methods) {
         kvs.emplace_back(b.str_literal(program_key(name)),
                          emit_closure(g, ctx, p));
@@ -2092,16 +2094,18 @@ struct Binder {
         kvs.emplace_back(b.str_literal(std::string(sf.name->token)),
                          default_of(sf.type, p));
       }
-      kvs.emplace_back(b.str_literal(kCtorKey),
-                       emit_closure(ci.ctor_fn, ctx, p));
-      out.push_back(write_var(ci.var, b.object_lit(kvs), ctx, p));
+      out.push_back(write_var(
+          ci.var,
+          class_table(b, b.object_lit(kvs), ci.name, b.nil_literal(),
+                      {emit_closure(ci.ctor_fn, ctx, p)}),
+          ctx, p));
     }
     for (const ClassInfo& ci : classes) {
       if (ci.base.empty()) continue;
       const auto it = class_by_name.find(ci.base);
       if (it == class_by_name.end()) continue;
-      out.push_back(b.set_index(
-          read_var(ci.var, ctx, p), b.str_literal(kBaseKey),
+      out.push_back(set_kind_field(
+          b, read_var(ci.var, ctx, p), kClassBase,
           read_var(classes[static_cast<size_t>(it->second)].var, ctx, p)));
     }
     for (const auto& [name, v] : static_by_name) {

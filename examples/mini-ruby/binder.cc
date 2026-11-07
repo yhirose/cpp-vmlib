@@ -64,9 +64,9 @@ namespace mini_ruby {
 namespace {
 
 // An exception's kind and message and a Range's marker, under keys the
-// implementation chose (runtime_parts.h's kImplPrefix), beside the class
-// layout's own kClassKey, kBaseKey and kNameKey. A method's key is
-// program_key(name), so no method meets one of these or a field.
+// implementation chose (runtime_parts.h's kImplPrefix). Classes are
+// runtime_parts.h's layout, which keeps them in the class's kind record
+// and an instance's meta, so a method's key is its name.
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
 constexpr char kRangeKey[] = "\x01" "r";
@@ -659,7 +659,7 @@ struct Binder {
         r.blk({r.set(c, r.call("$classof", {r.L(a)})),
                r.iff(r.isnt(r.typ(c), "nil"),
                      r.blk({r.set(m_, r.call("$mfind",
-                                             {r.L(c), r.S(program_key("=="))})),
+                                             {r.L(c), r.S("==")})),
                             r.iff(r.isnt(r.typ(m_), "nil"),
                                   r.ret(r.call("$truthy",
                                                {r.callb(r.L(m_),
@@ -818,11 +818,11 @@ struct Binder {
         r.isnt(r.typ(c), "nil"),
         r.blk(
             {r.set(m,
-                   r.call("$mfind", {r.L(c), r.S(program_key("to_s"))})),
+                   r.call("$mfind", {r.L(c), r.S("to_s")})),
              r.iff(r.isnt(r.typ(m), "nil"),
                    r.ret(r.call("$str", {r.callb(r.L(m), {r.L(v)})}))),
              r.ret(r.bin(BinOp::Add,
-                         r.bin(BinOp::Add, r.S("#<"), r.idx(r.L(c), kNameKey)),
+                         r.bin(BinOp::Add, r.S("#<"), class_name(r, r.L(c))),
                          r.S(">")))})));
     r.add(r.ret(r.S("#<Object>")));
     r.finish("$str");
@@ -844,7 +844,7 @@ struct Binder {
                  r.isnt(r.typ(c), "nil"),
                  r.blk(
                      {r.set(m, r.call("$mfind",
-                                      {r.L(c), r.S(program_key("inspect"))})),
+                                      {r.L(c), r.S("inspect")})),
                       r.iff(r.isnt(r.typ(m), "nil"),
                             r.ret(r.call("$str",
                                          {r.callb(r.L(m), {r.L(v)})})))}))})));
@@ -1326,10 +1326,10 @@ struct Binder {
   // -- Classes --------------------------------------------------------------
   //
   // There is no class in this IR and nothing was added for one: a class is
-  // an object holding its base's table and its methods, keyed with a
-  // prefix no Ruby identifier can start with; an instance is a plain
-  // object pointing back at it under kClassKey. Every question a class
-  // system answers is a walk up that chain. See README.md.
+  // an object holding its methods, with its name and its base's table in
+  // its kind record; an instance is an object of its fields whose meta is
+  // its class (runtime_parts.h's layout). Every question a class system
+  // answers is a walk up that chain. See README.md.
 
   void rt_classof() {
     RT r(*this);
@@ -1349,7 +1349,7 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [c] = r.locals("c");
     r.add(r.set(c, r.call("$classof", {r.L(v)})));
-    r.add(r.iff(r.isnt(r.typ(c), "nil"), r.ret(r.idx(r.L(c), kNameKey))));
+    r.add(r.iff(r.isnt(r.typ(c), "nil"), r.ret(class_name(r, r.L(c)))));
     r.add(r.iff(r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kExcKey))),
                 r.ret(r.idx(r.L(v), kExcKey))));
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S("NilClass"))));
@@ -1420,8 +1420,7 @@ struct Binder {
                   r.bin(BinOp::Le,
                         r.call("$cmp", {r.L(value), r.idx(r.L(pattern), "hi")}),
                         r.I(0))))));
-    r.add(r.iff(r.both(r.is(r.typ(pattern), "object"),
-                       r.has(r.L(pattern), r.S(kNameKey))),
+    r.add(r.iff(is_kind(r, pattern, kClassKind),
                 r.ret(r.call("$isa", {r.L(value), r.L(pattern)}))));
     r.add(r.ret(r.call("$eq", {r.L(pattern), r.L(value)})));
     r.finish("$caseeq");
@@ -1526,7 +1525,7 @@ struct Binder {
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
                           {rt.call("$classof", {T}, p),
-                           b.str_literal(program_key(name))},
+                           b.str_literal(name)},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
@@ -1538,21 +1537,20 @@ struct Binder {
     auto b = Builder(m).at(p);
     const ClassInfo& ci = class_info.at(&a);
     const auto& methods = class_of.at(&a);
-    std::vector<std::pair<NodeId, NodeId>> kvs{
-        {b.str_literal(kNameKey), b.str_literal(ci.name)}};
-    if (ci.base_var >= 0) {
-      kvs.emplace_back(b.str_literal(kBaseKey), read_var(ci.base_var, ctx, p));
-    }
+    std::vector<std::pair<NodeId, NodeId>> kvs;
     for (const auto& [name, g] : methods) {
       // An attr_accessor method has no source body to walk -- new_fn made
       // it directly -- so it is built the same way, directly.
       const NodeId method = fns[static_cast<size_t>(g)].body == nullptr
                                 ? emit_attr_method(g, name, p)
                                 : emit_closure(g, ctx, p);
-      kvs.emplace_back(b.str_literal(program_key(name)), method);
+      kvs.emplace_back(b.str_literal(name), method);
     }
+    const NodeId base = ci.base_var >= 0 ? read_var(ci.base_var, ctx, p)
+                                         : b.nil_literal();
     const int32_t declv = decl_of.at(a.nodes[0].get());
-    return write_var(declv, b.object_lit(kvs), ctx, p);
+    return write_var(declv, class_table(b, b.object_lit(kvs), ci.name, base),
+                     ctx, p);
   }
 
   NodeId emit_attr_method(int32_t g, const std::string& name, SrcPos p) {
@@ -1905,7 +1903,7 @@ struct Binder {
             {b.assign(
                  VarKind::Local, mv,
                  rt.call("$mfind",
-                         {base, b.str_literal(program_key(fi.method_name))},
+                         {base, b.str_literal(fi.method_name)},
                          p)),
              b.make_if(
                  b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
@@ -2339,11 +2337,10 @@ struct Binder {
       no_init = b.block(run);
     }
     return b.block(
-        {b.assign(VarKind::Local, t,
-                  b.object_lit({{b.str_literal(kClassKey), cls}})),
+        {b.assign(VarKind::Local, t, new_instance(b, cls)),
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
-                          {cls, b.str_literal(program_key("initialize"))},
+                          {cls, b.str_literal("initialize")},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),
@@ -2417,7 +2414,7 @@ struct Binder {
          b.assign(VarKind::Local, mv,
                   rt.call("$mfind",
                           {rt.call("$classof", {T}, p),
-                           b.str_literal(program_key(name))},
+                           b.str_literal(name)},
                           p)),
          b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
                             b.str_literal("nil")),

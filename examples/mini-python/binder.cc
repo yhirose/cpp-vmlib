@@ -58,19 +58,20 @@ namespace {
 
 // A bignum's two fields and an exception's name and message, under keys
 // the implementation chose (runtime_parts.h's kImplPrefix) -- whose first
-// byte no Python source can produce, the trick vmlib.h's own kDropKey uses.
-// A class instance's back-pointer is the class layout's kClassKey.
+// byte no Python identifier can start with. Classes are runtime_parts.h's
+// layout: a class's facts are in its kind record and an instance's class
+// is its meta, so a method's key is its name.
 constexpr char kBigKey[] = "\x01" "b";   // the limb array
 constexpr char kSignKey[] = "\x01" "s";  // -1 or 1
 constexpr char kExcKey[] = "\x01" "e";
 constexpr char kMsgKey[] = "\x01" "m";
-// Inheritance: a class table points at its base's table (kBaseKey), carries
-// the class value (the constructor closure) so that `isinstance` and
-// `except` have an identity to compare, and names the builtin exception it
-// is rooted at -- `Exception` is not a class here, so a class that derives
-// from one is marked rather than linked. See README.md.
-constexpr char kIdKey[] = "\x01" "k";
-constexpr char kRootKey[] = "\x01" "x";
+// Inheritance: a class's kind record holds its base's table
+// (kClassBase), the builtin exception it is rooted at -- `Exception` is not
+// a class here, so a class that derives from one is marked rather than
+// linked -- and the class value (the constructor closure), so that
+// `isinstance` and `except` have an identity to compare. See README.md.
+constexpr int64_t kClassRoot = kClassOwn;
+constexpr int64_t kClassId = kClassOwn + 1;
 // A tuple is an array wrapped in an object, which is the only way to keep
 // `type(t)` and `print(t)` honest: the IR has one sequence, and Python has
 // two that print and compare differently.
@@ -1459,7 +1460,7 @@ struct Binder {
                      r.ret(r.Bo(false))),
                r.ret(r.call("$eq", {r.idx(r.L(a), kTupKey),
                                     r.idx(r.L(b), kTupKey)}))})));
-    r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S(program_key("__eq__"))})));
+    r.add(r.set(f_, r.call("$dunder", {r.L(a), r.S("__eq__")})));
     r.add(r.iff(r.isnt(r.typ(f_), "nil"),
                 r.ret(r.call("$truthy",
                              {r.b.call_value(r.L(f_), {r.arr({r.L(a), r.L(b)}),
@@ -1524,7 +1525,7 @@ struct Binder {
                 r.ret(r.call("$tupstr", {r.idx(r.L(v), kTupKey)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)),
                 r.ret(r.call("$str", {r.idx(r.L(v), kMsgKey)}))));
-    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S(program_key("__str__"))})));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("__str__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
@@ -1537,10 +1538,10 @@ struct Binder {
                             r.bin(BinOp::Add, r.S("<class '"),
                                   r.idx(r.L(v), r.S("__name__"))),
                             r.S("'>")))));
-    r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
+    r.add(r.set(f, instance_class(r, v)));
+    r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.bin(BinOp::Add,
-                            r.bin(BinOp::Add, r.S("<"),
-                                  r.idx(r.idx(r.L(v), kClassKey), kNameKey)),
+                            r.bin(BinOp::Add, r.S("<"), class_name(r, r.L(f))),
                             r.S(" object>")))));
     r.add(r.ret(r.S("<object>")));
     r.finish("$str");
@@ -1599,7 +1600,7 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [f] = r.locals("f");
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.call("$strrepr", {r.L(v)}))));
-    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S(program_key("__repr__"))})));
+    r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("__repr__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
@@ -1808,18 +1809,15 @@ struct Binder {
   void rt_getattr() {
     RT r(*this);
     const auto [o, name] = r.params("o", "name");
-    const auto [cls, key] = r.locals("cls", "key");
+    const auto [found] = r.locals("found");
+    // An instance's meta is its class, and the walk ends at once at
+    // anything else's -- nil, or a kind record.
     r.add(r.iff(
         r.is(r.typ(o), "object"),
         r.blk(
             {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
-             r.iff(
-                 r.has(r.L(o), r.S(kClassKey)),
-                 r.blk(
-                     {r.set(key, program_key(r, r.L(name))),
-                      r.set(cls, r.call("$clsfind",
-                                        {r.idx(r.L(o), kClassKey), r.L(key)})),
-                      r.iff(r.isnt(r.typ(cls), "nil"), r.ret(r.L(cls)))}))})));
+             r.set(found, r.call("$clsfind", {r.meta(r.L(o)), r.L(name)})),
+             r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found)))})));
     r.add(r.ret(
         r.call("$exc", {r.S("AttributeError"),
                         r.bin(BinOp::Add, r.S("no attribute "), r.L(name))})));
@@ -1892,8 +1890,8 @@ struct Binder {
     r.add(r.iff(r.call("$isbig", {r.L(v)}), r.ret(r.S("int"))));
     r.add(r.iff(r.call("$istup", {r.L(v)}), r.ret(r.S("tuple"))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kExcKey))));
-    r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
-                r.ret(r.idx(r.idx(r.L(v), kClassKey), kNameKey))));
+    r.add(r.iff(r.is(r.typ(r.meta(r.L(v))), "object"),
+                r.ret(class_name(r, r.meta(r.L(v))))));
     r.add(r.ret(r.S("object")));
     r.finish("$typename");
   }
@@ -2245,8 +2243,9 @@ struct Binder {
     r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(
         r, t,
-        r.iff(r.both(r.has(r.L(t), r.S(kRootKey)),
-                     r.bin(BinOp::Eq, r.idx(r.L(t), kRootKey), r.L(name))),
+        r.iff(r.both(r.is(r.typ(kind_field(r, r.L(t), kClassRoot)), "string"),
+                     r.bin(BinOp::Eq, kind_field(r, r.L(t), kClassRoot),
+                           r.L(name))),
               r.ret(r.Bo(true)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isname");
@@ -2260,9 +2259,8 @@ struct Binder {
     const auto [t] = r.locals("t");
     r.add(r.set(t, instance_class(r, v)));
     r.add(walk_bases(r, t,
-                     r.iff(r.both(r.has(r.L(t), r.S(kIdKey)),
-                                  r.in(IntrinsicId::Same,
-                                       {r.idx(r.L(t), kIdKey), r.L(cls)})),
+                     r.iff(r.in(IntrinsicId::Same,
+                                {kind_field(r, r.L(t), kClassId), r.L(cls)}),
                            r.ret(r.Bo(true)))));
     r.add(r.ret(r.Bo(false)));
     r.finish("$isinstv");
@@ -2294,13 +2292,12 @@ struct Binder {
                              r.ret(r.b.call_value(
                                  r.L(f), {r.call("$acons", {r.L(self), r.L(a)}),
                                           r.L(k)})))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S(program_key("__init__"))),
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S("__init__")),
                 r.ret(r.call("$excinit", {r.L(self), r.L(a)}))));
     r.add(r.ret(r.call(
         "$exc", {r.S("AttributeError"),
                  r.bin(BinOp::Add, r.S("'super' object has no attribute "),
-                       r.in(IntrinsicId::StrSlice,
-                            {r.L(key), r.I(1), r.len(r.L(key))}))})));
+                       r.L(key))})));
     r.finish("$supercall");
   }
 
@@ -3834,18 +3831,17 @@ struct Binder {
       emit_defaults(g, ctx, out, p);
     }
     const ClassInfo& ci = class_info.at(&a);
-    std::vector<std::pair<NodeId, NodeId>> kvs{
-        {b.str_literal(kNameKey), b.str_literal(cname)}};
-    if (ci.base_var >= 0) {
-      kvs.emplace_back(b.str_literal(kBaseKey), read_var(ci.base_var, ctx, p));
-    }
-    if (!ci.root.empty()) {
-      kvs.emplace_back(b.str_literal(kRootKey), b.str_literal(ci.root));
-    }
+    std::vector<std::pair<NodeId, NodeId>> kvs;
     for (const auto& [name, g] : methods) {
-      kvs.emplace_back(b.str_literal(program_key(name)),
-                       emit_closure(g, ctx, p));
+      kvs.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
     }
+    // The identity is filled in below, once the closure that is the class
+    // value exists.
+    const NodeId table = class_table(
+        b, b.object_lit(kvs), cname,
+        ci.base_var >= 0 ? read_var(ci.base_var, ctx, p) : b.nil_literal(),
+        {ci.root.empty() ? b.nil_literal() : b.str_literal(ci.root),
+         b.nil_literal()});
     // The table lives in a cell -- the constructor captures it, and so does
     // any method that says `super()`.
     const auto [ck, cell] = rs.access(ctx.fn, ci.table_var);
@@ -3859,7 +3855,7 @@ struct Binder {
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
     m.capture_maps.push_back(cs);
     out.push_back(b.cell_fresh(cell));
-    out.push_back(b.assign(VarKind::Cell, cell, b.object_lit(kvs)));
+    out.push_back(b.assign(VarKind::Cell, cell, table));
     // The class value is its constructor closure, and the table keeps a
     // reference to it: that is the identity `isinstance` and `except`
     // compare, since there is nothing else a class could be.
@@ -3868,7 +3864,7 @@ struct Binder {
     out.push_back(
         b.assign(VarKind::Local, t,
                  b.make_closure(rs.fns[static_cast<size_t>(ctor)].index, cm)));
-    out.push_back(b.set_index(T, b.str_literal(kIdKey), K));
+    out.push_back(set_kind_field(b, T, kClassId, K));
     out.push_back(write_var(v, K, ctx, p));
     return b.block(out);
   }
@@ -3886,12 +3882,11 @@ struct Binder {
     const NodeId O = b.varref(VarKind::Local, 2, p);
     const NodeId F = b.varref(VarKind::Local, 3, p);
     // `__init__` may be the base's, so it is looked up rather than indexed.
+    auto bp = b.at(p);
     std::vector<NodeId> body{
-        b.assign(VarKind::Local, 2,
-                 b.object_lit({{b.str_literal(kClassKey, p), C}}, p), p),
+        b.assign(VarKind::Local, 2, new_instance(bp, C), p),
         b.assign(VarKind::Local, 3,
-                 rt.call("$clsfind",
-                         {C, b.str_literal(program_key("__init__"), p)}, p),
+                 rt.call("$clsfind", {C, b.str_literal("__init__", p)}, p),
                  p),
         b.make_if(
             b.binary(BinOp::Ne,
@@ -4179,6 +4174,7 @@ struct Binder {
       const auto& params = fns[static_cast<size_t>(ctx.fn)].params;
       if (params.empty()) fail(prim, "'super' outside a method");
       const NodeId table = read_var(ref_of.at(&prim), ctx, pos_of(prim));
+      auto bp = b.at(pos_of(prim));
       const Ast& callnode = *a.nodes[3];
       const auto [A, K] = emit_callargs(
           callnode.nodes.empty() ? nullptr : callnode.nodes[0].get(), ctx, {},
@@ -4186,9 +4182,8 @@ struct Binder {
       cur = rt.call(
           "$supercall",
           {read_var(params[0].var, ctx, pos_of(prim)),
-           b.index(table, b.str_literal(kBaseKey, pos_of(prim)),
-                    pos_of(prim)),
-           b.str_literal(program_key(std::string(a.nodes[2]->nodes[0]->token)),
+           kind_field(bp, table, kClassBase),
+           b.str_literal(std::string(a.nodes[2]->nodes[0]->token),
                          pos_of(prim)),
            A, K},
           pos_of(prim));
@@ -5023,9 +5018,8 @@ std::string describe(const Value& v) {
   std::string name;
   if (const Value* k = o->find(kExcKey); k && k->is_str()) {
     name = k->as_str();
-  } else if (const Value* c = o->find(kClassKey); c && c->is_object()) {
-    const Value* n = c->as_object()->find(kNameKey);
-    if (n && n->is_str()) name = n->as_str();
+  } else if (const std::string* n = runtime_parts::instance_class_name(v)) {
+    name = *n;
   }
   const Value* msg = o->find(kMsgKey);
   if (name.empty() || msg == nullptr) return to_display(v);

@@ -16,3 +16,4 @@ collection: [2, 8, 18]
 closed-over class: Shifted {mut v: 105} Shifted
 init method name method 1 Labeled
 fields: ['x'] 1
+Labeled init method odd

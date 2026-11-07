@@ -134,18 +134,18 @@ implement -- `replace`'s count, `print`'s `end=` -- raises
 ## Inheritance, and the walk it is
 
 There is no class in this IR and nothing was added for one: a class is an
-object holding its methods, its base's table, and the constructor closure
-that is its identity (`isinstance` and `except ThisClass` both compare
-against it); an instance is an object with one hidden key pointing back at
-its class. Every question a class system answers is then a walk up that
-chain:
+object holding its methods, with its name, its base's table and the
+constructor closure that is its identity (`isinstance` and `except
+ThisClass` both compare against it) in its kind record; an instance is an
+object of its attributes whose meta -- the slot no key reaches,
+`MetaGet`/`MetaSet` -- is its class. Every question a class system answers
+is then a walk up that chain:
 
 ```
 $clsfind(t, key):        # method lookup, used by getattr, super(), == and str()
   while typeof(t) == "object":
     if t has key: return t[key]
-    if not (t has base): break
-    t = t[base]
+    t = record(t).base
   return nil
 ```
 

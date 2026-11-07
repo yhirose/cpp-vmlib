@@ -83,19 +83,19 @@ and nothing special happens for it.
 
 Inside a `class`, there *is* a table, because dispatch has to be dynamic:
 `obj.speak` cannot know at compile time which class `obj` turned out to
-be. A class is an object holding its base's table and its methods (keyed
-`"\x02" + name`, a prefix no Ruby identifier can start with); an instance
-is a plain object pointing back at its class. Every question a class
-system answers -- an ordinary call, `super`, `is_a?`, `to_s`/`inspect`/
-`==` on a plain object -- is the same walk, `$mfind`, climbing `kBaseKey`
-links until a key is found or the chain runs out:
+be. A class is an object holding its methods by name, with its name and
+its base's table in its kind record; an instance is an object of its
+fields whose meta -- the slot no key reaches, `MetaGet`/`MetaSet` -- is
+its class ([the shared layout](../common/runtime_parts.h)). Every question
+a class system answers -- an ordinary call, `super`, `is_a?`, `to_s`/
+`inspect`/`==` on a plain object -- is the same walk, `$mfind`, climbing
+to each base until a key is found or the chain runs out:
 
 ```
 $mfind(t, key):
   while typeof(t) == "object":
     if t has key: return t[key]
-    if not (t has base): break
-    t = t[base]
+    t = record(t).base
   return nil
 ```
 
@@ -116,15 +116,16 @@ collide with an ordinary object's *own* type; a class instance here is
 structurally distinct from every builtin container).
 
 `ClassName.new(args)` is recognized at the one place `ClassName` is used
-as a receiver rather than a value: it builds `{"\x01c": <the table>}` and
-calls `initialize` through the same `$mfind` walk, so a subclass with no
-`initialize` of its own inherits its base's automatically. `super(args)`
-looks up the *base* of the class the calling method was declared in
-(captured once, at `resolve_def` time, not read off the instance), which
-is what makes a three-level override chain resolve correctly regardless
-of which subclass actually called it. A bare `super` passes the method's
-own parameters on, as they are when it runs -- a `*rest` spread back out
--- so it reads them all, and a block that calls it captures them all.
+as a receiver rather than a value: it builds an object whose meta is the
+table and calls `initialize` through the same `$mfind` walk, so a subclass
+with no `initialize` of its own inherits its base's automatically.
+`super(args)` looks up the *base* of the class the calling method was
+declared in (captured once, at `resolve_def` time, not read off the
+instance), which is what makes a three-level override chain resolve
+correctly regardless of which subclass actually called it. A bare `super`
+passes the method's own parameters on, as they are when it runs -- a
+`*rest` spread back out -- so it reads them all, and a block that calls it
+captures them all.
 
 `samples/classes.rb` is inheritance, `super`, `attr_accessor`,
 `is_a?`/`instance_of?`, and `to_s`/`==` overrides on a plain object, all
