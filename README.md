@@ -870,9 +870,16 @@ tables out for you).
 | [mini-csharp](examples/mini-csharp/) | PEG, via cpp-peglib | A slice of C#, checked against `dotnet`. **Classes and inheritance** -- virtual dispatch is a walk up a chain of ordinary objects, so an override wins with no support from the IR -- and *static types*, which is the claim it exists to make: where mini-go's types decide its lowering, this one parses types and then erases them, and the runtime it lands on needs no addition. A **property** (auto or with a `get`/`set` body) compiles to the same `get_Name`/`set_Name` pair `csc` itself would name, found by the very `$mfind` walk a method call uses -- an `override` on one costs nothing beyond declaring the derived accessor. `using` is a `Scope` plus a `Defer`, `yield return` is a generator, `async`/`await` is a coroutine and the scheduler, and `Main` itself is a coroutine so that a `Task` can be awaited from it. Notably it carries **no** truthiness helper and **no** float-formatting rule -- the two decisions this header says it leaves to a front end, and the two every dynamic front end here has to make -- because on both, C#'s answer is already the VM's. See [examples/mini-csharp/README.md](examples/mini-csharp/README.md). |
 
 Adding one means writing a binder -- your parser's tree to `coreir::Module`
--- under `examples/<name>/`, plus that front end's own implementation of the
-`coreir_rt_*` contract and CLI if it needs them. Nothing in `coreir` or `vm`
-changes, or even has to know the front end exists.
+-- under `examples/<name>/`. The rest is shared: its `main.cc` names the
+binder and whatever `vm::RunOptions` its programs need, and hands them to
+the command line every front end here runs (`examples/common/driver.h`);
+its `CMakeLists.txt` is one `add_front_end()` call
+(`examples/common/CMakeLists.txt`), which builds it and registers its
+tests -- `samples/` against their `golden/` transcripts, `uncaught/` if
+there is one, and `--check-sharing` over every program. A front end
+outside this repository brings its own CLI, and its own implementation of
+the `coreir_rt_*` contract if the stdio host does not suit it. Nothing in
+`coreir` or `vm` changes, or even has to know the front end exists.
 
 ## Design notes
 
@@ -1002,10 +1009,11 @@ least measurable, in [Benchmarks](#benchmarks).
 
 ## Testing
 
-Each front end owns its own verification, but the shape is the same
-everywhere: run every sample and check the output against an oracle this
-repository does not contain. Passing your own test suite is not the same as
-matching the language -- see a front end's own README for what its oracle is.
+Each front end owns its own samples, but the check is the same everywhere:
+`test/run_samples.cmake` runs every sample and checks the output against a
+golden transcript from an oracle this repository does not contain. Passing
+your own test suite is not the same as matching the language -- see a
+front end's own README for what its oracle is.
 A failing program is checked the same way from the other side:
 `test/run_errors.cmake` runs a directory of programs that each end in an
 error and requires each report -- message, position and exit code -- to

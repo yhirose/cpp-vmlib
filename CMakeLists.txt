@@ -45,7 +45,8 @@ enable_testing()
 
 # The PL/0 front end is an example, and also the test suite's oracle
 # harness: the sample and error transcripts run its binary. What every
-# front end shares (examples/common) comes first, wherever PL/0 is built.
+# front end shares comes first, wherever PL/0 is built: examples/common,
+# the command-line driver and add_front_end(), which registers one.
 if(VMLIB_BUILD_EXAMPLES OR VMLIB_BUILD_TESTS)
   add_subdirectory(examples/common)
   add_subdirectory(examples/pl0)
