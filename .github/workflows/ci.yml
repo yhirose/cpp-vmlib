@@ -40,11 +40,14 @@ jobs:
   # as the two agree, whatever the language prints. test/goldens.sh
   # configures with VMLIB_CHECK_GOLDENS and runs `ctest -L goldens`, the
   # same samples through test/oracle.sh: nothing is compiled, only the
-  # languages, at the versions test/languages.sh pins, and the files. The image is named rather than ubuntu-latest
-  # because lua and guile come from its archive, and a new image must not
+  # languages, at the versions test/languages.sh pins, and the files.
+  #
+  # Its image is the one both jobs that use .github/actions/languages run
+  # on (bench is the other), named here once: that action installs Lua and
+  # Guile from the image's apt archive, so a new ubuntu-latest must not
   # move the answer under the goldens without a commit that says so.
   goldens:
-    runs-on: ubuntu-26.04
+    runs-on: &languages-image ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/languages
@@ -142,7 +145,7 @@ jobs:
   # .claude/commands/ci-bench.md drives). They are still tables in the job
   # summary, not an artifact nobody opens.
   bench:
-    runs-on: ubuntu-latest
+    runs-on: *languages-image
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/languages
