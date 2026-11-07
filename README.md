@@ -697,6 +697,17 @@ headroom above it, so a frame that reached the bound without passing it
 still runs them; exit code that itself runs away fails at the raised
 bound.
 
+An allocation that fails is, to the executor, a host's own exception:
+`std::bad_alloc` leaves `vm::compile` or `vm::run` with every frame
+released and nothing left pinned, and the `Runtime` collects what the run
+left behind as it would after any other throw. A destructor is the one
+place nothing can leave, since it runs inside a release; a failure there
+of any kind -- a trap, an allocation, a host function's exception -- is
+reported on stderr (`drop: out of memory`) and swallowed, the way Python,
+Lua and Java treat a finalizer's. `test/test_alloc_failure.cc` holds the
+library to this by failing every allocation a run makes, in turn: that one
+alone, and that one and every one after it.
+
 ## Building
 
 With CMake, `add_subdirectory` this repository and link the `vmlib`

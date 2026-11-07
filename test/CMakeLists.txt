@@ -39,10 +39,12 @@ add_test(NAME sharing
 # in the exception-safety property coreir/rt.h documents.
 # deep_calls: call chains deeper than the machine stack, which the executor
 # survives because its frames are heap objects rather than C++ activations.
+# alloc_failure: every allocation a run makes failed in turn, which the run
+# survives the way it survives a host's throw.
 foreach(t throw_safety deep_calls values closures lifetimes containers
         control_flow exceptions defers gc generators arity drops jobs names
         ints fields switch natives tailcalls coroutines bigint_recipe
-        singleton binding verify default_rt)
+        singleton binding verify default_rt alloc_failure)
   add_executable(test_${t} test_${t}.cc)
   target_link_libraries(test_${t} PRIVATE vmlib)
   add_test(NAME ${t} COMMAND test_${t})
