@@ -53,11 +53,13 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "runtime_parts.h"
 #include "vmlib.h"
 
 using namespace peg;
 using namespace peg::udl;
 using namespace coreir;
+using namespace runtime_parts;
 
 namespace mini_lua {
 namespace {
@@ -397,10 +399,7 @@ struct Binder {
   // neither."
   void rt_truthy() {
     RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.L(v))));
-    r.add(r.ret(r.Bo(true)));
+    truthy_nil_false(r);
     r.finish("$truthy");
   }
 

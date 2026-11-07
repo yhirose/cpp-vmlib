@@ -169,11 +169,27 @@ inline void iter_step(
   w.add(w.ret(step(w, w.idx(w.L(a), w.L(i)))));
 }
 
+// ---- Truthiness ------------------------------------------------------------
+//
+// `(v)`: false for nil and for false, true for everything else -- 0, "",
+// an empty container all included. Lua's rule and Ruby's (and Elixir's and
+// Clojure's), which Value::truthy() does not follow: it calls 0 false. The
+// one truthiness written the same way twice here; JavaScript's and
+// Python's differ from it and from each other (see below).
+inline void truthy_nil_false(FuncWriter& w) {
+  const auto [v] = w.params("v");
+  w.add(w.iff(w.is(w.typ(v), "nil"), w.ret(w.Bo(false))));
+  w.add(w.iff(w.is(w.typ(v), "bool"), w.ret(w.L(v))));
+  w.add(w.ret(w.Bo(true)));
+}
+
 // ---- Left per language, and why -------------------------------------------
 //
-// * `$truthy`, past nil and false. JavaScript's falsy set has "" and NaN and
-//   not [], Python's has "", [] and {} and not NaN: the same decision
-//   Value::truthy() refuses to make, made differently by each.
+// * `$truthy` past nil and false. JavaScript's falsy set has "" and NaN and
+//   not [], Python's has "", [] and {} and not NaN: the decision
+//   Value::truthy() refuses to make, made differently by each, and in
+//   bodies too short for a parameterized one to be anything but a table of
+//   the same decisions.
 // * `$str`. Every front end spells nil, a bool and a container its own way
 //   ("None", "nil", "", "undefined"; "True", "true"), and finds a class's own
 //   to_s/__str__/ToString/__tostring by its own protocol.

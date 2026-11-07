@@ -600,12 +600,10 @@ struct Binder {
     r.finish(name);
   }
 
+  // Only nil and false are false: Lua's rule too, so it is shared.
   void rt_truthy() {
     RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.L(v))));
-    r.add(r.ret(r.Bo(true)));
+    truthy_nil_false(r);
     r.finish("$truthy");
   }
 
