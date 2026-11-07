@@ -34,6 +34,21 @@ jobs:
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
 
+  # The other half of the build lanes' sample tests. Those hold each front
+  # end to its goldens; this holds the goldens to the real language
+  # (test/goldens.sh), the one thing a front end's own test cannot check --
+  # it passes for as long as the two agree, whatever the language prints.
+  # Nothing is compiled: the languages, at the versions test/languages.sh
+  # pins, and the files. The image is named rather than ubuntu-latest
+  # because lua and guile come from its archive, and a new image must not
+  # move the answer under the goldens without a commit that says so.
+  goldens:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/languages
+      - run: test/goldens.sh
+
   # Every allocation collects. What this catches is the collector taking an
   # object some C++ handle still holds -- the premature-sweep class of bug --
   # anywhere in the whole suite, not only in test_gc.cc's arranged scenes.
