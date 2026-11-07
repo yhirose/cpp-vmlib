@@ -1452,6 +1452,15 @@ struct Binder {
     return rt.call(h, {x, y}, p);
   }
 
+  // `c[k]`: an Array's or a String's element at an index in range, and a
+  // Hash's value or nil, are Index's; a negative index, one out of range
+  // (nil) and anything else are $idx's.
+  NodeId index(NodeId c, NodeId k, SrcPos p) {
+    return Builder(m).at(p).index(
+        c, k,
+        {rt.ref("$idx", p), tags_named({"array", "string", "map", "int"})});
+  }
+
   // `==` on two values of these types is Eq's -- an Integer and a Float
   // compare as numbers -- and on two of different types, which Eq refuses,
   // $eq's, which also asks an object's own `==`.
@@ -1802,7 +1811,7 @@ struct Binder {
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
     const NodeId R = b.varref(VarKind::Local, tr);
     const NodeId K = b.varref(VarKind::Local, tk);
-    const NodeId cur = op == "=" ? b.nil_literal() : rt.call("$idx", {R, K}, p);
+    const NodeId cur = op == "=" ? b.nil_literal() : index(R, K, p);
     return b.block({b.assign(VarKind::Local, tr, recv),
                     b.assign(VarKind::Local, tk, key),
                     rt.call("$setidx", {R, K, combine(cur)}, p)});
@@ -2356,7 +2365,7 @@ struct Binder {
     const SrcPos p = pos_of(sfx);
     auto b = Builder(m).at(p);
     if (sfx.tag == "indexsfx"_) {
-      return rt.call("$idx", {recv, emit_expr(*sfx.nodes[0], ctx)}, p);
+      return index(recv, emit_expr(*sfx.nodes[0], ctx), p);
     }
     const std::string name(sfx.nodes[0]->token);
     Args cargs;
