@@ -187,7 +187,8 @@ in tail position, so a tail call through it stays one too.
   for `1.0`, and Guile gives `1.0`; its comment says a front end that cares
   builds the string, so `$fstr` does.
 * **`modulo` follows the divisor's sign** where `BinOp::Mod` (like C's
-  `%`, and like `remainder`) follows the dividend's.
+  `%`, and like `remainder`) follows the dividend's: on two exact
+  integers it is `BinOp::FloorMod`.
 
 ## `case`, and `define-record-type` -- R7RS's answer to "a class"
 

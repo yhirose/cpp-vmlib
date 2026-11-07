@@ -5,6 +5,9 @@
 (display (- 10 1 2)) (display " ") (display (- 5)) (newline)
 (display (quotient 7 2)) (display " ") (display (remainder 7 2)) (newline)
 (display (modulo -7 3)) (display " ") (display (remainder -7 3)) (newline)
+; Which way `modulo` rounds is the signs' to say, not their product's,
+; which wraps past 2^63.
+(display (modulo -3 4611686018427387904)) (newline)
 (display (/ 1.0 4)) (display " ") (display (expt 2 10)) (newline)
 (display (abs -3)) (display " ") (display (min 2 9)) (display " ")
 (display (max 2 9)) (newline)

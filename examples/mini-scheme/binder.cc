@@ -636,7 +636,8 @@ struct Binder {
       return r.bin(BinOp::Mod, r.L(0), r.L(1));
     }, {"a", "b"});
     // `modulo` follows the divisor's sign; `remainder` follows the
-    // dividend's -- BinOp::Mod is the second, so the first is a correction.
+    // dividend's -- BinOp::Mod is the second, and BinOp::FloorMod the
+    // first.
     rt_modulo();
     rt_expt();
 
@@ -796,13 +797,10 @@ struct Binder {
   void rt_modulo() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [m] = r.locals("m");
-    r.add(r.set(m, r.bin(BinOp::Mod, r.L(a), r.L(b))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Ne, r.L(m), r.I(0)),
-               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(m), r.L(b)), r.I(0))),
-        r.set(m, r.bin(BinOp::Add, r.L(m), r.L(b)))));
-    r.add(r.ret(r.L(m)));
+    r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
+                r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
+    // An inexact modulo is outside this subset, and Mod says so.
+    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
     r.finish("$modulo");
   }
 
@@ -1078,9 +1076,16 @@ struct Binder {
   // (runtime_parts.h's op_or_helper).
   NodeId apply2(const std::string& helper, NodeId x, NodeId y, SrcPos p) {
     const auto it = binop_helpers().find(helper);
-    if (it == binop_helpers().end()) return rt.call(helper, {x, y}, p);
-    return op_or_helper(rt, it->second, x, y, tags_named({"int", "double"}),
-                        helper, p);
+    if (it != binop_helpers().end()) {
+      return op_or_helper(rt, it->second, x, y,
+                          tags_named({"int", "double"}), helper, p);
+    }
+    // `modulo` on two exact integers is FloorMod, which is its rule.
+    if (helper == "$modulo") {
+      return op_or_helper(rt, BinOp::FloorMod, x, y, tags_named("int"),
+                          helper, p);
+    }
+    return rt.call(helper, {x, y}, p);
   }
 
   // A quoted datum, built at bind time: a list becomes a chain of pairs, a
@@ -1280,6 +1285,7 @@ struct Binder {
     if (static_cast<int32_t>(args.size()) != bi.arity) {
       fail(at, name + " takes " + std::to_string(bi.arity) + " arguments");
     }
+    if (args.size() == 2) return apply2(bi.rt, args[0], args[1], p);
     return rt.call(bi.rt, args, p);
   }
 
