@@ -62,7 +62,8 @@ namespace {
 
 // What the implementation keeps on an object is its kind record
 // (runtime_parts.h's Hidden state), where no field name can reach it. A
-// record instance's names the record type it was made by; the token an
+// record instance's names the record type it was made by -- one record per
+// type, every instance's meta, and so the type's identity; the token an
 // escape continuation throws carries its call/cc's tag and the value.
 constexpr char kRecordKind[] = "record";
 constexpr int64_t kRecordType = 1;
@@ -1343,6 +1344,19 @@ struct Binder {
     const RecordInfo& ri = records.at(&a);
     std::vector<NodeId> out;
 
+    // The record type's kind record, built once where the form runs -- in
+    // a cell the constructor and the predicate close over -- and every
+    // record of the type has it as its meta: immutable, so shared, and
+    // the type's identity, so the predicate asks Same.
+    const int32_t cell = ctx.next_cell++;
+    out.push_back(b.cell_fresh(cell));
+    out.push_back(b.assign(VarKind::Cell, cell,
+                           b.array_lit({b.str_literal(kRecordKind),
+                                        b.str_literal(ri.type_name)})));
+    const int32_t cmap = static_cast<int32_t>(m.capture_maps.size());
+    m.capture_maps.push_back({{VarKind::Cell, cell}});
+    const NodeId type = b.varref(VarKind::Capture, 0);
+
     const int32_t ctor_var = decl_of.at(a.nodes[2]->nodes[0].get());
     {
       Func f;
@@ -1350,6 +1364,8 @@ struct Binder {
       f.num_params = static_cast<int32_t>(ri.ctor_fields.size());
       f.num_locals = f.num_params;
       f.local_names = ri.ctor_fields;
+      f.num_captures = 1;
+      f.capture_names = {"$type"};
       f.lenient_arity = true;
       // Every field, in the order the form declares them -- the order
       // display shows them in -- with #f for one the constructor does not
@@ -1366,12 +1382,11 @@ struct Binder {
                                                at - ri.ctor_fields.begin())));
       }
       f.body = b.scope(0, f.num_params,
-                       b.make_return(of_kind(b, b.object_lit(kvs), kRecordKind,
-                                             {b.str_literal(ri.type_name)})));
+                       b.make_return(b.intrinsic(IntrinsicId::MetaSet,
+                                                 {b.object_lit(kvs), type})));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(f));
-      out.push_back(
-          write_var(ctor_var, b.make_closure(idx, rt.empty_cmap()), ctx, p));
+      out.push_back(write_var(ctor_var, b.make_closure(idx, cmap), ctx, p));
     }
 
     const int32_t pred_var = decl_of.at(a.nodes[3].get());
@@ -1379,20 +1394,20 @@ struct Binder {
       Func f;
       f.name = ri.type_name + "?";
       f.num_params = 1;
-      f.num_locals = 3;
-      f.local_names = {"v", "$meta", "$type"};
+      f.num_locals = 1;
+      f.local_names = {"v"};
+      f.num_captures = 1;
+      f.capture_names = {"$type"};
       f.lenient_arity = true;
       const NodeId V = b.varref(VarKind::Local, 0);
-      const NodeId cond = b.make_if(
-          is_kind(b, V, 1, 2, kRecordKind),
-          b.binary(BinOp::Eq, kind_field(b, V, kRecordType),
-                   b.str_literal(ri.type_name)),
-          b.bool_literal(false));
-      f.body = b.scope(0, 3, b.make_return(cond));
+      f.body = b.scope(
+          0, 1,
+          b.make_return(b.intrinsic(
+              IntrinsicId::Same,
+              {b.intrinsic(IntrinsicId::MetaGet, {V}), type})));
       const int32_t idx = static_cast<int32_t>(m.funcs.size());
       m.funcs.push_back(std::move(f));
-      out.push_back(
-          write_var(pred_var, b.make_closure(idx, rt.empty_cmap()), ctx, p));
+      out.push_back(write_var(pred_var, b.make_closure(idx, cmap), ctx, p));
     }
 
     for (const RecordField& rf : ri.fields) {
