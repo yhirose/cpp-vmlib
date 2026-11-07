@@ -917,24 +917,22 @@ struct Binder {
         {"lo", "hi"});
   }
 
-  // The shared iteration cursor: `{k:"a", v:array, i:index}` for an array
-  // or a Range (expanded once, up front), and `{k:"h", v:keys, src:hash,
-  // i:index}` for a Hash -- so `$each`/`$map`/etc. all walk the one shape,
-  // and only a Hash's step differs (it hands back a key and a value).
+  // The iteration cursor: runtime_parts.h's sequence_cursor for an array or
+  // a Range (expanded once, up front), and Ruby's own `{k:"h", v:keys,
+  // src:hash, i:index}` for a Hash -- so `$each`/`$map`/etc. all walk the
+  // one shape, and only a Hash's step differs (it hands back a key and a
+  // value).
   void rt_iter() {
     RT r(*this);
     const auto [v] = r.params("v");
-    r.add(r.iff(r.is(r.typ(v), "array"),
-                r.ret(r.obj({{"k", r.S("a")}, {"v", r.L(v)}, {"i", r.I(0)}}))));
+    r.add(r.iff(r.is(r.typ(v), "array"), r.ret(sequence_cursor(r, r.L(v)))));
     r.add(r.iff(r.is(r.typ(v), "map"),
                 r.ret(r.obj({{"k", r.S("h")},
                              {"v", r.in(IntrinsicId::ObjectKeys, {r.L(v)})},
                              {"src", r.L(v)},
                              {"i", r.I(0)}}))));
     r.add(r.iff(r.both(r.is(r.typ(v), "object"), r.has(r.L(v), r.S(kRangeKey))),
-                r.ret(r.obj({{"k", r.S("a")},
-                             {"v", r.call("$toa", {r.L(v)})},
-                             {"i", r.I(0)}}))));
+                r.ret(sequence_cursor(r, r.call("$toa", {r.L(v)})))));
     r.add(r.ret(r.call("$exc", {r.S("TypeError"),
                                 r.S("not iterable")})));
     r.finish("$iter");
@@ -944,19 +942,17 @@ struct Binder {
     RT r(*this);
     const auto [it] = r.params("it");
     const auto [a, i, k] = r.locals("a", "i", "k");
-    r.add(r.set(a, r.idx(r.L(it), "v")));
+    r.add(r.set(a, cursor_source(r, it)));
     r.add(r.set(i, r.idx(r.L(it), "i")));
-    r.add(r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(a))),
-                r.ret(r.obj({{"done", r.Bo(true)}}))));
+    r.add(r.iff(r.bin(BinOp::Ge, r.L(i), r.len(r.L(a))), r.ret(step_done(r))));
     r.add(r.sidx(r.L(it), r.S("i"), r.bin(BinOp::Add, r.L(i), r.I(1))));
-    r.add(r.iff(r.is(r.idx(r.L(it), "k"), "h"),
+    r.add(r.iff(cursor_is(r, it, "h"),
                 r.blk({r.set(k, r.idx(r.L(a), r.L(i))),
                        r.ret(r.obj({{"done", r.Bo(false)},
                                     {"key", r.L(k)},
                                     {"value", r.idx(r.idx(r.L(it), "src"),
                                                     r.L(k))}}))})));
-    r.add(r.ret(
-        r.obj({{"done", r.Bo(false)}, {"value", r.idx(r.L(a), r.L(i))}})));
+    r.add(r.ret(step(r, r.idx(r.L(a), r.L(i)))));
     r.finish("$iternext");
   }
 
