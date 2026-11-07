@@ -231,6 +231,52 @@ the one `declare_var` and `note_call`/`close_over_calls` exist for.
 are all top-level, so there is nothing to closure-convert. The other seven
 front ends use all three.
 
+**Where binders go wrong.** Auditing the eight `mini-*` front ends against
+their real languages turned up the same few mistakes in nearly every one.
+Only the second has a check that runs over a new front end's programs; the
+rest are caught by a sample written against the real language, its output
+kept as the golden (see [Testing](#testing)).
+
+- *An argument the callee never reads still runs* -- every argument, in
+  order, when a library function lowered by name reads fewer, and before a
+  call on a nil receiver fails. `spill_unread` and `Builder::sequence`,
+  above, are for this.
+- *Each operand runs once.* A `NodeId` used twice -- a receiver for its
+  lookup and again for its call, the target of a desugared `x op= y` --
+  runs twice, and `--check-sharing`, above, reports it.
+- *Evaluation order is the language's, not the tree's.* lua5.4 evaluates a
+  multiple assignment's targets left to right, then its values, then
+  stores right to left; Python's `t[k] = v` evaluates `v` before `t` and
+  `k`; a chained comparison runs an operand only once the link before it
+  held; Go runs a struct literal's values in the order they are written.
+  Reordering takes temporaries, and one written before expressions emitted
+  earlier run is `alloc_fresh_local`'s, above.
+- *Every expression has the language's value.* An assignment, where it is
+  an expression, is worth what it stored -- `Assign` is a statement, which
+  `verify()` refuses in value position, so the binder stores and reads
+  back; a function returns its body's value, so one that falls off its end
+  must end in the language's nothing; a constructor that returns an object
+  is what `new` gives.
+- *The implementation's names stay out of the program's.* A key the
+  implementation chooses needs a prefix no identifier can spell, as
+  `kDropKey`'s `"\x01"` does; mini-culebra's class table keeps its own
+  entries under `"\x01"` and the program's methods under `"\x02"` (see its
+  [Classes, without a class in the IR](examples/mini-culebra/README.md#classes-without-a-class-in-the-ir)),
+  after its `init` and `name` had collided with methods of those names.
+- *Printing is the language's*: number formatting, string escapes and
+  `repr`, how a record or a procedure displays, an error's wording, and the
+  report of an uncaught exception, which `test/run_errors.cmake` pins for
+  the five front ends that word their own.
+- *Arity is the language's*: which calls are lenient (`Func::lenient_arity`,
+  [Static calls](#static-calls)), what a rest param collects
+  ([Variadic calls](#variadic-calls)), that a Ruby method checks its count
+  where a block does not, and that a library function refuses a count it
+  does not take.
+- *Equality is the language's*: a Ruby object's own `==` answers before the
+  types are compared, a Lua table equals itself without asking `__eq`,
+  Scheme's `memq` compares with `eq?` where `member` uses `equal?`, and
+  Python's `xs += ys` extends the list in place.
+
 ## Fixed-width integers
 
 `Value` only ever holds an `int64` or a `double` -- there is no `int32`, no
