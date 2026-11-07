@@ -18,22 +18,13 @@
 # (mini-go's do: each is a standalone `package main`, and two side by side
 # would both declare `func main`, which `go build` rejects). <case>.stdin
 # beside it, when there is one, is its input. LEAD -- mini-js's prelude --
-# is bound ahead of each case in its own directory, as
-# test/run_sharing.cmake binds it, and is not a case.
+# is bound ahead of each case and is not one (test/cases.cmake).
 
-# Every argument is required: the cases are a recursive glob of DIR, and a
-# call that left DIR out would walk the whole filesystem from its root.
-foreach(arg BIN DIR EXT ORACLE)
-  if("${${arg}}" STREQUAL "")
-    message(FATAL_ERROR "run_samples.cmake: -D${arg} is required")
-  endif()
-endforeach()
+include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
+require_args(run_samples.cmake BIN DIR EXT ORACLE)
 
 file(GLOB_RECURSE sources ${DIR}/*.${EXT})
-if(LEAD)
-  list(REMOVE_ITEM sources ${LEAD})
-  get_filename_component(lead_dir ${LEAD} DIRECTORY)
-endif()
+drop_lead(sources)
 list(SORT sources)
 if(NOT sources)
   message(FATAL_ERROR "no *.${EXT} samples under ${DIR}")
@@ -44,10 +35,7 @@ foreach(src ${sources})
   get_filename_component(dir ${src} DIRECTORY)
   get_filename_component(name ${src} NAME)
   get_filename_component(s ${src} NAME_WE)
-  set(lead)
-  if(LEAD AND dir STREQUAL lead_dir)
-    set(lead ${LEAD})
-  endif()
+  lead_for(lead ${src})
   set(input)
   if(EXISTS ${dir}/${s}.stdin)
     set(input INPUT_FILE ${dir}/${s}.stdin)

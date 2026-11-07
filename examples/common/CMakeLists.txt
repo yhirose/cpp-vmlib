@@ -3,9 +3,10 @@
 #
 # The driver is one library, built once. It is the translation unit of
 # each front end that takes the stdio host (VMLIB_DEFAULT_RUNTIME), and the
-# one that instantiates the compiler and the executor -- so a front end's
-# main.cc is a few lines of what is its own, and the executor is compiled
-# once rather than once per front end.
+# one that instantiates the compiler and the executor's run loop -- so a
+# front end's main.cc is a few lines of what is its own, and that code is
+# compiled once rather than once per front end. (A binder whose host
+# functions call back into the executor still instantiates that part.)
 add_library(front-end-driver STATIC driver.cc)
 target_include_directories(front-end-driver PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(front-end-driver PUBLIC vmlib)
@@ -19,29 +20,14 @@ target_link_libraries(front-end-driver PUBLIC vmlib)
 # header, so that a warning in it is upstream's to fix rather than this
 # build's -Werror's.
 #
-# With EXT, the source extension, its tests too. Their names are an
-# interface: CI's sanitizer lane selects a front end's tests by "<name>-".
-# They register whether or not VMLIB_BUILD_TESTS is on: nothing else in
-# the tree depends on a front end, so its checks live with it rather than
-# in test/. (enable_testing() runs once at the top level, ahead of every
-# add_subdirectory -- see the comment there for why that timing matters.)
-#
-#   <name>-samples   Every program under samples/ prints exactly its
-#                    golden transcript, samples/golden/<sample>.txt,
-#                    captured once from ORACLE (test/run_samples.cmake).
-#                    LEAD, a file in the front end's directory, is bound
-#                    ahead of each sample: mini-js's prelude.
-#   <name>-uncaught  Only with an uncaught/ directory: an exception nothing
-#                    catches is reported in the language's own words
-#                    (RunOptions::describe), as uncaught/expected/ holds
-#                    each case's report (test/run_errors.cmake).
-#   <name>-sharing   Nothing a program could observe is evaluated twice
-#                    (coreir::shared_effects): every sample, uncaught case
-#                    and bench/languages program (test/run_sharing.cmake).
-#
-# PL/0 passes no EXT. Its binary is the main suite's oracle harness, so its
-# tests are the suite's: test/CMakeLists.txt registers them under the
-# suite's names, with its diagnostics' transcripts in test/errors/.
+# With EXT, the source extension, its tests too: front_end_tests() below,
+# named "<name>-". They register whether or not VMLIB_BUILD_TESTS is on:
+# nothing else in the tree depends on a front end, so its checks live with
+# it rather than in test/. (enable_testing() runs once at the top level,
+# ahead of every add_subdirectory -- see the comment there for why that
+# timing matters.) PL/0 passes no EXT: its binary is the main suite's
+# oracle harness, so its tests are the suite's, registered by
+# test/CMakeLists.txt.
 function(add_front_end name)
   cmake_parse_arguments(PARSE_ARGV 1 arg "" "EXT;ORACLE;LEAD" "")
   if(DEFINED arg_UNPARSED_ARGUMENTS OR DEFINED arg_KEYWORDS_MISSING_VALUES
@@ -50,46 +36,65 @@ function(add_front_end name)
     message(FATAL_ERROR
             "add_front_end(<name> [EXT <ext> ORACLE <oracle> [LEAD <file>]])")
   endif()
-  set(dir ${CMAKE_CURRENT_SOURCE_DIR})
 
   add_executable(${name} main.cc binder.cc)
-  target_include_directories(${name} PRIVATE ${dir})
   target_include_directories(${name} SYSTEM PRIVATE
                              ${PROJECT_SOURCE_DIR}/examples/pl0/vendor)
   target_link_libraries(${name} PRIVATE front-end-driver)
 
-  if(NOT DEFINED arg_EXT)
-    return()
+  if(DEFINED arg_EXT)
+    set(lead)
+    if(DEFINED arg_LEAD)
+      set(lead LEAD ${CMAKE_CURRENT_SOURCE_DIR}/${arg_LEAD})
+    endif()
+    front_end_tests(${name}- ${name} DIR ${CMAKE_CURRENT_SOURCE_DIR}
+                    EXT ${arg_EXT} ORACLE "${arg_ORACLE}" ${lead})
   endif()
+endfunction()
+
+# front_end_tests(<prefix> <target> DIR <dir> EXT <ext> ORACLE <oracle>
+#                 [LEAD <file>])
+#
+# The checks over a front end's programs, the <target> binary run on the
+# *.<ext> files under <dir> -- add_front_end's, prefixed "<name>-", and
+# the main suite's for PL/0, unprefixed. Their names are an interface:
+# CI's sanitizer lane selects a front end's tests by "<name>-".
+#
+#   <prefix>samples   Every program under samples/ prints exactly its
+#                     golden transcript, samples/golden/<sample>.txt,
+#                     captured once from ORACLE (test/run_samples.cmake).
+#                     LEAD, a file under samples/, is bound ahead of each
+#                     sample: mini-js's prelude.
+#   <prefix>uncaught  Only with an uncaught/ directory: an exception
+#                     nothing catches is reported in the language's own
+#                     words (RunOptions::describe), as uncaught/expected/
+#                     holds each case's report (test/run_errors.cmake).
+#   <prefix>sharing   Nothing a program could observe is evaluated twice
+#                     (coreir::shared_effects): every sample, uncaught case
+#                     and bench/languages program (test/run_sharing.cmake).
+function(front_end_tests prefix target)
+  cmake_parse_arguments(PARSE_ARGV 2 arg "" "DIR;EXT;ORACLE;LEAD" "")
+  if(DEFINED arg_UNPARSED_ARGUMENTS OR DEFINED arg_KEYWORDS_MISSING_VALUES
+     OR NOT DEFINED arg_DIR OR NOT DEFINED arg_EXT OR NOT DEFINED arg_ORACLE)
+    message(FATAL_ERROR "front_end_tests(<prefix> <target> DIR <dir> "
+                        "EXT <ext> ORACLE <oracle> [LEAD <file>])")
+  endif()
+  set(run ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE:${target}> -DEXT=${arg_EXT})
   set(lead)
   if(DEFINED arg_LEAD)
-    set(lead -DLEAD=${dir}/${arg_LEAD})
+    set(lead -DLEAD=${arg_LEAD})
   endif()
+  set(scripts ${PROJECT_SOURCE_DIR}/test)
 
-  add_test(NAME ${name}-samples
-           COMMAND ${CMAKE_COMMAND}
-                   -DBIN=$<TARGET_FILE:${name}>
-                   -DDIR=${dir}/samples
-                   -DEXT=${arg_EXT}
-                   "-DORACLE=${arg_ORACLE}"
-                   ${lead}
-                   -P ${PROJECT_SOURCE_DIR}/test/run_samples.cmake)
-
-  if(EXISTS ${dir}/uncaught)
-    add_test(NAME ${name}-uncaught
-             COMMAND ${CMAKE_COMMAND}
-                     -DBIN=$<TARGET_FILE:${name}>
-                     -DDIR=${dir}/uncaught
-                     -DEXT=${arg_EXT}
-                     -P ${PROJECT_SOURCE_DIR}/test/run_errors.cmake)
+  add_test(NAME ${prefix}samples
+           COMMAND ${run} -DDIR=${arg_DIR}/samples "-DORACLE=${arg_ORACLE}"
+                   ${lead} -P ${scripts}/run_samples.cmake)
+  if(EXISTS ${arg_DIR}/uncaught)
+    add_test(NAME ${prefix}uncaught
+             COMMAND ${run} -DDIR=${arg_DIR}/uncaught
+                     -P ${scripts}/run_errors.cmake)
   endif()
-
-  add_test(NAME ${name}-sharing
-           COMMAND ${CMAKE_COMMAND}
-                   -DBIN=$<TARGET_FILE:${name}>
-                   -DSRC=${dir}
-                   -DBENCH=${PROJECT_SOURCE_DIR}/bench/languages
-                   -DEXT=${arg_EXT}
-                   ${lead}
-                   -P ${PROJECT_SOURCE_DIR}/test/run_sharing.cmake)
+  add_test(NAME ${prefix}sharing
+           COMMAND ${run} -DSRC=${arg_DIR} ${lead}
+                   -P ${scripts}/run_sharing.cmake)
 endfunction()

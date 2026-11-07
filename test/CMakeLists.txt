@@ -1,13 +1,10 @@
-# Each sample/error case runs once, through the one engine there is, and is
-# checked against an oracle this repository does not contain: culebra's own
-# PL/0 interpreter for samples, a fixed expected/ transcript for errors.
-add_test(NAME samples
-         COMMAND ${CMAKE_COMMAND}
-                 -DBIN=$<TARGET_FILE:pl0>
-                 -DDIR=${PROJECT_SOURCE_DIR}/examples/pl0/samples
-                 -DEXT=pas
-                 "-DORACLE=culebra's pl0.cul"
-                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples.cmake)
+# PL/0's programs, checked the way every front end's are
+# (front_end_tests, examples/common/CMakeLists.txt) but as the main suite's
+# own, unprefixed: `samples`, each against a golden captured from an oracle
+# this repository does not contain -- culebra's own PL/0 interpreter -- and
+# `sharing`. Its diagnostics are checked against fixed transcripts below.
+front_end_tests("" pl0 DIR ${PROJECT_SOURCE_DIR}/examples/pl0 EXT pas
+                ORACLE "culebra's pl0.cul")
 
 # The errors are not golden-compared against culebra: the binder reports
 # undefined names, constant assignment and duplicate declarations at bind
@@ -19,18 +16,6 @@ add_test(NAME errors
                  -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/errors
                  -DEXT=pas
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_errors.cmake)
-
-# Nothing a program could observe is evaluated twice
-# (coreir::shared_effects): every PL/0 sample (bench/languages has none).
-# Each example front end runs the same check over its own
-# (<front end>-sharing).
-add_test(NAME sharing
-         COMMAND ${CMAKE_COMMAND}
-                 -DBIN=$<TARGET_FILE:pl0>
-                 -DSRC=${CMAKE_SOURCE_DIR}/examples/pl0
-                 -DBENCH=${CMAKE_SOURCE_DIR}/bench/languages
-                 -DEXT=pas
-                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_sharing.cmake)
 
 # Not PL/0 tests: these exercise coreir/vm directly, building their Core-IR by
 # hand and supplying their own coreir_rt host, to pin properties the samples

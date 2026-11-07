@@ -52,76 +52,16 @@ if(VMLIB_BUILD_EXAMPLES OR VMLIB_BUILD_TESTS)
   add_subdirectory(examples/pl0)
 endif()
 
-# mini-go is a second example, proving the managed-language recipes
-# (Fixed-width integers, `float`, Static calls, Struct fields, Switch)
-# against a real `go run` rather than culebra's dynamic PL/0. It plays no
-# role in the main test suite the way PL/0 does, so it stays behind
-# VMLIB_BUILD_EXAMPLES alone --
-# but its own sample check (examples/mini-go/CMakeLists.txt) still
-# registers with ctest regardless of VMLIB_BUILD_TESTS, same as any other
-# add_test once testing is enabled.
+# The other front ends are examples alone: none plays a role in the main
+# suite the way PL/0 does, so they build only with VMLIB_BUILD_EXAMPLES --
+# and their own checks (add_front_end) register with ctest regardless of
+# VMLIB_BUILD_TESTS, as any add_test does once testing is enabled. What
+# each one proves is said at the top of its own CMakeLists.txt.
 if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-go)
-endif()
-
-# mini-js is the dynamic-language counterpart to mini-go: where that one
-# proves the managed, statically-typed recipes against `go run`, this one
-# proves Closures, Exceptions, Generators, Maps and Coroutines + Scheduler
-# (async/await over a Promise it writes itself) against `node`. Same
-# arrangement as mini-go -- behind VMLIB_BUILD_EXAMPLES, with its own
-# add_test that registers regardless of VMLIB_BUILD_TESTS.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-js)
-endif()
-
-# mini-culebra is the front end whose oracle is culebra itself. It is the
-# only one that exercises the mechanisms vmlib.h describes in culebra's own
-# terms -- the owned stack, a Scope's explicit release order and
-# RunOptions::entry_frame_drops -- and its standard library is the Host
-# functions recipe, vm::RunOptions::natives.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-culebra)
-endif()
-
-# mini-lua proves Tail calls, as mini-scheme does -- Lua guarantees them,
-# so `lua` is an oracle for the property rather than an implementation
-# that happens to agree -- and is the only front end that hands
-# coroutines to the program the way CoroCreate/CoroResume/CoroYield were
-# named for.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-lua)
-endif()
-
-# mini-python is the only front end that proves Arbitrary-precision
-# integers -- Python's `int` is unbounded, so python3 is an oracle for a
-# bignum this library deliberately has no Value tag for -- and the only one
-# whose lexical structure a PEG cannot express, so it normalizes the
-# indentation before parsing.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-python)
-endif()
-
-# mini-scheme is the front end that shows a *boundary* rather than a
-# recipe: the escape half of call/cc is a TryCatch and works, and the
-# re-entrant half is the "multi-shot continuations" entry in this README's
-# own list of what stays out of reach.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-scheme)
-endif()
-
-# mini-ruby is the only front end that uses FnArity and ArgCount: Ruby
-# makes both program-visible, as `Proc#arity` and as the proc/lambda
-# distinction (lenient_arity plus one ArgCount test).
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-ruby)
-endif()
-
-# mini-csharp is statically typed like mini-go, but erases its types where
-# mini-go's decide the lowering -- which is the point: it parses types,
-# erases them, and then wants nothing the runtime does not already have,
-# classes and inheritance included. Its oracle is `dotnet`.
-if(VMLIB_BUILD_EXAMPLES)
-  add_subdirectory(examples/mini-csharp)
+  foreach(front_end mini-go mini-js mini-culebra mini-lua mini-python
+                    mini-scheme mini-ruby mini-csharp)
+    add_subdirectory(examples/${front_end})
+  endforeach()
 endif()
 
 if(VMLIB_BUILD_TESTS)

@@ -876,7 +876,8 @@ the command line every front end here runs (`examples/common/driver.h`);
 its `CMakeLists.txt` is one `add_front_end()` call
 (`examples/common/CMakeLists.txt`), which builds it and registers its
 tests -- `samples/` against their `golden/` transcripts, `uncaught/` if
-there is one, and `--check-sharing` over every program. A front end
+there is one, and `--check-sharing` over every program -- and its name
+joins the list of front ends in the top-level `CMakeLists.txt`. A front end
 outside this repository brings its own CLI, and its own implementation of
 the `coreir_rt_*` contract if the stdio host does not suit it. Nothing in
 `coreir` or `vm` changes, or even has to know the front end exists.
