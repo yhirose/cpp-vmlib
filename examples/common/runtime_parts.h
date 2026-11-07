@@ -132,16 +132,13 @@ inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
 }
 
 // The walk, as the While it is: from the table in `c`, each table up the
-// chain in turn, nearest first, until one has no base. `visit` runs at each
-// and returns from the helper when it finds what it is after; a walk that
-// falls off the end found nothing. `c` is left at the last table looked at.
+// chain in turn, nearest first, until one has no base -- whose kBaseKey
+// reads as nil, which ends the loop. `visit` runs at each and returns from
+// the helper when it finds what it is after; a walk that falls off the end
+// found nothing.
 inline NodeId walk_bases(FuncWriter& w, FuncWriter::Slot c, NodeId visit) {
-  return w.wh(
-      w.is(w.typ(c), "object"),
-      w.blk({visit,
-             w.iff(w.bin(BinOp::Eq, w.has(w.L(c), w.S(kBaseKey)), w.Bo(false)),
-                   w.b.make_break()),
-             w.set(c, w.idx(w.L(c), kBaseKey))}));
+  return w.wh(w.is(w.typ(c), "object"),
+              w.blk({visit, w.set(c, w.idx(w.L(c), kBaseKey))}));
 }
 
 // `(t, key)`: what `key` names in the table `t` or in its nearest ancestor
@@ -312,13 +309,14 @@ inline void float_str(FuncWriter& w, const NonFinite& spell) {
   w.add(w.iff(w.in(IntrinsicId::Same, {w.L(d), w.D(-0.0)}),
               w.ret(w.S("-0.0"))));
   w.add(w.iff(
-      w.both(w.bin(BinOp::Gt, w.L(d), w.D(-lim)),
-             w.bin(BinOp::Lt, w.L(d), w.D(lim))),
-      w.blk({w.set(i, w.in(IntrinsicId::ToInt, {w.L(d)})),
-             w.iff(w.bin(BinOp::Eq, w.in(IntrinsicId::ToDouble, {w.L(i)}),
-                         w.L(d)),
-                   w.ret(w.bin(BinOp::Add, w.in(IntrinsicId::ToStr, {w.L(i)}),
-                               w.S(".0"))))})));
+      w.bin(BinOp::Gt, w.L(d), w.D(-lim)),
+      w.iff(w.bin(BinOp::Lt, w.L(d), w.D(lim)),
+            w.blk({w.set(i, w.in(IntrinsicId::ToInt, {w.L(d)})),
+                   w.iff(w.bin(BinOp::Eq,
+                               w.in(IntrinsicId::ToDouble, {w.L(i)}), w.L(d)),
+                         w.ret(w.bin(BinOp::Add,
+                                     w.in(IntrinsicId::ToStr, {w.L(i)}),
+                                     w.S(".0"))))}))));
   w.add(w.iff(w.bin(BinOp::Ne, w.L(d), w.L(d)), w.ret(w.S(spell.nan))));
   w.add(w.iff(w.bin(BinOp::Eq, w.L(d), w.D(inf)), w.ret(w.S(spell.inf))));
   w.add(w.iff(w.bin(BinOp::Eq, w.L(d), w.D(-inf)),
@@ -359,8 +357,7 @@ inline NodeId equal_entries(HelperWriter& r, FuncWriter::Slot a,
                             const std::string& eq) {
   return r.blk(
       {r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(a)})),
-       r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)),
-                   r.len(r.in(IntrinsicId::ObjectKeys, {r.L(b)}))),
+       r.iff(r.bin(BinOp::Ne, r.len(r.L(ks)), r.len(r.L(b))),
              r.ret(r.Bo(false))),
        r.set(i, r.I(0)),
        r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(ks))),
@@ -415,8 +412,10 @@ inline constexpr int64_t kPending = 0;
 inline constexpr int64_t kFulfilled = 1;
 inline constexpr int64_t kRejected = 2;
 
-inline NodeId is_promise(FuncWriter& w, FuncWriter::Slot v) {
-  return w.both(w.is(w.typ(v), "object"), w.has(w.L(v), w.S(kPromiseState)));
+// `then`, when `v` holds a promise -- two tests, each branching on its own.
+inline NodeId if_promise(FuncWriter& w, FuncWriter::Slot v, NodeId then) {
+  return w.iff(w.is(w.typ(v), "object"),
+               w.iff(w.has(w.L(v), w.S(kPromiseState)), then));
 }
 inline NodeId promise_state(FuncWriter& w, NodeId p) {
   return w.idx(p, kPromiseState);
@@ -470,7 +469,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     HelperWriter r(rt);
     const auto [v] = r.params("v");
     const auto [p] = r.locals("p");
-    r.add(r.iff(is_promise(r, v), r.ret(r.L(v))));
+    r.add(if_promise(r, v, r.ret(r.L(v))));
     r.add(r.set(p, r.call("$pnew", {})));
     r.add(r.call("$psettle", {r.L(p), r.I(kFulfilled), r.L(v)}));
     r.add(r.ret(r.L(p)));
@@ -480,10 +479,11 @@ inline void write_promise_helpers(HelperTable& rt) {
     // cells: 0 = q, 1 = v, for $adopt to close over.
     HelperWriter r(rt);
     const auto [q, v] = r.params("q", "v");
-    r.add(r.iff(is_promise(r, v),
-                r.blk({r.setc(0, r.L(q)), r.setc(1, r.L(v)),
-                       r.call("$pon", {r.L(v), r.clos("$adopt", {0, 1})}),
-                       r.ret(r.Nil())})));
+    r.add(if_promise(
+        r, v,
+        r.blk({r.setc(0, r.L(q)), r.setc(1, r.L(v)),
+               r.call("$pon", {r.L(v), r.clos("$adopt", {0, 1})}),
+               r.ret(r.Nil())})));
     r.add(r.call("$psettle", {r.L(q), r.I(kFulfilled), r.L(v)}));
     r.add(r.ret(r.Nil()));
     r.finish("$presolve", 2);

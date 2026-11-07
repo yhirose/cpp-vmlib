@@ -803,7 +803,7 @@ struct Binder {
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
     r.add(r.iff(r.has(r.L(v), r.S(kExcKey)), r.ret(r.idx(r.L(v), kMsgKey))));
-    r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S("ToString")})));
+    r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S(program_key("ToString"))})));
     r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
     r.add(r.iff(r.has(r.L(v), r.S(kClassKey)),
@@ -849,23 +849,21 @@ struct Binder {
   // The walk is written into two helpers, which differ only in a miss:
   // $mlookup answers nil (a receiver that is not a class instance, or a
   // chain without the name), $mfind -- a call's -- fails. Inlined rather
-  // than one calling the other, since every dispatch takes $mfind.
-  void method_walk(RT& r, FuncWriter::Slot recv, FuncWriter::Slot name) {
-    const auto [cls, key] = r.locals("cls", "key");
-    r.add(r.iff(
-        r.is(r.typ(recv), "object"),
-        r.blk(
-            {r.set(cls, r.idx(r.L(recv), kClassKey)),  // nil: no instance
-             r.set(key, program_key(r, r.L(name))),
-             walk_bases(r, cls,
-                        r.iff(r.has(r.L(cls), r.L(key)),
-                              r.ret(r.idx(r.L(cls), r.L(key)))))})));
+  // than one calling the other, since every dispatch takes $mfind. Both
+  // take the method's key, program_key(name), built where the call is
+  // bound rather than at every call.
+  void method_walk(RT& r, FuncWriter::Slot recv, FuncWriter::Slot key) {
+    const auto [cls] = r.locals("cls");
+    r.add(r.set(cls, instance_class(r, recv)));
+    r.add(walk_bases(r, cls,
+                     r.iff(r.has(r.L(cls), r.L(key)),
+                           r.ret(r.idx(r.L(cls), r.L(key))))));
   }
 
   void rt_mlookup() {
     RT r(*this);
-    const auto [recv, name] = r.params("recv", "name");
-    method_walk(r, recv, name);
+    const auto [recv, key] = r.params("recv", "key");
+    method_walk(r, recv, key);
     r.add(r.ret(r.Nil()));
     r.finish("$mlookup");
   }
@@ -875,14 +873,16 @@ struct Binder {
   // first, as C#'s does before its null check.
   void rt_mfind() {
     RT r(*this);
-    const auto [recv, name] = r.params("recv", "name");
-    method_walk(r, recv, name);
+    const auto [recv, key] = r.params("recv", "key");
+    method_walk(r, recv, key);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
                 r.ret(r.ref("$nullcall"))));
     r.add(r.iff(r.bin(BinOp::Eq, r.has(r.L(recv), r.S(kClassKey)), r.Bo(false)),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
-        "$exc", {r.bin(BinOp::Add, r.S("no such method: "), r.L(name))})));
+        "$exc", {r.bin(BinOp::Add, r.S("no such method: "),
+                       r.in(IntrinsicId::StrSlice,
+                            {r.L(key), r.I(1), r.len(r.L(key))}))})));
     r.finish("$mfind");
   }
 
@@ -1304,7 +1304,7 @@ struct Binder {
     f.body = b.scope(
         0, 1,
         b.call_value(
-            rt.call("$mfind", {C, b.str_literal("Dispose", p)}, p),
+            rt.call("$mfind", {C, b.str_literal(program_key("Dispose"), p)}, p),
             {C}, p),
         p);
     m.funcs[static_cast<size_t>(rs.fns[static_cast<size_t>(g)].index)] =
@@ -1658,9 +1658,10 @@ struct Binder {
     const NodeId T = b.varref(VarKind::Local, t);
     std::vector<NodeId> callargs{T};
     callargs.insert(callargs.end(), args.begin(), args.end());
-    return b.block({b.assign(VarKind::Local, t, recv),
-                    b.call_value(rt.call("$mfind", {T, b.str_literal(name)}, p),
-                                 callargs)});
+    const NodeId method =
+        rt.call("$mfind", {T, b.str_literal(program_key(name))}, p);
+    return b.block(
+        {b.assign(VarKind::Local, t, recv), b.call_value(method, callargs)});
   }
 
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
@@ -1690,7 +1691,7 @@ struct Binder {
                                  : rt.call("$await", {T}, p);
       NodeId call = b.block(
           {b.assign(VarKind::Local, mt,
-                    rt.call("$mlookup", {T, b.str_literal(name)}, p)),
+                    rt.call("$mlookup", {T, b.str_literal(program_key(name))}, p)),
            b.make_if(b.binary(BinOp::Ne,
                               b.intrinsic(IntrinsicId::TypeOf, {M}),
                               b.str_literal("nil")),
