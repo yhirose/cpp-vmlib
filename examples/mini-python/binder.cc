@@ -91,6 +91,14 @@ constexpr char kTypeKind[] = "type";
 // Base 10^9: a limb product plus two carries stays under 2^63, and
 // rendering is nine decimal digits per limb with no division at all.
 constexpr int64_t kBase = 1000000000;
+// 2^63 in kBase limbs, little-endian: the one magnitude of three limbs a
+// negative int64 reaches and a positive one does not.
+constexpr uint64_t kTwo63 = uint64_t{1} << 63;
+constexpr int64_t kTwo63Limbs[] = {
+    static_cast<int64_t>(kTwo63 % kBase),
+    static_cast<int64_t>(kTwo63 / kBase % kBase),
+    static_cast<int64_t>(kTwo63 / kBase / kBase)};
+static_assert(kTwo63 / kBase / kBase < kBase, "2^63 is three limbs");
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -882,21 +890,25 @@ struct Binder {
     r.finish("$isbig");
   }
 
-  // The limbs of an int's magnitude. Taken digit by digit from the int
-  // itself rather than from its negation: Div and Mod truncate, so a
-  // negative int's limbs are its remainders negated, and the least int,
-  // whose negation wraps to itself, has limbs like any other.
+  // The limbs of an int's magnitude. A negative int gives its lowest limb
+  // from its own truncated remainder, negated, and the rest from its
+  // quotient negated, which is small enough to negate: the least int,
+  // whose own negation wraps to itself, has limbs like any other.
   void rt_tolimbs() {
     RT r(*this);
     const auto [n] = r.params("n");
-    const auto [out, i, d] = r.locals("out", "i", "d");
+    const auto [out, i] = r.locals("out", "i");
     r.add(r.set(out, r.arr({})));
     r.add(r.set(i, r.L(n)));
-    r.add(r.wh(r.bin(BinOp::Ne, r.L(i), r.I(0)),
-               r.blk({r.set(d, r.bin(BinOp::Mod, r.L(i), r.I(kBase))),
-                      r.push(r.L(out),
-                             r.iff(r.bin(BinOp::Lt, r.L(d), r.I(0)),
-                                   r.b.unary(UnOp::Neg, r.L(d)), r.L(d))),
+    r.add(r.iff(
+        r.bin(BinOp::Lt, r.L(i), r.I(0)),
+        r.blk({r.push(r.L(out),
+                      r.b.unary(UnOp::Neg,
+                                r.bin(BinOp::Mod, r.L(i), r.I(kBase)))),
+               r.set(i, r.b.unary(UnOp::Neg,
+                                  r.bin(BinOp::Div, r.L(i), r.I(kBase))))})));
+    r.add(r.wh(r.bin(BinOp::Gt, r.L(i), r.I(0)),
+               r.blk({r.push(r.L(out), r.bin(BinOp::Mod, r.L(i), r.I(kBase))),
                       r.set(i, r.bin(BinOp::Div, r.L(i), r.I(kBase)))})));
     r.add(r.ret(r.L(out)));
     r.finish("$tolimbs");
@@ -906,13 +918,32 @@ struct Binder {
   // the operations that overflowed: whatever fits an int64 comes back as
   // one, so an int has one representation and a bignum is only what an int
   // cannot hold -- -2**63 is the least int, equal to it and its `%` an
-  // int's. A magnitude under 2^63 fits, and 2^63 itself when negative;
-  // the limbs are summed with wrapping arithmetic, which lands 2^63 on the
+  // int's. Two limbs, under 10^18, always fit, and four never do; three
+  // fit under 2^63 in magnitude, or at 2^63 itself when negative. The
+  // limbs are summed with wrapping arithmetic, which lands 2^63 on the
   // least int, whose negation is itself.
   void rt_mkbig() {
     RT r(*this);
     const auto [limbs, sign] = r.params("limbs", "sign");
-    const auto [n, v, c, i] = r.locals("n", "v", "c", "i");
+    const auto [n, v] = r.locals("n", "v");
+    const auto limb = [&](int64_t k) { return r.idx(r.L(limbs), r.I(k)); };
+    const auto value = [&](NodeId magnitude) {
+      return r.blk({r.set(v, magnitude),
+                    r.iff(r.bin(BinOp::Lt, r.L(sign), r.I(0)),
+                          r.set(v, r.b.unary(UnOp::Neg, r.L(v)))),
+                    r.ret(r.L(v))});
+    };
+    const auto shift = [&](NodeId high, NodeId low) {
+      return r.bin(BinOp::Add, r.bin(BinOp::Mul, high, r.I(kBase)), low);
+    };
+    // Three limbs against 2^63's, from the top: below it, or at it with
+    // the sign negative.
+    const auto fits = [&](int64_t k, const auto& self) -> NodeId {
+      const NodeId at = r.bin(BinOp::Eq, limb(k), r.I(kTwo63Limbs[k]));
+      return r.either(r.bin(BinOp::Lt, limb(k), r.I(kTwo63Limbs[k])),
+                      r.both(at, k == 0 ? r.bin(BinOp::Lt, r.L(sign), r.I(0))
+                                        : self(k - 1, self)));
+    };
     r.add(r.set(n, r.len(r.L(limbs))));
     r.add(
         r.wh(r.both(r.bin(BinOp::Gt, r.L(n), r.I(0)),
@@ -924,24 +955,11 @@ struct Binder {
                 r.set(limbs, r.in(IntrinsicId::ArraySlice,
                                   {r.L(limbs), r.I(0), r.L(n)}))));
     r.add(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)), r.ret(r.I(0))));
-    r.add(r.set(c, r.call("$ucmp", {r.L(limbs), r.arr({r.I(854775808),
-                                                       r.I(223372036),
-                                                       r.I(9)})})));
-    r.add(r.iff(
-        r.either(r.bin(BinOp::Lt, r.L(c), r.I(0)),
-                 r.both(r.bin(BinOp::Eq, r.L(c), r.I(0)),
-                        r.bin(BinOp::Lt, r.L(sign), r.I(0)))),
-        r.blk({r.set(v, r.I(0)),
-               r.set(i, r.bin(BinOp::Sub, r.L(n), r.I(1))),
-               r.wh(r.bin(BinOp::Ge, r.L(i), r.I(0)),
-                    r.blk({r.set(v, r.bin(BinOp::Add,
-                                          r.bin(BinOp::Mul, r.L(v),
-                                                r.I(kBase)),
-                                          r.idx(r.L(limbs), r.L(i)))),
-                           r.set(i, r.bin(BinOp::Sub, r.L(i), r.I(1)))})),
-               r.iff(r.bin(BinOp::Lt, r.L(sign), r.I(0)),
-                     r.set(v, r.b.unary(UnOp::Neg, r.L(v)))),
-               r.ret(r.L(v))})));
+    r.add(r.iff(r.bin(BinOp::Le, r.L(n), r.I(2)),
+                value(r.iff(r.bin(BinOp::Eq, r.L(n), r.I(2)),
+                            shift(limb(1), limb(0)), limb(0)))));
+    r.add(r.iff(r.both(r.bin(BinOp::Eq, r.L(n), r.I(3)), fits(2, fits)),
+                value(shift(shift(limb(2), limb(1)), limb(0)))));
     r.add(r.ret(of_kind(r, r.obj({}), kBigKind, {r.L(limbs), r.L(sign)})));
     r.finish("$mkbig");
   }
@@ -1163,14 +1181,19 @@ struct Binder {
   void rt_neg() {
     RT r(*this);
     const auto [v] = r.params("v");
-    // An int or a bignum, by its limbs with the sign flipped: the least
-    // int's negation grows past int64, and 2**63's comes back to it, which
-    // $mkbig hands back as an int.
-    r.add(r.iff(r.either(r.is(r.typ(v), "int"), r.call("$isbig", {r.L(v)})),
+    // A bignum or an int, by its limbs with the sign flipped: 2**63's
+    // negation is the least int, which $mkbig hands back as one, and the
+    // least int's grows past int64.
+    r.add(r.iff(r.call("$isbig", {r.L(v)}),
                 r.ret(r.call("$mkbig",
-                             {r.call("$biglimbs", {r.L(v)}),
+                             {kind_field(r, r.L(v), kBigLimbs),
                               r.b.unary(UnOp::Neg,
-                                        r.call("$bigsign", {r.L(v)}))}))));
+                                        kind_field(r, r.L(v), kBigSign))}))));
+    r.add(r.iff(r.is(r.typ(v), "int"),
+                r.ret(r.call("$mkbig",
+                             {r.call("$tolimbs", {r.L(v)}),
+                              r.iff(r.bin(BinOp::Lt, r.L(v), r.I(0)), r.I(1),
+                                    r.I(-1))}))));
     r.add(r.ret(r.b.unary(UnOp::Neg, r.L(v))));
     r.finish("$neg");
   }
@@ -1331,11 +1354,10 @@ struct Binder {
     r.add(raise_on_zero(r, r.L(b)));
     // a // -1 is -a, which grows past int64 for the least int, where
     // FloorDiv wraps.
-    r.add(r.iff(r.both(int_pair(r, r.typ(a), r.typ(b)),
-                       r.bin(BinOp::Eq, r.L(b), r.I(-1))),
-                r.ret(r.call("$neg", {r.L(a)}))));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
-                r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
+                r.ret(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(-1)),
+                            r.call("$neg", {r.L(a)}),
+                            r.bin(BinOp::FloorDiv, r.L(a), r.L(b))))));
     // FloorDiv floors the rounded quotient, which may have rounded up to a
     // whole number: 1 // 0.2 is 5.0 there and 4.0 here. CPython's is the
     // quotient of a - fmod(a, b), a whole multiple of b that the rounding
