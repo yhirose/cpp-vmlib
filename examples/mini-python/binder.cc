@@ -1326,7 +1326,7 @@ struct Binder {
   // `/`, `//` and `%` raise for a zero divisor, an int's or a float's,
   // where the VM traps on the one and answers inf or nan for the other.
   NodeId raise_on_zero(RT& r, NodeId divisor) {
-    return r.iff(r.bin(BinOp::Eq, divisor, r.I(0)),
+    return r.iff(is_zero_divisor(r, divisor),
                  r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                        r.S("division by zero")})));
   }

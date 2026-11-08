@@ -517,6 +517,13 @@ inline NodeId is_number(FuncWriter& w, NodeId v) {
   const NodeId t = w.typ(v);
   return w.either(w.is(t, "int"), w.is(t, "double"));
 }
+// Whether `v`, a divisor, is a zero, an int's or a double's -- what an
+// exact division leaves its helper to raise for (vmlib.h's kExact).
+// Anything that is no number is not, and goes on to the operator, which
+// refuses it in its own words.
+inline NodeId is_zero_divisor(FuncWriter& w, NodeId v) {
+  return w.both(is_number(w, v), w.bin(coreir::BinOp::Eq, v, w.I(0)));
+}
 // `+`: two numbers add and two strings concatenate, which is Add -- in
 // JavaScript, C#, Ruby and Python; a string beside anything else is each
 // language's own.

@@ -623,7 +623,7 @@ struct Binder {
   void rt_division(const char* name, BinOp op) {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(r.both(is_number(r, r.L(b)), r.bin(BinOp::Eq, r.L(b), r.I(0))),
+    r.add(r.iff(is_zero_divisor(r, r.L(b)),
                 r.ret(r.call("$err", {r.S("ZeroDivisionError"),
                                       r.S("divide by 0 error")}))));
     r.add(r.ret(r.bin(op, r.L(a), r.L(b))));

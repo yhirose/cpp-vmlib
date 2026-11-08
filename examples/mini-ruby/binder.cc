@@ -735,10 +735,8 @@ struct Binder {
 
   // `/` and `%` raise for a zero divisor -- `%` a Float's too -- where the
   // VM traps on an Integer one and answers NaN or Infinity for a Float one.
-  // Anything that is no number goes on to the operator, which refuses it.
   NodeId raise_on_zero(RT& r, FuncWriter::Slot divisor) {
-    return r.iff(r.both(is_number(r, r.L(divisor)),
-                        r.bin(BinOp::Eq, r.L(divisor), r.I(0))),
+    return r.iff(is_zero_divisor(r, r.L(divisor)),
                  r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                        r.S("divided by 0")})));
   }
