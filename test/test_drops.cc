@@ -1150,6 +1150,38 @@ int main() {
              "cannot give a destructor to array", "on an array: the trap");
   }
 
+  // The last reference to a drop-bearing object is the slot a SetIndex
+  // overwrites, and its destructor pushes onto the very array being
+  // written: the store must not be through a slot the push moved.
+  {
+    Prog g;
+    Func dr{"drop_push", 1, 0, NodeId{}, {"self"}, {}};
+    dr.num_params = 1;
+    dr.body = g.b.intrinsic(
+        IntrinsicId::ArrayPush,
+        {g.b.index(g.local(0), g.str("xs"), g.p), g.b.literal(99, g.p)}, g.p);
+    g.m.funcs.push_back(dr);  // funcs[2]
+    const NodeId o = g.b.intrinsic(
+        IntrinsicId::DropSet,
+        {g.b.object_lit({{g.str("xs"), g.b.nil_literal(g.p)}}, g.p),
+         g.b.make_closure(2, 0, g.p)},
+        g.p);
+    g.main(g.b.block(
+               {g.b.assign(VarKind::Local, 2, o, g.p),
+                g.b.assign(VarKind::Local, 1,
+                           g.b.array_lit({g.local(2)}, g.p), g.p),
+                g.b.set_index(g.local(2), g.str("xs"), g.local(1), g.p),
+                g.b.assign(VarKind::Local, 2, g.b.nil_literal(g.p), g.p),
+                g.b.set_index(g.local(1), g.b.literal(0, g.p),
+                              g.b.literal(1, g.p), g.p),
+                g.print(g.b.intrinsic(IntrinsicId::Len, {g.local(1)}, g.p))},
+               g.p),
+           {"xs", "o"});
+    expect_clean(run_module(g.m, "destructor pushes onto the array"),
+                 "destructor pushes onto the array");
+    check_eq(joined(), "2|", "destructor pushes onto the array: length");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "drops: %d failure(s)\n", g_failures);
     return 1;

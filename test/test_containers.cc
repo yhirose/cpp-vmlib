@@ -755,6 +755,33 @@ int main() {
     check_eq(joined(), "false|true|true|false|", "not output");
   }
 
+  // A SetIndex whose value expression empties the receiver: the key is
+  // checked after the value ran, against the length it has then, so the
+  // write traps rather than landing in a slot that is gone.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 1, 0, NodeId{}, {"xs"}, {}});
+    Func clear{"clear", 1, 0, NodeId{}, {"xs"}, {}};
+    clear.num_params = 1;
+    clear.body = b.block(
+        {b.intrinsic(IntrinsicId::ArrayPop, {b.varref(VarKind::Local, 0, p)},
+                     p),
+         b.make_return(b.literal(7, p), p)},
+        p);
+    m.funcs.push_back(clear);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    m.funcs[0].body = b.block(
+        {b.assign(VarKind::Local, 0, b.array_lit({b.literal(5, p)}, p), p),
+         b.set_index(xs, b.literal(0, p),
+                     b.call_value(b.make_closure(1, 0, p), {xs}, p), p)},
+        p);
+    check_eq(run_module(m, "set_index: value empties the receiver"),
+             "array index 0 out of range for length 0",
+             "set_index: value empties the receiver");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;
