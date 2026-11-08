@@ -598,8 +598,13 @@ struct Binder {
   //   $eq           `==` (equality_tags), an object's own `==` being the
   //                 helper's to ask.
   //   $idx          `c[k]` on an Array or a String and an index in range,
-  //                 or a Hash, whose missing key Index answers nil as $idx
-  //                 does; a negative index or one out of range is $idx's.
+  //                 or a Hash, whose missing key is nil (kMissNil; a Hash
+  //                 with a meta leaves that to $idx); a negative index or
+  //                 one out of range is $idx's.
+  //   $setidx       `c[k] = v` on an Array and an index in range or at its
+  //                 length (kAppend), or a Hash and any key, a new one
+  //                 included; a negative index, and one past the length,
+  //                 which pads with nil, are $setidx's.
   static Operators::Table operators() {
     const uint32_t ints = tags_named("int");
     return {
@@ -610,7 +615,10 @@ struct Binder {
         {"$div", VmOp::binary(BinOp::FloorDiv, ints)},
         {"$mod", VmOp::binary(BinOp::FloorMod, number_tags(), true)},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
-        {"$idx", VmOp::index(tags_named({"array", "string", "map", "int"}))},
+        {"$idx", VmOp::index(tags_named({"array", "string", "map"}), kMissNil,
+                             tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "map"}),
+                                    kMissNil | kAppend, kAllTags)},
     };
   }
 
@@ -1821,11 +1829,12 @@ struct Binder {
         b, recv, key,
         [&](NodeId r, NodeId k) { return ops.call("$idx", {r, k}, p); },
         [&](NodeId r, NodeId k, NodeId v) {
-          return rt.call("$setidx", {r, k, v}, p);
+          return ops.call("$setidx", {r, k, v}, p);
         },
         [&](const auto& read) {
           return combine(op == "=" ? b.nil_literal() : read());
-        });
+        },
+        true);
   }
 
   // -- Expressions --------------------------------------------------------
