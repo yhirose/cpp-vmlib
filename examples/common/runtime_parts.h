@@ -305,11 +305,14 @@ inline NodeId reading(coreir::Builder::At& b, const std::vector<NodeId>& args,
   });
 }
 
-// `store(v)` for `value` held by a Let, then `v`: an assignment as an
-// expression, whose value is what was assigned and not what the store
-// answers (a store, a SetIndex, answers none).
+// `store(value)`, and with `as_value` an assignment that is an expression:
+// `value` held by a Let, stored, and read again after, so that its value is
+// what was assigned and not what the store answers (a SetIndex answers
+// none).
 template <class Store>
-inline NodeId stored_value(coreir::Builder::At& b, NodeId value, Store store) {
+inline NodeId stored_value(coreir::Builder::At& b, NodeId value, Store store,
+                           bool as_value = true) {
+  if (!as_value) return store(value);
   return b.let(value, [&](auto v) { return b.block({store(v()), v()}); });
 }
 
@@ -330,12 +333,9 @@ inline NodeId read_modify_write(coreir::Builder::At& b, NodeId recv,
                                 NodeId key, Get get, Set set, Combine combine,
                                 bool as_value = false) {
   return b.lets({recv, key}, [&](const std::vector<coreir::Builder::Temp>& t) {
-    const NodeId value =
-        combine([&] { return get(t[0](), t[1]()); });
-    if (!as_value) return set(t[0](), t[1](), value);
-    return stored_value(b, value, [&](NodeId v) {
-      return set(t[0](), t[1](), v);
-    });
+    return stored_value(
+        b, combine([&] { return get(t[0](), t[1]()); }),
+        [&](NodeId v) { return set(t[0](), t[1](), v); }, as_value);
   });
 }
 

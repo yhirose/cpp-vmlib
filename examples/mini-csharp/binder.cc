@@ -1850,8 +1850,7 @@ struct Binder {
           const auto set = [&](NodeId v) {
             return ops.call("$setf", {o(), key, v}, p);
           };
-          return as_value ? stored_value(b, combine(read), set)
-                          : set(combine(read));
+          return stored_value(b, combine(read), set, as_value);
         });
       }
       if (prop_refs.count(&target)) {

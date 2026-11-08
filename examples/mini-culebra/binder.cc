@@ -1470,8 +1470,7 @@ struct Binder {
         return ops.call(member ? "$setmem" : "$setidx",
                         {t[1](), t[2](), v}, p);
       };
-      return as_value ? stored_value(b, apply(cur, t[0]()), store)
-                      : store(apply(cur, t[0]()));
+      return stored_value(b, apply(cur, t[0]()), store, as_value);
     });
   }
 
