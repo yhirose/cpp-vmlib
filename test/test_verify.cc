@@ -354,12 +354,16 @@ int main() {
            }),
            "unknown operator flag", "a flag that is not kExact");
   check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {callee(b), 1, 0, 2});
+           }),
+           "binary has no key to name tags for", "a Binary with a key set");
+  check_eq(verdict([&](Module&, Builder& b) {
              return b.binary(BinOp::Lt, b.literal(1, p), b.literal(2, p),
-                             {callee(b), 1, true}, p);
+                             {callee(b), 1, kExact}, p);
            }),
            "lt cannot be exact", "an exact comparison");
   check_eq(verdict([&](Module&, Builder& b) {
-             return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, true},
+             return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, kExact},
                             p);
            }),
            "not cannot be exact", "an exact Not");
@@ -398,10 +402,26 @@ int main() {
            }),
            "operator has tags or flags but no fallback",
            "an Index's tags without a fallback");
+  // The key's set is an Index's; the value's, a SetIndex's.
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, 0, 2}, p);
+           }),
+           "", "an Index with a key set");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, 0, 0, 2}, p);
+           }),
+           "index has no value to name tags for", "an Index with a value set");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, 0, kAllTags + 1}, p);
+           }),
+           "operator's tag set names no tag", "a key set past the last tag");
   // Built exact, the Builder keeps the flag for verify() to refuse.
   check_eq(verdict([&](Module&, Builder& b) {
              return b.index(b.array_lit({}, p), b.literal(0, p),
-                            {callee(b), 1, true}, p);
+                            {callee(b), 1, kExact}, p);
            }),
            "index cannot be exact", "an exact Index");
   check_eq(verdict([&](Module& m, Builder& b) {

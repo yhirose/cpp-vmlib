@@ -589,7 +589,7 @@ class Operators {
                           std::to_string(operands) + " operands",
                       0, 0);
     }
-    const Fallback f{rt_.ref(helper, p), o.tags, o.exact};
+    const Fallback f{rt_.ref(helper, p), o.tags, o.exact ? coreir::kExact : 0};
     auto b = coreir::Builder(rt_.module()).at(p);
     switch (o.kind) {
       case VmOp::Kind::Unary:

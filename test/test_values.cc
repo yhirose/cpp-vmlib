@@ -659,7 +659,7 @@ int main() {
       return b.intrinsic(IntrinsicId::Print, {v}, p);
     };
     const auto fb = [&](Builder& b, uint32_t tags, bool exact = false) {
-      return Fallback{b.make_closure(1, 0, p), tags, exact};
+      return Fallback{b.make_closure(1, 0, p), tags, exact ? kExact : 0};
     };
     struct Case {
       std::function<NodeId(Builder&)> make;
@@ -773,6 +773,30 @@ int main() {
          },
          "20|f|<array>|2|-1|f|<array>|-1|-1|f|ab|1|-1|b|f|<array>|1|-1|",
          "an Index"},
+        // An Index's receiver and key have a set each: a string in the
+        // set for keys does not make a string a receiver, and a key the
+        // key set leaves out is the fallback's though the receiver's set
+        // holds it.
+        {[&](Builder& b) {
+           const auto at = [&](NodeId r, NodeId k, uint32_t tags,
+                               uint32_t key_tags) {
+             Fallback f = fb(b, tags);
+             f.key_tags = key_tags;
+             return print(b, b.index(r, k, f, p));
+           };
+           const auto list = [&] {
+             return b.array_lit({b.literal(10, p), b.literal(20, p)}, p);
+           };
+           return b.block(
+               {at(b.str_literal("ab", p), b.literal(1, p),
+                   tags_named("string"), tags_named("int")),
+                at(b.str_literal("ab", p), b.literal(1, p),
+                   tags_named("array"), tags_named({"string", "int"})),
+                at(list(), b.literal(1, p), tags_named({"array", "string"}),
+                   tags_named("string"))},
+               p);
+         },
+         "b|f|ab|1|-1|f|<array>|1|-1|", "an Index with a key set"},
         // The operands run first, each once; the fallback only when called,
         // after them; and a statement's value goes nowhere.
         {[&](Builder& b) {

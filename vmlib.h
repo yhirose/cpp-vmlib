@@ -1380,6 +1380,12 @@ inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 // Ruby's `%`) marks its operators exact.
 inline constexpr int32_t kExact = 1;
 
+// Every flag there is, and a flag's word.
+inline constexpr int32_t kKnownFlags = kExact;
+inline constexpr const char* flag_name(int32_t flag) {
+  return flag == kExact ? "exact" : "flagged";
+}
+
 // The signed divisions: the operators a zero divisor makes untrue, and
 // whose failure the compiler reports at the divisor.
 inline constexpr bool is_division(BinOp op) {
@@ -1394,6 +1400,19 @@ inline constexpr bool can_be_exact(BinOp op) {
          is_division(op);
 }
 inline constexpr bool can_be_exact(UnOp op) { return op == UnOp::Neg; }
+
+// The flags a node of this tag (and operator) may carry: the one table
+// verify() reads, so a flag cannot be set where it would mean nothing.
+inline constexpr int32_t allowed_flags(Tag t, uint8_t op) {
+  switch (t) {
+    case Tag::Unary:
+      return can_be_exact(static_cast<UnOp>(op)) ? kExact : 0;
+    case Tag::Binary:
+      return can_be_exact(static_cast<BinOp>(op)) ? kExact : 0;
+    default:
+      return 0;
+  }
+}
 
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
 // shortest-round-trip doubles included. A language whose display rules
@@ -1961,14 +1980,47 @@ inline constexpr bool yields_value(Tag t) {
 // ---------------------------------------------------------------------------
 
 // An operation's fallback (Tag::Unary has the rule): what is called when
-// an operand's tag is not in `tags`, the operation traps, or -- `exact` --
-// an int result wraps. The callee is invalid when there is none.
+// an operand's tag is not in the set it names, the operation traps, or --
+// kExact in `flags` -- an int result wraps. The callee is invalid when
+// there is none.
+//
+// The sets. Unary and Binary have one, `tags`, that every operand's tag
+// must be in. Index has a set for each operand, `tags` for the receiver
+// and `key_tags` for the key (0: the same as `tags`), so that "a string is
+// a key" does not make a string a receiver. SetIndex adds `value_tags` for
+// the value stored (0: any value).
 struct Fallback {
   NodeId callee;
   uint32_t tags = 0;
-  bool exact = false;
+  int32_t flags = 0;
+  uint32_t key_tags = 0;
+  uint32_t value_tags = 0;
   bool valid() const { return callee.valid(); }
+  bool exact() const { return (flags & kExact) != 0; }
+  uint32_t key_mask() const { return key_tags != 0 ? key_tags : tags; }
 };
+
+// The one statement of how a fallback is packed, into the two ints a Node
+// has (a, b) and, in a Try instruction, the ints it has (c, and the b that
+// try_mode adds the operator to):
+//   a: bits 0-15 `tags`, bits 16-31 `key_tags`.
+//   b: bits 0-7 `flags`, bits 8-21 `value_tags`.
+// Every reader and writer of them -- the Builder, fallback_of, verify(),
+// the compiler and the executor -- goes through these two, so no one
+// shifts by hand.
+struct FallbackBits {
+  int32_t a = 0, b = 0;
+};
+inline constexpr FallbackBits pack_fallback(const Fallback& f) {
+  return {static_cast<int32_t>(f.tags | f.key_tags << 16),
+          static_cast<int32_t>(static_cast<uint32_t>(f.flags) |
+                               f.value_tags << 8)};
+}
+inline constexpr Fallback unpack_fallback(NodeId callee, FallbackBits x) {
+  const auto a = static_cast<uint32_t>(x.a), b = static_cast<uint32_t>(x.b);
+  return {callee, a & 0xffff, static_cast<int32_t>(b & 0xff), a >> 16,
+          b >> 8};
+}
 
 // The operands of a tag that may name a fallback -- Unary, Binary, Index
 // -- and 0 for every other tag. The fallback, when there is one, is the
@@ -1989,8 +2041,7 @@ inline bool names_fallback(const Node& x) {
 inline Fallback fallback_of(const Module& m, NodeId n) {
   const Node& x = m.at(n);
   if (!names_fallback(x)) return {};
-  return {m.child(n, operands_of(x.tag)), static_cast<uint32_t>(x.a),
-          (x.b & kExact) != 0};
+  return unpack_fallback(m.child(n, operands_of(x.tag)), {x.a, x.b});
 }
 
 struct UnaryView  { UnOp op; NodeId operand; Fallback fallback; };
@@ -2542,8 +2593,8 @@ private:
   NodeId or_call(Tag tag, uint8_t op, std::vector<NodeId> operands,
                  const Fallback& f, SrcPos p) {
     operands.push_back(f.callee);
-    return emit(tag, op, p, static_cast<int32_t>(f.tags),
-                f.exact ? kExact : 0, operands);
+    const FallbackBits bits = pack_fallback(f);
+    return emit(tag, op, p, bits.a, bits.b, operands);
   }
 
   NodeId emit(Tag tag, uint8_t op, SrcPos p, int32_t a, int32_t b,
@@ -4433,15 +4484,18 @@ enum class Op : uint8_t {
   DropSet,      // a = dst, b = object reg, c = destructor reg
 };
 
-// TryUnary's and TryBinary's b: the operator (a UnOp or a BinOp, which the
-// opcode says) in the low byte, and its flags (coreir::kExact) above.
-inline constexpr int32_t try_mode(uint8_t op, int32_t flags) {
-  return op | flags << 8;
+// A Try instruction's b: the operator (a UnOp or a BinOp, which the opcode
+// says) in the low byte, and above it the b of the node's FallbackBits
+// (coreir::pack_fallback); its c is the node's a.
+inline constexpr int32_t try_mode(uint8_t op, int32_t node_b) {
+  return op | node_b << 8;
 }
 inline constexpr uint8_t try_op(int32_t mode) {
   return static_cast<uint8_t>(mode & 0xff);
 }
-inline constexpr int32_t try_flags(int32_t mode) { return mode >> 8; }
+inline constexpr coreir::FallbackBits try_bits(int32_t c, int32_t mode) {
+  return {c, mode >> 8};
+}
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
 // own Add..UGe, so the compiler and the executor can share one arithmetic
@@ -5819,20 +5873,24 @@ struct Verifier {
       if (n.a == 0 && n.b == 0) return true;
       return fail("operator has tags or flags but no fallback");
     }
-    if ((static_cast<uint32_t>(n.a) & ~kAllTags) != 0) {
+    const Fallback f = unpack_fallback(NodeId{}, {n.a, n.b});
+    if (((f.tags | f.key_tags | f.value_tags) & ~kAllTags) != 0) {
       return fail("operator's tag set names no tag");
     }
-    if ((n.b & ~kExact) != 0) return fail("unknown operator flag");
-    const bool unary = n.tag == Tag::Unary, binary = n.tag == Tag::Binary;
-    const bool exactable =
-        unary    ? can_be_exact(static_cast<UnOp>(n.op))
-        : binary ? can_be_exact(static_cast<BinOp>(n.op))
-                 : false;
-    if ((n.b & kExact) != 0 && !exactable) {
-      const char* what = unary    ? name_of(static_cast<UnOp>(n.op))
-                         : binary ? name_of(static_cast<BinOp>(n.op))
-                                  : name_of(n.tag);
-      return fail(std::string(what) + " cannot be exact");
+    if (f.key_tags != 0 && n.tag != Tag::Index) {
+      return fail(std::string(name_of(n.tag)) + " has no key to name tags for");
+    }
+    if (f.value_tags != 0) {
+      return fail(std::string(name_of(n.tag)) + " has no value to name tags for");
+    }
+    if ((f.flags & ~kKnownFlags) != 0) return fail("unknown operator flag");
+    if (const int32_t bad = f.flags & ~allowed_flags(n.tag, n.op); bad != 0) {
+      const char* what = n.tag == Tag::Unary
+                             ? name_of(static_cast<UnOp>(n.op))
+                         : n.tag == Tag::Binary
+                             ? name_of(static_cast<BinOp>(n.op))
+                             : name_of(n.tag);
+      return fail(std::string(what) + " cannot be " + flag_name(bad & -bad));
     }
     return true;
   }
@@ -6235,7 +6293,11 @@ struct Dumper {
   void fallback(const Fallback& f) {
     if (!f.valid()) return;
     out << " or-call " << tag_set_text(f.tags);
-    if (f.exact) out << " exact";
+    if (f.key_tags != 0) out << " key " << tag_set_text(f.key_tags);
+    if (f.value_tags != 0) out << " value " << tag_set_text(f.value_tags);
+    for (int32_t flag = 1; flag <= kKnownFlags; flag <<= 1) {
+      if ((f.flags & flag) != 0) out << " " << flag_name(flag);
+    }
   }
 
   void node(NodeId id, int d) {
@@ -6965,9 +7027,18 @@ inline std::string to_string(const Program& p) {
                               : coreir::name_of(static_cast<coreir::BinOp>(op)))
               << " r" << (in.a + 1);
           if (!unary) out << ", r" << (in.a + 2);
-          out << ", "
-              << coreir::detail::tag_set_text(static_cast<uint32_t>(in.c));
-          if ((try_flags(in.b) & coreir::kExact) != 0) out << " exact";
+          const coreir::Fallback f =
+              coreir::unpack_fallback(coreir::NodeId{}, try_bits(in.c, in.b));
+          out << ", " << coreir::detail::tag_set_text(f.tags);
+          if (f.key_tags != 0) {
+            out << " key " << coreir::detail::tag_set_text(f.key_tags);
+          }
+          if (f.value_tags != 0) {
+            out << " value " << coreir::detail::tag_set_text(f.value_tags);
+          }
+          for (int32_t flag = 1; flag <= coreir::kKnownFlags; flag <<= 1) {
+            if ((f.flags & flag) != 0) out << " " << coreir::flag_name(flag);
+          }
           out << ", " << in.d;
           break;
         }
@@ -7695,8 +7766,8 @@ struct FnCompiler {
     const Op op = n.tag == Tag::Unary    ? Op::TryUnary
                   : n.tag == Tag::Binary ? Op::TryBinary
                                          : Op::TryIndex;
-    const size_t at = emit(op, dst, try_mode(n.op, f.exact ? kExact : 0),
-                           static_cast<int32_t>(f.tags), n.pos);
+    const FallbackBits bits = pack_fallback(f);
+    const size_t at = emit(op, dst, try_mode(n.op, bits.b), bits.a, n.pos);
     const int32_t callee = compile_expr(f.callee);
     emit_call(dst, callee, dst + 1, static_cast<int32_t>(k), false, tail,
               n.pos);
@@ -9924,13 +9995,10 @@ struct Exec {
   // and true, when it has one for these operands; false, with nothing
   // written, when the fallback's call that follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
-    const auto tags = static_cast<uint32_t>(in.c);
-    const auto in_set = [tags](const Value& v) {
-      return has_tag(tags, v.tag());
-    };
-    const bool exact = (try_flags(in.b) & kExact) != 0;
+    const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
+    const bool exact = fb.exact();
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
-    if (!in_set(x)) return false;
+    if (!has_tag(fb.tags, x.tag())) return false;
     if (in.op == Op::TryUnary) {
       const auto op = static_cast<UnOp>(try_op(in.b));
       if (unop_fault(op, x) != Fault::None) return false;
@@ -9939,12 +10007,13 @@ struct Exec {
       return true;
     }
     const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
-    if (!in_set(y)) return false;
     if (in.op == Op::TryIndex) {
+      if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (index_fault(x, y) != Fault::None) return false;
       f.regs[static_cast<size_t>(in.a)] = index_get(x, y);
       return true;
     }
+    if (!has_tag(fb.tags, y.tag())) return false;
     const auto op = static_cast<BinOp>(try_op(in.b));
     if (exact && inexact(op, x, y)) return false;
     return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
