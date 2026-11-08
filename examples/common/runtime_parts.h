@@ -309,9 +309,10 @@ inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
   return exception(w.b, type, name, message);
 }
 
-// Whether `v` is an exception: a builtin one, or an instance of a
-// program's class that keeps a message. The meta and its head are each
-// read once, into scratch locals of the writer's.
+// Whether `v` is an exception: an Object whose meta is an exception's
+// record, all three of its fields there, headed by kExcKind for a builtin
+// one or by the class of a program's that keeps a message. The meta and
+// its head are each read once, into scratch locals of the writer's.
 inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
   const auto m = w.scratch("$meta");
   const auto h = w.scratch("$type");
@@ -319,7 +320,8 @@ inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
   return w.both(
       w.is(w.typ(v), "object"),
       w.blk({w.set(m, w.meta(w.L(v))),
-             w.both(w.is(w.typ(m), "array"),
+             w.both(w.both(w.is(w.typ(m), "array"),
+                           w.bin(BinOp::Gt, w.len(w.L(m)), w.I(kExcMessage))),
                     w.blk({w.set(h, w.idx(w.L(m), w.I(0))),
                            w.iff(w.is(w.typ(h), "string"),
                                  w.bin(BinOp::Eq, w.L(h), w.S(kExcKind)),
@@ -327,13 +329,17 @@ inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
 }
 
 // The same, asked in C++ by a host function -- a report's: the exception's
-// [type, name, message], or null when `v` is none.
+// [type, name, message], or null when `v` is none, by is_exception's tests
+// in is_exception's order, the meta read once.
 inline const std::vector<coreir::Value>* exception_record(
     const coreir::Value& v) {
-  if (const auto* rec = kind_record(v, kExcKind)) return rec;
-  if (!v.is_object() || !v.as_object()->meta.is_array()) return nullptr;
-  const std::vector<coreir::Value>& rec = v.as_object()->meta.as_array()->items;
-  return rec.size() > static_cast<size_t>(kExcMessage) && rec[0].is_object()
+  if (!v.is_object()) return nullptr;
+  const coreir::Value& m = v.as_object()->meta;
+  if (!m.is_array()) return nullptr;
+  const std::vector<coreir::Value>& rec = m.as_array()->items;
+  if (rec.size() <= static_cast<size_t>(kExcMessage)) return nullptr;
+  const coreir::Value& type = rec[0];
+  return (type.is_str() && type.as_str() == kExcKind) || type.is_object()
              ? &rec
              : nullptr;
 }
