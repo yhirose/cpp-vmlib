@@ -822,8 +822,8 @@ struct Binder {
       return {b.binary(op, l.node, r.node, p), Type::Str};
     }
     // `%` is integers only in Go -- float64 has math.Mod, not an operator --
-    // and the executor's own "cannot mod double" would say it as a runtime
-    // trap rather than a diagnostic at the operator's position.
+    // and the executor's Mod would answer fmod for one, where Go refuses
+    // the program at the operator's position.
     if (op == BinOp::Mod && (l.type == Type::F32 || l.type == Type::F64)) {
       fail(at, "operator % is not defined on " +
                    describe_type(l.type, l.second_half));

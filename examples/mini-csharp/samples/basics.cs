@@ -2,7 +2,7 @@
 // VM's answer. `/` and `%` on two ints truncate toward zero, which is
 // what BinOp::Div and BinOp::Mod do; a whole double prints without a
 // point, which is what to_display does; and int + int stays int while
-// int + double widens, which is what eval_binop does. So unlike every
+// int + double widens, which is what binop_fault does. So unlike every
 // other front end here, this one carries no arithmetic helper and no
 // float-formatting rule -- see README.md.
 

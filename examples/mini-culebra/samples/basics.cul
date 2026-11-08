@@ -1,9 +1,17 @@
 # Scalars and operators. Almost none of this needed a helper: culebra's
 # Long is the VM's Int, its Float is the VM's Double, `/` on two Longs is
-# integer division and `%` is C's -- which is what eval_binop already does.
+# integer division and `%` is C's -- which is what binop_fault already does.
 
 println("arith: {1 + 2 * 3} {7 - 2} {7 / 2} {7 % 3} {0 - 7 % 3}")
 println("floats: {7 / 2.0} {1 + 2.0} {1.0 * 3} {0.1 + 0.2}")
+# `%` on a Float is fmod, truncated the same way. A zero divisor raises
+# ZeroDivisionError, a Float's too, where Div alone answers inf; and the
+# least Long over -1 wraps, as every Long does.
+println("float rem: {7.5 % 2} {(0 - 7.5) % 2} {7 % 2.5} {(0 - 4.0) % 2}")
+fn zerodiv(f) { try { "{f()}" } catch e { "!{e.kind}" } }
+println("zero: {zerodiv(|| 7 / 0)} {zerodiv(|| 7.5 / 0)} {zerodiv(|| 7 % 0.0)}")
+let least = 0 - 9223372036854775807 - 1
+println("least: {least / (0 - 1)} {least % (0 - 1)}")
 println("display: {4.0} {100.0} {1.5} {2} {0 - 0.0}")
 println("strings: {'a' + 'b'} {'abc'.size()} {''.size()}")
 println("bools: {true} {false} {!true} {1 < 2} {2 <= 2} {'a' < 'b'}")

@@ -37,8 +37,10 @@
 // `if` here takes a Bool, a Long or a Float and nothing else -- which is
 // Value::truthy()'s own rule for those three -- so a condition is a bare
 // Tag::If with no call in front of it. `/` on two Longs is integer
-// division and `%` is C's, which is BinOp::Div and BinOp::Mod unchanged.
-// Only equality needed writing (`==` across two types is `false` in
+// division and `%` is C's, which is BinOp::Div and BinOp::Mod -- but for
+// a zero divisor, a Float's too, which raises ZeroDivisionError, so the
+// two are exact (vmlib.h's kExact) with a helper for that. Only equality
+// needed writing (`==` across two types is `false` in
 // culebra and a trap in the VM, and arrays and objects compare
 // structurally), and only display did (culebra prints a whole Float as
 // "4.0", which to_display's comment names as the reason it does not grow a
@@ -417,7 +419,7 @@ struct Binder {
     static const std::vector<std::string> names = {
         "$eq",   "$fstr",  "$disp",  "$insp", "$arrstr", "$objstr",
         "$err",  "$idx",   "$setidx", "$mem", "$setmem", "$methodof",
-        "$iter", "$iternext",
+        "$iter", "$iternext", "$div", "$mod",
     };
     return names;
   }
@@ -432,10 +434,15 @@ struct Binder {
   //   $idx  `xs[i]` on an array and an index in range; one out of range
   //         or not a Long, and an object (whose missing key is a
   //         KeyError, where Index answers nil), are $idx's.
+  //   $div  `/` and `%` on two numbers, exact: a zero divisor, a Float's
+  //   $mod  as well as a Long's, raises ZeroDivisionError, which is the
+  //         helper's.
   static Operators::Table operators() {
     return {
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
         {"$idx", VmOp::index(tags_named({"array", "int"}))},
+        {"$div", VmOp::binary(BinOp::Div, number_tags(), true)},
+        {"$mod", VmOp::binary(BinOp::Mod, number_tags(), true)},
     };
   }
 
@@ -609,6 +616,20 @@ struct Binder {
     r.finish("$err");
   }
 
+  // `/` and `%` where Div and Mod do not answer for culebra: a zero
+  // divisor raises ZeroDivisionError, a Float's too (where Div answers inf
+  // and Mod NaN), and anything else -- the least Long over -1, which
+  // wraps as culebra's does, or what is no number -- is the operator's.
+  void rt_division(const char* name, BinOp op) {
+    RT r(*this);
+    const auto [a, b] = r.params("a", "b");
+    r.add(r.iff(r.both(is_number(r, r.L(b)), r.bin(BinOp::Eq, r.L(b), r.I(0))),
+                r.ret(r.call("$err", {r.S("ZeroDivisionError"),
+                                      r.S("divide by 0 error")}))));
+    r.add(r.ret(r.bin(op, r.L(a), r.L(b))));
+    r.finish(name);
+  }
+
   // `a[i]` and `o['k']`: strict, unlike `.` -- an absent key is a KeyError
   // and an out-of-range index an IndexError, both of which culebra raises
   // and this front end therefore raises too, rather than letting Index's
@@ -757,6 +778,8 @@ struct Binder {
     rt_arrstr();
     rt_objstr();
     rt_err();
+    rt_division("$div", BinOp::Div);
+    rt_division("$mod", BinOp::Mod);
     rt_idx();
     rt_setidx();
     rt_mem();
@@ -1206,20 +1229,11 @@ struct Binder {
       }
       case "additive"_:
       case "multiplicative"_: {
-        // Straight to BinOp, with no helper in the way: culebra's `/` on
-        // two Longs is integer division and its `%` is C's, which is what
-        // binop_fault already does for two Ints.
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
-          const std::string t(op.token);
-          const BinOp o = t == "+"   ? BinOp::Add
-                          : t == "-" ? BinOp::Sub
-                          : t == "*" ? BinOp::Mul
-                          : t == "/" ? BinOp::Div
-                                     : BinOp::Mod;
-          acc =
-              b.at(pos_of(op)).binary(o, acc, emit_expr(*a.nodes[i + 1], ctx));
+          acc = arith(std::string(op.token), acc,
+                      emit_expr(*a.nodes[i + 1], ctx), pos_of(op));
         }
         return acc;
       }
@@ -1377,6 +1391,16 @@ struct Binder {
     return cur;
   }
 
+  // An arithmetic operator, `+`, `-`, `*`, `/` or `%`, and the same one
+  // inside `+=` and the rest: straight to BinOp, as binop_fault is culebra's
+  // on two numbers, but for `/` and `%`, whose zero divisor raises.
+  NodeId arith(const std::string& t, NodeId l, NodeId r, SrcPos p) {
+    if (t == "/") return ops.call("$div", {l, r}, p);
+    if (t == "%") return ops.call("$mod", {l, r}, p);
+    const BinOp o = t == "+" ? BinOp::Add : t == "-" ? BinOp::Sub : BinOp::Mul;
+    return Builder(m).at(p).binary(o, l, r);
+  }
+
   // An assignment in culebra's order (docs/language.md, "Evaluation
   // order"): the value first; then the target -- its receiver, then its
   // key -- once; then, for a compound, the present value read through that
@@ -1391,12 +1415,7 @@ struct Binder {
     const Ast& rhs = *a.nodes[2];
     const auto apply = [&](NodeId cur, NodeId v) -> NodeId {
       if (op == "=") return v;
-      const BinOp o = op == "+="   ? BinOp::Add
-                      : op == "-=" ? BinOp::Sub
-                      : op == "*=" ? BinOp::Mul
-                      : op == "/=" ? BinOp::Div
-                                   : BinOp::Mod;
-      return b.binary(o, cur, v);
+      return arith(op.substr(0, 1), cur, v, p);
     };
 
     if (target.tag == "ident"_) {

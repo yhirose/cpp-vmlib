@@ -1,5 +1,8 @@
 arith: 7 5 3 1 -1
 floats: 3.5 3.0 3.0 0.30000000000000004
+float rem: 1.5 -1.5 2.0 -0.0
+zero: !ZeroDivisionError !ZeroDivisionError !ZeroDivisionError
+least: -9223372036854775808 0
 display: 4.0 100.0 1.5 2 0.0
 strings: ab 3 0
 bools: true false false true true true

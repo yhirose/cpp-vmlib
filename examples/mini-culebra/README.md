@@ -41,9 +41,12 @@ culebra mostly does not:
   bare `Tag::If` with no call in front of it. (`if ''` is a *type error* in
   culebra; mini-culebra does not raise it, which is the one place it is
   laxer than the language.)
-* **`/` on two Longs is integer division and `%` is C's**, which is
-  `BinOp::Div` and `BinOp::Mod` unchanged: `binop_fault`'s "two ints stay
-  integers" is culebra's rule already.
+* **`/` on two Longs is integer division and `%` is C's**, a Float's
+  `%` fmod, which is `BinOp::Div` and `BinOp::Mod`: `binop_fault`'s "two
+  ints stay integers" is culebra's rule already. They are exact (vmlib.h's
+  `kExact`), with `$div` and `$mod` behind them for the one thing culebra
+  does not share: a zero divisor, a Float's as well as a Long's, raises
+  `ZeroDivisionError`.
 * **A Long is `Value`'s Int and a Float is its Double.** There is no single
   number type to normalize into and back out of.
 
@@ -273,13 +276,11 @@ Quietly different:
   track that per property. It infers it: a class instance's fields are
   all mutable, a literal's are not, and neither are a class value's (where
   culebra prints a field added to one as `mut`).
-* **Runtime traps are not culebra's errors.** A divide by zero or a call
-  with the wrong arity raises the executor's own trap value, which a `catch`
-  lands but which has no `.kind`. The two container errors this binder
-  raises itself -- `IndexError` and `KeyError` -- do carry `kind` and
-  `message`, because they are the ones the samples ask about.
-* **Float division by zero yields an infinity** where culebra raises
-  `ZeroDivisionError`. Integer division by zero traps in both.
+* **Runtime traps are not culebra's errors.** A call with the wrong arity
+  raises the executor's own trap value, which a `catch` lands but which
+  has no `.kind`. The errors this binder raises itself -- `IndexError`,
+  `KeyError` and `ZeroDivisionError` -- do carry `kind` and `message`,
+  because they are the ones the samples ask about.
 * **A generator prints as `<generator>`.** culebra prints its internal
   state object, which nothing could reproduce.
 * **A builtin method name wins over a property.** `size`, `push`, `pop`,
