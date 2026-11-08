@@ -473,10 +473,11 @@ inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
 // operators do, an int and a double meeting as numbers.
 inline uint32_t number_tags() { return coreir::tags_named({"int", "double"}); }
 // The same line asked of one value inside a helper's body: whether `v` is
-// an int or a double.
+// an int or a double -- `v` evaluated once, and each test a TypeIn of it.
 inline NodeId is_number(FuncWriter& w, NodeId v) {
-  const NodeId t = w.typ(v);
-  return w.either(w.is(t, "int"), w.is(t, "double"));
+  return w.let(v, [&](auto t) {
+    return w.either(w.is(w.typ(t()), "int"), w.is(w.typ(t()), "double"));
+  });
 }
 // Whether `v`, a divisor, is a zero, an int's or a double's -- what an
 // exact division leaves its helper to raise for (vmlib.h's kExact).
