@@ -825,7 +825,7 @@ struct Binder {
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
-    const auto [mth] = r.locals("m");
+    const auto [mth, cls] = r.locals("m", "cls");
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S(""))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
@@ -838,8 +838,8 @@ struct Binder {
     r.add(r.set(mth, r.call("$mlookup", {r.L(v), r.S("ToString")})));
     r.add(r.iff(r.isnt(r.typ(mth), "nil"),
                 r.ret(r.b.call_value(r.L(mth), {r.L(v)}))));
-    r.add(r.iff(r.is(r.typ(r.meta(r.L(v))), "object"),
-                r.ret(class_name(r, r.meta(r.L(v))))));
+    r.add(r.set(cls, instance_class(r, v)));
+    r.add(r.iff(r.isnt(r.typ(cls), "nil"), r.ret(class_name(r, r.L(cls)))));
     r.add(r.ret(r.S("<object>")));
     r.finish("$str");
   }
@@ -906,7 +906,9 @@ struct Binder {
     method_walk(r, recv, key);
     r.add(r.iff(r.isnt(r.typ(recv), "object"),
                 r.ret(r.ref("$nullcall"))));
-    r.add(r.iff(r.isnt(r.typ(r.meta(r.L(recv))), "object"),
+    // The walk has run off its chain; whether there was one to walk is
+    // the receiver's class, asked again on this way out alone.
+    r.add(r.iff(r.is(r.typ(instance_class(r, recv)), "nil"),
                 r.ret(r.call("$exc", {r.S("not an object")}))));
     r.add(r.ret(r.call(
         "$exc", {r.bin(BinOp::Add, r.S("no such method: "), r.L(key))})));

@@ -569,14 +569,14 @@ struct Binder {
   void rt_objstr() {
     RT r(*this);
     const auto [o] = r.params("o");
-    const auto [out, i, ks, k, n, mut] =
-        r.locals("out", "i", "ks", "k", "n", "mut");
+    const auto [out, i, ks, k, n, mut, cls] =
+        r.locals("out", "i", "ks", "k", "n", "mut", "cls");
     r.add(r.set(out, r.S("{")));
     r.add(r.set(mut, r.S("")));
-    r.add(r.iff(r.is(r.typ(r.meta(r.L(o))), "object"),
+    r.add(r.set(cls, instance_class(r, o)));
+    r.add(r.iff(r.isnt(r.typ(cls), "nil"),
                 r.blk({r.set(mut, r.S("mut ")),
-                       r.set(out, r.bin(BinOp::Add,
-                                        class_name(r, r.meta(r.L(o))),
+                       r.set(out, r.bin(BinOp::Add, class_name(r, r.L(cls)),
                                         r.S(" {")))})));
     r.add(r.set(i, r.I(0)));
     r.add(r.set(ks, r.in(IntrinsicId::ObjectKeys, {r.L(o)})));
