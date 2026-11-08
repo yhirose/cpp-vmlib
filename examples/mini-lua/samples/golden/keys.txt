@@ -1,0 +1,12 @@
+a	a	a	a
+b	b	b
+c	c
+d	d	d
+e	e
+f	f	f	f
+g	g
+h	h	h
+7
+x	x	y	z	z
+x	y	z
+10	15	20	30	4

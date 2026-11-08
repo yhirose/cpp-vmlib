@@ -128,9 +128,10 @@ by the same container.
 
 Three rules the binder writes on top of it:
 
-* **`t[1.0]` and `t[1]` are one slot.** `$key` normalizes an integral float
-  to the integer it equals before it is used, so a table keyed by
-  arithmetic results behaves.
+* **`t[1.0]` and `t[1]` are one slot.** The VM's `kIntegralKey` on `$get`'s
+  and `$set`'s Index and SetIndex, and the `IntegralKey` intrinsic in
+  `rawget` and `rawset`, take an integral float, anywhere in 64 bits, as
+  the integer it equals, so a table keyed by arithmetic results behaves.
 * **Assigning nil removes the key**, which is what keeps `#` and `pairs`
   agreeing about what the table holds.
 * **`#` is a border**, found by walking from 1 -- not `Len`, which answers

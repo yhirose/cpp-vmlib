@@ -1096,6 +1096,44 @@ int main() {
              "kIntegralKey");
   }
 
+  // IntegralKey is kIntegralKey's rule as an intrinsic: the int a double
+  // holds when it holds an integer in int64's range, and any other value as
+  // it is.
+  {
+    Module m;
+    Builder b(m);
+    const auto key = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::IntegralKey, {v}, p);
+    };
+    const auto show = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.binary(BinOp::Add,
+                                   b.intrinsic(IntrinsicId::TypeOf, {v}, p),
+                                   b.str_literal(":", p), p)},
+                         p);
+    };
+    const auto D = [&](double v) { return b.double_literal(v, p); };
+    const auto both = [&](NodeId v) {
+      return std::vector<NodeId>{show(key(v)),
+                                 b.intrinsic(IntrinsicId::Print, {key(v)}, p)};
+    };
+    std::vector<NodeId> body;
+    for (const NodeId v :
+         {D(1.0), D(-0.0), D(9007199254740992.0), D(1152921504606846976.0),
+          D(-9223372036854775808.0), D(9223372036854775808.0), D(1.5),
+          D(std::nan("")), D(HUGE_VAL), b.literal(7, p), b.str_literal("s", p),
+          b.nil_literal(p)}) {
+      for (const NodeId n : both(v)) body.push_back(n);
+    }
+    m.funcs.push_back({"main", 0, 0, b.block(body, p), {}, {}});
+    check_eq(run_module(m, "IntegralKey"), "", "IntegralKey: failure");
+    check_eq(joined(),
+             "int:|1|int:|0|int:|9007199254740992|int:|1152921504606846976|"
+             "int:|-9223372036854775808|double:|9223372036854775808|"
+             "double:|1.5|double:|nan|double:|inf|int:|7|string:|s|nil:|nil|",
+             "IntegralKey");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;

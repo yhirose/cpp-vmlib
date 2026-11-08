@@ -644,7 +644,7 @@ runs every key through it before `Index`, `SetIndex`, `ObjectHas` or
 
 | language | wants | normalize first |
 |---|---|---|
-| Lua | `t[1.0]` and `t[1]` are one slot | a double that equals an int becomes that int (mini-lua's `$key`) |
+| Lua | `t[1.0]` and `t[1]` are one slot | a double that equals an int becomes that int (the VM's `kIntegralKey`; `IntegralKey` where no Index is) |
 | JavaScript `Map`/`Set` | SameValueZero: `+0` and `-0` are one key | `-0.0` becomes `0.0` |
 | Python `dict` | `1`, `1.0` and `True` are one key | a bool or an integral double becomes the int (mini-python leaves `True` and `1` apart, and says so) |
 

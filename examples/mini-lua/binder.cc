@@ -380,7 +380,7 @@ struct Binder {
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
         "$truthy", "$eq",   "$div",  "$cat",  "$str",
-        "$key",    "$get",  "$set",  "$len",  "$one",  "$nth",   "$append",
+        "$get",  "$set",  "$len",  "$one",  "$nth",   "$append",
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$spread", "$error", "$mm", "$add", "$subm", "$mulm",
         "$select", "$pack", "$unpack", "$insertat", "$calltable",
@@ -389,9 +389,10 @@ struct Binder {
   }
 
   // A key a table takes: an int, a string, a bool or a float, a float that
-  // is a whole number being the int (kIntegralKey, which is `$key`'s rule
-  // in the VM). A nil is no key, and NaN, which kIntegralKey leaves to
-  // the fallback, is none either.
+  // is a whole number being the int. That rule is the VM's alone: the Index
+  // and SetIndex of $get and $set have kIntegralKey, and their fallbacks,
+  // rawget and rawset take the key through IntegralKey. A nil is no key,
+  // and NaN, which the VM leaves to the fallback, is none either.
   static uint32_t lua_keys() {
     return tags_named({"int", "string", "bool", "double"});
   }
@@ -579,28 +580,6 @@ struct Binder {
     r.finish("$cat");
   }
 
-  // A table key: `t[1.0]` and `t[1]` are the same slot in Lua, so an
-  // integral float normalizes to the integer it equals before it is used.
-  void rt_key() {
-    RT r(*this);
-    const auto [k] = r.params("k");
-    const auto [i] = r.locals("i");
-    r.add(r.iff(
-        r.is(r.typ(k), "double"),
-        r.blk({r.iff(r.bin(BinOp::Ne, r.L(k), r.L(k)), r.ret(r.L(k))),
-               r.iff(r.b.make_if(
-                         r.bin(BinOp::Gt, r.L(k), r.D(-9.007199254740992e15)),
-                         r.bin(BinOp::Lt, r.L(k), r.D(9.007199254740992e15)),
-                         r.Bo(false)),
-                     r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(k)})),
-                            r.iff(r.bin(BinOp::Eq,
-                                        r.in(IntrinsicId::ToDouble, {r.L(i)}),
-                                        r.L(k)),
-                                  r.ret(r.L(i)))}))})));
-    r.add(r.ret(r.L(k)));
-    r.finish("$key");
-  }
-
   // Reading a table, with the one metamethod this subset has. `__index`
   // may be a table (look there instead) or a function (call it) -- Lua's
   // own rule, written here because a metatable is a language's idea and
@@ -611,7 +590,7 @@ struct Binder {
     const auto [key, mt, idx] = r.locals("key", "mt", "idx");
     r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.b.make_throw(r.S("attempt to index a non-table value"))));
-    r.add(r.set(key, r.call("$key", {r.L(k)})));
+    r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
     r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
     r.add(r.set(mt, r.meta(r.L(t))));
     r.add(r.iff(
@@ -637,7 +616,7 @@ struct Binder {
     const auto [key, m] = r.locals("key", "m");
     r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.b.make_throw(r.S("attempt to index a non-table value"))));
-    r.add(r.set(key, r.call("$key", {r.L(k)})));
+    r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
     r.add(r.iff(r.is(r.typ(v), "nil"),
                 r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(t), r.L(key)}),
                        r.ret(r.L(v))})));
@@ -937,7 +916,7 @@ struct Binder {
 
   void emit_runtime() {
     rt_truthy(); rt_eq(); rt_div(); rt_cat(); rt_str();
-    rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
+    rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
     rt_insert(); rt_insertat(); rt_calltable(); rt_spread(); rt_error();
     rt_mm();
@@ -1470,7 +1449,7 @@ struct Binder {
           return {b.let(a0(0),
                         [&](auto t) {
                           return b.block(
-                              {b.set_index(t(), rt.call("$key", {a0(1)}, p),
+                              {b.set_index(t(), b.intrinsic(IntrinsicId::IntegralKey, {a0(1)}, p),
                                            a0(2), p),
                                t()},
                               p);
@@ -1479,7 +1458,7 @@ struct Binder {
                   false};
         }
         if (g == "rawget") {
-          return {b.index(a0(0), rt.call("$key", {a0(1)}, p), p), false};
+          return {b.index(a0(0), b.intrinsic(IntrinsicId::IntegralKey, {a0(1)}, p), p), false};
         }
         fail(prim, "'" + g + "' is not supported here");
       }

@@ -1429,9 +1429,9 @@ inline constexpr int32_t kIntegralKey = 8;
 inline constexpr int32_t kKnownFlags =
     kExact | kMissNil | kAppend | kIntegralKey;
 inline constexpr const char* flag_name(int32_t flag) {
-  return flag == kExact     ? "exact"
-         : flag == kMissNil ? "missnil"
-         : flag == kAppend  ? "append"
+  return flag == kExact         ? "exact"
+         : flag == kMissNil     ? "missnil"
+         : flag == kAppend      ? "append"
          : flag == kIntegralKey ? "integralkey"
                                 : "flagged";
 }
@@ -1596,6 +1596,11 @@ enum class IntrinsicId : uint8_t {
   // for fixed-width ints (see the README's Fixed-width integers section) --
   // this is that discipline's one addition for a language with `float`.
   ToFloat32,    // (n) -> double, rounded to float precision
+  // A key as kIntegralKey (Tag::Index) takes it: the int a double holds
+  // when it holds an integer in int64's range, -0.0 as 0, and otherwise the
+  // value itself. For a language that keys by it somewhere no Index is
+  // (Lua's rawget and rawset), so that its keys are one rule's.
+  IntegralKey,  // (k) -> k
   // The string and array primitives a front end cannot write over Index
   // alone at a reasonable cost. A slice is the half-open range [i, j),
   // bounds-checked the way Index is (semantics.h's slice_error) and always
@@ -1963,6 +1968,7 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::GenThrow: return 2;
     case IntrinsicId::Enqueue: return 1;
     case IntrinsicId::ToFloat32: return 1;
+    case IntrinsicId::IntegralKey: return 1;
     case IntrinsicId::StrSlice: return 3;
     case IntrinsicId::ArraySlice: return 3;
     case IntrinsicId::StrByte: return 2;
@@ -2035,7 +2041,7 @@ inline constexpr bool yields_value(Tag t) {
 
 // An operation's fallback (Tag::Unary has the rule): what is called when
 // an operand's tag is not in the set it names, the operation faults, or the
-// flags (kExact, kMissNil, kAppend) say the language answers. The callee is
+// flags (kExact, kMissNil, kAppend, kIntegralKey) say the language answers. The callee is
 // invalid when there is none.
 //
 // The sets. Unary and Binary have one, `tags`, that every operand's tag
@@ -4296,16 +4302,17 @@ VMLIB_INLINE Value index_get(const Value& recv, const Value& key) {
   return v ? *v : Value();
 }
 
-// Whether the double `d` holds an integer in int64's range -- -0.0 does,
-// and 0 is the int; NaN, a fraction, an infinity and 2^63 do not -- and
-// that integer: kIntegralKey's rule.
-VMLIB_INLINE bool integral_int(double d, int64_t& out) {
+// kIntegralKey's rule, the one copy: the int a Double holds when it holds an
+// integer in int64's range -- -0.0 is 0; NaN, a fraction, an infinity and
+// 2^63 do not -- and any other value as it is.
+VMLIB_INLINE Value integral_key(const Value& key) {
+  if (!key.is_double()) return key;
+  const double d = key.as_double();
   if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0) ||
       d != std::trunc(d)) {
-    return false;
+    return key;
   }
-  out = static_cast<int64_t>(d);
-  return true;
+  return Value::make_int(static_cast<int64_t>(d));
 }
 
 // The slot a key names in a map or an object, or null for a miss -- and for
@@ -4564,6 +4571,7 @@ enum class Op : uint8_t {
   // is what makes the queue a scheduler -- joins the run's FIFO.
   Enqueue,      // a = closure or coroutine reg
   ToFloat32,    // a = dst, b = src   (round to float precision, as a double)
+  IntegralKey,  // a = dst, b = src   (kIntegralKey's key)
   // Slices spend the fourth operand on their second bound, the way
   // CallValue spends it on its argument count.
   StrSlice,     // a = dst, b = str reg, c = from reg, d = to reg
@@ -4698,6 +4706,7 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::GenThrow:     return Op::GenThrow;
     case I::Enqueue:      return Op::Enqueue;
     case I::ToFloat32:    return Op::ToFloat32;
+    case I::IntegralKey:  return Op::IntegralKey;
     case I::StrSlice:     return Op::StrSlice;
     case I::ArraySlice:   return Op::ArraySlice;
     case I::StrByte:      return Op::StrByte;
@@ -5858,6 +5867,7 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::GenThrow: return "genthrow";
     case IntrinsicId::Enqueue: return "enqueue";
     case IntrinsicId::ToFloat32: return "tofloat32";
+    case IntrinsicId::IntegralKey: return "integralkey";
     case IntrinsicId::StrSlice: return "strslice";
     case IntrinsicId::ArraySlice: return "arrayslice";
     case IntrinsicId::StrByte: return "strbyte";
@@ -6682,6 +6692,7 @@ inline constexpr bool observable(IntrinsicId id) {
     case IntrinsicId::Same:
     case IntrinsicId::FnArity:
     case IntrinsicId::ToFloat32:
+    case IntrinsicId::IntegralKey:
     case IntrinsicId::StrSlice:
     case IntrinsicId::StrByte:
     case IntrinsicId::StrFromByte:
@@ -6997,6 +7008,7 @@ inline const char* name_of(Op op) {
     case Op::GenThrow:    return "genthrow";
     case Op::Enqueue:     return "enqueue";
     case Op::ToFloat32:   return "tofloat32";
+    case Op::IntegralKey: return "integralkey";
     case Op::StrSlice:    return "strslice";
     case Op::ArraySlice:  return "arrayslice";
     case Op::StrByte:     return "strbyte";
@@ -7166,7 +7178,8 @@ inline std::string to_string(const Program& p) {
         case Op::ObjectKeys: case Op::ObjectRemove: case Op::ArgCount:
         case Op::Same: case Op::FnArity: case Op::Collect: case Op::HeapStats:
         case Op::GenResume: case Op::GenReturn: case Op::GenThrow:
-        case Op::Enqueue: case Op::ToFloat32: case Op::StrSlice:
+        case Op::Enqueue: case Op::ToFloat32: case Op::IntegralKey:
+        case Op::StrSlice:
         case Op::ArraySlice: case Op::StrByte: case Op::StrFromByte:
         case Op::StrUpper: case Op::StrLower: case Op::NewMap:
         case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
@@ -10145,22 +10158,24 @@ struct Exec {
   }
 
   // TryIndex and TrySetIndex: the container operations, whose sets and
-  // flags are all of the Fallback's.
+  // flags are all of the Fallback's. With kIntegralKey a double key is
+  // judged as the int it holds (integral_key), and NaN is not the VM's; the
+  // registers, and so the fallback, keep the key as written.
   static bool try_container(Frame& f, const Insn& in) {
     const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
     if (!has_tag(fb.tags, x.tag())) return false;
-    Value norm;  // the key as an int, when kIntegralKey makes it one
-    const Value* yp = &f.regs[static_cast<size_t>(in.a) + 2];
-    if (fb.integral_key() && yp->is_double()) {
-      const double d = yp->as_double();
-      if (std::isnan(d)) return false;
-      if (int64_t i = 0; integral_int(d, i)) {
-        norm = Value::make_int(i);
-        yp = &norm;
-      }
+    const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    if (fb.integral_key() && y.is_double()) {
+      if (std::isnan(y.as_double())) return false;
+      return container_op(f, in, fb, x, integral_key(y));
     }
-    const Value& y = *yp;
+    return container_op(f, in, fb, x, y);
+  }
+
+  // The operation itself, on the receiver `x` and the key `y` as it is judged.
+  static bool container_op(Frame& f, const Insn& in, const Fallback& fb,
+                           const Value& x, const Value& y) {
     if (!has_tag(fb.key_mask(), y.tag())) return false;
     if (in.op == Op::TryIndex) {
       if (index_fault(x, y) != Fault::None) return false;
@@ -10742,6 +10757,9 @@ struct Exec {
           f.regs[in.a] = Value::make_double(v.as_number());
           break;
         }
+        case Op::IntegralKey:
+          f.regs[in.a] = integral_key(f.regs[in.b]);
+          break;
         case Op::ToFloat32: {
           const Value& v = f.regs[in.b];
           if (!v.is_number()) {
