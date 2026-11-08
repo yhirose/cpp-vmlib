@@ -2073,10 +2073,14 @@ inline constexpr FallbackBits pack_fallback(const Fallback& f) {
           static_cast<int32_t>(static_cast<uint32_t>(f.flags) |
                                f.value_tags << 8)};
 }
+// The two fields a Unary or Binary reads, without unpacking the rest.
+inline constexpr uint32_t tags_of(FallbackBits x) {
+  return static_cast<uint32_t>(x.a) & 0xffff;
+}
+inline constexpr int32_t flags_of(FallbackBits x) { return x.b & 0xff; }
 inline constexpr Fallback unpack_fallback(NodeId callee, FallbackBits x) {
   const auto a = static_cast<uint32_t>(x.a), b = static_cast<uint32_t>(x.b);
-  return {callee, a & 0xffff, static_cast<int32_t>(b & 0xff), a >> 16,
-          b >> 8};
+  return {callee, tags_of(x), flags_of(x), a >> 16, b >> 8};
 }
 
 // The operands of a tag that may name a fallback -- Unary, Binary, Index
@@ -10117,16 +10121,35 @@ struct Exec {
   // operands; false, with nothing written, when the fallback's call that
   // follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
-    const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
+    if (in.op == Op::TryIndex || in.op == Op::TrySetIndex) {
+      return try_container(f, in);
+    }
+    const FallbackBits bits = try_bits(in.c, in.b);
+    const uint32_t tags = tags_of(bits);
+    const bool exact = (flags_of(bits) & kExact) != 0;
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
-    if (!has_tag(fb.tags, x.tag())) return false;
+    if (!has_tag(tags, x.tag())) return false;
     if (in.op == Op::TryUnary) {
       const auto op = static_cast<UnOp>(try_op(in.b));
       if (unop_fault(op, x) != Fault::None) return false;
-      if (fb.exact() && x.is_int() && wraps(op, x.as_int())) return false;
+      if (exact && x.is_int() && wraps(op, x.as_int())) return false;
       f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
       return true;
     }
+    const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    if (!has_tag(tags, y.tag())) return false;
+    const auto op = static_cast<BinOp>(try_op(in.b));
+    if (exact && inexact(op, x, y)) return false;
+    return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
+           Fault::None;
+  }
+
+  // TryIndex and TrySetIndex: the container operations, whose sets and
+  // flags are all of the Fallback's.
+  static bool try_container(Frame& f, const Insn& in) {
+    const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
+    const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
+    if (!has_tag(fb.tags, x.tag())) return false;
     Value norm;  // the key as an int, when kIntegralKey makes it one
     const Value* yp = &f.regs[static_cast<size_t>(in.a) + 2];
     if (fb.integral_key() && yp->is_double()) {
@@ -10138,15 +10161,7 @@ struct Exec {
       }
     }
     const Value& y = *yp;
-    if (!has_tag(in.op == Op::TryBinary ? fb.tags : fb.key_mask(), y.tag())) {
-      return false;
-    }
-    if (in.op == Op::TryBinary) {
-      const auto op = static_cast<BinOp>(try_op(in.b));
-      if (fb.exact() && inexact(op, x, y)) return false;
-      return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
-             Fault::None;
-    }
+    if (!has_tag(fb.key_mask(), y.tag())) return false;
     if (in.op == Op::TryIndex) {
       if (index_fault(x, y) != Fault::None) return false;
       Value& dst = f.regs[static_cast<size_t>(in.a)];
