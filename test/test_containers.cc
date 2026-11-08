@@ -827,8 +827,9 @@ int main() {
       return b.intrinsic(IntrinsicId::Print, {v}, p);
     };
     const auto set = [&](NodeId r, NodeId k, NodeId v, uint32_t tags,
-                         uint32_t key_tags = 0, uint32_t value_tags = 0) {
-      Fallback f{b.make_closure(1, 0, p), tags};
+                         uint32_t key_tags = 0, uint32_t value_tags = 0,
+                         int32_t flags = 0) {
+      Fallback f{b.make_closure(1, 0, p), tags, flags};
       f.key_tags = key_tags;
       f.value_tags = value_tags;
       return b.set_index(r, k, v, f, p);
@@ -844,8 +845,8 @@ int main() {
          // In range, an existing key, a new key, a map: the VM's.
          set(xs, L(1), L(21), kContainers | kKeys),
          set(o, S("a"), L(2), kContainers | kKeys),
-         set(o, S("b"), L(3), kContainers | kKeys),
-         set(mp, S("k"), L(4), kContainers | kKeys),
+         set(o, S("b"), L(3), kContainers | kKeys, 0, 0, kMissNil),
+         set(mp, S("k"), L(4), kContainers | kKeys, 0, 0, kMissNil),
          print(S(".")),
          // At the length, below zero, a string key on an array, a
          // non-string key on an object: faults, the fallback's.
@@ -879,6 +880,85 @@ int main() {
     check_eq(joined(),
              ".|fb|fb|fb|fb|.|fb|.|fb|fb|.|fb|.|6|21|2|3|4|",
              "set_index with a fallback");
+  }
+
+  // kMissNil: a miss -- a key the map or object lacks -- is the fallback's
+  // unless the flag says the VM reads nil and creates the key, and then
+  // only for a receiver with no meta; a hit is the VM's either way, and a
+  // key holding nil is a hit, which a read of nil cannot tell from a miss.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    // 0 mp: a plain map; 1 mm: a map with a meta; 2 o, 3 om: the same for
+    // an object. Each holds a key "n" with nil.
+    m.funcs.push_back({"main", 4, 0, NodeId{}, {"mp", "mm", "o", "om"}, {}});
+    Func rd{"read", 2, 0, NodeId{}, {"r", "k"}, {}};
+    rd.num_params = 2;
+    rd.lenient_arity = true;
+    rd.body = b.make_return(b.str_literal("F", p), p);
+    m.funcs.push_back(rd);
+    Func wr{"write", 3, 0, NodeId{}, {"r", "k", "v"}, {}};
+    wr.num_params = 3;
+    wr.lenient_arity = true;
+    wr.body = b.intrinsic(IntrinsicId::Print, {b.str_literal("W", p)}, p);
+    m.funcs.push_back(wr);
+    const auto V = [&](int32_t i) { return b.varref(VarKind::Local, i, p); };
+    const auto S = [&](const char* v) { return b.str_literal(v, p); };
+    const auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const auto meta = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::MetaSet, {v, b.array_lit({S("t")}, p)},
+                         p);
+    };
+    const uint32_t kBoth = tags_named({"map", "object", "string"});
+    const auto get = [&](int32_t r, const char* k, int32_t flags) {
+      return print(b.index(V(r), S(k),
+                           {b.make_closure(1, 0, p), kBoth, flags}, p));
+    };
+    const auto put = [&](int32_t r, const char* k, int32_t flags) {
+      return b.set_index(V(r), S(k), b.literal(1, p),
+                         {b.make_closure(2, 0, p), kBoth, flags}, p);
+    };
+    const auto len = [&](int32_t r) {
+      return print(b.intrinsic(IntrinsicId::Len, {V(r)}, p));
+    };
+    const NodeId nil = b.nil_literal(p);
+    std::vector<NodeId> body{
+        b.assign(VarKind::Local, 0, b.intrinsic(IntrinsicId::MapNew, {}, p), p),
+        b.assign(VarKind::Local, 1,
+                 meta(b.intrinsic(IntrinsicId::MapNew, {}, p)), p),
+        b.assign(VarKind::Local, 2, b.object_lit({}, p), p),
+        b.assign(VarKind::Local, 3, meta(b.object_lit({}, p)), p),
+        b.set_index(V(0), S("n"), nil, p), b.set_index(V(1), S("n"), nil, p),
+        b.set_index(V(2), S("n"), nil, p), b.set_index(V(3), S("n"), nil, p)};
+    const auto add = [&](NodeId n) { body.push_back(n); };
+    // Reads. Without the flag every miss is the fallback's; with it, a
+    // plain receiver reads nil and a receiver with a meta still does not.
+    for (int32_t r = 0; r < 4; ++r) add(get(r, "x", 0));
+    add(print(S(".")));
+    for (int32_t r = 0; r < 4; ++r) add(get(r, "x", kMissNil));
+    add(print(S(".")));
+    // A key holding nil is found: nil, never the fallback's.
+    for (int32_t r = 0; r < 4; ++r) add(get(r, "n", 0));
+    add(print(S(".")));
+    // Writes. The same split for a new key; an existing key (holding nil)
+    // is written by the VM in every case.
+    for (int32_t r = 0; r < 4; ++r) add(put(r, "y", 0));
+    add(print(S(".")));
+    for (int32_t r = 0; r < 4; ++r) add(put(r, "y", kMissNil));
+    add(print(S(".")));
+    for (int32_t r = 0; r < 4; ++r) add(put(r, "n", 0));
+    add(print(S(".")));
+    for (int32_t r = 0; r < 4; ++r) add(len(r));
+    for (int32_t r = 0; r < 4; ++r) add(get(r, "n", 0));
+    m.funcs[0].body = b.scope(0, 4, b.block(body, p), p);
+    check_eq(run_module(m, "kMissNil"), "", "kMissNil: unexpected failure");
+    check_eq(joined(),
+             "F|F|F|F|.|nil|F|nil|F|.|nil|nil|nil|nil|.|"
+             "W|W|W|W|.|W|W|.|.|2|1|2|1|1|1|1|1|",
+             "kMissNil");
   }
 
   if (g_failures != 0) {

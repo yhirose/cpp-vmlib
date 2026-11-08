@@ -349,10 +349,32 @@ int main() {
            "operator's tag set names no tag", "a tag past the last");
   check_eq(verdict([&](Module& m, Builder& b) {
              const NodeId n = add(b, {callee(b), 1});
-             m.nodes[n.v].b = 2;
+             m.nodes[n.v].b = 8;
              return n;
            }),
-           "unknown operator flag", "a flag that is not kExact");
+           "unknown operator flag", "a flag there is none of");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {callee(b), 1, kMissNil});
+           }),
+           "add cannot be missnil", "a Binary's miss");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, kMissNil},
+                            p);
+           }),
+           "not cannot be missnil", "a Unary's miss");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, kMissNil}, p);
+           }),
+           "", "an Index's miss");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.block(
+                 {b.set_index(b.array_lit({}, p), b.literal(0, p),
+                              b.literal(1, p), {callee(b), 1, kMissNil}, p),
+                  b.literal(0, p)},
+                 p);
+           }),
+           "", "a SetIndex's miss");
   check_eq(verdict([&](Module&, Builder& b) {
              return add(b, {callee(b), 1, 0, 2});
            }),

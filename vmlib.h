@@ -1386,10 +1386,23 @@ inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 // Ruby's `%`) marks its operators exact.
 inline constexpr int32_t kExact = 1;
 
+// kMissNil (Index and SetIndex): the fallback answers a miss -- a key the
+// map or object lacks -- unless this is set, and then the VM does, as the
+// language would: a read gives nil, a write creates the key. Only for a
+// receiver whose meta slot is nil, though: a table with a metatable, an
+// instance of a class, has a protocol of its own for a miss (Lua's __index
+// and __newindex, a prototype chain), and its misses are the fallback's
+// whatever this says. A hit is the VM's either way. So the flag is for a
+// language whose miss on a plain container is nil: Lua's tables, Ruby's
+// hashes, a JavaScript object literal. One whose miss is an error (Python's
+// KeyError, C#'s KeyNotFoundException) leaves it clear. Like the tag sets
+// it widens what the VM answers, where kExact narrows what it would.
+inline constexpr int32_t kMissNil = 2;
+
 // Every flag there is, and a flag's word.
-inline constexpr int32_t kKnownFlags = kExact;
+inline constexpr int32_t kKnownFlags = kExact | kMissNil;
 inline constexpr const char* flag_name(int32_t flag) {
-  return flag == kExact ? "exact" : "flagged";
+  return flag == kExact ? "exact" : flag == kMissNil ? "missnil" : "flagged";
 }
 
 // The signed divisions: the operators a zero divisor makes untrue, and
@@ -1415,6 +1428,9 @@ inline constexpr int32_t allowed_flags(Tag t, uint8_t op) {
       return can_be_exact(static_cast<UnOp>(op)) ? kExact : 0;
     case Tag::Binary:
       return can_be_exact(static_cast<BinOp>(op)) ? kExact : 0;
+    case Tag::Index:
+    case Tag::SetIndex:
+      return kMissNil;
     default:
       return 0;
   }
@@ -2003,6 +2019,7 @@ struct Fallback {
   uint32_t value_tags = 0;
   bool valid() const { return callee.valid(); }
   bool exact() const { return (flags & kExact) != 0; }
+  bool miss_nil() const { return (flags & kMissNil) != 0; }
   uint32_t key_mask() const { return key_tags != 0 ? key_tags : tags; }
 };
 
@@ -4235,6 +4252,16 @@ VMLIB_INLINE Value index_get(const Value& recv, const Value& key) {
   }
   const Value* v = recv.as_object()->find(key.as_str());
   return v ? *v : Value();
+}
+
+// The slot a key names in a map or an object, or null for a miss -- and for
+// a receiver that holds none, whose elements are not found by key. What a
+// miss is, a nil read or a new key or the language's to say, is the
+// caller's (kMissNil): index_get cannot tell it from a stored nil.
+VMLIB_INLINE Value* index_slot(const Value& recv, const Value& key) {
+  if (recv.is_map()) return recv.as_map()->find(key);
+  if (recv.is_object()) return recv.as_object()->find(key.as_str());
+  return nullptr;
 }
 
 inline void index_set(const Value& recv, const Value& key, const Value& v) {
@@ -10054,13 +10081,30 @@ struct Exec {
       if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (fb.value_tags != 0 && !has_tag(fb.value_tags, z.tag())) return false;
       if (index_fault(x, y, true) != Fault::None) return false;
+      if (Value* slot = index_slot(x, y)) {
+        *slot = z;
+        return true;
+      }
+      if (x.is_map() || x.is_object()) {
+        if (!fb.miss_nil() || !meta_slot(x)->is_nil()) return false;
+      }
       index_set(x, y, z);
       return true;
     }
     if (in.op == Op::TryIndex) {
       if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (index_fault(x, y) != Fault::None) return false;
-      f.regs[static_cast<size_t>(in.a)] = index_get(x, y);
+      Value& dst = f.regs[static_cast<size_t>(in.a)];
+      if (const Value* slot = index_slot(x, y)) {
+        dst = *slot;
+        return true;
+      }
+      if (x.is_map() || x.is_object()) {
+        if (!fb.miss_nil() || !meta_slot(x)->is_nil()) return false;
+        dst = Value();
+        return true;
+      }
+      dst = index_get(x, y);
       return true;
     }
     if (!has_tag(fb.tags, y.tag())) return false;
