@@ -11,6 +11,10 @@ puts -3 % 4611686018427387904, -3 / 4611686018427387904
 # `%` floors a Float the same way, a zero remainder keeping the
 # dividend's sign.
 puts 7.5 % 2, -7.5 % 2, 7 % 2.5, 7.5 % -2, -4.0 % 2, 4.0 % -2
+# The least Integer over -1 leaves 0, and a Float divided by zero is
+# Infinity, where its `%` by zero raises (errors.rb).
+least = -9223372036854775807 - 1
+puts least % -1, 7.5 / 0
 puts 7 / 2.0, 1 + 2.0, 1.0 * 3
 
 # A whole Float prints with a point, which is to_display's output plus the

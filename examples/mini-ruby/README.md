@@ -144,9 +144,10 @@ checked against `ruby`.
 * **`/` and `%` on two Integers floor**, where `BinOp::Div` truncates and
   `BinOp::Mod` is C's: they are `BinOp::FloorDiv` and `BinOp::FloorMod`,
   with `$div` and `$mod` behind them for a Float and a zero divisor.
-  `%` floors a Float too: `$mod` hands it to `BinOp::FloorMod` once it
-  has raised ZeroDivisionError for a zero divisor, where the operator
-  would answer NaN.
+  `%` floors a Float too, as the same `BinOp::FloorMod`, exact (vmlib.h's
+  `kExact`): a zero divisor, a Float's as well as an Integer's, is `$mod`'s,
+  which raises ZeroDivisionError where the operator would answer NaN. `/`
+  on a Float is IEEE's, Infinity for a zero divisor, as Ruby's is.
 * **`+` concatenates** strings and arrays.
 * **A whole Float prints with a point** -- `to_display`'s output plus the
   one rule its comment leaves to a front end.

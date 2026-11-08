@@ -589,8 +589,12 @@ struct Binder {
   //   $add          `+` (add_tags), an Integer wrapping, as this subset's
   //                 does; anything else repeats, joins or asks a class.
   //   $sub $mul     `-` and `*` on two numbers.
-  //   $div $mod     `/` and `%` on two Integers, Ruby's floor; a Float or
-  //                 a zero divisor (ZeroDivisionError) is the helper's.
+  //   $div          `/` on two Integers, Ruby's floor; a Float, which
+  //                 divides as IEEE does (a zero divisor is Infinity), or
+  //                 an Integer zero divisor (ZeroDivisionError) is $div's.
+  //   $mod          `%` on two numbers, Ruby's floor, exactly: a zero
+  //                 divisor, a Float's too, raises ZeroDivisionError, which
+  //                 is $mod's.
   //   $eq           `==` (equality_tags), an object's own `==` being the
   //                 helper's to ask.
   //   $idx          `c[k]` on an Array or a String and an index in range,
@@ -604,7 +608,7 @@ struct Binder {
         {"$sub", VmOp::binary(BinOp::Sub, number_tags())},
         {"$mul", VmOp::binary(BinOp::Mul, number_tags())},
         {"$div", VmOp::binary(BinOp::FloorDiv, ints)},
-        {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
+        {"$mod", VmOp::binary(BinOp::FloorMod, number_tags(), true)},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
         {"$idx", VmOp::index(tags_named({"array", "string", "map", "int"}))},
     };
@@ -755,7 +759,8 @@ struct Binder {
   // Ruby's `%` floors on Floats as on Integers, which is FloorMod on any
   // two numbers, and raises ZeroDivisionError for a zero divisor of
   // either, where FloorMod traps on an Integer one and answers NaN for a
-  // Float one. (Ruby takes the divisor's side from a product's sign, which
+  // Float one -- the one answer the exact operator in the program leaves
+  // to this, with what is no number. (Ruby takes the divisor's side from a product's sign, which
   // a tiny remainder over a tiny divisor underflows: 1e-320 % -1e-10 is
   // 1.0e-320 there and -1.0e-10 here.)
   void rt_mod() {
