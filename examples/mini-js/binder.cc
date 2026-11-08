@@ -1173,12 +1173,27 @@ struct Binder {
   // operators().
   NodeId truthy(NodeId v, SrcPos p) { return ops.call("$truthy", {v}, p); }
 
-  // `%`: Number::remainder, which is fmod -- Mod on a double, the dividend
-  // made one first so that the answer is a double even of two ints, as
-  // every JavaScript number is: `-4 % 2` is -0, and `7 % 0` NaN.
+  // `%`: Number::remainder, which is fmod -- Mod with the divisor made a
+  // double, which widens an int dividend beside it, so that the answer is
+  // a double even of two ints, as every JavaScript number is: `-4 % 2` is
+  // -0, and `7 % 0` NaN. A literal divisor is converted here rather than
+  // at run time, which for JavaScript's own literals, doubles already,
+  // means not at all.
   NodeId remainder(NodeId x, NodeId y, SrcPos p) {
     auto b = Builder(m).at(p);
-    return b.binary(BinOp::Mod, b.intrinsic(IntrinsicId::ToDouble, {x}), y);
+    return b.binary(BinOp::Mod, x, to_double(y, p));
+  }
+
+  // ToDouble, folded when its operand is a number literal.
+  NodeId to_double(NodeId v, SrcPos p) {
+    auto b = Builder(m).at(p);
+    if (m.at(v).tag == Tag::Literal) {
+      if (m.const_kind(v) == ConstKind::Double) return v;
+      if (m.const_kind(v) == ConstKind::Int) {
+        return b.double_literal(static_cast<double>(m.int_const(v)));
+      }
+    }
+    return b.intrinsic(IntrinsicId::ToDouble, {v});
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {

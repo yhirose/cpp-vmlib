@@ -1,6 +1,7 @@
 arith: [7, 5, 3.5, 1, -1, 0.5]
 div by zero: [Infinity, -Infinity, NaN]
 rem: [1.5, -1.5, 2, NaN, NaN, NaN, -Infinity]
+int rem: [-Infinity, NaN, 3, 0]
 concat: ['ab', 'n=1', '1n', 'xtrue']
 unary: [-3, 3, false, true]
 truthy: [false, false, true, false, true, true]

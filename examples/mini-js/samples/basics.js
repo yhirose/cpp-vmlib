@@ -6,6 +6,9 @@ show('arith', [1 + 2 * 3, 7 - 2, 7 / 2, 7 % 3, -7 % 3, 2 / 4]);
 show('div by zero', [1 / 0, -1 / 0, 0 / 0]);
 // `%` is fmod's remainder, a double even of two ints, and NaN by zero.
 show('rem', [7.5 % 2, -7.5 % 2, 7 % 2.5, 7 % 0, 7.5 % 0, 0 % 0, 1 / (-4 % 2)]);
+// So it is of two ints, which `.length` is: still a double, -0 and NaN.
+const four = [1, 2, 3, 4].length;
+show('int rem', [1 / (-four % 2), four % 0, 7 % four, four % four]);
 show('concat', ['a' + 'b', 'n=' + 1, 1 + 'n', 'x' + true]);
 show('unary', [-3, -(-3), !true, !!'a']);
 
