@@ -2021,15 +2021,15 @@ inline constexpr bool yields_value(Tag t) {
 // ---------------------------------------------------------------------------
 
 // An operation's fallback (Tag::Unary has the rule): what is called when
-// an operand's tag is not in the set it names, the operation traps, or --
-// kExact in `flags` -- an int result wraps. The callee is invalid when
-// there is none.
+// an operand's tag is not in the set it names, the operation faults, or the
+// flags (kExact, kMissNil, kAppend) say the language answers. The callee is
+// invalid when there is none.
 //
 // The sets. Unary and Binary have one, `tags`, that every operand's tag
-// must be in. Index has a set for each operand, `tags` for the receiver
-// and `key_tags` for the key (0: the same as `tags`), so that "a string is
-// a key" does not make a string a receiver. SetIndex adds `value_tags` for
-// the value stored (0: any value).
+// must be in. Index and SetIndex have a set for each operand, `tags` for
+// the receiver and `key_tags` for the key (0: the same as `tags`), so that
+// "a string is a key" does not make a string a receiver; SetIndex adds
+// `value_tags` for the value stored (0: any value).
 struct Fallback {
   NodeId callee;
   uint32_t tags = 0;
@@ -2066,10 +2066,11 @@ inline constexpr Fallback unpack_fallback(NodeId callee, FallbackBits x) {
 }
 
 // The operands of a tag that may name a fallback -- Unary, Binary, Index
-// -- and 0 for every other tag. The fallback, when there is one, is the
-// child after them, with its set in Node::a and its flags in Node::b: the
-// one statement of that layout, which the views, verify(), the effects
-// scan, the dump and the compiler all read through.
+// and SetIndex -- and 0 for every other tag. The fallback, when there is
+// one, is the child after them, with its sets and flags in Node::a and
+// Node::b as pack_fallback says: the one statement of that layout, which
+// the views, verify(), the effects scan, the dump and the compiler all read
+// through.
 inline constexpr uint32_t operands_of(Tag t) {
   switch (t) {
     case Tag::Unary:  return 1;
@@ -4502,19 +4503,21 @@ enum class Op : uint8_t {
   SameType,     // a = dst, b = lhs, c = rhs   (coreir::same_type_name)
   // An operator with a fallback (coreir's Tag::Unary has the rule): the
   // operator's answer, into a, from the operands in the registers after
-  // it, when every operand's tag is in the set c, it does not trap, and --
-  // kExact in b's flags -- no int result is out of range and no divisor is
-  // zero; then on at d.
+  // it, when every operand's tag is in its set, it does not trap, and the
+  // flags (coreir::Fallback) allow it -- for kExact, no int result out of
+  // range and no zero divisor; then on at d. The sets and flags are the
+  // node's, packed as coreir::pack_fallback says: the sets in c, the flags
+  // in b above the operator (try_mode).
   // Otherwise nothing is written and the next instruction runs, which is
   // the fallback's call over those same operand registers, ending at d.
   // Lua 5.4's arithmetic opcodes skip the OP_MMBIN after them the same way.
   TryUnary,     // a = dst, a + 1 = operand, b = try_mode, c = tags, d = done
   TryBinary,    // a = dst, a + 1 and a + 2 = operands, b, c, d as TryUnary
-  TryIndex,     // a = dst, a + 1 = receiver, a + 2 = key, c, d as TryUnary
-  // Tag::SetIndex's: a + 1 = receiver, a + 2 = key, a + 3 = value. Nothing
-  // is written into a; the fallback's call that follows has its answer
-  // there, which the statement's end clears.
-  TrySetIndex,  // a = dst, a + 1, a + 2, a + 3 = operands, b, c, d as TryUnary
+  TryIndex,     // a = dst, a + 1 = receiver, a + 2 = key, b, c, d as above
+  // Tag::SetIndex's, a statement: a + 1 = receiver, a + 2 = key, a + 3 =
+  // value. Nothing is written into a, which is the scratch the fallback's
+  // call that follows answers into, and the statement's end clears.
+  TrySetIndex,  // a = scratch, a + 1 .. a + 3 = operands, b, c, d as above
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
   Pow,          // a = dst, b = lhs, c = rhs   (std::pow over doubles)
@@ -10085,8 +10088,8 @@ struct Exec {
 
   // TryUnary, TryBinary, TryIndex and TrySetIndex (bytecode.h): the answer
   // into in.a (a store has none), and true, when it has one for these
-  // operands; false, with nothing
-  // written, when the fallback's call that follows is to answer.
+  // operands; false, with nothing written, when the fallback's call that
+  // follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
     const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];

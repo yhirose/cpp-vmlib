@@ -615,8 +615,10 @@ struct Binder {
         {"$div", VmOp::binary(BinOp::FloorDiv, ints)},
         {"$mod", VmOp::binary(BinOp::FloorMod, number_tags(), kExact)},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
+        // Any key, for a get and a set alike: an Array or a String takes
+        // only an int whatever is asked, and a Hash takes any.
         {"$idx", VmOp::index(tags_named({"array", "string", "map"}), kMissNil,
-                             tags_named({"int", "string"}))},
+                             kAllTags)},
         {"$setidx", VmOp::set_index(tags_named({"array", "map"}),
                                     kMissNil | kAppend, kAllTags)},
     };
