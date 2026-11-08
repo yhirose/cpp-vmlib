@@ -256,7 +256,10 @@ continues the logical line, and a `#` or a bracket inside a string is text.
 * **`//` and `%` floor**, where `BinOp::Div` truncates and `BinOp::Mod` is
   C's -- on two ints they are `BinOp::FloorDiv` and `BinOp::FloorMod`,
   `$idiv` and `$mod` behind them raising ZeroDivisionError; `/` is
-  *always* a float, even on two ints.
+  *always* a float, even on two ints. A float's are CPython's, which
+  are not quite the operators': `1 // 0.2` is 4.0, the quotient of
+  `1 - 1 % 0.2`, where `FloorDiv` floors the rounded quotient, 5.0, and a
+  zero remainder takes the divisor's sign rather than the dividend's.
 * **`==` across two types is `False`**, where `eval_binop` refuses the
   comparison.
 * **Comparisons chain.** `a < b <= c` means `a < b and b <= c` with `b`

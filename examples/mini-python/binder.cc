@@ -815,8 +815,8 @@ struct Binder {
   //                   exactly, since one that would wrap goes to the limbs
   //                   (the promotion rule, at rt_add).
   //   $idiv $mod      `//` and `%` on two ints, Python's floor; a zero
-  //                   divisor (ZeroDivisionError), a float or a bignum is
-  //                   the helper's.
+  //                   divisor (ZeroDivisionError), a float, whose floor is
+  //                   CPython's own, or a bignum is the helper's.
   //   $lt $le $gt $ge an ordering of two ints or two strings; a float is
   //                   not, as $cmp orders it through ToDouble beside an
   //                   int, and a bignum, a tuple or an object are $cmp's.
@@ -1282,37 +1282,60 @@ struct Binder {
 
   // `//` and `%` floor, like Lua's and unlike C's: on two ints they are
   // FloorDiv and FloorMod, and the operators in the program are those, with
-  // these behind them (Binder::arith) for a zero divisor and the rest. A
-  // float's `//` is Div, stepped down when it was inexact and the signs
-  // disagree; a float's `%`, and a bignum's, this subset leaves out, and
-  // Mod refuses them.
+  // these behind them (Binder::operators) for a zero divisor, which raises
+  // ZeroDivisionError where a float's would be inf or nan, and the rest.
+  // A float's (an int beside it widening) are CPython's float_floor_div
+  // and float_rem, which differ from FloorDiv's and FloorMod's in two
+  // places, each said where it falls; a bignum's this subset leaves out,
+  // and the operators refuse it.
   void rt_idiv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [q] = r.locals("q");
+    const auto [t, q, f] = r.locals("t", "q", "f");
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("division by zero")}))));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
                 r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
-    r.add(r.set(q, r.bin(BinOp::Div, r.L(a), r.L(b))));
-    r.add(r.iff(
-        r.both(r.bin(BinOp::Ne, r.bin(BinOp::Mul, r.L(q), r.L(b)), r.L(a)),
-               r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(a), r.L(b)), r.I(0))),
-        r.set(q, r.bin(BinOp::Sub, r.L(q), r.I(1)))));
-    r.add(r.ret(r.L(q)));
+    // FloorDiv floors the rounded quotient, which may have rounded up to a
+    // whole number: 1 // 0.2 is 5.0 there and 4.0 here. CPython's is the
+    // quotient of a - fmod(a, b), a whole multiple of b that the rounding
+    // leaves only near a whole number: a step down when the remainder is
+    // on the other side of zero from b, then snapped to the nearest, and a
+    // zero signed as a / b is.
+    r.add(r.set(t, r.in(IntrinsicId::FMod, {r.L(a), r.L(b)})));
+    r.add(r.set(q, r.bin(BinOp::Div, r.bin(BinOp::Sub, r.L(a), r.L(t)),
+                         r.L(b))));
+    r.add(r.iff(r.both(r.bin(BinOp::Ne, r.L(t), r.D(0.0)),
+                       r.bin(BinOp::Ne, r.bin(BinOp::Lt, r.L(t), r.D(0.0)),
+                             r.bin(BinOp::Lt, r.L(b), r.D(0.0)))),
+                r.set(q, r.bin(BinOp::Sub, r.L(q), r.D(1.0)))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(q), r.D(0.0)),
+                r.ret(r.bin(BinOp::Mul, r.D(0.0),
+                            r.bin(BinOp::Div, r.L(a), r.L(b))))));
+    r.add(r.set(f, r.bin(BinOp::FloorDiv, r.L(q), r.D(1.0))));
+    r.add(r.iff(r.bin(BinOp::Gt, r.bin(BinOp::Sub, r.L(q), r.L(f)), r.D(0.5)),
+                r.set(f, r.bin(BinOp::Add, r.L(f), r.D(1.0)))));
+    r.add(r.ret(r.L(f)));
     r.finish("$idiv");
   }
 
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    const auto [m] = r.locals("m");
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
                                       r.S("division by zero")}))));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
                 r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
-    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
+    // FloorMod's, but for a zero remainder, which keeps the dividend's sign
+    // there and takes the divisor's here.
+    r.add(r.set(m, r.bin(BinOp::FloorMod, r.L(a), r.L(b))));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(m), r.D(0.0)),
+                r.ret(r.b.make_if(r.bin(BinOp::Lt, r.L(b), r.D(0.0)),
+                                  r.D(-0.0), r.D(0.0)))));
+    r.add(r.ret(r.L(m)));
     r.finish("$mod");
   }
 

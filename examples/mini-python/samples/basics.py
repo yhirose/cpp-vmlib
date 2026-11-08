@@ -7,6 +7,13 @@ print(1 + 2 * 3, 7 - 2, 3 * 4, 2 ** 3)
 # wraps past 2^63.
 print(7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)
 print(-3 % 4611686018427387904, -3 // 4611686018427387904)
+# A float floors too, as CPython's does: the quotient of a - a % b, which
+# the rounded quotient floored is not where it rounded up (1 // 0.2),
+# snapped to a whole number where it rounded down (68.2 // 2.8), and the
+# remainder on the divisor's side, a zero one included.
+print(7.5 // 2, -7.5 // 2, 7 // 2.5, 1 // 0.2, 68.2 // 2.8, -0.5 // -2)
+print(7.5 % 2, -7.5 % 2, 7 % 2.5, 7.5 % -2, -4.0 % 2, 4.0 % -2)
+print(1 % 0.2, 1e-320 % -1e-10)
 # `/` is always a float, even on two ints.
 print(7 / 2, 6 / 3, 1 / 4)
 print(-3, - -3, abs(-5), abs(5))
