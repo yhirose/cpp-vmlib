@@ -1112,7 +1112,7 @@ enum class Tag : uint8_t {
   // callable. With one, `a` is a set of tags (bit t for ValueTag t, the
   // form coreir::tags_named builds), and the operator answers only when
   // every operand's tag is in the set, the operator does not trap on them,
-  // and -- with kExact in `b` -- an int Add, Sub, Mul or Neg does not wrap.
+  // and -- with kExact in `b` -- its answer is the operation's true value.
   // Otherwise the fallback is evaluated, after the operands and only
   // then, and called with the operands' values, and what it returns is the
   // node's value. Which tags go in the set is the language's to say: the
@@ -1340,17 +1340,32 @@ inline constexpr UnOp kLastUnOp = UnOp::WrapU32;
 inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 
 // An operator's flags, in Node::b when it has a fallback (Tag::Unary).
-// kExact: an int Add, Sub, Mul or Neg whose result wrapped is the
-// fallback's to answer -- a language whose integers do not wrap (Python's
-// and Ruby's grow) takes int64's answer only when it is the true one.
+//
+// kExact: the VM answers only when its answer is the operation's true
+// value, and the fallback answers the rest. The two ways it is not are an
+// int result that wrapped -- Add, Sub, Mul and Neg past int64, and Div or
+// FloorDiv of the least int by -1 -- and a zero divisor, whose int
+// division traps and whose double division is inf or nan. Nothing else:
+// a double quotient that overflows to inf over a nonzero divisor, or one
+// that rounds, is IEEE's answer and stays the VM's, as it is CPython's
+// (1e308 / 1e-10 is inf there too). A language whose integers do not wrap
+// (Python's grow) or whose zero divisor raises (Python's, culebra's,
+// Ruby's `%`) takes the VM's answer only where it is the true one.
 inline constexpr int32_t kExact = 1;
 
-// The operators whose int result can wrap: Add, Sub, Mul and Neg, the only
-// ones kExact means anything for.
-inline constexpr bool can_wrap(BinOp op) {
-  return op == BinOp::Add || op == BinOp::Sub || op == BinOp::Mul;
+// The operators kExact means anything for: those whose answer can be
+// untrue in one of those two ways.
+inline constexpr bool can_be_exact(BinOp op) {
+  switch (op) {
+    case BinOp::Add: case BinOp::Sub: case BinOp::Mul:
+    case BinOp::Div: case BinOp::Mod:
+    case BinOp::FloorDiv: case BinOp::FloorMod:
+      return true;
+    default:
+      return false;
+  }
 }
-inline constexpr bool can_wrap(UnOp op) { return op == UnOp::Neg; }
+inline constexpr bool can_be_exact(UnOp op) { return op == UnOp::Neg; }
 
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
 // shortest-round-trip doubles included. A language whose display rules
@@ -3626,12 +3641,11 @@ inline int64_t wrap_neg(int64_t a) {
   return static_cast<int64_t>(0u - static_cast<uint64_t>(a));
 }
 
-// Whether an int Add, Sub, Mul or Neg wraps: its int64 result, the one
-// wrap_add et al. give, is not the true one -- what kExact asks of an
-// operator with a fallback (Tag::Unary). Asked before the operation, by
-// comparing against the bounds, so no signed overflow happens in asking
-// (the CERT INT32-C checks). One arm per operator can_wrap names; verify
-// refuses kExact on any other, so no other reaches here.
+// Whether an int operation wraps: its int64 result, the one wrap_add et
+// al. and binop_fault give, is not the true one. Asked before the
+// operation, by comparing against the bounds, so no signed overflow
+// happens in asking (the CERT INT32-C checks). A division wraps only for
+// the least int over -1; a remainder never does.
 inline bool wraps(BinOp op, int64_t a, int64_t b) {
   constexpr int64_t lo = std::numeric_limits<int64_t>::min();
   constexpr int64_t hi = std::numeric_limits<int64_t>::max();
@@ -3642,12 +3656,26 @@ inline bool wraps(BinOp op, int64_t a, int64_t b) {
       if (a > 0) return b > 0 ? a > hi / b : b < lo / a;
       if (b > 0) return a < lo / b;
       return a != 0 && b < hi / a;
+    case BinOp::Div: case BinOp::FloorDiv: return a == lo && b == -1;
     default:
       return false;
   }
 }
 inline bool wraps(UnOp op, int64_t a) {
-  return can_wrap(op) && a == std::numeric_limits<int64_t>::min();
+  return op == UnOp::Neg && a == std::numeric_limits<int64_t>::min();
+}
+
+inline constexpr bool is_division(BinOp op) {
+  return op == BinOp::Div || op == BinOp::Mod || op == BinOp::FloorDiv ||
+         op == BinOp::FloorMod;
+}
+
+// Whether the operation's answer for these operands is not its true value
+// -- kExact's question, both of its halves: an int result that wraps, or a
+// zero divisor, an int's or a double's.
+inline bool inexact(BinOp op, const Value& l, const Value& r) {
+  if (is_division(op) && r.is_number() && r.as_number() == 0) return true;
+  return l.is_int() && r.is_int() && wraps(op, l.as_int(), r.as_int());
 }
 
 // Operators that never widen to double: the classic bitops plus the
@@ -3721,8 +3749,8 @@ enum class Fault : uint8_t {
   None,
   // The operation does not take operands of these types.
   Operands,
-  // Integer arithmetic's own, and Mod's on doubles.
-  DivideByZero, DivisionOverflow, ModDouble,
+  // Integer division's own.
+  DivideByZero,
   // An index's: a string or an array takes an int, an object a string, and
   // the int must be in range.
   IntKey, StrKey, Range,
@@ -3771,8 +3799,8 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
                          Value& out) {
   constexpr Fault ok = Fault::None;
   // Two ints stay integers; anything else numeric widens to double. Mod on
-  // doubles is deliberately absent -- fmod versus truncation is a language's
-  // decision, and no front end here needs it yet.
+  // doubles is fmod, the remainder truncated as on ints -- C's, C#'s,
+  // JavaScript's, culebra's; FloorMod is the floored one.
   if (l.is_int() && r.is_int()) {
     const int64_t a = l.as_int();
     const int64_t b = r.as_int();
@@ -3784,12 +3812,17 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       case BinOp::UDiv: case BinOp::UMod:
       case BinOp::FloorDiv: case BinOp::FloorMod: {
         // Every division form traps on a zero divisor -- one statement of
-        // that, since UDiv/UMod differ from the others only in the overflow
-        // case they do not have (no negative dividend for -1 to misfire on).
+        // that.
         if (b == 0) return Fault::DivideByZero;
-        if (op != BinOp::UDiv && op != BinOp::UMod &&
-            a == std::numeric_limits<int64_t>::min() && b == -1) {
-          return Fault::DivisionOverflow;
+        // A signed division by -1 is a negation, which wraps for the least
+        // int as Mul's does, and leaves no remainder: answered here because
+        // C++'s own / and % are undefined on the least int over -1 (x86's
+        // idiv faults). Lua's luaV_idiv and luaV_mod, Go's and Java's rule.
+        // UDiv and UMod read -1 as 2^64 - 1 and need no such case.
+        if (b == -1 && op != BinOp::UDiv && op != BinOp::UMod) {
+          const bool quotient = op == BinOp::Div || op == BinOp::FloorDiv;
+          out = Value::make_int(quotient ? wrap_neg(a) : 0);
+          return ok;
         }
         const uint64_t ua = static_cast<uint64_t>(a);
         const uint64_t ub = static_cast<uint64_t>(b);
@@ -3861,7 +3894,6 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
     return ok;
   }
   if (l.is_number() && r.is_number() && !is_int_only(op)) {
-    if (op == BinOp::Mod) return Fault::ModDouble;
     const double a = l.as_number();
     const double b = r.as_number();
     switch (op) {
@@ -3870,6 +3902,7 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       case BinOp::Mul: out = Value::make_double(a * b); return ok;
       // inf/nan, not a trap
       case BinOp::Div: out = Value::make_double(a / b); return ok;
+      case BinOp::Mod: out = Value::make_double(std::fmod(a, b)); return ok;
       case BinOp::FloorDiv:
         out = Value::make_double(std::floor(a / b));
         return ok;
@@ -3915,8 +3948,6 @@ inline std::string fault_text(Fault e, BinOp op, const Value& l,
                               const Value& r) {
   switch (e) {
     case Fault::DivideByZero:     return "divide by zero";
-    case Fault::DivisionOverflow: return "division overflow";
-    case Fault::ModDouble:        return "cannot mod double";
     default:
       return std::string("cannot ") + name_of(op) + " " +
              type_name(l.tag()) + " and " + type_name(r.tag());
@@ -4285,7 +4316,7 @@ enum class Op : uint8_t {
   // An operator with a fallback (coreir's Tag::Unary has the rule): the
   // operator's answer, into a, from the operands in the registers after
   // it, when every operand's tag is in the set c, it does not trap, and --
-  // kExact in b's flags -- an int result does not wrap; then on at d.
+  // kExact in b's flags -- its answer is the true value; then on at d.
   // Otherwise nothing is written and the next instruction runs, which is
   // the fallback's call over those same operand registers, ending at d.
   // Lua 5.4's arithmetic opcodes skip the OP_MMBIN after them the same way.
@@ -5702,8 +5733,8 @@ struct Verifier {
   // An operation that may name a fallback (Tag::Unary): its operands and
   // at most the fallback after them; no tag set or flag without one, since
   // nothing would read them; with one, tags that exist and flags that do,
-  // and kExact only where an int result can wrap.
-  bool check_fallback(const Node& n, bool wrappable) {
+  // and kExact only where an answer can be untrue (can_be_exact).
+  bool check_fallback(const Node& n, bool exactable) {
     const uint32_t k = operands_of(n.tag);
     if (n.num_children != k && n.num_children != k + 1) {
       return fail(std::string(name_of(n.tag)) + " takes " +
@@ -5718,8 +5749,10 @@ struct Verifier {
       return fail("operator's tag set names no tag");
     }
     if ((n.b & ~kExact) != 0) return fail("unknown operator flag");
-    if ((n.b & kExact) != 0 && !wrappable) {
-      return fail("only Add, Sub, Mul and Neg can be exact");
+    if ((n.b & kExact) != 0 && !exactable) {
+      return fail(
+          "only Add, Sub, Mul, Div, Mod, FloorDiv, FloorMod and Neg can be "
+          "exact");
     }
     return true;
   }
@@ -5842,7 +5875,7 @@ struct Verifier {
         if (n.op > static_cast<uint8_t>(kLastUnOp)) {
           return fail("unknown unary operator");
         }
-        if (!check_fallback(n, can_wrap(static_cast<UnOp>(n.op)))) {
+        if (!check_fallback(n, can_be_exact(static_cast<UnOp>(n.op)))) {
           return false;
         }
         break;
@@ -5850,7 +5883,7 @@ struct Verifier {
         if (n.op > static_cast<uint8_t>(kLastBinOp)) {
           return fail("unknown binary operator");
         }
-        if (!check_fallback(n, can_wrap(static_cast<BinOp>(n.op)))) {
+        if (!check_fallback(n, can_be_exact(static_cast<BinOp>(n.op)))) {
           return false;
         }
         break;
@@ -9652,10 +9685,7 @@ struct Exec {
       return true;
     }
     const auto op = static_cast<BinOp>(try_op(in.b));
-    if (exact && x.is_int() && y.is_int() &&
-        wraps(op, x.as_int(), y.as_int())) {
-      return false;
-    }
+    if (exact && inexact(op, x, y)) return false;
     return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
            Fault::None;
   }

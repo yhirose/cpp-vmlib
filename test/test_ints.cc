@@ -349,7 +349,7 @@ void test_to_float32_boundaries() {
 }
 
 // FloorDiv and FloorMod over every pair of interesting int64s (both
-// signs, both ends, the least int but over -1, which traps) and a random
+// signs, both ends, the least int over -1, which wraps) and a random
 // tail, checked against what defines them rather than against the formula
 // that computes them: q * b + r == a, r is 0 or has b's sign, and |r| <
 // |b| -- one (q, r) satisfies all three. The product and the sum wrap, as
@@ -358,13 +358,10 @@ void test_to_float32_boundaries() {
 void test_floor_division() {
   constexpr int64_t lo = std::numeric_limits<int64_t>::min();
   constexpr int64_t hi = std::numeric_limits<int64_t>::max();
-  std::vector<std::pair<int64_t, int64_t>> pairs;
-  for (const auto& ab :
-       pairs_of({0, 1, -1, 2, -2, 7, -7, hi, lo, lo + 1, int64_t{1} << 62,
-                 -(int64_t{1} << 62) + 3},
-                rand_u64_bits, true)) {
-    if (ab.first != lo || ab.second != -1) pairs.push_back(ab);
-  }
+  const std::vector<std::pair<int64_t, int64_t>> pairs =
+      pairs_of({0, 1, -1, 2, -2, 7, -7, hi, lo, lo + 1, int64_t{1} << 62,
+                -(int64_t{1} << 62) + 3},
+               rand_u64_bits, true);
   Module m;
   Builder b(m);
   const SrcPos p{1, 1};
@@ -449,8 +446,8 @@ int main() {
       },
       UnOp::WrapI32);
   // The one i32 overflow case Div can hit: INT32_MIN / -1. i64 division
-  // does not trap on it (only INT64_MIN / -1 does), so it reaches WrapI32
-  // holding 2^31, which wraps back to INT32_MIN -- Java's rule.
+  // holds 2^31, which reaches WrapI32 and wraps back to INT32_MIN --
+  // Java's rule, and int64's own for INT64_MIN / -1 below.
   {
     Module m;
     Builder b(m);
@@ -619,28 +616,34 @@ int main() {
     check_trap({b.binary(BinOp::UMod, b.literal(5, p), b.literal(0, p), p)},
               m, b, p, "divide by zero", "UMod by zero");
   }
-  // FloorDiv and FloorMod trap where Div and Mod do: a zero divisor and
-  // the least int over -1. A double is test_values' case.
+  // FloorDiv and FloorMod trap where Div and Mod do, on a zero divisor,
+  // reported at the divisor. A double is test_values' case.
   for (const BinOp op : {BinOp::FloorDiv, BinOp::FloorMod}) {
-    const std::string name = name_of(op);
-    {
-      // Reported at the divisor, as Div's and Mod's are.
-      Module m;
-      Builder b(m);
-      const SrcPos p{1, 1};
-      check_trap({b.binary(op, b.literal(5, p), b.literal(0, {2, 7}), p)}, m,
-                 b, p, "divide by zero @2:7", name + " by zero");
-    }
-    {
-      Module m;
-      Builder b(m);
-      const SrcPos p{1, 1};
-      check_trap({b.binary(op,
-                           b.literal(std::numeric_limits<int64_t>::min(), p),
-                           b.literal(-1, p), p)},
-                 m, b, p, "division overflow",
-                 name + " of the least int by -1");
-    }
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    check_trap({b.binary(op, b.literal(5, p), b.literal(0, {2, 7}), p)}, m, b,
+               p, "divide by zero @2:7", std::string(name_of(op)) + " by zero");
+  }
+  // The least int over -1 does not trap: a quotient wraps, as Mul's
+  // negation of it does, and a remainder is 0 -- Lua's, Go's and Java's
+  // rule, where C++'s own / and % are undefined there. Each op its own
+  // run, so one that traps does not hide the rest.
+  for (const auto& [op, want] :
+       {std::pair{BinOp::Div, std::numeric_limits<int64_t>::min()},
+        std::pair{BinOp::FloorDiv, std::numeric_limits<int64_t>::min()},
+        std::pair{BinOp::Mod, int64_t{0}},
+        std::pair{BinOp::FloorMod, int64_t{0}}}) {
+    Module m;
+    Builder b(m);
+    const SrcPos p{1, 1};
+    const std::string what =
+        std::string(name_of(op)) + " of the least int by -1";
+    const auto lines = run_batch(
+        {b.binary(op, b.literal(std::numeric_limits<int64_t>::min(), p),
+                  b.literal(-1, p), p)},
+        m, b, p, what);
+    if (lines.size() == 1) check_eq(parse_line(lines[0]), want, what);
   }
   {
     Module m;

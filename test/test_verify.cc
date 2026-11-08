@@ -319,16 +319,18 @@ int main() {
              return n;
            }),
            "unknown operator flag", "a flag that is not kExact");
+  const char* const not_exact =
+      "only Add, Sub, Mul, Div, Mod, FloorDiv, FloorMod and Neg can be exact";
   check_eq(verdict([&](Module&, Builder& b) {
              return b.binary(BinOp::Lt, b.literal(1, p), b.literal(2, p),
                              {callee(b), 1, true}, p);
            }),
-           "only Add, Sub, Mul and Neg can be exact", "an exact comparison");
+           not_exact, "an exact comparison");
   check_eq(verdict([&](Module&, Builder& b) {
              return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, true},
                             p);
            }),
-           "only Add, Sub, Mul and Neg can be exact", "an exact Not");
+           not_exact, "an exact Not");
   check_eq(verdict([&](Module&, Builder& b) {
              return add(b, {callee(b), kAllTags, true});
            }) + verdict([&](Module&, Builder& b) {
@@ -336,6 +338,15 @@ int main() {
                             {callee(b), kAllTags, true}, p);
            }),
            "", "an exact Add and an exact Neg");
+  // A division is exact too: its answer is untrue for a zero divisor.
+  for (const BinOp op :
+       {BinOp::Div, BinOp::Mod, BinOp::FloorDiv, BinOp::FloorMod}) {
+    check_eq(verdict([&](Module&, Builder& b) {
+               return b.binary(op, b.literal(7, p), b.literal(2, p),
+                               {callee(b), kAllTags, true}, p);
+             }),
+             "", (std::string("an exact ") + name_of(op)).c_str());
+  }
   check_eq(verdict([&](Module& m, Builder& b) {
              const NodeId n = add(b, {callee(b), 1});
              m.nodes[n.v].num_children = 4;
@@ -360,7 +371,7 @@ int main() {
              return b.index(b.array_lit({}, p), b.literal(0, p),
                             {callee(b), 1, true}, p);
            }),
-           "only Add, Sub, Mul and Neg can be exact", "an exact Index");
+           not_exact, "an exact Index");
   check_eq(verdict([&](Module& m, Builder& b) {
              const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p),
                                       {callee(b), 1}, p);

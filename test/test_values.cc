@@ -317,10 +317,11 @@ int main() {
     check_eq(joined(), "nil|true|false|true|3|3.5|0.75|", "scalar output");
   }
 
-  // --- 7b. FloorDiv and FloorMod on doubles: the quotient floored and the
-  // remainder on the divisor's side, an int widening as for Add, and Div's
-  // inf or nan for a zero divisor. Each case its own run, so one that traps
-  // does not hide the rest. ----------------------------------------------
+  // --- 7b. Mod, FloorDiv and FloorMod on doubles: fmod's truncated
+  // remainder, the quotient floored and the remainder on the divisor's
+  // side, an int widening as for Add, and Div's inf or nan for a zero
+  // divisor. Each case its own run, so one that traps does not hide the
+  // rest. ---------------------------------------------------------------
   {
     const double inf = std::numeric_limits<double>::infinity();
     struct Case {
@@ -330,6 +331,13 @@ int main() {
       const char* want;
     };
     const Case cases[] = {
+        {BinOp::Mod, 7.5, 2, false, "1.5|double|"},
+        {BinOp::Mod, -7.5, 2, false, "-1.5|"},
+        {BinOp::Mod, 7, 2.5, true, "2|double|"},
+        // A zero remainder keeps the dividend's sign.
+        {BinOp::Mod, -4.0, 2, false, "-0|"},
+        {BinOp::Mod, 7.5, inf, false, "7.5|"},
+        {BinOp::Mod, 7.5, 0, false, "nan|"},
         {BinOp::FloorDiv, 7.5, 2, false, "3|double|"},
         {BinOp::FloorDiv, -7.5, 2, false, "-4|"},
         {BinOp::FloorDiv, 7.5, -2, false, "-4|"},
@@ -394,28 +402,19 @@ int main() {
   }
 
   // --- 9. Type errors the new tags make possible. -------------------------
-  struct Case {
-    const char* what;
-    BinOp op;
-    bool lhs_double;
-    const char* want;
-  };
-  for (const Case& c :
-       {Case{"mod on doubles", BinOp::Mod, true, "cannot mod double"},
-        Case{"int vs bool", BinOp::Eq, false, "cannot eq int and bool"}}) {
+  {
     Module m;
     Builder b(m);
-    const NodeId lhs =
-        c.lhs_double ? b.double_literal(1.5, p) : b.literal(1, p);
-    const NodeId rhs =
-        c.lhs_double ? b.double_literal(2.0, p) : b.bool_literal(true, p);
-    m.funcs.push_back({"main", 0, 0,
-                       b.intrinsic(IntrinsicId::Print,
-                                   {b.binary(c.op, lhs, rhs, p)}, p),
-                       {},
-                       {}});
-    const std::string failed = run_module(m, c.what);
-    check_eq(failed, c.want, std::string(c.what) + ": message");
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Eq, b.literal(1, p),
+                               b.bool_literal(true, p), p)},
+                     p),
+         {},
+         {}});
+    check_eq(run_module(m, "int vs bool"), "cannot eq int and bool",
+             "int vs bool: message");
   }
 
   // --- 10. Bit operations: int-only, masked shift counts. -----------------
@@ -718,6 +717,30 @@ int main() {
          "-9223372036854775808|", "an exact mul that just fits"},
         {bin(BinOp::Div, I(1), I(0), kInt), "f|1|0|-1|",
          "a trap is the fallback's"},
+        // Exact division: a zero divisor, a double's included, and a
+        // quotient that wraps are the fallback's; a double quotient past
+        // the largest finite one, over a nonzero divisor, is IEEE's inf
+        // and stays the VM's, as CPython answers it too.
+        {bin(BinOp::Div, D(1.5), D(0.0), kDbl), "inf|",
+         "a double zero divisor, not exact"},
+        {bin(BinOp::Div, D(1.5), D(0.0), kDbl, true), "f|1.5|0|-1|",
+         "an exact double zero divisor"},
+        {bin(BinOp::Mod, D(1.5), I(0), kInt | kDbl, true), "f|1.5|0|-1|",
+         "an exact Mod by an int zero"},
+        {bin(BinOp::FloorMod, D(-1.5), D(-0.0), kDbl, true),
+         "f|-1.5|-0|-1|", "an exact FloorMod by -0.0"},
+        {bin(BinOp::Div, D(1e308), D(1e-10), kDbl, true), "inf|",
+         "an exact quotient past the largest double"},
+        {bin(BinOp::FloorDiv, I(kMin), I(-1), kInt), "-9223372036854775808|",
+         "a quotient that wraps, not exact"},
+        {bin(BinOp::FloorDiv, I(kMin), I(-1), kInt, true),
+         "f|-9223372036854775808|-1|-1|", "an exact quotient that would wrap"},
+        {bin(BinOp::Div, I(kMin), I(-1), kInt, true),
+         "f|-9223372036854775808|-1|-1|", "an exact Div that would wrap"},
+        {bin(BinOp::Mod, I(kMin), I(-1), kInt, true), "0|",
+         "an exact remainder of the least int by -1"},
+        {bin(BinOp::FloorDiv, I(kMin + 1), I(-1), kInt, true),
+         "9223372036854775807|", "an exact quotient that fits"},
         {bin(BinOp::Eq, I(1), S("a"), kInt | kStr), "f|1|a|-1|",
          "so is Eq refusing two types"},
         {bin(BinOp::Lt, S("a"), S("b"), kStr), "true|", "two strings"},
