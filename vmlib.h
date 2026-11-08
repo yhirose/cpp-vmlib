@@ -7191,16 +7191,15 @@ struct FnCompiler {
     top = base;
   }
 
-  // A value the function returns, returned where it is made: an If
-  // returns from each arm -- a missing else returns nil -- and a Block
-  // from its last value, past its statements (compile_leading),
-  // recursively, where compile_value would move
-  // every arm's value into one register for a single return. The arms of
-  // an If in tail position are in tail position too (R7RS's tail
-  // contexts), and a compiler for an expression language returns from
-  // each. `exit(r)` emits what follows the value in `r` -- a Return's
-  // scope exits and Ret, or a body's bare Ret -- once per arm, each the
-  // code the one return was.
+  // A value the function returns, returned where it is made: an If returns
+  // from each arm -- a missing else returns nil -- and a Block from its last
+  // value, past its statements (compile_leading), recursively, where
+  // compile_value would move every arm's value into one register for a single
+  // return. The arms of an If in tail position are in tail position too
+  // (R7RS's tail contexts), and a compiler for an expression language returns
+  // from each. `exit(r)` emits what follows the value in `r` -- a Return's
+  // scope exits and Ret, or a body's bare Ret -- once per arm, each the code
+  // the one return was.
   template <class Exit>
   void compile_tail(NodeId id, const Exit& exit) {
     id = compile_leading(id);
