@@ -91,76 +91,38 @@ inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
   return of_kind(w.b, obj, kind, state);
 }
 
-// A helper writer for the parts below that ask a value about its meta --
-// is_kind, instance_class, is_exception -- with the temporaries they
-// share: a value's meta and its head, written and read inside the one
-// expression a part builds and dead after it, one slot per name however
-// many questions the helper asks. Two uses of one temporary cannot
-// overlap, because a part takes the value it asks about as a Slot, never
-// as an expression to evaluate between its writes and its reads -- a rule
-// these parts keep, which is why the slots are theirs to hand out and not
-// FuncWriter's. What a part can still be handed wrongly is a temporary
-// that is the value's own slot; check_scratch refuses that.
-class PartsWriter : public HelperWriter {
- public:
-  using HelperWriter::HelperWriter;
-
-  Slot scratch(const std::string& name) {
-    const auto [it, fresh] = scratch_.try_emplace(name);
-    if (fresh) it->second = local(name);
-    return it->second;
-  }
-
- private:
-  std::map<std::string, Slot> scratch_;
-};
-
-// The temporaries a part writes and reads are slots of their own, neither
-// each other nor the value's, which is read again after they are written.
-inline void check_scratch(std::initializer_list<int32_t> slots) {
-  for (auto i = slots.begin(); i != slots.end(); ++i) {
-    for (auto j = std::next(i); j != slots.end(); ++j) {
-      if (*i == *j) {
-        coreir_rt::fail("runtime_parts: a temporary shares a slot", 0, 0);
-      }
-    }
-  }
-}
-
-// Whether the local `v` carries a kind record of `kind`: any value can be
-// asked, and one that is no Object, or whose meta is no kind record of a
-// kind's name, is of none -- anything but an Object is answered by its
-// first test, which on the paths that ask of every number (`$add`'s "is
-// this a tuple") is the whole cost. The meta, and its head, are each read
-// once, into the locals `m` and `h` the caller lends.
-inline NodeId is_kind(coreir::Builder::At& b, int32_t v, int32_t m, int32_t h,
+// Whether `v` carries a kind record of `kind`: any value can be asked,
+// and one that is no Object, or whose meta is no kind record of a kind's
+// name, is of none -- anything but an Object is answered by its first
+// test, which on the paths that ask of every number (`$add`'s "is this a
+// tuple") is the whole cost. The value, its meta and the meta's head are
+// each read once, each held by a Let for the tests that read it.
+inline NodeId is_kind(coreir::Builder::At& b, NodeId v,
                       const std::string& kind) {
-  using coreir::VarKind;
-  check_scratch({v, m, h});
   const auto is = [&](NodeId x, const char* type) {
     return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {x}),
                     b.str_literal(type));
   };
-  const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
-  const NodeId no = b.bool_literal(false);
-  return b.make_if(
-      is(L(v), "object"),
-      b.block(
-          {b.assign(VarKind::Local, m,
-                    b.intrinsic(IntrinsicId::MetaGet, {L(v)})),
-           b.make_if(is(L(m), "array"),
-                     b.block({b.assign(VarKind::Local, h,
-                                       b.index(L(m), b.literal(0))),
-                              b.make_if(is(L(h), "string"),
-                                        b.binary(BinOp::Eq, L(h),
-                                                 b.str_literal(kind)),
-                                        b.bool_literal(false))}),
-                     b.bool_literal(false))}),
-      no);
+  const auto no = [&] { return b.bool_literal(false); };
+  return b.let(v, [&](auto t) {
+    return b.make_if(
+        is(t(), "object"),
+        b.let(b.intrinsic(IntrinsicId::MetaGet, {t()}), [&](auto m) {
+          return b.make_if(
+              is(m(), "array"),
+              b.let(b.index(m(), b.literal(0)), [&](auto h) {
+                return b.make_if(is(h(), "string"),
+                                 b.binary(BinOp::Eq, h(), b.str_literal(kind)),
+                                 no());
+              }),
+              no());
+        }),
+        no());
+  });
 }
-inline NodeId is_kind(PartsWriter& w, FuncWriter::Slot v,
+inline NodeId is_kind(FuncWriter& w, FuncWriter::Slot v,
                       const std::string& kind) {
-  return is_kind(w.b, v.i, w.scratch("$meta").i, w.scratch("$type").i, kind);
+  return is_kind(w.b, w.L(v), kind);
 }
 
 // Element `i` of the kind record `v` carries, read and written.
@@ -247,20 +209,19 @@ inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
 // is an instance, as only an Object has a kind record (is_kind), so any
 // other value -- a receiver of a builtin type, the common case in a
 // method call -- is answered by its one type test. The meta and its head
-// are each read once, into scratch locals of the writer's.
-inline NodeId instance_class(PartsWriter& w, FuncWriter::Slot v) {
-  const auto m = w.scratch("$meta");
-  const auto h = w.scratch("$type");
-  check_scratch({v.i, m.i, h.i});
+// are each read once, each held by a Let.
+inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
   return w.iff(
       w.is(w.typ(v), "object"),
-      w.blk({w.set(m, w.meta(w.L(v))),
-             w.iff(w.is(w.typ(m), "object"), w.L(m),
-                   w.iff(w.is(w.typ(m), "array"),
-                         w.blk({w.set(h, w.idx(w.L(m), w.I(0))),
-                                w.iff(w.is(w.typ(h), "object"), w.L(h),
-                                      w.Nil())}),
-                         w.Nil()))}),
+      w.let(w.meta(w.L(v)), [&](auto m) {
+        return w.iff(
+            w.is(w.typ(m()), "object"), m(),
+            w.iff(w.is(w.typ(m()), "array"),
+                  w.let(w.idx(m(), w.I(0)), [&](auto h) {
+                    return w.iff(w.is(w.typ(h()), "object"), h(), w.Nil());
+                  }),
+                  w.Nil()));
+      }),
       w.Nil());
 }
 
@@ -345,20 +306,20 @@ inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
 // Whether `v` is an exception: an Object whose meta is an exception's
 // record, all three of its fields there, headed by kExcKind for a builtin
 // one or by the class of a program's that keeps a message. The meta and
-// its head are each read once, into scratch locals of the writer's.
-inline NodeId is_exception(PartsWriter& w, FuncWriter::Slot v) {
-  const auto m = w.scratch("$meta");
-  const auto h = w.scratch("$type");
-  check_scratch({v.i, m.i, h.i});
+// its head are each read once, each held by a Let.
+inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
   return w.both(
       w.is(w.typ(v), "object"),
-      w.blk({w.set(m, w.meta(w.L(v))),
-             w.both(w.both(w.is(w.typ(m), "array"),
-                           w.bin(BinOp::Gt, w.len(w.L(m)), w.I(kExcMessage))),
-                    w.blk({w.set(h, w.idx(w.L(m), w.I(0))),
-                           w.iff(w.is(w.typ(h), "string"),
-                                 w.bin(BinOp::Eq, w.L(h), w.S(kExcKind)),
-                                 w.is(w.typ(h), "object"))}))}));
+      w.let(w.meta(w.L(v)), [&](auto m) {
+        return w.both(
+            w.both(w.is(w.typ(m()), "array"),
+                   w.bin(BinOp::Gt, w.len(m()), w.I(kExcMessage))),
+            w.let(w.idx(m(), w.I(0)), [&](auto h) {
+              return w.iff(w.is(w.typ(h()), "string"),
+                           w.bin(BinOp::Eq, h(), w.S(kExcKind)),
+                           w.is(w.typ(h()), "object"));
+            }));
+      }));
 }
 
 // The same, asked in C++ by a host function -- a report's: the exception's
@@ -763,7 +724,7 @@ inline constexpr int64_t kFulfilled = 1;
 inline constexpr int64_t kRejected = 2;
 
 // `then`, when `v` holds a promise.
-inline NodeId if_promise(PartsWriter& w, FuncWriter::Slot v, NodeId then) {
+inline NodeId if_promise(FuncWriter& w, FuncWriter::Slot v, NodeId then) {
   return w.iff(is_kind(w, v, kPromiseKind), then);
 }
 inline NodeId promise_state(FuncWriter& w, NodeId p) {
@@ -782,13 +743,13 @@ inline const std::vector<std::string>& promise_helpers() {
 
 inline void write_promise_helpers(HelperTable& rt) {
   {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     r.add(r.ret(of_kind(r, r.obj({}), kPromiseKind,
                         {r.I(kPending), r.Nil(), r.arr({})})));
     r.finish("$pnew");
   }
   {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [p, st, v] = r.params("p", "st", "v");
     const auto [waiting, i] = r.locals("waiting", "i");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
@@ -805,7 +766,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     r.finish("$psettle");
   }
   {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [p, cb] = r.params("p", "cb");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
                 r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
@@ -814,7 +775,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     r.finish("$pon");
   }
   {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [v] = r.params("v");
     const auto [p] = r.locals("p");
     r.add(if_promise(r, v, r.ret(r.L(v))));
@@ -825,7 +786,7 @@ inline void write_promise_helpers(HelperTable& rt) {
   }
   {
     // cells: 0 = q, 1 = v, for $adopt to close over.
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [q, v] = r.params("q", "v");
     r.add(if_promise(
         r, v,
@@ -838,13 +799,13 @@ inline void write_promise_helpers(HelperTable& rt) {
   }
   {
     // captures: 0 = the promise to settle, 1 = the one it adopts.
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     r.add(r.call("$psettle", {r.P(0), promise_state(r, r.P(1)),
                               promise_value(r, r.P(1))}));
     r.finish("$adopt", 0, 2);
   }
   {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [v] = r.params("v");
     const auto [p] = r.locals("p");
     r.add(r.set(p, r.call("$topromise", {r.L(v)})));

@@ -616,8 +616,8 @@ struct Binder {
 
   // One helper of the runtime above, with the front end's own addition to
   // coreir::HelperWriter.
-  struct RT : PartsWriter {
-    explicit RT(Binder& bd) : PartsWriter(bd.rt) {}
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
 
     // Calling a Proc/block value: its own parameter 0 is a block of its
     // own (nil, since we never pass one), and the real arguments follow.

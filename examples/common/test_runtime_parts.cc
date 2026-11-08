@@ -103,7 +103,7 @@ int main() {
   const char* const helpers[kParts] = {"$kind", "$class", "$exception"};
   rt.reserve({helpers[kKind], helpers[kClass], helpers[kException]});
   for (int64_t part = 0; part < kParts; ++part) {
-    PartsWriter r(rt);
+    HelperWriter r(rt);
     const auto [v] = r.params("v");
     r.add(r.ret(part == kKind    ? is_kind(r, v, kTupleKind)
                 : part == kClass ? instance_class(r, v)

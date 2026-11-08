@@ -538,8 +538,8 @@ struct Binder {
   // HelperWriter) are deliberate: these bodies are dense trees, and
   // spelling `b.binary(BinOp::Eq, ...)` at every node buries what the code
   // says under how it is built.
-  struct RT : PartsWriter {
-    explicit RT(Binder& bd) : PartsWriter(bd.rt) {}
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
   // ToBoolean, ES2023 7.1.2. The VM's own Value::truthy() is close but
@@ -1889,14 +1889,12 @@ struct Binder {
     const int32_t mark = ctx.mark();
     const int32_t kv = ctx.alloc_local("$cls");
     const int32_t tv = ctx.alloc_local("$this");
-    const int32_t meta = ctx.alloc_local("$meta");
-    const int32_t type = ctx.alloc_local("$type");
     const NodeId K = b.varref(VarKind::Local, kv);
     const NodeId T = b.varref(VarKind::Local, tv);
     const NodeId built = b.block(
         {b.assign(VarKind::Local, kv,
                   read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
-         b.make_if(b.binary(BinOp::Eq, is_kind(b, kv, meta, type, kClassKind),
+         b.make_if(b.binary(BinOp::Eq, is_kind(b, b.varref(VarKind::Local, kv), kClassKind),
                             b.bool_literal(false)),
                    rt.call("$throwtype",
                            {b.str_literal(n + " is not a constructor")}, p),

@@ -586,8 +586,8 @@ struct Binder {
 
   // One helper of the runtime above, with the front end's own additions to
   // coreir::HelperWriter.
-  struct RT : PartsWriter {
-    explicit RT(Binder& bd) : PartsWriter(bd.rt) {
+  struct RT : HelperWriter {
+    explicit RT(Binder& bd) : HelperWriter(bd.rt) {
       // Scheme's own rule, and the one every library procedure here is
       // written to rely on: a call in tail position reuses the frame.
       tail_calls = true;
@@ -1589,8 +1589,6 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     const int32_t exc = ctx.alloc_local("$exc");
-    const int32_t meta = ctx.alloc_local("$meta");
-    const int32_t type = ctx.alloc_local("$type");
     const int32_t cell = ctx.next_cell++;
     const NodeId TAG = b.varref(VarKind::Cell, cell);
     const NodeId E = b.varref(VarKind::Local, exc);
@@ -1602,7 +1600,7 @@ struct Binder {
     const NodeId body = b.call_value(emit_form(*a.nodes[1], ctx),
                                      {b.make_closure(rt.func("$escape"), cm)});
     const NodeId mine = b.make_if(
-        is_kind(b, exc, meta, type, kEscapeKind),
+        is_kind(b, b.varref(VarKind::Local, exc), kEscapeKind),
         b.intrinsic(IntrinsicId::Same, {kind_field(b, E, kEscapeTag), TAG}),
         b.bool_literal(false));
     const NodeId handler = b.make_if(mine, kind_field(b, E, kEscapeValue),
@@ -1673,12 +1671,10 @@ struct Binder {
       // nothing; with it, it says what the program asked for and why it
       // cannot have it.
       const int32_t slot = ctx.alloc_local("$exc");
-      const int32_t meta = ctx.alloc_local("$meta");
-      const int32_t type = ctx.alloc_local("$type");
       const NodeId E = b.varref(VarKind::Local, slot);
       stmts.push_back(b.make_try(
           slot, value,
-          b.make_if(is_kind(b, slot, meta, type, kEscapeKind),
+          b.make_if(is_kind(b, b.varref(VarKind::Local, slot), kEscapeKind),
                     b.make_throw(b.str_literal(
                         "call/cc: a continuation was invoked after the "
                         "call/cc that made it had already returned. This "
