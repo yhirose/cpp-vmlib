@@ -1500,8 +1500,9 @@ struct Binder {
                  r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "map"))),
         r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0)))));
     // A tuple is an object here, false when empty as a list is.
-    r.add(r.iff(r.call("$istup", {r.L(v)}),
-                r.ret(r.bin(BinOp::Gt, r.len(r.call("$untup", {r.L(v)})),
+    r.add(r.iff(is_kind(r, v, kTupleKind),
+                r.ret(r.bin(BinOp::Gt,
+                            r.len(kind_field(r, r.L(v), kTupleItems)),
                             r.I(0)))));
     r.add(r.ret(r.Bo(true)));
     r.finish("$truthy");
