@@ -524,16 +524,15 @@ struct Binder {
   //   $seq     `===`: two values of one type compare as Eq does, but for
   //            an int beside a double -- Eq says 1 == 1.0, and $seq, which
   //            compares the types first, says not -- so an int is $seq's.
-  //   $index   `o[k]` and `o.k`: an array's element at an int in range,
-  //            or an object's own property, found by its name (an int key
-  //            on an object, a string on an array, `length`, a Map's
-  //            `size` are $index's); a property it lacks is undefined
+  //   $index   `o.k` and `o[k]` on an object and a string key: its own
+  //            property, found by name, or undefined for one it lacks
   //            (kMissNil), unless it has a meta -- a class's instance, a
-  //            Map, whose misses are the prototype chain's.
-  //   $setidx  `o[k] = v` and `o.k = v`: the same two, a new property
-  //            included, and an array's element at its length, which
-  //            grows it (kAppend); an element past the length or a
-  //            negative one is $setidx's.
+  //            Map -- whose misses are the prototype chain's and whose
+  //            `size` is $index's. An array is $index's whole: every
+  //            JavaScript number is a double here, an index too, which no
+  //            fast path takes.
+  //   $setidx  `o.k = v` and `o[k] = v` on the same, a new property
+  //            included.
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth,
@@ -541,11 +540,10 @@ struct Binder {
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},
-        {"$index", VmOp::index(tags_named({"array", "object"}), kMissNil,
-                               tags_named({"int", "string"}))},
-        {"$setidx", VmOp::set_index(tags_named({"array", "object"}),
-                                    kMissNil | kAppend,
-                                    tags_named({"int", "string"}))},
+        {"$index", VmOp::index(tags_named("object"), kMissNil,
+                               tags_named("string"))},
+        {"$setidx", VmOp::set_index(tags_named("object"), kMissNil,
+                                    tags_named("string"))},
     };
   }
 
