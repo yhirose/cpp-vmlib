@@ -3768,6 +3768,9 @@ inline const char* type_name(ValueTag t) {
 // never answers. kAllTags is the whole set, which `!=` complements against.
 inline constexpr uint32_t kAllTags =
     (1u << (static_cast<uint32_t>(kLastValueTag) + 1)) - 1;
+// pack_fallback puts three of these sets in two ints, 16 bits for the first
+// two and 14 for the third: a fifteenth tag would overflow into the flags.
+static_assert(kAllTags < (1u << 14), "pack_fallback has room for 14 tags");
 
 // Whether a set of tags holds `t`.
 inline constexpr bool has_tag(uint32_t set, ValueTag t) {

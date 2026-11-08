@@ -1334,6 +1334,27 @@ int main() {
     holds(BinOp::Ne, 1, NAN, true, "int != NaN");
   }
 
+  // pack_fallback and unpack_fallback are inverses, every field at its
+  // largest and at its smallest, and no field reaches into another.
+  {
+    const auto roundtrip = [&](const Fallback& f, const char* what) {
+      const Fallback g = unpack_fallback(f.callee, pack_fallback(f));
+      check_eq(std::to_string(g.tags) + "," + std::to_string(g.key_tags) +
+                   "," + std::to_string(g.value_tags) + "," +
+                   std::to_string(g.flags),
+               std::to_string(f.tags) + "," + std::to_string(f.key_tags) +
+                   "," + std::to_string(f.value_tags) + "," +
+                   std::to_string(f.flags),
+               what);
+    };
+    roundtrip({NodeId{}, kAllTags, 0xff, kAllTags, kAllTags}, "packed: full");
+    roundtrip({NodeId{}, 0, 0, 0, 0}, "packed: empty");
+    roundtrip({NodeId{}, kAllTags, 0, 0, 0}, "packed: tags alone");
+    roundtrip({NodeId{}, 0, 0, kAllTags, 0}, "packed: key alone");
+    roundtrip({NodeId{}, 0, 0, 0, kAllTags}, "packed: value alone");
+    roundtrip({NodeId{}, 0, 0xff, 0, 0}, "packed: flags alone");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "values: %d failure(s)\n", g_failures);
     return 1;
