@@ -279,6 +279,49 @@ inline void find_in_chain(FuncWriter& w) {
   w.add(w.ret(w.Nil()));
 }
 
+// ---- Held values --------------------------------------------------------
+//
+// What a binder writes over Builder::let for the two shapes most of them
+// share.
+
+// A call that reads fewer of its arguments than it is given -- a library
+// function lowered by name to an intrinsic or a helper, which takes only
+// the ones it reads -- in a language that runs every argument anyway, in
+// order, before the call. The first `reads` are held by Lets, the rest run
+// for their effects alone, and then `call(read)` over the values the first
+// ones held. Given no more than it reads, it is `call(args)`, built as it
+// would have been without this.
+template <class F>
+inline NodeId reading(coreir::Builder::At& b, const std::vector<NodeId>& args,
+                      size_t reads, F call) {
+  if (args.size() <= reads) return call(args);
+  const std::vector<NodeId> first(args.begin(),
+                                  args.begin() + static_cast<long>(reads));
+  return b.lets(first, [&](const std::vector<coreir::Builder::Temp>& t) {
+    std::vector<NodeId> out(args.begin() + static_cast<long>(reads),
+                            args.end());
+    out.push_back(call(coreir::Builder::read_all(t)));
+    return b.block(out);
+  });
+}
+
+// `recv[key] = combine(recv[key])`, the receiver and the key each run once
+// and held by a Let for the read and for the write: a compound assignment
+// to a field, an element or a property. The binder supplies how to read
+// one (`get(recv, key)`), how to write one (`set(recv, key, value)`), and
+// `combine(read)`, the new value over a callable that makes the present
+// one -- never called for a plain `=`, which has no use for it.
+template <class Get, class Set, class Combine>
+inline NodeId read_modify_write(coreir::Builder::At& b, NodeId recv,
+                                NodeId key, Get get, Set set,
+                                Combine combine) {
+  return b.lets({recv, key}, [&](const std::vector<coreir::Builder::Temp>& t) {
+    const NodeId value =
+        combine([&] { return get(t[0](), t[1]()); });
+    return set(t[0](), t[1](), value);
+  });
+}
+
 // ---- Exceptions ------------------------------------------------------------
 //
 // An exception the implementation raises or a program builds is an object

@@ -1292,7 +1292,7 @@ struct Binder {
   // matches by name read them by position, so a spread has nowhere to go.
   // `lead` goes in front -- a method's receiver, which runs first.
   // JavaScript runs every argument of a call, whether the function reads
-  // it or not, so the ones past `reads` still run (Builder::reading):
+  // it or not, so the ones past `reads` still run (reading):
   // `String(1, f())` calls f, after the 1 and before String. `make` builds
   // the call over the lead and the arguments it reads.
   using ArgList = const std::vector<NodeId>&;
@@ -1307,8 +1307,8 @@ struct Binder {
       }
       all.push_back(emit_expr(*c, ctx));
     }
-    return Builder(m).at(pos_of(args)).reading(
-        all, reads + (lead.valid() ? 1 : 0), make);
+    auto b = Builder(m).at(pos_of(args));
+    return reading(b, all, reads + (lead.valid() ? 1 : 0), make);
   }
 
   static bool has_spread(const Ast& list) {
@@ -2055,7 +2055,7 @@ struct Binder {
     auto b = Builder(m).at(p);
     const Ast& arglist = *call.nodes[0];
     // A builtin reads its receiver and then `reads` arguments, one value
-    // each; any argument past those still runs (Builder::reading), after
+    // each; any argument past those still runs (reading), after
     // the receiver as JavaScript orders them. A method of the program's
     // own takes its arguments the way any call does.
     const auto builtin = [&](size_t reads, const auto& make) {
@@ -2160,9 +2160,7 @@ struct Binder {
               return b.lets(values, [&](const std::vector<Builder::Temp>& v) {
                 const auto held = [&] {
                   Args a;
-                  for (size_t k = 0; k < args.fixed.size(); ++k) {
-                    a.fixed.push_back(v[k]());
-                  }
+                  a.fixed = Builder::read_all(v, 0, args.fixed.size());
                   if (args.spread.valid()) a.spread = v.back()();
                   return a;
                 };
@@ -2223,10 +2221,13 @@ struct Binder {
     // Receiver and key are held by Lets: `o[i()] += 1` must evaluate each
     // of them once, not once for the read and again for the write.
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
-    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
-      const auto read = [&] { return rt.call("$index", {t[0](), t[1]()}, p); };
-      return rt.call("$setidx", {t[0](), t[1](), combine(read)}, p);
-    });
+    return read_modify_write(
+        b, recv, key,
+        [&](NodeId r, NodeId k) { return rt.call("$index", {r, k}, p); },
+        [&](NodeId r, NodeId k, NodeId v) {
+          return rt.call("$setidx", {r, k, v}, p);
+        },
+        combine);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {

@@ -3369,8 +3369,7 @@ struct Binder {
     std::vector<NodeId> values = g.pos;
     for (const auto& kv : g.kw) values.push_back(kv.second);
     return b.lets(values, [&](const std::vector<Builder::Temp>& held) {
-      std::vector<NodeId> pos;
-      for (size_t j = 0; j < g.pos.size(); ++j) pos.push_back(held[j]());
+      const std::vector<NodeId> pos = Builder::read_all(held, 0, g.pos.size());
       for (size_t j = 0; j < g.kw.size(); ++j) {
         kwv[at[j]] = held[g.pos.size() + j]();
       }
@@ -3858,13 +3857,15 @@ struct Binder {
     const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
                             : emit_expr(*last.nodes[0], ctx);
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
-    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
-      const auto cur = [&] {
-        return rt.call(attr ? "$getattr" : "$idx", {t[0](), t[1]()}, p);
-      };
-      return rt.call(attr ? "$setattr" : "$setidx",
-                     {t[0](), t[1](), combine(cur)}, p);
-    });
+    return read_modify_write(
+        b, recv, key,
+        [&](NodeId r, NodeId k) {
+          return rt.call(attr ? "$getattr" : "$idx", {r, k}, p);
+        },
+        [&](NodeId r, NodeId k, NodeId v) {
+          return rt.call(attr ? "$setattr" : "$setidx", {r, k, v}, p);
+        },
+        combine);
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
@@ -4363,9 +4364,7 @@ struct Binder {
       for (const auto& kv : given_args.kw) values.push_back(kv.second);
       return b.lets(values, [&](const std::vector<Builder::Temp>& held) {
         Given g;
-        for (size_t k = 0; k < given_args.pos.size(); ++k) {
-          g.pos.push_back(held[k]());
-        }
+        g.pos = Builder::read_all(held, 0, given_args.pos.size());
         for (size_t k = 0; k < given_args.kw.size(); ++k) {
           g.kw.emplace_back(given_args.kw[k].first,
                             held[given_args.pos.size() + k]());

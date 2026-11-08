@@ -1527,7 +1527,8 @@ struct Binder {
                   {rt.call("$classof", {t[0]()}, p), b.str_literal(name)}, p),
           [&](auto method) {
             std::vector<NodeId> callargs{blk, t[0]()};
-            for (size_t k = 1; k < t.size(); ++k) callargs.push_back(t[k]());
+            const auto rest = Builder::read_all(t, 1);
+            callargs.insert(callargs.end(), rest.begin(), rest.end());
             return b.make_if(
                 b.binary(BinOp::Ne,
                          b.intrinsic(IntrinsicId::TypeOf, {method()}),
@@ -1816,11 +1817,15 @@ struct Binder {
     }
     const NodeId key = emit_expr(*target.nodes.back()->nodes[0], ctx);
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
-    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
-      const NodeId cur =
-          op == "=" ? b.nil_literal() : ops.call("$idx", {t[0](), t[1]()}, p);
-      return rt.call("$setidx", {t[0](), t[1](), combine(cur)}, p);
-    });
+    return read_modify_write(
+        b, recv, key,
+        [&](NodeId r, NodeId k) { return ops.call("$idx", {r, k}, p); },
+        [&](NodeId r, NodeId k, NodeId v) {
+          return rt.call("$setidx", {r, k, v}, p);
+        },
+        [&](const auto& read) {
+          return combine(op == "=" ? b.nil_literal() : read());
+        });
   }
 
   // -- Expressions --------------------------------------------------------
@@ -2162,8 +2167,8 @@ struct Binder {
     return Builder(m).at(p).lets(
         values, [&](const std::vector<Builder::Temp>& t) {
           Args held;
-          size_t k = 0;
-          for (; k < args.fixed.size(); ++k) held.fixed.push_back(t[k]());
+          size_t k = args.fixed.size();
+          held.fixed = Builder::read_all(t, 0, k);
           if (args.spread.valid()) held.spread = t[k++]();
           if (args.block.valid()) held.block = t[k++]();
           return body(held);

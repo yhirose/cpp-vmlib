@@ -15,6 +15,10 @@
 // them: nothing builds one -- every kind record and exception starts with
 // its type -- and the IR parts read its head, which traps, where the C++
 // twins answer none.
+//
+// Beside them, the two shapes runtime_parts writes over Builder::let for
+// the binders -- `reading` and `read_modify_write` -- each run once, to
+// pin that every argument and every operand runs once, in order.
 
 #include <cstdio>
 #include <functional>
@@ -41,6 +45,44 @@ const char* const kPartNames[kParts] = {"is_kind/kind_record",
                                         "is_exception/exception_record"};
 
 int g_failures = 0;
+std::vector<std::string> g_out;
+
+std::string joined() {
+  std::string s;
+  for (const auto& line : g_out) s += line + "|";
+  return s;
+}
+
+void check_eq(const std::string& got, const std::string& want,
+              const std::string& what) {
+  if (got != want) {
+    std::fprintf(stderr, "FAIL: %s\n  want [%s]\n  got  [%s]\n", what.c_str(),
+                 want.c_str(), got.c_str());
+    ++g_failures;
+  }
+}
+
+// Runs a module whose entry is `body`, with `locals` locals.
+void run_body(NodeId body, Module& m, int32_t locals, const std::string& what) {
+  m.funcs.push_back({});
+  m.funcs[0] = {"main", locals, 0, body,
+                std::vector<std::string>(static_cast<size_t>(locals), "x"), {}};
+  g_out.clear();
+  if (auto err = verify(m)) {
+    std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", what.c_str(),
+                 err->c_str());
+    ++g_failures;
+    return;
+  }
+  Runtime heap;
+  try {
+    vm::run(vm::compile(m), heap);
+  } catch (const Failure& e) {
+    std::fprintf(stderr, "FAIL: %s: %s\n", what.c_str(), e.what());
+    ++g_failures;
+  }
+}
+
 int g_compared = 0;
 int g_positive[kParts] = {};
 
@@ -86,9 +128,13 @@ bool twin(NativeCall& c) {
 }  // namespace
 
 extern "C" {
-void coreir_rt_out(int64_t) {}
-void coreir_rt_out_str(const char*, int64_t) {}
-void coreir_rt_out_raw(const char*, int64_t) {}
+void coreir_rt_out(int64_t v) { g_out.push_back(std::to_string(v)); }
+void coreir_rt_out_str(const char* bytes, int64_t len) {
+  g_out.emplace_back(bytes, static_cast<size_t>(len));
+}
+void coreir_rt_out_raw(const char* bytes, int64_t len) {
+  g_out.emplace_back(bytes, static_cast<size_t>(len));
+}
 int64_t coreir_rt_in(int64_t, int64_t) { return 0; }
 void coreir_rt_poll(void) {}
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t, int64_t) {
@@ -202,6 +248,76 @@ int main() {
       ++g_failures;
     }
   }
+  // reading: three arguments, each printing its number, to a call that
+  // reads one: all three print, first to last, and the call sees the
+  // first's value. Given no more than it reads, `call` gets the arguments
+  // as they are.
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    const auto arg = [&](int64_t k) {
+      return b.block({b.intrinsic(IntrinsicId::Print, {b.literal(k)}),
+                      b.literal(k * 10)});
+    };
+    const NodeId call =
+        reading(b, {arg(1), arg(2), arg(3)}, 1,
+                [&](const std::vector<NodeId>& read) {
+                  if (read.size() != 1) {
+                    std::fprintf(stderr, "FAIL: reading: %zu read\n",
+                                 read.size());
+                    ++g_failures;
+                  }
+                  return b.intrinsic(IntrinsicId::Print, {read[0]});
+                });
+    const NodeId only = arg(4);
+    NodeId direct;
+    reading(b, {only}, 1, [&](const std::vector<NodeId>& read) {
+      direct = read[0];
+      return read[0];
+    });
+    if (direct != only) {
+      std::fprintf(stderr, "FAIL: reading held what was all read\n");
+      ++g_failures;
+    }
+    run_body(call, m, 0, "reading");
+    check_eq(joined(), "1|2|3|10|", "reading: every argument runs, in order");
+  }
+
+  // read_modify_write: `a[k()] += 5` runs the receiver and the key once
+  // each, in that order, and reads and writes through what they gave; a
+  // plain `=` never makes the read.
+  {
+    const auto run = [&](bool plain) {
+      Module m;
+      Builder bld(m);
+      auto b = bld.at(SrcPos{1, 1});
+      const auto noisy = [&](const char* name, NodeId v) {
+        return b.block({b.intrinsic(IntrinsicId::Print, {b.str_literal(name)}),
+                        v});
+      };
+      const NodeId rmw = read_modify_write(
+          b, noisy("recv", b.varref(VarKind::Local, 0)),
+          noisy("key", b.literal(0)),
+          [&](NodeId r, NodeId k) { return b.index(r, k); },
+          [&](NodeId r, NodeId k, NodeId v) { return b.set_index(r, k, v); },
+          [&](const std::function<NodeId()>& read) {
+            return plain ? b.literal(7) : b.binary(BinOp::Add, read(),
+                                                   b.literal(5));
+          });
+      run_body(b.block({b.assign(VarKind::Local, 0,
+                                 b.array_lit({b.literal(10)})),
+                        rmw,
+                        b.intrinsic(IntrinsicId::Print,
+                                    {b.index(b.varref(VarKind::Local, 0),
+                                             b.literal(0))})}),
+               m, 1, "read_modify_write");
+      return joined();
+    };
+    check_eq(run(false), "recv|key|15|", "read_modify_write: +=");
+    check_eq(run(true), "recv|key|7|", "read_modify_write: =");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "runtime_parts: %d failure(s)\n", g_failures);
     return 1;

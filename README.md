@@ -115,13 +115,7 @@ A few things worth knowing before you write a binder:
   variable is a `Local`. Reach for it wherever a value is read twice --
   a receiver and its method lookup, a key read and written back -- rather
   than claiming a local, or hanging one subtree under two parents, which
-  compiles it once per parent and which `verify()` refuses for anything
-  but a leaf (a literal, a variable, a host function, a `LetRef`). A `Let`
-  has one lifetime, the statement's end. The one place a front end needs
-  a value to die sooner is mini-culebra's method-call receiver: culebra
-  runs a receiver's destructor when its method returns, before the
-  statement goes on, so that receiver keeps a local and a `Scope` around
-  the call.
+  compiles it once per parent.
 - **Calling is two steps.** `MakeClosure` builds a callable over cells;
   `CallValue` calls whatever a value turns out to be -- a closure, or a host
   function a `NativeRef` named (see [Host functions](#host-functions)).
@@ -186,39 +180,44 @@ lexically. `push_scope`/`declare`/`resolve` as you walk the source;
 `number_captures(m)` once afterwards; then `read(m, fn, var, p)` and
 `write(m, fn, var, value, p)` emit the `VarRef` or `Assign` a use needs --
 through `access(fn, var)`, which answers the `(VarKind, index)` pair: a
-local slot, a cell of this function's own, or a capture -- and `closure(m,
-here, target, p)` emits the `MakeClosure` for `target`, with the forwarding
-table (`capture_map`) expressed in `here`'s frame. What it gets right, and a
-per-function capture list would not, is the propagation: a name read two
-levels in is recorded as free in *every* function between the reader and the
-owner, because a closure's capture map is written in the frame that builds
-it and the frame two levels down cannot name a cell it does not own. It
-knows nothing about any parse tree -- names and integers go in, and the
-front end keeps its own per-function record beside it. Past that walk it has
-hooks for the less regular cases: `declare_var` for a front end that
+local slot, a cell of this function's own, or a capture -- and
+`closure(m, here, target, p)` emits the `MakeClosure` for `target`, with
+the forwarding table (`capture_map`) expressed in `here`'s frame. What it
+gets right, and a per-function capture list would not, is the propagation:
+a name read two levels in is recorded as free in *every* function between
+the reader and the owner, because a closure's capture map is written in the
+frame that builds it and the frame two levels down cannot name a cell it
+does not own.
+It knows nothing about any parse tree -- names and integers go in, and the
+front end keeps its own per-function record beside it. Past that walk it
+has hooks for the less regular cases: `declare_var` for a front end that
 resolves names through its own tables, `note_call` plus `close_over_calls`
 for one whose functions are static entities with a closure built at every
 call site (the call graph's fixpoint), `set_parent` for nesting learned
 after the fact, and `mark`/`rollback` for a prelude bound once with program
-after program compiled on top of it. `FrameLayout` is the slot
-bookkeeping that goes with it: `alloc_local` for the names, and `mark`/
-`release` so sibling blocks reuse slots and a frame's width is the deepest
-nesting rather than the total number of declarations. A value held only
-for one expression needs no slot: `Builder::let` holds it (see `Let`,
-above). `Builder::reading` is for a call that reads fewer arguments than
-it is given, a library function lowered by name: every argument still
-runs, in order, the read ones held by Lets the call reads.
+after program compiled on top of it. `FrameLayout` is the slot bookkeeping
+that goes with it: `alloc_local` for the names, and `mark`/`release` so
+sibling blocks reuse slots and a frame's width is the deepest nesting rather
+than the total number of declarations. A value held only for one expression
+needs no slot: `Builder::let` holds it (see `Let`, above). runtime_parts'
+`reading` is for a call that reads fewer arguments than it is given, a
+library function lowered by name: every argument still runs, in order, the
+read ones held by Lets the call reads.
 
-A node reached from two parents is compiled under each, so it runs once per
-parent that runs. `verify()` allows it -- for a read it costs only time --
-but a call, a store or a fresh object reached twice is a front end
-evaluating something twice. `shared_effects(m)` lists exactly those: a node
-whose subtree the program could observe running, which one run of a
-function body evaluates twice, and the innermost node that does it. Of the
-control flow it follows only `If` and `Switch`, which run one arm, so a
-node under both arms of one `If` is fine and two runs a `return` keeps
-apart are still two -- build that node once for each place instead, which
-compiles to the very code the sharing did.
+A node reached from two parents is compiled under each, so a call, a store
+or a fresh object reached twice is a front end evaluating something twice,
+and the code of a nested pair doubles at every level. `verify()` refuses
+it for any node but a leaf -- a literal, a variable, a host function, a
+`LetRef` -- and every front end binds, and so verifies, every program it
+runs, so the refusal reaches every sample, bench and test program without
+a flag. A value read twice is held by a `Let` (above); the same code in
+each of two places is built twice. `shared_effects(m)` is the finer
+question, for what `verify()` lets through no longer but a hand-built
+module might hold: a node whose subtree the program could observe
+running, which one run of a function body evaluates twice, and the
+innermost node that does it. Of the control flow it follows only `If` and
+`Switch`, which run one arm, so a node under both arms of one `If` is
+one run -- though `verify()` still refuses it.
 
 `dropped_effects(m)` is the mirror image: a node of that kind which no
 function body reaches, built and then left out of the tree, so it never
@@ -310,7 +309,7 @@ kept as the golden (see [Testing](#testing)).
 
 - *An argument the callee never reads still runs* -- every argument, in
   order, when a library function lowered by name reads fewer, and before a
-  call on a nil receiver fails. `Builder::reading` and
+  call on a nil receiver fails. runtime_parts' `reading` and
   `Builder::sequence`, above, are for this. An argument built and then
   left out of the call is one no function body reaches, and
   `--check-effects`, above, reports it; the order is the samples' to pin.

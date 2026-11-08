@@ -2247,18 +2247,11 @@ public:
     SrcPos p_;
   };
 
-  // A Let: `init` evaluated once, and the body `body(t)` builds over it,
-  // where every t() reads that value. The temporary's id is the module's
-  // next.
-  template <class F>
-  NodeId let(NodeId init, F body, SrcPos p) {
-    const int32_t id = m_.next_let++;
-    const NodeId b = body(Temp(m_, id, p));
-    return emit(Tag::Let, 0, p, id, 0, {init, b});
-  }
-  // Several, nested in order -- inits[0] runs first -- with `body(ts)`
-  // reading inits[i] through ts[i]: a call's arguments, run once and read
-  // by whichever of its forms runs.
+  // Lets, nested in order -- inits[0] runs first, each init once -- with
+  // `body(ts)` building over them, ts[i]() reading inits[i]: a call's
+  // arguments, run once and read by whichever of its forms runs. The one
+  // place temporaries get their ids (the module's next) and Let nodes are
+  // emitted.
   template <class F>
   NodeId lets(const std::vector<NodeId>& inits, F body, SrcPos p) {
     std::vector<Temp> ts;
@@ -2271,27 +2264,23 @@ public:
     }
     return out;
   }
-  // A call that reads fewer of its arguments than it is given -- a
-  // library function a binder lowers by name to an intrinsic or a helper,
-  // which takes only the ones it reads -- in a language that runs every
-  // argument anyway, in order, before the call. The first `reads` are held
-  // by Lets, the rest run for their effects alone, and then `call(read)`
-  // over the values the first ones held. Given no more than it reads, it
-  // is `call(args)`, built as it would have been without this.
+  // A Let: `init` evaluated once, and the body `body(t)` builds over it,
+  // where every t() reads that value.
   template <class F>
-  NodeId reading(const std::vector<NodeId>& args, size_t reads, F call,
-                 SrcPos p) {
-    if (args.size() <= reads) return call(args);
-    const std::vector<NodeId> first(args.begin(),
-                                    args.begin() + static_cast<long>(reads));
-    return lets(first, [&](const std::vector<Temp>& t) {
-      std::vector<NodeId> out(args.begin() + static_cast<long>(reads),
-                              args.end());
-      std::vector<NodeId> read;
-      for (const Temp& x : t) read.push_back(x());
-      out.push_back(call(read));
-      return block(out, p);
-    }, p);
+  NodeId let(NodeId init, F body, SrcPos p) {
+    return lets({init}, [&](const std::vector<Temp>& t) { return body(t[0]); },
+                p);
+  }
+  // Reads of the temporaries from `from` on, `count` of them (all the rest
+  // by default), each a fresh leaf: what a call over them is made of.
+  static std::vector<NodeId> read_all(const std::vector<Temp>& ts,
+                                      size_t from = 0,
+                                      size_t count = static_cast<size_t>(-1)) {
+    std::vector<NodeId> out;
+    for (size_t k = from; k < ts.size() && out.size() < count; ++k) {
+      out.push_back(ts[k]());
+    }
+    return out;
   }
 
   NodeId scope(int32_t first_local, int32_t end_local, NodeId body, SrcPos p) {
@@ -2456,10 +2445,6 @@ public:
     template <class F>
     NodeId lets(const std::vector<NodeId>& inits, F body) {
       return b().lets(inits, body, p_);
-    }
-    template <class F>
-    NodeId reading(const std::vector<NodeId>& args, size_t reads, F call) {
-      return b().reading(args, reads, call, p_);
     }
     NodeId scope(int32_t lo, int32_t hi, NodeId body) {
       return b().scope(lo, hi, body, p_);

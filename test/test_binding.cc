@@ -287,45 +287,6 @@ int main() {
     }
   }
 
-  // --- 4b. Arguments a call does not read still run, in order. -----------
-  // Three arguments, each printing its number, to a call that reads one:
-  // all three print, first to last, and the call sees the first's value
-  // through the Let that holds it (Builder::reading). Given no more than
-  // it reads, the call is built over the same nodes, and nothing else.
-  {
-    Module m;
-    m.funcs.resize(1);
-    Builder bld(m);
-    auto b = bld.at(SrcPos{1, 1});
-    const auto arg = [&](int64_t k) {
-      return b.block({b.intrinsic(IntrinsicId::Print, {b.literal(k)}),
-                      b.literal(k * 10)});
-    };
-    const auto print_first = [&](const std::vector<NodeId>& read) {
-      if (read.size() != 1) {
-        std::fprintf(stderr, "FAIL: reading: %zu read, want 1\n", read.size());
-        ++g_failures;
-      }
-      return b.intrinsic(IntrinsicId::Print, {read[0]});
-    };
-    const NodeId call = b.reading({arg(1), arg(2), arg(3)}, 1, print_first);
-    const NodeId only = arg(4);
-    NodeId direct;
-    b.reading({only}, 1, [&](const std::vector<NodeId>& read) {
-      direct = read[0];
-      return read[0];
-    });
-    if (direct != only) {
-      std::fprintf(stderr, "FAIL: reading held what was all read\n");
-      ++g_failures;
-    }
-    Func& mainf = m.funcs[0];
-    mainf.name = "main";
-    mainf.body = call;
-    run_module(m, "reading");
-    check_eq(joined(), "1|2|3|10|", "reading output");
-  }
-
   // --- 5. FuncWriter: named slots, and a body that runs. ------------------
   // `sum(n)`: the loop a helper library is full of. Written with named
   // slots, so the frame's shape is stated once and finish() derives the

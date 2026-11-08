@@ -108,7 +108,7 @@ bool is_global(const std::string& n) {
 // How many arguments each library function that takes one value each
 // reads, by its qualified name: kReadsEvery for one that reads all it is
 // given, the string natives, which check their own. The arguments past
-// those still run -- Builder::reading. A function missing here is
+// those still run -- runtime_parts' reading. A function missing here is
 // not bound at all, rather than lowered without its count and so losing
 // the arguments it does not read. One that takes every value as one array
 // (print, io.write, select, pcall, table.pack) has none past them, and is
@@ -1305,11 +1305,12 @@ struct Binder {
             if (args.rest.valid()) {
               one_each.push_back(one(args.rest, p));
             }
-            // Every argument runs, read or not (Builder::reading).
-            cur = {b.at(p).reading(one_each, *library_reads("string." + name),
-                                   [&](const std::vector<NodeId>& read) {
-                                     return string_call(name, read, p);
-                                   }),
+            // Every argument runs, read or not (reading).
+            auto bp = b.at(p);
+            cur = {reading(bp, one_each, *library_reads("string." + name),
+                           [&](const std::vector<NodeId>& read) {
+                             return string_call(name, read, p);
+                           }),
                    false};
             break;
           }
@@ -1346,9 +1347,7 @@ struct Binder {
     if (args.rest.valid()) values.push_back(args.rest);
     return b.lets(values, [&](const std::vector<Builder::Temp>& t) {
       const auto held = [&](size_t from, size_t n) {
-        std::vector<NodeId> out;
-        for (size_t k = from; k < from + n; ++k) out.push_back(t[k]());
-        return out;
+        return Builder::read_all(t, from, n);
       };
       const size_t nb = before.size();
       const size_t na = args.firsts.size();
@@ -1418,7 +1417,7 @@ struct Binder {
     if (!reads) fail(prim, "'" + name + "' is not supported here");
     std::vector<NodeId> args = vals.firsts;
     if (vals.rest.valid()) args.push_back(one(vals.rest, p));
-    // The arguments it reads, held by Builder::reading while the call is
+    // The arguments it reads, held by `reading` while the call is
     // built over them; every argument runs, read or not.
     const std::vector<NodeId>* read = &args;
     const auto a0 = [&](size_t k) {
@@ -1511,8 +1510,9 @@ struct Binder {
       fail(prim, "'" + g + "." + mem + "' is not supported here");
     };
     Val v{};
-    const NodeId n = b.at(p).reading(
-        args, *reads, [&](const std::vector<NodeId>& held) {
+    auto bp = b.at(p);
+    const NodeId n = reading(
+        bp, args, *reads, [&](const std::vector<NodeId>& held) {
           read = &held;
           v = dispatch();
           return v.n;

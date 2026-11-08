@@ -1701,11 +1701,7 @@ struct Binder {
         const auto arg = [&](size_t k) {
           return k + 1 < v.size() ? v[k + 1]() : b.nil_literal();
         };
-        const auto callargs = [&] {
-          std::vector<NodeId> out;
-          for (const auto& t : v) out.push_back(t());
-          return out;
-        };
+        const auto callargs = [&] { return Builder::read_all(v); };
         const NodeId library =
             name == "Add" ? rt.call("$dictadd", {self(), arg(0), arg(1)}, p)
                           : rt.call("$await", {self()}, p);
@@ -1871,13 +1867,15 @@ struct Binder {
     const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
                               : emit_expr(*last.nodes[0], ctx);
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
-    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
-      const auto read = [&] {
-        return rt.call(member ? "$getf" : "$idx", {t[0](), t[1]()}, p);
-      };
-      return rt.call(member ? "$setf" : "$setidx",
-                     {t[0](), t[1](), combine(read)}, p);
-    });
+    return read_modify_write(
+        b, recv, key,
+        [&](NodeId r, NodeId k) {
+          return rt.call(member ? "$getf" : "$idx", {r, k}, p);
+        },
+        [&](NodeId r, NodeId k, NodeId v) {
+          return rt.call(member ? "$setf" : "$setidx", {r, k, v}, p);
+        },
+        combine);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
