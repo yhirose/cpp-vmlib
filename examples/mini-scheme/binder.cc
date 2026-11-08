@@ -850,20 +850,23 @@ struct Binder {
                 r.err(scheme + ": wrong type argument")));
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
                 r.err(scheme + ": numerical overflow")));
-    const auto [v] = r.locals("v");
-    if (op == BinOp::Div) {
-      r.add(r.set(v, r.bin(BinOp::Div,
-                           r.bin(BinOp::Sub, r.L(a),
-                                 r.bin(BinOp::Mod, r.L(a), r.L(b))),
-                           r.L(b))));
-      r.add(r.iff(r.bin(BinOp::Eq, r.L(v), r.I(0)),
-                  r.ret(r.bin(BinOp::Mul, r.D(0.0),
-                              r.bin(BinOp::Div, r.L(a), r.L(b))))));
-    } else {
-      r.add(r.set(v, r.bin(op, r.L(a), r.L(b))));
-      r.add(r.iff(r.bin(BinOp::Eq, r.L(v), r.I(0)), r.ret(r.D(0.0))));
-    }
-    r.add(r.ret(r.L(v)));
+    // The quotient or the remainder, held by a Let for its zero test and
+    // the answer.
+    const NodeId value =
+        op == BinOp::Div
+            ? r.bin(BinOp::Div,
+                    r.bin(BinOp::Sub, r.L(a),
+                          r.bin(BinOp::Mod, r.L(a), r.L(b))),
+                    r.L(b))
+            : r.bin(op, r.L(a), r.L(b));
+    r.add(r.ret(r.let(value, [&](auto v) {
+      // A zero is signed as guile signs it (above).
+      const NodeId zero =
+          op == BinOp::Div
+              ? r.bin(BinOp::Mul, r.D(0.0), r.bin(BinOp::Div, r.L(a), r.L(b)))
+              : r.D(0.0);
+      return r.iff(r.bin(BinOp::Eq, v(), r.I(0)), zero, v());
+    })));
     r.finish(bi.rt);
   }
 
@@ -1265,7 +1268,7 @@ struct Binder {
                              rt.call("$listarr", {args.back()}, p));
       }
       const Builtin* bi = find_builtin(h);
-      if (bi != nullptr) return emit_builtin_call(*bi, h, args, ctx, p, a);
+      if (bi != nullptr) return emit_builtin_call(*bi, h, args, p, a);
     }
     return b.call_value(emit_form(*a.nodes[0], ctx), args);
   }
@@ -1274,8 +1277,8 @@ struct Binder {
   // as a chain of its two-argument helper (Fold has the rules, and
   // rt_fold_value is the same fold for the builtin as a value).
   NodeId emit_builtin_call(const Builtin& bi, const std::string& name,
-                           const std::vector<NodeId>& args, FnCtx& ctx,
-                           SrcPos p, const Ast& at) {
+                           const std::vector<NodeId>& args, SrcPos p,
+                           const Ast& at) {
     auto b = Builder(m).at(p);
     if (bi.fold == Fold::Left) {
       if (args.empty()) {
@@ -1298,27 +1301,19 @@ struct Binder {
       // The operands are a procedure call's arguments: each runs once, in
       // order, whether or not an earlier comparison has failed. Two need
       // nothing more; with three or more, every middle one is read by two
-      // comparisons, so they all run into temporaries first and the
+      // comparisons, so they all run first, held by Lets, and the
       // comparisons read those.
       if (args.empty()) return b.bool_literal(true);
       if (args.size() == 1) return b.block({args[0], b.bool_literal(true)});
       if (args.size() == 2) return ops.call(bi.rt, {args[0], args[1]}, p);
-      std::vector<NodeId> out;
-      std::vector<NodeId> vals;
-      for (const NodeId v : args) {
-        // Fresh: an operand after this one may hold a scope (call/cc's)
-        // that claimed and gave back a slot, and runs after this is set.
-        const int32_t t = ctx.alloc_fresh_local("$cmp");
-        out.push_back(b.assign(VarKind::Local, t, v));
-        vals.push_back(b.varref(VarKind::Local, t));
-      }
-      NodeId acc = ops.call(bi.rt, {vals[0], vals[1]}, p);
-      for (size_t i = 2; i < vals.size(); ++i) {
-        acc = b.make_if(acc, ops.call(bi.rt, {vals[i - 1], vals[i]}, p),
-                        b.bool_literal(false));
-      }
-      out.push_back(acc);
-      return b.block(out);
+      return b.lets(args, [&](const std::vector<Builder::Temp>& v) {
+        NodeId acc = ops.call(bi.rt, {v[0](), v[1]()}, p);
+        for (size_t i = 2; i < v.size(); ++i) {
+          acc = b.make_if(acc, ops.call(bi.rt, {v[i - 1](), v[i]()}, p),
+                          b.bool_literal(false));
+        }
+        return acc;
+      });
     }
     if (static_cast<int32_t>(args.size()) != bi.arity) {
       fail(at, name + " takes " + std::to_string(bi.arity) + " arguments");
@@ -1346,13 +1341,14 @@ struct Binder {
   NodeId emit_case(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
-    const int32_t t = ctx.alloc_local("$case");
-    const NodeId T = b.varref(VarKind::Local, t);
-    return b.block({b.assign(VarKind::Local, t, emit_form(*a.nodes[1], ctx)),
-                    emit_case_clauses(a, 2, T, ctx)});
+    // The key, held by a Let for every clause to compare.
+    return b.let(emit_form(*a.nodes[1], ctx), [&](auto key) {
+      return emit_case_clauses(a, 2, key, ctx);
+    });
   }
 
-  NodeId emit_case_clauses(const Ast& a, size_t i, NodeId T, FnCtx& ctx) {
+  NodeId emit_case_clauses(const Ast& a, size_t i, const Builder::Temp& key,
+                           FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     if (i >= a.nodes.size()) return b.nil_literal();
@@ -1362,10 +1358,10 @@ struct Binder {
     NodeId cond = b.bool_literal(false);
     for (const auto& d : data.nodes) {
       cond = b.make_if(cond, b.bool_literal(true),
-                       rt.call("$eqv", {T, datum(*d, p)}, p));
+                       rt.call("$eqv", {key(), datum(*d, p)}, p));
     }
     return b.make_if(cond, emit_seq(clause, 1, ctx, p),
-                     emit_case_clauses(a, i + 1, T, ctx));
+                     emit_case_clauses(a, i + 1, key, ctx));
   }
 
   // `define-record-type`: no source body for any of the names it binds --
@@ -1496,13 +1492,11 @@ struct Binder {
                        emit_cond(a, i + 1, ctx));
     }
     // `(cond (test))` answers the test's own value, which is why a clause
-    // with no body is not the same as one whose body is empty -- kept in a
-    // temporary, the way `or` keeps its operand, so the test runs once.
-    const int32_t t = ctx.alloc_local("$cond");
-    const NodeId T = b.varref(VarKind::Local, t);
-    const NodeId test = emit_form(*clause.nodes[0], ctx);
-    return b.block({b.assign(VarKind::Local, t, test),
-                    b.make_if(truthy(T, p), T, emit_cond(a, i + 1, ctx))});
+    // with no body is not the same as one whose body is empty -- held by a
+    // Let, the way `or` holds its operand, so the test runs once.
+    return b.let(emit_form(*clause.nodes[0], ctx), [&](auto test) {
+      return b.make_if(truthy(test(), p), test(), emit_cond(a, i + 1, ctx));
+    });
   }
 
   // `and` and `or` answer one of their operands, not a boolean.
@@ -1512,12 +1506,11 @@ struct Binder {
     if (a.nodes.size() == 1) return b.bool_literal(is_and);
     NodeId acc = emit_form(*a.nodes[1], ctx);
     for (size_t i = 2; i < a.nodes.size(); ++i) {
-      const int32_t t = ctx.alloc_local(is_and ? "$and" : "$or");
       const NodeId rhs = emit_form(*a.nodes[i], ctx);
-      const NodeId keep = b.varref(VarKind::Local, t);
-      acc = b.block({b.assign(VarKind::Local, t, acc),
-                     b.make_if(truthy(keep, p), is_and ? rhs : keep,
-                               is_and ? keep : rhs)});
+      acc = b.let(acc, [&](auto keep) {
+        return b.make_if(truthy(keep(), p), is_and ? rhs : keep(),
+                         is_and ? keep() : rhs);
+      });
     }
     return acc;
   }
