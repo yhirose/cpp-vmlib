@@ -39,4 +39,11 @@ func main() {
 	fmt.Println(neg % -1)
 	fmt.Println(u % 7)
 	fmt.Println(big % 1000000007)
+
+	// The least int64 over -1, which the spec answers with itself and a
+	// remainder of 0: the quotient overflows, and wraps.
+	var least int64 = -big - 1
+	var minus int64 = -1
+	fmt.Println(least / minus)
+	fmt.Println(least % minus)
 }

@@ -20,6 +20,8 @@ print(7.5 % 0 ~= 7.5 % 0)
 -- Which way to round is the signs' to say, not their product's, which
 -- wraps past 2^63.
 print(-3 % 4611686018427387904, -3 // 4611686018427387904)
+-- The least integer over -1 wraps to itself, and leaves 0.
+print((-9223372036854775807 - 1) // -1, (-9223372036854775807 - 1) % -1)
 print(2 ^ 10, 2 ^ 0.5)
 print(math.type(1), math.type(1.0), math.type(7 // 2), math.type(7 / 2))
 
