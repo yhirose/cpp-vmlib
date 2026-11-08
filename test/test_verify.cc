@@ -418,6 +418,43 @@ int main() {
                             {callee(b), 1, 0, kAllTags + 1}, p);
            }),
            "operator's tag set names no tag", "a key set past the last tag");
+  // A SetIndex may name a fallback, and its value's set; never as a value.
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.block({b.set_index(b.array_lit({}, p), b.literal(0, p),
+                                         b.literal(1, p),
+                                         {callee(b), 1, 0, 2, 4}, p),
+                             b.literal(0, p)},
+                            p);
+           }),
+           "", "a SetIndex with a fallback");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.binary(BinOp::Add, b.literal(1, p), b.literal(2, p),
+                             {callee(b), 1, 0, 0, 4}, p);
+           }),
+           "binary has no value to name tags for", "a Binary with a value set");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.set_index(b.array_lit({}, p), b.literal(0, p),
+                                          b.literal(1, p), p);
+             m.nodes[n.v].a = 1;
+             return b.block({n, b.literal(0, p)}, p);
+           }),
+           "operator has tags or flags but no fallback",
+           "a SetIndex's tags without a fallback");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n =
+                 b.set_index(b.array_lit({}, p), b.literal(0, p),
+                             b.literal(1, p), {callee(b), 1}, p);
+             m.nodes[n.v].num_children = 5;
+             return b.block({n, b.literal(0, p)}, p);
+           }),
+           "setindex takes 3 or 4 children", "a SetIndex with five children");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(
+                 b.set_index(b.array_lit({}, p), b.literal(0, p),
+                             b.literal(1, p), {callee(b), 1}, p),
+                 b.literal(0, p), p);
+           }),
+           "statement in value position", "a SetIndex with a fallback as a value");
   // Built exact, the Builder keeps the flag for verify() to refuse.
   check_eq(verdict([&](Module&, Builder& b) {
              return b.index(b.array_lit({}, p), b.literal(0, p),

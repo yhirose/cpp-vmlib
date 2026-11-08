@@ -1178,8 +1178,14 @@ enum class Tag : uint8_t {
   // of the language's own is the language's.
   ArrayLit,   // children: items...
   ObjectLit,  // children: key, value, key, value, ...
-  Index,      // children: receiver, key [, fallback]; a = tags with one
-  SetIndex,   // children: receiver, key, value
+  Index,      // children: receiver, key [, fallback]; a and b as Fallback
+  // SetIndex may name a fallback the same way, its operands the receiver,
+  // the key and the value: the store is the VM's when the receiver and the
+  // key are in their sets (the value in its, if it names one) and the
+  // store does not fault; otherwise the fallback is called with the three
+  // and the store is its to make. A statement either way: the node has no
+  // value (yields_value), and the fallback's answer is dropped.
+  SetIndex,   // children: receiver, key, value [, fallback]; a, b as Index
   // A struct field, at a slot the front end assigns -- the same contract
   // VarKind::Local's slot indices already are. Where Index looks a key up
   // by comparing it against every prop in turn, FieldGet/FieldSet read
@@ -1849,7 +1855,7 @@ inline constexpr int arity_of(Tag t) {
     case Tag::ArrayLit:    return -1;
     case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
     case Tag::Index:       return -1;  // receiver, key [, fallback]
-    case Tag::SetIndex:    return 3;
+    case Tag::SetIndex:    return -1;  // receiver, key, value [, fallback]
     case Tag::FieldGet:    return 1;
     case Tag::FieldSet:    return 2;
     case Tag::Scope:       return -1;  // body, or body + release list
@@ -2032,6 +2038,7 @@ inline constexpr uint32_t operands_of(Tag t) {
     case Tag::Unary:  return 1;
     case Tag::Binary:
     case Tag::Index:  return 2;
+    case Tag::SetIndex: return 3;
     default:          return 0;
   }
 }
@@ -2047,6 +2054,7 @@ inline Fallback fallback_of(const Module& m, NodeId n) {
 struct UnaryView  { UnOp op; NodeId operand; Fallback fallback; };
 struct BinaryView { BinOp op; NodeId lhs, rhs; Fallback fallback; };
 struct IndexView  { NodeId receiver, key; Fallback fallback; };
+struct SetIndexView { NodeId receiver, key, value; Fallback fallback; };
 struct AssignView { VarKind kind; int32_t index; NodeId value; };
 struct VarRefView { VarKind kind; int32_t index; };
 struct IfView     { NodeId cond, then_, els; };  // els may be invalid
@@ -2085,6 +2093,9 @@ inline BinaryView view_binary(const Module& m, NodeId n) {
 }
 inline IndexView view_index(const Module& m, NodeId n) {
   return {m.child(n, 0), m.child(n, 1), fallback_of(m, n)};
+}
+inline SetIndexView view_set_index(const Module& m, NodeId n) {
+  return {m.child(n, 0), m.child(n, 1), m.child(n, 2), fallback_of(m, n)};
 }
 inline AssignView view_assign(const Module& m, NodeId n) {
   return {static_cast<VarKind>(m.at(n).op), m.at(n).a, m.child(n, 0)};
@@ -2402,6 +2413,10 @@ public:
   NodeId set_index(NodeId recv, NodeId key, NodeId value, SrcPos p) {
     return emit(Tag::SetIndex, 0, p, 0, 0, {recv, key, value});
   }
+  NodeId set_index(NodeId recv, NodeId key, NodeId value, const Fallback& f,
+                   SrcPos p) {
+    return or_call(Tag::SetIndex, 0, {recv, key, value}, f, p);
+  }
   // `slot` is the front end's own field numbering (props index); `name` is
   // carried along only for a trap message ("field 'next' of ..."), never
   // read to execute anything -- the same diagnostics-only role
@@ -2534,6 +2549,9 @@ public:
     }
     NodeId set_index(NodeId recv, NodeId key, NodeId v) {
       return b().set_index(recv, key, v, p_);
+    }
+    NodeId set_index(NodeId recv, NodeId key, NodeId v, const Fallback& f) {
+      return b().set_index(recv, key, v, f, p_);
     }
     NodeId field_get(NodeId recv, int32_t slot, const std::string& name) {
       return b().field_get(recv, slot, name, p_);
@@ -4443,6 +4461,10 @@ enum class Op : uint8_t {
   TryUnary,     // a = dst, a + 1 = operand, b = try_mode, c = tags, d = done
   TryBinary,    // a = dst, a + 1 and a + 2 = operands, b, c, d as TryUnary
   TryIndex,     // a = dst, a + 1 = receiver, a + 2 = key, c, d as TryUnary
+  // Tag::SetIndex's: a + 1 = receiver, a + 2 = key, a + 3 = value. Nothing
+  // is written into a; the fallback's call that follows has its answer
+  // there, which the statement's end clears.
+  TrySetIndex,  // a = dst, a + 1, a + 2, a + 3 = operands, b, c, d as TryUnary
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
   Pow,          // a = dst, b = lhs, c = rhs   (std::pow over doubles)
@@ -5877,10 +5899,10 @@ struct Verifier {
     if (((f.tags | f.key_tags | f.value_tags) & ~kAllTags) != 0) {
       return fail("operator's tag set names no tag");
     }
-    if (f.key_tags != 0 && n.tag != Tag::Index) {
+    if (f.key_tags != 0 && n.tag != Tag::Index && n.tag != Tag::SetIndex) {
       return fail(std::string(name_of(n.tag)) + " has no key to name tags for");
     }
-    if (f.value_tags != 0) {
+    if (f.value_tags != 0 && n.tag != Tag::SetIndex) {
       return fail(std::string(name_of(n.tag)) + " has no value to name tags for");
     }
     if ((f.flags & ~kKnownFlags) != 0) return fail("unknown operator flag");
@@ -6022,6 +6044,7 @@ struct Verifier {
         if (!check_fallback(n)) return false;
         break;
       case Tag::Index:
+      case Tag::SetIndex:
         if (!check_fallback(n)) return false;
         break;
       case Tag::VarRef:
@@ -6378,7 +6401,10 @@ struct Dumper {
         out << "index";
         fallback(view_index(m, id).fallback);
         break;
-      case Tag::SetIndex: out << "setindex"; break;
+      case Tag::SetIndex:
+        out << "setindex";
+        fallback(view_set_index(m, id).fallback);
+        break;
       // One case for both: FieldSetView is FieldView plus a value child, so
       // the slot and the name const are the same a/b either way, and the
       // word is the one name_of already has for the tag -- the same way
@@ -6867,6 +6893,7 @@ inline const char* name_of(Op op) {
     case Op::TryUnary:    return "tryunary";
     case Op::TryBinary:   return "trybinary";
     case Op::TryIndex:    return "tryindex";
+    case Op::TrySetIndex: return "trysetindex";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";
     case Op::Pow:         return "pow";
@@ -7017,16 +7044,20 @@ inline std::string to_string(const Program& p) {
           break;
         case Op::TryUnary:
         case Op::TryBinary:
-        case Op::TryIndex: {
+        case Op::TryIndex:
+        case Op::TrySetIndex: {
           const uint8_t op = try_op(in.b);
           const bool unary = in.op == Op::TryUnary;
           out << " r" << in.a << ", "
               << (in.op == Op::TryIndex
                       ? "index"
+                  : in.op == Op::TrySetIndex
+                      ? "setindex"
                       : unary ? coreir::name_of(static_cast<coreir::UnOp>(op))
                               : coreir::name_of(static_cast<coreir::BinOp>(op)))
               << " r" << (in.a + 1);
           if (!unary) out << ", r" << (in.a + 2);
+          if (in.op == Op::TrySetIndex) out << ", r" << (in.a + 3);
           const coreir::Fallback f =
               coreir::unpack_fallback(coreir::NodeId{}, try_bits(in.c, in.b));
           out << ", " << coreir::detail::tag_set_text(f.tags);
@@ -7763,9 +7794,10 @@ struct FnCompiler {
     const Node& n = m.at(id);
     const Fallback f = fallback_of(m, id);
     const uint32_t k = operands_of(n.tag);
-    const Op op = n.tag == Tag::Unary    ? Op::TryUnary
-                  : n.tag == Tag::Binary ? Op::TryBinary
-                                         : Op::TryIndex;
+    const Op op = n.tag == Tag::Unary      ? Op::TryUnary
+                  : n.tag == Tag::Binary   ? Op::TryBinary
+                  : n.tag == Tag::SetIndex ? Op::TrySetIndex
+                                           : Op::TryIndex;
     const FallbackBits bits = pack_fallback(f);
     const size_t at = emit(op, dst, try_mode(n.op, bits.b), bits.a, n.pos);
     const int32_t callee = compile_expr(f.callee);
@@ -8263,6 +8295,15 @@ struct FnCompiler {
       }
 
       case Tag::SetIndex: {
+        if (names_fallback(n)) {
+          // The Try over the three operands in place, then the fallback's
+          // call, which the Try jumps over; neither's answer is read.
+          const int32_t dst = alloc();
+          compile_operands(id);
+          const size_t at = emit_try(id, dst, false);
+          ch.code[at].d = here();
+          break;
+        }
         const int32_t recv = compile_expr(m.child(id, 0));
         const int32_t key = compile_expr(m.child(id, 1));
         const int32_t val = compile_expr(m.child(id, 2));
@@ -9991,8 +10032,9 @@ struct Exec {
     finish_coro(co);
   }
 
-  // TryUnary, TryBinary and TryIndex (bytecode.h): the answer into in.a,
-  // and true, when it has one for these operands; false, with nothing
+  // TryUnary, TryBinary, TryIndex and TrySetIndex (bytecode.h): the answer
+  // into in.a (a store has none), and true, when it has one for these
+  // operands; false, with nothing
   // written, when the fallback's call that follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
     const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
@@ -10007,6 +10049,14 @@ struct Exec {
       return true;
     }
     const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    if (in.op == Op::TrySetIndex) {
+      const Value& z = f.regs[static_cast<size_t>(in.a) + 3];
+      if (!has_tag(fb.key_mask(), y.tag())) return false;
+      if (fb.value_tags != 0 && !has_tag(fb.value_tags, z.tag())) return false;
+      if (index_fault(x, y, true) != Fault::None) return false;
+      index_set(x, y, z);
+      return true;
+    }
     if (in.op == Op::TryIndex) {
       if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (index_fault(x, y) != Fault::None) return false;
@@ -10114,6 +10164,7 @@ struct Exec {
         case Op::TryUnary:
         case Op::TryBinary:
         case Op::TryIndex:
+        case Op::TrySetIndex:
           if (try_operator(f, in)) {
             f.pc = static_cast<size_t>(in.d);
             continue;

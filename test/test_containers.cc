@@ -803,6 +803,84 @@ int main() {
              "cannot assign into a string", "index_fault: its text");
   }
 
+  // A SetIndex with a fallback: the VM stores when the receiver and the key
+  // are in their sets, the value is in its, and the store does not fault;
+  // otherwise the fallback is called with the three operands -- after them,
+  // and only then -- and the store is the fallback's to make. Here it only
+  // says so ("fb"), which is how the cases below tell the two apart.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 3, 0, NodeId{}, {"xs", "o", "mp"}, {}});
+    Func fb{"fb", 3, 0, NodeId{}, {"r", "k", "v"}, {}};
+    fb.num_params = 3;
+    fb.lenient_arity = true;
+    fb.body = b.intrinsic(IntrinsicId::Print, {b.str_literal("fb", p)}, p);
+    m.funcs.push_back(fb);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    const NodeId o = b.varref(VarKind::Local, 1, p);
+    const NodeId mp = b.varref(VarKind::Local, 2, p);
+    const auto L = [&](int64_t v) { return b.literal(v, p); };
+    const auto S = [&](const char* v) { return b.str_literal(v, p); };
+    const auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const auto set = [&](NodeId r, NodeId k, NodeId v, uint32_t tags,
+                         uint32_t key_tags = 0, uint32_t value_tags = 0) {
+      Fallback f{b.make_closure(1, 0, p), tags};
+      f.key_tags = key_tags;
+      f.value_tags = value_tags;
+      return b.set_index(r, k, v, f, p);
+    };
+    const uint32_t kContainers = tags_named({"array", "object", "map"});
+    const uint32_t kKeys = tags_named({"int", "string"});
+    const NodeId body = b.block(
+        {b.assign(VarKind::Local, 0, b.array_lit({L(10), L(20)}, p), p),
+         b.assign(VarKind::Local, 1,
+                  b.object_lit({{S("a"), L(1)}}, p), p),
+         b.assign(VarKind::Local, 2, b.intrinsic(IntrinsicId::MapNew, {}, p),
+                  p),
+         // In range, an existing key, a new key, a map: the VM's.
+         set(xs, L(1), L(21), kContainers | kKeys),
+         set(o, S("a"), L(2), kContainers | kKeys),
+         set(o, S("b"), L(3), kContainers | kKeys),
+         set(mp, S("k"), L(4), kContainers | kKeys),
+         print(S(".")),
+         // At the length, below zero, a string key on an array, a
+         // non-string key on an object: faults, the fallback's.
+         set(xs, L(2), L(0), kContainers | kKeys),
+         set(xs, L(-1), L(0), kContainers | kKeys),
+         set(xs, S("x"), L(0), kContainers | kKeys),
+         set(o, L(0), L(0), kContainers | kKeys),
+         print(S(".")),
+         // A string is no container to write: its fault comes before the
+         // set is asked about the key.
+         set(S("abc"), L(0), S("x"), kContainers | kKeys | tags_named("string")),
+         print(S(".")),
+         // A receiver outside the receiver's set, though the key set has
+         // its tag; a key outside the key's.
+         set(xs, L(0), L(5), tags_named("object"), kKeys),
+         set(o, S("a"), L(5), kContainers, tags_named("int")),
+         print(S(".")),
+         // A value outside the value's set: the fallback's, where the
+         // same store of another value is the VM's.
+         set(xs, L(0), b.nil_literal(p), kContainers, kKeys,
+             kAllTags & ~tags_named("nil")),
+         set(xs, L(0), L(6), kContainers, kKeys, kAllTags & ~tags_named("nil")),
+         print(S(".")),
+         print(b.index(xs, L(0), p)), print(b.index(xs, L(1), p)),
+         print(b.index(o, S("a"), p)), print(b.index(o, S("b"), p)),
+         print(b.index(mp, S("k"), p))},
+        p);
+    m.funcs[0].body = b.scope(0, 3, body, p);
+    check_eq(run_module(m, "set_index: with a fallback"), "",
+             "set_index with a fallback: unexpected failure");
+    check_eq(joined(),
+             ".|fb|fb|fb|fb|.|fb|.|fb|fb|.|fb|.|6|21|2|3|4|",
+             "set_index with a fallback");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;
