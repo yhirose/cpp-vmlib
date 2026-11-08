@@ -814,8 +814,8 @@ struct Binder {
   }
 
   // One helper of the runtime above under construction.
-  struct RT : HelperWriter {
-    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
+  struct RT : PartsWriter {
+    explicit RT(Binder& bd) : PartsWriter(bd.rt) {}
   };
 
   // Object.ToString, for the values this subset has. Note the double: no

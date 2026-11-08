@@ -91,11 +91,32 @@ inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
   return of_kind(w.b, obj, kind, state);
 }
 
-// The temporaries the parts below write and read inside one expression --
-// a value's meta, and its head -- are slots of their own, neither each
-// other nor the value's, which is read again after they are written. A
-// part checks this of the slots it is handed; FuncWriter::scratch says
-// why nothing else can make two uses of one temporary overlap.
+// A helper writer for the parts below that ask a value about its meta --
+// is_kind, instance_class, is_exception -- with the temporaries they
+// share: a value's meta and its head, written and read inside the one
+// expression a part builds and dead after it, one slot per name however
+// many questions the helper asks. Two uses of one temporary cannot
+// overlap, because a part takes the value it asks about as a Slot, never
+// as an expression to evaluate between its writes and its reads -- a rule
+// these parts keep, which is why the slots are theirs to hand out and not
+// FuncWriter's. What a part can still be handed wrongly is a temporary
+// that is the value's own slot; check_scratch refuses that.
+class PartsWriter : public HelperWriter {
+ public:
+  using HelperWriter::HelperWriter;
+
+  Slot scratch(const std::string& name) {
+    const auto [it, fresh] = scratch_.try_emplace(name);
+    if (fresh) it->second = local(name);
+    return it->second;
+  }
+
+ private:
+  std::map<std::string, Slot> scratch_;
+};
+
+// The temporaries a part writes and reads are slots of their own, neither
+// each other nor the value's, which is read again after they are written.
 inline void check_scratch(std::initializer_list<int32_t> slots) {
   for (auto i = slots.begin(); i != slots.end(); ++i) {
     for (auto j = std::next(i); j != slots.end(); ++j) {
@@ -137,7 +158,7 @@ inline NodeId is_kind(coreir::Builder::At& b, int32_t v, int32_t m, int32_t h,
                      b.bool_literal(false))}),
       no);
 }
-inline NodeId is_kind(FuncWriter& w, FuncWriter::Slot v,
+inline NodeId is_kind(PartsWriter& w, FuncWriter::Slot v,
                       const std::string& kind) {
   return is_kind(w.b, v.i, w.scratch("$meta").i, w.scratch("$type").i, kind);
 }
@@ -216,7 +237,7 @@ inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
 // other value -- a receiver of a builtin type, the common case in a
 // method call -- is answered by its one type test. The meta is read once,
 // into a scratch local of the writer's.
-inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
+inline NodeId instance_class(PartsWriter& w, FuncWriter::Slot v) {
   const auto m = w.scratch("$meta");
   check_scratch({v.i, m.i});
   return w.iff(
@@ -313,7 +334,7 @@ inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
 // record, all three of its fields there, headed by kExcKind for a builtin
 // one or by the class of a program's that keeps a message. The meta and
 // its head are each read once, into scratch locals of the writer's.
-inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
+inline NodeId is_exception(PartsWriter& w, FuncWriter::Slot v) {
   const auto m = w.scratch("$meta");
   const auto h = w.scratch("$type");
   check_scratch({v.i, m.i, h.i});
@@ -726,7 +747,7 @@ inline constexpr int64_t kFulfilled = 1;
 inline constexpr int64_t kRejected = 2;
 
 // `then`, when `v` holds a promise.
-inline NodeId if_promise(FuncWriter& w, FuncWriter::Slot v, NodeId then) {
+inline NodeId if_promise(PartsWriter& w, FuncWriter::Slot v, NodeId then) {
   return w.iff(is_kind(w, v, kPromiseKind), then);
 }
 inline NodeId promise_state(FuncWriter& w, NodeId p) {
@@ -745,13 +766,13 @@ inline const std::vector<std::string>& promise_helpers() {
 
 inline void write_promise_helpers(HelperTable& rt) {
   {
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     r.add(r.ret(of_kind(r, r.obj({}), kPromiseKind,
                         {r.I(kPending), r.Nil(), r.arr({})})));
     r.finish("$pnew");
   }
   {
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     const auto [p, st, v] = r.params("p", "st", "v");
     const auto [waiting, i] = r.locals("waiting", "i");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
@@ -768,7 +789,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     r.finish("$psettle");
   }
   {
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     const auto [p, cb] = r.params("p", "cb");
     r.add(r.iff(r.bin(BinOp::Ne, promise_state(r, r.L(p)), r.I(kPending)),
                 r.blk({r.in(IntrinsicId::Enqueue, {r.L(cb)}), r.ret(r.Nil())})));
@@ -777,7 +798,7 @@ inline void write_promise_helpers(HelperTable& rt) {
     r.finish("$pon");
   }
   {
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     const auto [v] = r.params("v");
     const auto [p] = r.locals("p");
     r.add(if_promise(r, v, r.ret(r.L(v))));
@@ -788,7 +809,7 @@ inline void write_promise_helpers(HelperTable& rt) {
   }
   {
     // cells: 0 = q, 1 = v, for $adopt to close over.
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     const auto [q, v] = r.params("q", "v");
     r.add(if_promise(
         r, v,
@@ -801,13 +822,13 @@ inline void write_promise_helpers(HelperTable& rt) {
   }
   {
     // captures: 0 = the promise to settle, 1 = the one it adopts.
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     r.add(r.call("$psettle", {r.P(0), promise_state(r, r.P(1)),
                               promise_value(r, r.P(1))}));
     r.finish("$adopt", 0, 2);
   }
   {
-    HelperWriter r(rt);
+    PartsWriter r(rt);
     const auto [v] = r.params("v");
     const auto [p] = r.locals("p");
     r.add(r.set(p, r.call("$topromise", {r.L(v)})));

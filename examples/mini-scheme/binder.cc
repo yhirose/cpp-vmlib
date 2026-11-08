@@ -580,8 +580,8 @@ struct Binder {
 
   // One helper of the runtime above, with the front end's own additions to
   // coreir::HelperWriter.
-  struct RT : HelperWriter {
-    explicit RT(Binder& bd) : HelperWriter(bd.rt) {
+  struct RT : PartsWriter {
+    explicit RT(Binder& bd) : PartsWriter(bd.rt) {
       // Scheme's own rule, and the one every library procedure here is
       // written to rely on: a call in tail position reuses the frame.
       tail_calls = true;

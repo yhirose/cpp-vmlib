@@ -538,8 +538,8 @@ struct Binder {
   // HelperWriter) are deliberate: these bodies are dense trees, and
   // spelling `b.binary(BinOp::Eq, ...)` at every node buries what the code
   // says under how it is built.
-  struct RT : HelperWriter {
-    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
+  struct RT : PartsWriter {
+    explicit RT(Binder& bd) : PartsWriter(bd.rt) {}
   };
 
   // ToBoolean, ES2023 7.1.2. The VM's own Value::truthy() is close but

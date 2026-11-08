@@ -3234,18 +3234,6 @@ class FuncWriter {
     names_.push_back(std::move(name));
     return Slot{static_cast<int32_t>(names_.size() - 1)};
   }
-  // A temporary of the kind a part reaches for inside one expression it
-  // builds -- written and read there, dead after -- one slot per name per
-  // writer, however many such expressions the helper holds. The parts
-  // that share one must not nest, one's temporary live across another's;
-  // a part that takes the value it asks about as a Slot, never as an
-  // expression to evaluate between its writes and its reads, cannot, and
-  // checks only that the slot is not that value's own.
-  Slot scratch(const std::string& name) {
-    const auto [it, fresh] = scratch_.try_emplace(name);
-    if (fresh) it->second = local(name);
-    return it->second;
-  }
 
   // The same, several at once, so a helper declares its frame in a line or
   // two rather than one line per slot:
@@ -3428,7 +3416,6 @@ class FuncWriter {
 
   std::vector<std::string> names_;
   int32_t nparams_ = 0;
-  std::map<std::string, Slot> scratch_;
 };
 
 // The runtime library a front end writes with FuncWriter, as a table of

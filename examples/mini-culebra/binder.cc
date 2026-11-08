@@ -441,8 +441,8 @@ struct Binder {
 
   // One helper of the runtime above, with the front end's own addition to
   // coreir::HelperWriter.
-  struct RT : HelperWriter {
-    explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
+  struct RT : PartsWriter {
+    explicit RT(Binder& bd) : PartsWriter(bd.rt) {}
 
     // The three checks `xs[i]` owes before the Index itself, shared by the
     // read and the write helper.
