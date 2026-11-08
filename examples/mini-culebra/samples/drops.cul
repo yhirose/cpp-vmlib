@@ -157,6 +157,19 @@ fn temporaries() {
 println('a temporary receiver:')
 temporaries()
 
+# So is the receiver of a compound assignment: it dies when the statement
+# is done with it, before the next one runs, not when its function ends.
+class Counter {
+  new(id) { self.id = id; self.n = 0 }
+  drop() { println("  drop {self.id}") }
+}
+fn compound() {
+  Counter.new('c').n += 1
+  println('after the assignment')
+}
+println('a temporary assigned through:')
+compound()
+
 # A key is a property whatever its bytes. The one below starts with byte 1,
 # written raw, and is where a destructor was once kept: it is a property
 # now and nothing more -- the object is no resource, and keys() lists it.

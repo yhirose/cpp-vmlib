@@ -1,10 +1,15 @@
 # A literal that ends in its `drop` is one expression -- the object, then
 # DropSet, which answers it -- with no scope around it, whose exit would
 # run the owned analysis over the object it has just made: no ownedmark
-# carries the literal's line. One with a field after its `drop` keeps the
-# object in a slot of a scope of its own.
+# carries the literal's line. One with a field after its `drop` holds the
+# object in a Let while the rest is stored, and has no scope either.
 fn make() {
   let o = {name: 'o', drop: fn () { println('drop') }}
   o.name
 }
 println(make())
+fn make_after() {
+  let o = {drop: fn () { println('drop after') }, name: 'p'}
+  o.name
+}
+println(make_after())

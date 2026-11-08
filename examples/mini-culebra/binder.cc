@@ -491,9 +491,11 @@ struct Binder {
 
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(true)));
-    const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)));
-    arms.emplace_back(r.S("bool"), scalar);
-    arms.emplace_back(r.S("string"), scalar);
+    // Each key its own body, built alike: one body under two keys would
+    // be compiled twice anyway.
+    const auto scalar = [&] { return r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))); };
+    arms.emplace_back(r.S("bool"), scalar());
+    arms.emplace_back(r.S("string"), scalar());
     // Arrays: same length, and equal element by element. Objects: same
     // key count, and every key of the left present in the right with an
     // equal value.
@@ -1193,12 +1195,11 @@ struct Binder {
         const bool is_or = a.tag == "logor"_;
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t);
-          acc = b.block(
-              {b.assign(VarKind::Local, t, acc),
-               b.make_if(keep, is_or ? keep : rhs, is_or ? rhs : keep)});
+          acc = b.let(acc, [&](auto keep) {
+            return b.make_if(keep(), is_or ? keep() : rhs,
+                             is_or ? rhs : keep());
+          });
         }
         return acc;
       }
@@ -1253,11 +1254,10 @@ struct Binder {
         // is a resource". The entries before the first `drop` are the
         // literal; that one and any after it are given or stored in
         // source order, as the literal would have run them, on the
-        // object in a slot of a scope around the literal alone -- which
-        // a literal ending in its `drop`, the usual shape, needs not:
-        // DropSet answers the object it gave the destructor, so the
-        // literal and its `drop` are one expression, and no scope's exit
-        // runs the owned analysis over an object it has just made.
+        // object a Let holds -- which a literal ending in its `drop`,
+        // the usual shape, needs not: DropSet answers the object it gave
+        // the destructor, so the literal and its `drop` are one
+        // expression.
         const auto key_of = [](const Ast& c) {
           const Ast& key = *c.nodes[0];
           return key.tag == "string"_ ? unescape(std::string(key.token))
@@ -1282,20 +1282,18 @@ struct Binder {
           return b.intrinsic(IntrinsicId::DropSet,
                              {obj, emit_expr(*a.nodes[first]->nodes[1], ctx)});
         }
-        const int32_t mark = ctx.mark();
-        const int32_t t = ctx.alloc_local("$obj");
-        const auto O = [&] { return b.varref(VarKind::Local, t); };
-        std::vector<NodeId> steps{b.assign(VarKind::Local, t, obj)};
-        for (size_t i = first; i < n; ++i) {
-          const std::string k = key_of(*a.nodes[i]);
-          const NodeId v = emit_expr(*a.nodes[i]->nodes[1], ctx);
-          steps.push_back(k == kDropField
-                              ? b.intrinsic(IntrinsicId::DropSet, {O(), v})
-                              : b.set_index(O(), b.str_literal(k), v));
-        }
-        steps.push_back(O());
-        const int32_t end = ctx.release(mark);
-        return b.scope(mark, end, b.block(steps));
+        return b.let(obj, [&](auto o) {
+          std::vector<NodeId> steps;
+          for (size_t i = first; i < n; ++i) {
+            const std::string k = key_of(*a.nodes[i]);
+            const NodeId v = emit_expr(*a.nodes[i]->nodes[1], ctx);
+            steps.push_back(k == kDropField
+                                ? b.intrinsic(IntrinsicId::DropSet, {o(), v})
+                                : b.set_index(o(), b.str_literal(k), v));
+          }
+          steps.push_back(o());
+          return b.block(steps);
+        });
       }
       default:
         fail(a, "cannot evaluate " + a.name);
@@ -1432,11 +1430,9 @@ struct Binder {
       } else {
         // The value runs before the variable is read: `x += f()` adds to
         // what f left in x.
-        const int32_t tv = ctx.alloc_local("$val");
-        out.push_back(b.assign(VarKind::Local, tv, emit_expr(rhs, ctx)));
-        out.push_back(write_var(
-            v, apply(read_var(v, ctx, p), b.varref(VarKind::Local, tv)), ctx,
-            p));
+        out.push_back(b.let(emit_expr(rhs, ctx), [&](auto val) {
+          return write_var(v, apply(read_var(v, ctx, p), val()), ctx, p);
+        }));
       }
       if (as_value) out.push_back(read_var(v, ctx, p));
       return out.size() == 1 ? out[0] : b.block(out);
@@ -1450,25 +1446,19 @@ struct Binder {
     if (!member && last.tag != "indexsfx"_) {
       fail(last, "cannot assign to this expression");
     }
-    // The temporaries are claimed before anything is emitted: each is set
-    // before the expressions after it run, and a scope inside one of those
-    // (a method call, a block) must not hand its slot out again.
-    const int32_t tv = ctx.alloc_local("$val");
-    const int32_t tr = ctx.alloc_local("$recv");
-    const int32_t tk = ctx.alloc_local("$key");
-    const NodeId V = b.varref(VarKind::Local, tv);
-    const NodeId R = b.varref(VarKind::Local, tr);
-    const NodeId K = b.varref(VarKind::Local, tk);
+    // The value, then the receiver, then the key, each run once and held
+    // by a Let for the read and the write.
     const NodeId value = emit_expr(rhs, ctx);
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
     const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
                               : emit_expr(*last.nodes[0], ctx);
-    const NodeId cur =
-        op == "=" ? NodeId{} : rt.call(member ? "$mem" : "$idx", {R, K}, p);
-    return b.block(
-        {b.assign(VarKind::Local, tv, value), b.assign(VarKind::Local, tr, recv),
-         b.assign(VarKind::Local, tk, key),
-         rt.call(member ? "$setmem" : "$setidx", {R, K, apply(cur, V)}, p)});
+    return b.lets({value, recv, key}, [&](const std::vector<Builder::Temp>& t) {
+      const NodeId cur =
+          op == "=" ? NodeId{}
+                    : rt.call(member ? "$mem" : "$idx", {t[1](), t[2]()}, p);
+      return rt.call(member ? "$setmem" : "$setidx",
+                     {t[1](), t[2](), apply(cur, t[0]())}, p);
+    });
   }
 
   // -- One function's body -------------------------------------------------

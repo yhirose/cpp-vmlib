@@ -1,2 +1,3 @@
 0 ownedmark	; 7:11
-1 dropset
+0 ownedmark	; 12:11
+2 dropset

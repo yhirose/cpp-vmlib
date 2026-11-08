@@ -44,6 +44,9 @@ a temporary receiver:
   drop t
 tagged t
 after the call
+a temporary assigned through:
+  drop c
+after the assignment
 a key spelled like the destructor:
   keys: 2
 end of program
