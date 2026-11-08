@@ -3815,6 +3815,8 @@ enum class Fault : uint8_t {
   // An index's: a string or an array takes an int, an object a string, and
   // the int must be in range.
   IntKey, StrKey, Range,
+  // A write into a string: a value, not a container of cells.
+  Immutable,
 };
 
 // Whether a truncated division's remainder `m` -- C's % on ints, fmod's
@@ -4104,7 +4106,11 @@ inline int64_t index_bound(const Value& recv) {
              : static_cast<int64_t>(recv.as_array()->items.size());
 }
 
-VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key) {
+VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key,
+                               bool write = false) {
+  // Strings read through Index but do not write: they are immutable values,
+  // not containers of cells.
+  if (write && recv.is_str()) return Fault::Immutable;
   if (recv.is_str() || recv.is_array()) {
     if (!key.is_int()) return Fault::IntKey;
     const int64_t i = key.as_int();
@@ -4123,6 +4129,8 @@ VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key) {
 inline std::string fault_text(Fault e, const Value& recv, const Value& key) {
   const std::string what = type_name(recv.tag());
   switch (e) {
+    case Fault::Immutable:
+      return "cannot assign into a string";
     case Fault::IntKey:
       return what + " index must be an int, not " + type_name(key.tag());
     case Fault::StrKey:
@@ -10214,10 +10222,8 @@ struct Exec {
         case Op::SetIndex: {
           const Value& recv = f.regs[in.a];
           const Value& key = f.regs[in.b];
-          // Strings read through Index but do not write: they are immutable
-          // values, not containers of cells.
-          if (recv.is_str()) fail(f, "cannot assign into a string");
-          if (const Fault e = index_fault(recv, key); e != Fault::None) {
+          if (const Fault e = index_fault(recv, key, true);
+              e != Fault::None) {
             fail(f, fault_text(e, recv, key));
           }
           index_set(recv, key, f.regs[in.c]);

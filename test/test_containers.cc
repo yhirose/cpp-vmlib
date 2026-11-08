@@ -29,6 +29,13 @@ struct Failure : std::runtime_error {
 std::vector<std::string> g_out;
 int g_failures = 0;
 
+void check(bool ok, const std::string& what) {
+  if (!ok) {
+    std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+    ++g_failures;
+  }
+}
+
 void check_eq(const std::string& got, const std::string& want,
               const std::string& what) {
   if (got != want) {
@@ -780,6 +787,20 @@ int main() {
     check_eq(run_module(m, "set_index: value empties the receiver"),
              "array index 0 out of range for length 0",
              "set_index: value empties the receiver");
+  }
+
+  // index_fault, read and write: a string is readable and not writable, and
+  // the write fault comes before the key is looked at.
+  {
+    const Value str = Value::make_str("abc");
+    check(index_fault(str, Value::make_int(1)) == Fault::None,
+          "index_fault: a string reads");
+    check(index_fault(str, Value::make_int(1), true) == Fault::Immutable,
+          "index_fault: a string does not write");
+    check(index_fault(str, Value::make_str("k"), true) == Fault::Immutable,
+          "index_fault: the write fault comes first");
+    check_eq(fault_text(Fault::Immutable, str, Value::make_int(1)),
+             "cannot assign into a string", "index_fault: its text");
   }
 
   if (g_failures != 0) {
