@@ -829,10 +829,12 @@ struct Binder {
   //   $neg            strings, and `-x` on a number -- an int answer
   //                   exactly, since one that would wrap goes to the limbs
   //                   (the promotion rule, at rt_add).
-  //   $idiv $mod      `//` and `%` on two ints, Python's floor, exactly:
-  //                   a zero divisor (ZeroDivisionError), the least int
-  //                   over -1 (whose quotient grows), a float, whose floor
-  //                   is CPython's own, or a bignum is the helper's.
+  //   $idiv $mod      `//` and `%` on two ints, Python's floor; a zero
+  //                   divisor (ZeroDivisionError), a float, whose floor is
+  //                   CPython's own, or a bignum is the helper's, and --
+  //                   `//` being exact -- the least int over -1, whose
+  //                   quotient grows. A remainder cannot grow, and an int
+  //                   zero divisor already faults, so `%` needs no flag.
   //   $fdiv           `/` on two floats, exactly: a zero divisor raises
   //                   ZeroDivisionError, and an int, which `/` makes a
   //                   float, is $fdiv's.
@@ -857,7 +859,7 @@ struct Binder {
         {"$mul", VmOp::binary(BinOp::Mul, number_tags(), true)},
         {"$neg", VmOp::unary(UnOp::Neg, number_tags(), true)},
         {"$idiv", VmOp::binary(BinOp::FloorDiv, ints, true)},
-        {"$mod", VmOp::binary(BinOp::FloorMod, ints, true)},
+        {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
         {"$fdiv", VmOp::binary(BinOp::Div, tags_named("double"), true)},
         {"$lt", VmOp::binary(BinOp::Lt, order)},
         {"$le", VmOp::binary(BinOp::Le, order)},
@@ -3822,11 +3824,7 @@ struct Binder {
                            rt.call("$aext", {now(), v}, p),
                            ops.call("$add", {now(), v}, p)));
       }
-      if (op == "-=") return ops.call("$sub", {cur(), v}, p);
-      if (op == "*=") return ops.call("$mul", {cur(), v}, p);
-      if (op == "//=") return ops.call("$idiv", {cur(), v}, p);
-      if (op == "/=") return rt.call("$fdiv", {cur(), v}, p);
-      return ops.call("$mod", {cur(), v}, p);
+      return arith(op.substr(0, op.size() - 1), cur(), v, p);
     };
 
     if (target.tag == "ident"_) {
@@ -3992,6 +3990,19 @@ struct Binder {
   }
 
   // -- Expressions --------------------------------------------------------
+  // An arithmetic operator by its token, `+`, `-`, `*`, `//`, `/` or `%`,
+  // and the same one inside `+=` and the rest: each is its helper's entry
+  // in operators().
+  NodeId arith(const std::string& t, NodeId l, NodeId r, SrcPos p) {
+    const char* h = t == "+"    ? "$add"
+                    : t == "-"  ? "$sub"
+                    : t == "*"  ? "$mul"
+                    : t == "//" ? "$idiv"
+                    : t == "/"  ? "$fdiv"
+                                : "$mod";
+    return ops.call(h, {l, r}, p);
+  }
+
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
@@ -4170,16 +4181,8 @@ struct Binder {
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
-          const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const SrcPos op_p = pos_of(op);
-          const char* h = t == "+"    ? "$add"
-                          : t == "-"  ? "$sub"
-                          : t == "*"  ? "$mul"
-                          : t == "//" ? "$idiv"
-                          : t == "/"  ? "$fdiv"
-                                      : "$mod";
-          acc = ops.call(h, {acc, rhs}, op_p);
+          acc = arith(std::string(op.token), acc, rhs, pos_of(op));
         }
         return acc;
       }

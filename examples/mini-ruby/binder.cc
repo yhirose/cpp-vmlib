@@ -1744,6 +1744,19 @@ struct Binder {
     return b.scope(n, n, b.block(out));
   }
 
+  // An arithmetic operator by its token, `+`, `-`, `*`, `/`, `**` or `%`,
+  // and the same one inside `+=` and the rest: each is its helper's, the
+  // VM's operation in front where operators() has one.
+  NodeId arith(const std::string& t, NodeId l, NodeId r, SrcPos p) {
+    const char* h = t == "+"    ? "$add"
+                    : t == "-"  ? "$sub"
+                    : t == "*"  ? "$mul"
+                    : t == "/"  ? "$div"
+                    : t == "**" ? "$pow"
+                                : "$mod";
+    return ops.call(h, {l, r}, p);
+  }
+
   NodeId emit_assign(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
@@ -1752,12 +1765,7 @@ struct Binder {
     const auto combine = [&](NodeId cur) -> NodeId {
       const NodeId v = emit_expr(*a.nodes[2], ctx);
       if (op == "=") return v;
-      const char* h = op == "+="   ? "$add"
-                      : op == "-=" ? "$sub"
-                      : op == "*=" ? "$mul"
-                      : op == "/=" ? "$div"
-                                   : "$mod";
-      return ops.call(h, {cur, v}, p);
+      return arith(op.substr(0, op.size() - 1), cur, v, p);
     };
     if (target.tag == "ident"_) {
       // ref_of first, not decl_of: a block *parameter* shadows an outer
@@ -1987,15 +1995,8 @@ struct Binder {
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];
-          const std::string t(op.token);
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
-          const char* h = t == "+"    ? "$add"
-                          : t == "-"  ? "$sub"
-                          : t == "*"  ? "$mul"
-                          : t == "/"  ? "$div"
-                          : t == "**" ? "$pow"
-                                      : "$mod";
-          acc = ops.call(h, {acc, rhs}, pos_of(op));
+          acc = arith(std::string(op.token), acc, rhs, pos_of(op));
         }
         return acc;
       }
