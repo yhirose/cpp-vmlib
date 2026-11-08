@@ -1267,11 +1267,37 @@ enum class Tag : uint8_t {
   // sites hoists this into a Cell exactly as the Static calls recipe hoists
   // a MakeClosure.
   NativeRef,  // a = index into Module::natives
+  // A value held for the length of one expression: Let evaluates `init`
+  // once, and every LetRef naming the same `a` inside `body` reads that
+  // value; the Let's own value is the body's. `a` is a temporary's id, one
+  // per Let in the whole module (Builder::let and lets hand them out), so a
+  // LetRef names its Let without counting scopes. A temporary is not a
+  // variable: it has no slot, is never assigned, and cannot be captured --
+  // a closure that needs the value takes a Local. Where a front end would
+  // otherwise claim a local and a Scope just to read a value twice, or
+  // hang one subtree under two parents and compile it twice, it binds the
+  // value here and reads it through as many LetRefs as it likes, each its
+  // own leaf: verify() refuses any node but a leaf under two parents, so a
+  // value read twice has no other form. The value lives in the register
+  // its init lands in, kept until the end of the statement the Let is in,
+  // as every operand's is: no slot, no scope, nothing released at the
+  // Let's end. An ANF or SSA value, in a tree: OCaml's `let x = e1 in e2`
+  // with x immutable and unescaping, an SSA value whose definition
+  // dominates every use.
+  //
+  // A Let has one lifetime, the statement's end, and so does not stand in
+  // for a value that must die sooner. The one such case in the front ends
+  // is mini-culebra's method-call receiver: culebra ends a receiver's life
+  // when its method returns, before the statement goes on (its destructor
+  // runs then), so that receiver keeps a local and a Scope around the
+  // call, which release it at that moment.
+  Let,        // a = temporary id; children: init, body
+  LetRef,     // a = temporary id (a Let enclosing it in the same function)
 };
 
 // The last enumerator, for the scans (from_name, test_names) that walk the
 // enum's range.
-inline constexpr Tag kLastTag = Tag::NativeRef;
+inline constexpr Tag kLastTag = Tag::LetRef;
 
 // WrapI8..WrapU32 truncate an int to a narrower width and sign- or
 // zero-extend it back to int64 -- non-int traps, like Neg and BitNot. A
@@ -1660,19 +1686,18 @@ struct Func {
   // executor never knew) or fill a default. Off, a mismatch traps.
   bool lenient_arity = false;
   // A CallValue or CallSpread in tail position (a Return's operand, or the
-  // value the body ends in, through any Block / If / Switch / Scope on the
-  // way) replaces this activation instead of stacking on it, so a loop written
-  // as a call chain runs in one frame. The frame's exit happens *before*
-  // the callee runs: locals released last-slot-first, each open Scope's
-  // owned cycles resolved -- Rust's rule for `become`, and the one
-  // observable difference from a plain call, which is why this is the
-  // front end's to switch on rather than the default. Not applied inside
-  // a TryCatch body (the handler is a pc range of this chunk, and would be
-  // lost with the frame) or a Scope that declares defers (which the exit
-  // ordering above would run before the callee); and only for a callee
-  // that is a plain closure -- a native or a generator function is called
-  // the ordinary way and the frame returns its result. Off, a tail call
-  // is a call.
+  // value the body ends in, through any Block / If / Switch / Scope / Let on
+  // the way) replaces this activation instead of stacking on it, so a loop
+  // written as a call chain runs in one frame. The frame's exit happens
+  // *before* the callee runs: locals released last-slot-first, each open
+  // Scope's owned cycles resolved -- Rust's rule for `become`, and the one
+  // observable difference from a plain call, which is why this is the front
+  // end's to switch on rather than the default. Not applied inside a TryCatch
+  // body (the handler is a pc range of this chunk, and would be lost with the
+  // frame) or a Scope that declares defers (which the exit ordering above
+  // would run before the callee); and only for a callee that is a plain
+  // closure -- a native or a generator function is called the ordinary way and
+  // the frame returns its result. Off, a tail call is a call.
   bool tail_calls = false;
   // Every MakeClosure naming this function yields the *same* closure
   // object, built once per run and cached by the executor. The recipe the
@@ -1741,6 +1766,9 @@ struct Module {
   // The host functions this module calls, by name; Tag::NativeRef indexes
   // this. Resolved against the run's RunOptions::natives by vm::run.
   std::vector<std::string> natives;
+  // The id the next Builder::let gives its temporary: one per Let in the
+  // module, so a LetRef names its Let wherever the two are built.
+  int32_t next_let = 0;
 
   const Node& at(NodeId id) const { return nodes[id.v]; }
   NodeId child(NodeId id, uint32_t i) const {
@@ -1815,6 +1843,8 @@ inline constexpr int arity_of(Tag t) {
     case Tag::CellFresh:   return 0;
     case Tag::Yield:       return 1;
     case Tag::NativeRef:   return 0;
+    case Tag::Let:         return 2;
+    case Tag::LetRef:      return 0;
   }
   return -1;
 }
@@ -1910,6 +1940,8 @@ inline constexpr bool yields_value(Tag t) {
     case Tag::TryCatch:
     case Tag::Yield:
     case Tag::NativeRef:
+    case Tag::Let:
+    case Tag::LetRef:
       return true;
     default:
       return false;
@@ -1991,6 +2023,7 @@ struct FieldSetView { int32_t slot, name_const; NodeId receiver, value; };
 // many enclosing loops to skip, 0 being the innermost.
 struct LoopJumpView { int32_t depth; };
 struct NativeRefView { int32_t index; };
+struct LetView { int32_t temp; NodeId init, body; };
 
 inline UnaryView view_unary(const Module& m, NodeId n) {
   return {static_cast<UnOp>(m.at(n).op), m.child(n, 0), fallback_of(m, n)};
@@ -2064,6 +2097,11 @@ inline LoopJumpView view_continue(const Module& m, NodeId n) {
 inline NativeRefView view_native_ref(const Module& m, NodeId n) {
   return {m.at(n).a};
 }
+inline LetView view_let(const Module& m, NodeId n) {
+  return {m.at(n).a, m.child(n, 0), m.child(n, 1)};
+}
+// A LetRef's temporary, the `temp` of the Let it reads.
+inline int32_t view_let_ref(const Module& m, NodeId n) { return m.at(n).a; }
 
 // ---------------------------------------------------------------------------
 // Builder
@@ -2193,6 +2231,48 @@ public:
     first.push_back(last);
     return block(first, p);
   }
+  // What a Let's body reads the value through: each call is a fresh
+  // LetRef, so a body that reads the value twice hangs no node under two
+  // parents.
+  class Temp {
+   public:
+    NodeId operator()() const {
+      return Builder(*m_).emit(Tag::LetRef, 0, p_, id_, 0, {});
+    }
+
+   private:
+    friend class Builder;
+    Temp(Module& m, int32_t id, SrcPos p) : m_(&m), id_(id), p_(p) {}
+    Module* m_;
+    int32_t id_;
+    SrcPos p_;
+  };
+
+  // A Let: `init` evaluated once, and the body `body(t)` builds over it,
+  // where every t() reads that value. The temporary's id is the module's
+  // next.
+  template <class F>
+  NodeId let(NodeId init, F body, SrcPos p) {
+    const int32_t id = m_.next_let++;
+    const NodeId b = body(Temp(m_, id, p));
+    return emit(Tag::Let, 0, p, id, 0, {init, b});
+  }
+  // Several, nested in order -- inits[0] runs first -- with `body(ts)`
+  // reading inits[i] through ts[i]: a call's arguments, run once and read
+  // by whichever of its forms runs.
+  template <class F>
+  NodeId lets(const std::vector<NodeId>& inits, F body, SrcPos p) {
+    std::vector<Temp> ts;
+    for (size_t i = 0; i < inits.size(); ++i) {
+      ts.push_back(Temp(m_, m_.next_let++, p));
+    }
+    NodeId out = body(ts);
+    for (size_t i = inits.size(); i-- > 0;) {
+      out = emit(Tag::Let, 0, p, ts[i].id_, 0, {inits[i], out});
+    }
+    return out;
+  }
+
   NodeId scope(int32_t first_local, int32_t end_local, NodeId body, SrcPos p) {
     return emit(Tag::Scope, 0, p, first_local, end_local, {body});
   }
@@ -2347,6 +2427,14 @@ public:
     }
     NodeId sequence(std::vector<NodeId> first, NodeId last) {
       return b().sequence(std::move(first), last, p_);
+    }
+    template <class F>
+    NodeId let(NodeId init, F body) {
+      return b().let(init, body, p_);
+    }
+    template <class F>
+    NodeId lets(const std::vector<NodeId>& inits, F body) {
+      return b().lets(inits, body, p_);
     }
     NodeId scope(int32_t lo, int32_t hi, NodeId body) {
       return b().scope(lo, hi, body, p_);
@@ -3277,6 +3365,16 @@ class FuncWriter {
   // closure over its own state wants.
   NodeId setc(int32_t i, NodeId v) {
     return b.block({b.cell_fresh(i), b.assign(VarKind::Cell, i, v)});
+  }
+  // A value held for one expression (Tag::Let): `body(t)`, where each t()
+  // reads `init`'s value, evaluated once.
+  template <class F>
+  NodeId let(NodeId init, F body) {
+    return b.let(init, body);
+  }
+  template <class F>
+  NodeId lets(const std::vector<NodeId>& inits, F body) {
+    return b.lets(inits, body);
   }
 
   // -- literals ------------------------------------------------------------
@@ -5527,6 +5625,8 @@ inline const char* name_of(Tag t) {
     case Tag::CellFresh:   return "cellfresh";
     case Tag::Yield:       return "yield";
     case Tag::NativeRef:   return "nativeref";
+    case Tag::Let:         return "let";
+    case Tag::LetRef:      return "letref";
   }
   return "?";
 }
@@ -5705,6 +5805,11 @@ struct Verifier {
   // again while it is in here is its own ancestor. Sharing a node between
   // two parents is fine and stays fine; only a cycle is refused.
   std::vector<char> open;
+  // The temporaries whose Let bodies enclose the node being checked --
+  // what a LetRef may name -- and which Let node binds each temporary id,
+  // so that two Lets binding one id are refused wherever they sit.
+  std::vector<int32_t> lets;
+  std::unordered_map<int32_t, uint32_t> let_nodes;
 
   bool fail(const std::string& msg) {
     if (err.empty()) err = msg;
@@ -5980,6 +6085,23 @@ struct Verifier {
         }
         break;
       }
+      case Tag::Let: {
+        if (n.a < 0) return fail("Let's temporary id is negative");
+        const auto [it, fresh] = let_nodes.try_emplace(n.a, id.v);
+        if (!fresh && it->second != id.v) {
+          return fail("two Lets bind temporary t" + std::to_string(n.a));
+        }
+        break;
+      }
+      // Inside the body of the Let that binds it, in the same function --
+      // not in that Let's init, not after it, and not in a function built
+      // inside it, whose body is checked as a function of its own.
+      case Tag::LetRef:
+        if (std::find(lets.begin(), lets.end(), n.a) == lets.end()) {
+          return fail("t" + std::to_string(n.a) +
+                      " is read outside the body of its Let");
+        }
+        break;
       case Tag::ObjectLit:
         if (n.num_children % 2 != 0) {
           return fail("ObjectLit takes key/value pairs");
@@ -6043,6 +6165,7 @@ struct Verifier {
       case Tag::Throw:
       case Tag::Defer:
       case Tag::Yield:
+      case Tag::Let:  // the init; the body may be a statement, as an If arm
         if (!operand(0)) return false;
         break;
       // Only the subject and the keys are read as values; each arm body is
@@ -6070,7 +6193,11 @@ struct Verifier {
           (n.tag == Tag::While && i == 1) ? loop_depth + 1 : loop_depth;
       const int child_scope =
           n.tag == Tag::Scope ? scope_depth + 1 : scope_depth;
+      // A Let's body is the one edge that opens its temporary.
+      const bool opens = n.tag == Tag::Let && i == 1;
+      if (opens) lets.push_back(n.a);
       ok = check_node(m.child(id, i), f, child_depth, child_scope);
+      if (opens) lets.pop_back();
     }
     open[id.v] = 0;
     return ok;
@@ -6232,6 +6359,10 @@ struct Dumper {
             << idx;
         break;
       }
+      // The id is the temporary's name: `let t3` over its init and body,
+      // and `t3` where the body reads it.
+      case Tag::Let:    out << "let t" << view_let(m, id).temp; break;
+      case Tag::LetRef: out << "t" << view_let_ref(m, id); break;
     }
     out << "  @" << p.line << ":" << p.col << "\n";
     for (uint32_t i = 0; i < n.num_children; ++i) node(m.child(id, i), d + 1);
@@ -6242,7 +6373,7 @@ struct Dumper {
 
 inline std::optional<std::string> verify(const Module& m) {
   if (m.funcs.empty()) return std::string("module has no entry function");
-  detail::Verifier v{m, {}, {}};
+  detail::Verifier v{m, {}, {}, {}, {}};
   for (const Func& f : m.funcs) {
     if (static_cast<size_t>(f.num_locals) != f.local_names.size() ||
         static_cast<size_t>(f.num_captures) != f.capture_names.size()) {
@@ -6311,6 +6442,8 @@ inline constexpr bool observable(Tag t) {
     case Tag::Scope:
     case Tag::TryCatch:
     case Tag::NativeRef:
+    case Tag::Let:     // as observable as its init and body
+    case Tag::LetRef:  // a read of a value already made
       return false;
     case Tag::Assign:
     case Tag::MakeClosure:
@@ -6958,10 +7091,66 @@ struct FnCompiler {
   // owns.
   int32_t high_water = 0;
 
+  // The registers a Let holds (Tag::Let): each temporary's, in the order
+  // their Lets opened. A LetRef compiles to its register itself -- no
+  // instruction -- so the register must stay what the init made it until
+  // the Let's body ends, and the allocator is what keeps it so: `floor()`
+  // is one past the innermost pinned register, and neither alloc() nor
+  // release_to() will hand out or take back a register below it. Every
+  // expression's code enters at the `top` it finds and leaves at or above
+  // it, so the rule holds for all of them without a case apiece; one that
+  // broke it fails the compile, naming the register, in every build,
+  // instead of handing a LetRef whatever was written over its value.
+  struct Pin {
+    int32_t temp;
+    int32_t reg;
+  };
+  std::vector<Pin> pins{};
+  int32_t floor() const { return pins.empty() ? 0 : pins.back().reg + 1; }
+
   int32_t alloc() {
+    if (top < floor()) fail_pinned("alloc", top);
     const int32_t r = top++;
     if (top > high_water) high_water = top;
     ch.num_regs = std::max(ch.num_regs, top);
+    return r;
+  }
+
+  // Gives back the registers from `base` up, which must be above every
+  // pinned one: `base` is what an expression read as `top` on entry, and
+  // an expression entered inside a Let's body was entered above its pin.
+  void release_to(int32_t base) {
+    if (base < floor()) fail_pinned("release_to", base);
+    top = base;
+  }
+
+  [[noreturn]] void fail_pinned(const char* what, int32_t r) const {
+    coreir_rt::fail(std::string("vm::compile: ") + what + " at r" +
+                        std::to_string(r) + ", below r" +
+                        std::to_string(floor()) +
+                        ", where an open Let keeps its temporaries",
+                    0, 0);
+  }
+
+  // A call's result register, taken once its operands are compiled: it is
+  // `base`, below the run of arguments from `run_start`. The executor
+  // writes the result before it lets go of the arguments a native
+  // borrowed, so the result must not be one of them -- and it is not,
+  // unless the callee compiled to a pinned register and left `base` for
+  // the run's first argument; reserve_result() makes `base` the result's
+  // before the run is laid out.
+  void reserve_result(int32_t base) {
+    if (top == base) alloc();
+  }
+  int32_t alloc_result(int32_t base, int32_t run_start) {
+    release_to(base);
+    const int32_t r = alloc();
+    if (r >= run_start) {
+      coreir_rt::fail("vm::compile: a call's result r" + std::to_string(r) +
+                          " is in its argument run from r" +
+                          std::to_string(run_start),
+                      0, 0);
+    }
     return r;
   }
 
@@ -7175,7 +7364,7 @@ struct FnCompiler {
       if (want_value) {
         emit(Op::Move, dst, r, 0, sn.pos);
         r = dst;
-        top = dst + 1;
+        release_to(dst + 1);
       }
       defer_run_pc = here();
       emit(Op::DeferRunTo, 0, 0, 0, sn.pos);
@@ -7196,8 +7385,9 @@ struct FnCompiler {
   //
   // `tail` says the value is what the function returns, with nothing left
   // to run in this frame after it -- a Return's operand, or the body's
-  // last value -- and follows the value down through Block, If, Switch and
-  // Scope to whatever call ends it, which may then be a tail call. A
+  // last value -- and follows the value down through Block, If, Switch,
+  // Scope and a Let's body to whatever call ends it, which may then be a
+  // tail call. A
   // TryCatch body is never in tail position (its handler must survive the
   // call), and nothing else propagates it.
   int32_t compile_value(NodeId id, bool tail = false) {
@@ -7214,7 +7404,7 @@ struct FnCompiler {
     const int32_t base = top;
     const int32_t r = compile_value(arm, tail);
     if (r != dst) emit(Op::Move, dst, r, 0, pos);
-    top = base;
+    release_to(base);
   }
 
   // A value the function returns, returned where it is made: an If returns
@@ -7236,7 +7426,7 @@ struct FnCompiler {
       compile_branch(v.cond, false, to_else);
       const int32_t base = top;
       compile_tail(v.then_, exit);
-      top = base;
+      release_to(base);
       for (const size_t j : to_else) patch(j, here());
       if (v.els.valid()) {
         compile_tail(v.els, exit);
@@ -7247,7 +7437,45 @@ struct FnCompiler {
       }
       return;
     }
+    if (n.tag == Tag::Let) {
+      const OpenLet let(*this, id);
+      compile_tail(let.body, exit);
+      return;
+    }
     exit(compile_value(id, /*tail=*/true));
+  }
+
+  // An open Let: its init compiled into a register, bound to its
+  // temporary and pinned for the life of the guard, which is the body's.
+  // The guard's destructor unpins, so the pins are what they were however
+  // the body's compile ends, a failure that throws included. Nothing is
+  // released at the Let's end: the register is one of the statement's
+  // temporaries, cleared when the statement ends, or by whatever leaves it
+  // first (a jump's leave_down_to, a throw's unwinding, a frame's exit),
+  // as every operand's register is. The state is the pins alone: the
+  // register of a temporary is found in them, and the floor is derived.
+  struct OpenLet {
+    FnCompiler& c;
+    NodeId body;
+
+    OpenLet(FnCompiler& fc, NodeId id) : c(fc) {
+      const auto v = view_let(c.m, id);
+      body = v.body;
+      const int32_t r = c.compile_expr(v.init);
+      while (c.top <= r) c.alloc();
+      c.pins.push_back({v.temp, r});
+    }
+    ~OpenLet() { c.pins.pop_back(); }
+    OpenLet(const OpenLet&) = delete;
+    OpenLet& operator=(const OpenLet&) = delete;
+  };
+
+  // The register a LetRef reads.
+  int32_t let_reg(int32_t temp) const {
+    for (size_t i = pins.size(); i-- > 0;) {
+      if (pins[i].temp == temp) return pins[i].reg;
+    }
+    coreir_rt::fail("vm::compile: a LetRef names no open Let", 0, 0);
   }
 
   // The shape most expressions share: compile the operand (or two), free
@@ -7257,7 +7485,7 @@ struct FnCompiler {
     const int32_t base = top;
     const int32_t ra = compile_expr(a);
     const int32_t rb = b.valid() ? compile_expr(b) : 0;
-    top = base;
+    release_to(base);
     const int32_t r = alloc();
     emit(op, r, ra, rb, pos);
     return r;
@@ -7273,7 +7501,7 @@ struct FnCompiler {
     const int32_t slot = top;
     const int32_t r = compile_expr(id);
     if (r != slot) {
-      top = slot;
+      release_to(slot);
       alloc();
       emit(Op::Move, slot, r, 0, m.at(id).pos);
     }
@@ -7356,7 +7584,7 @@ struct FnCompiler {
     for (uint32_t i = 0; i < argc; ++i) {
       a[i] = compile_expr(m.child(id, i));
     }
-    top = base;
+    release_to(base);
     if (intrinsic_has_dst(v.id)) {
       const int32_t r = alloc();
       emit(op_of(v.id), r, a[0], a[1], n.pos, a[2]);
@@ -7380,7 +7608,7 @@ struct FnCompiler {
     const auto sw = view_switch(m, id);
     const int32_t base = top;
     const int32_t s = compile_expr(sw.subject);
-    top = base;
+    release_to(base);
     const int32_t r = alloc();
     const int32_t table_idx = static_cast<int32_t>(ch.switch_tables.size());
     ch.switch_tables.emplace_back();
@@ -7424,7 +7652,7 @@ struct FnCompiler {
     // here() is to be read after the call is emitted.
     const size_t at = emit_try(id, dst, tail);
     ch.code[at].d = here();
-    top = base;
+    release_to(base);
     alloc();
     return dst;
   }
@@ -7509,7 +7737,7 @@ struct FnCompiler {
     jumps.push_back(
         emit(sense ? Op::JumpIfTrue : Op::JumpIfFalse, cmp, 0, 0, pos));
     patch(past, here());
-    top = base;
+    release_to(base);
   }
 
   // Eq or Ne over TypeOf's answer, which asks about tags and nothing else,
@@ -7531,7 +7759,7 @@ struct FnCompiler {
     if (is_typeof(v.lhs) && is_typeof(v.rhs)) {
       const int32_t x = compile_expr(m.child(v.lhs, 0));
       const int32_t y = compile_expr(m.child(v.rhs, 0));
-      top = base;
+      release_to(base);
       const int32_t r = alloc();
       emit(Op::SameType, r, x, y, pos);
       if (ne) emit(Op::Not, r, r, 0, pos);
@@ -7545,7 +7773,7 @@ struct FnCompiler {
     }
     const uint32_t tags = tags_named(m.str_const(s));
     const int32_t x = compile_expr(m.child(t, 0));
-    top = base;
+    release_to(base);
     const int32_t r = alloc();
     emit(Op::TypeIn, r, x, static_cast<int32_t>(ne ? ~tags & kAllTags : tags),
          pos);
@@ -7661,12 +7889,17 @@ struct FnCompiler {
       case Tag::If:
         compile_if_branch(id, when, jumps);
         return;
+      case Tag::Let: {
+        const OpenLet let(*this, id);
+        compile_branch(let.body, when, jumps);
+        return;
+      }
       default:
         break;
     }
     const int32_t base = top;
     const int32_t r = compile_value(id);
-    top = base;
+    release_to(base);
     jumps.push_back(
         emit(when ? Op::JumpIfTrue : Op::JumpIfFalse, r, 0, 0, n.pos));
   }
@@ -7721,6 +7954,14 @@ struct FnCompiler {
         emit(load_op_of(v.kind), r, v.index, 0, n.pos);
         return r;
       }
+      case Tag::Let: {
+        const OpenLet let(*this, id);
+        return compile_value(let.body, tail);
+      }
+      // The temporary's own register: a reader that wants the value
+      // somewhere else -- an operand run (compile_operand) -- moves it.
+      case Tag::LetRef:
+        return let_reg(view_let_ref(m, id));
       case Tag::Unary: {
         auto v = view_unary(m, id);
         if (calls_fallback(v)) return compile_or_call(id, tail);
@@ -7798,7 +8039,7 @@ struct FnCompiler {
         for (uint32_t i = 0; i < n.num_children; ++i) {
           compile_operand(m.child(id, i));
         }
-        top = base;
+        release_to(base);
         const int32_t r = alloc();
         emit(Op::NewArray, r, items_at, static_cast<int32_t>(n.num_children),
              n.pos);
@@ -7815,7 +8056,7 @@ struct FnCompiler {
           const int32_t k = compile_expr(m.child(id, i));
           const int32_t v = compile_expr(m.child(id, i + 1));
           emit(Op::SetIndex, r, k, v, n.pos);
-          top = base;
+          release_to(base);
         }
         return r;
       }
@@ -7830,7 +8071,7 @@ struct FnCompiler {
         auto v = view_field_get(m, id);
         const int32_t base = top;
         const int32_t recv = compile_expr(v.receiver);
-        top = base;
+        release_to(base);
         const int32_t r = alloc();
         emit(Op::FieldGet, r, recv, v.slot, n.pos, v.name_const);
         return r;
@@ -7846,13 +8087,13 @@ struct FnCompiler {
         const bool spread = n.tag == Tag::CallSpread;
         const int32_t base = top;
         const int32_t callee = compile_expr(m.child(id, 0));
+        reserve_result(base);
         const int32_t operands = static_cast<int32_t>(n.num_children) - 1;
         const int32_t args_at = top;
         for (int32_t i = 0; i < operands; ++i) {
           compile_operand(m.child(id, static_cast<uint32_t>(i + 1)));
         }
-        top = base;
-        const int32_t r = alloc();
+        const int32_t r = alloc_result(base, args_at);
         emit_call(r, callee, args_at, operands - (spread ? 1 : 0), spread,
                   tail, n.pos);
         return r;
@@ -8006,15 +8247,24 @@ struct FnCompiler {
         compile_scope(id, false);
         break;
 
+      case Tag::Let: {
+        const OpenLet let(*this, id);
+        compile_stmt(let.body);
+        break;
+      }
+
       default: {
         // An expression used as a statement: evaluate it and drop the result.
         compile_expr(id);
         break;
       }
     }
+    // The statement's own temporaries, from its own base: inside a Let's
+    // body that base is at or above the floor (release_to checks it), so
+    // the clear never reaches a temporary the Let still holds.
     if (high_water > base) emit(Op::ClearRegs, base, high_water, 0, n.pos);
     high_water = std::max(outer_high_water, high_water);
-    top = base;
+    release_to(base);
   }
 };
 

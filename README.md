@@ -87,7 +87,7 @@ to it:
 
 | Group | Tags |
 |---|---|
-| Values | `Literal`, `VarRef`, `Assign` |
+| Values | `Literal`, `VarRef`, `Assign`, `Let`, `LetRef` |
 | Operators | `Unary`, `Binary`, `Intrinsic` |
 | Control flow | `If`, `Switch`, `While`, `Block`, `Break`, `Continue`, `Return` |
 | Functions | `MakeClosure`, `CallValue`, `CallSpread`, `Yield`, `NativeRef` |
@@ -106,6 +106,22 @@ A few things worth knowing before you write a binder:
   releases it on *every* exit -- falling off the end, `Break`, `Return`, or
   an unwinding throw. That is what makes a value die with its scope rather
   than with the frame.
+- **`Let` holds a value for one expression.** `b.let(init, [&](auto t) {
+  ... t() ... t() ... })` evaluates `init` once, and each `t()` is a fresh
+  `LetRef` reading it -- OCaml's `let x = e1 in e2`, or an SSA value whose
+  definition dominates its uses. The value stays in the register `init`
+  landed in, to the end of its statement as any operand does: no slot, no
+  `Scope`, nothing to release. It cannot be assigned or captured; a
+  variable is a `Local`. Reach for it wherever a value is read twice --
+  a receiver and its method lookup, a key read and written back -- rather
+  than claiming a local, or hanging one subtree under two parents, which
+  compiles it once per parent and which `verify()` refuses for anything
+  but a leaf (a literal, a variable, a host function, a `LetRef`). A `Let`
+  has one lifetime, the statement's end. The one place a front end needs
+  a value to die sooner is mini-culebra's method-call receiver: culebra
+  runs a receiver's destructor when its method returns, before the
+  statement goes on, so that receiver keeps a local and a `Scope` around
+  the call.
 - **Calling is two steps.** `MakeClosure` builds a callable over cells;
   `CallValue` calls whatever a value turns out to be -- a closure, or a host
   function a `NativeRef` named (see [Host functions](#host-functions)).
@@ -740,22 +756,21 @@ the same saving [Static calls](#static-calls) gets from `Func::singleton`.
 
 With `Func::tail_calls` on, a `CallValue` or `CallSpread` in tail position
 -- a `Return`'s operand, or the value the body ends in, followed down
-through `Block`, `If`, `Switch` and `Scope` -- replaces the frame instead of
-stacking on it, so a loop written as a call chain runs in one frame however
-long it goes, and `max_call_depth` stops mattering for it. The frame exits
-*before* the callee runs: temporaries, then locals last-slot-first, then
-each open scope's owned resolution. That is Rust's rule for `become`, and
-the one observable difference from a plain call -- a local's destructor now
-prints before the callee's output rather than after -- which is why a front
-end switches it on rather than getting it by default. The compiler leaves a
-call alone inside a `TryCatch` body (the handler is a pc range of this
-chunk and would go with the frame) and inside a `Scope` that declares
-defers or a release order; the executor leaves one alone when the callee is
-a native or a generator function, or the frame is the entry frame -- each
-of those is the call it would otherwise have been, and the frame returns
-its result.
-`test/test_tailcalls.cc` runs a million-deep mutual recursion under the
-default 10000-frame limit.
+through `Block`, `If`, `Switch`, `Scope` and `Let` -- replaces the frame
+instead of stacking on it, so a loop written as a call chain runs in one
+frame however long it goes, and `max_call_depth` stops mattering for it. The
+frame exits *before* the callee runs: temporaries, then locals
+last-slot-first, then each open scope's owned resolution. That is Rust's
+rule for `become`, and the one observable difference from a plain call -- a
+local's destructor now prints before the callee's output rather than after
+-- which is why a front end switches it on rather than getting it by
+default. The compiler leaves a call alone inside a `TryCatch` body (the
+handler is a pc range of this chunk and would go with the frame) and inside
+a `Scope` that declares defers or a release order; the executor leaves one
+alone when the callee is a native or a generator function, or the frame is
+the entry frame -- each of those is the call it would otherwise have been,
+and the frame returns its result. `test/test_tailcalls.cc` runs a
+million-deep mutual recursion under the default 10000-frame limit.
 
 ## Coroutines
 
