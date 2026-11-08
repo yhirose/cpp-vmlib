@@ -1514,31 +1514,31 @@ struct Binder {
   // `$mfind` are the walk, done at every call site that reaches here.
   NodeId emit_dynamic_call(NodeId recv, const std::string& name,
                            const std::vector<NodeId>& args, NodeId blk,
-                           FnCtx& ctx, SrcPos p) {
+                           SrcPos p) {
     auto b = Builder(m).at(p);
-    const int32_t t = ctx.alloc_local("$self");
-    const int32_t mv = ctx.alloc_local("$m");
-    const NodeId T = b.varref(VarKind::Local, t);
-    const NodeId M = b.varref(VarKind::Local, mv);
-    std::vector<NodeId> callargs{blk, T};
-    callargs.insert(callargs.end(), args.begin(), args.end());
-    // Ruby runs the arguments before it looks for the method, so they run
-    // before a NoMethodError too.
-    std::vector<NodeId> refused(args.begin(), args.end());
-    refused.push_back(rt.call(
-        "$nometh", {b.str_literal("undefined method '"), T, b.str_literal(name)},
-        p));
-    const NodeId no_method = b.block(refused);
-    return b.block(
-        {b.assign(VarKind::Local, t, recv),
-         b.assign(VarKind::Local, mv,
-                  rt.call("$mfind",
-                          {rt.call("$classof", {T}, p),
-                           b.str_literal(name)},
-                          p)),
-         b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
-                            b.str_literal("nil")),
-                   b.call_value(M, callargs), no_method)});
+    // Ruby runs the receiver and the arguments before it looks for the
+    // method, so they run before a NoMethodError too: each is held by a
+    // Let, and both ways read it.
+    std::vector<NodeId> values{recv};
+    values.insert(values.end(), args.begin(), args.end());
+    return b.lets(values, [&](const std::vector<Builder::Temp>& t) {
+      return b.let(
+          rt.call("$mfind",
+                  {rt.call("$classof", {t[0]()}, p), b.str_literal(name)}, p),
+          [&](auto method) {
+            std::vector<NodeId> callargs{blk, t[0]()};
+            for (size_t k = 1; k < t.size(); ++k) callargs.push_back(t[k]());
+            return b.make_if(
+                b.binary(BinOp::Ne,
+                         b.intrinsic(IntrinsicId::TypeOf, {method()}),
+                         b.str_literal("nil")),
+                b.call_value(method(), callargs),
+                rt.call("$nometh",
+                        {b.str_literal("undefined method '"), t[0](),
+                         b.str_literal(name)},
+                        p));
+          });
+    });
   }
 
   NodeId emit_classdef(const Ast& a, FnCtx& ctx) {
@@ -1590,8 +1590,8 @@ struct Binder {
   NodeId emit_case(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
-    const int32_t t = ctx.alloc_local("$case");
-    const NodeId T = b.varref(VarKind::Local, t);
+    // The subject, held by a Let for every `when` to compare.
+    return b.let(emit_expr(*a.nodes[0], ctx), [&](auto subject) {
     NodeId chain;
     const Ast* elsepart = nullptr;
     std::vector<const Ast*> whens;
@@ -1609,12 +1609,13 @@ struct Binder {
       NodeId cond = b.bool_literal(false);
       for (const auto& v : w.nodes[0]->nodes) {
         cond = b.make_if(cond, b.bool_literal(true),
-                         rt.call("$caseeq", {emit_expr(*v, ctx), T}, p));
+                         rt.call("$caseeq", {emit_expr(*v, ctx), subject()},
+                                 p));
       }
       chain = b.make_if(cond, emit_body(*w.nodes[1], ctx), chain);
     }
-    return b.block(
-        {b.assign(VarKind::Local, t, emit_expr(*a.nodes[0], ctx)), chain});
+    return chain;
+    });
   }
 
   NodeId emit_body(const Ast& a, FnCtx& ctx) {
@@ -1797,33 +1798,29 @@ struct Binder {
         fail(target, "only plain assignment is supported through a "
                      "method here");
       }
-      // Its value is the value assigned, whatever the setter answers --
-      // kept in `$val` as the argument runs, and read back after.
+      // Its value is the value assigned, whatever the setter answers: the
+      // receiver and then the value run, each held by a Let, and the
+      // value is read back after the call.
       const std::string name(target.nodes.back()->nodes[0]->token);
       const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
       const NodeId v = emit_expr(*a.nodes[2], ctx);
-      const int32_t vv = ctx.alloc_local("$val");
-      const NodeId V = b.varref(VarKind::Local, vv);
-      const NodeId kept = b.block({b.assign(VarKind::Local, vv, v), V});
-      return b.block({emit_dynamic_call(recv, name + "=", {kept},
-                                        b.nil_literal(), ctx, p),
-                      V});
+      return b.lets({recv, v}, [&](const std::vector<Builder::Temp>& t) {
+        return b.block({emit_dynamic_call(t[0](), name + "=", {t[1]()},
+                                          b.nil_literal(), p),
+                        t[1]()});
+      });
     }
     if (target.tag != "postfix"_ ||
         target.nodes.back()->tag != "indexsfx"_) {
       fail(target, "cannot assign to this expression");
     }
-    const int32_t tr = ctx.alloc_local("$recv");
-    const int32_t tk = ctx.alloc_local("$key");
     const NodeId key = emit_expr(*target.nodes.back()->nodes[0], ctx);
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr);
-    const NodeId K = b.varref(VarKind::Local, tk);
-    const NodeId cur =
-        op == "=" ? b.nil_literal() : ops.call("$idx", {R, K}, p);
-    return b.block({b.assign(VarKind::Local, tr, recv),
-                    b.assign(VarKind::Local, tk, key),
-                    rt.call("$setidx", {R, K, combine(cur)}, p)});
+    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
+      const NodeId cur =
+          op == "=" ? b.nil_literal() : ops.call("$idx", {t[0](), t[1]()}, p);
+      return rt.call("$setidx", {t[0](), t[1](), combine(cur)}, p);
+    });
   }
 
   // -- Expressions --------------------------------------------------------
@@ -1895,37 +1892,34 @@ struct Binder {
         } else {
           args = emit_call_args(a.nodes[0].get(), ctx);
         }
-        const NodeId self = read_var(fi.params[1], ctx, p);
+        const auto self = [&] { return read_var(fi.params[1], ctx, p); };
         // No method above this one -- none in the bases, or no base but
         // Object -- is a NoMethodError, raised once the arguments have run.
         const auto no_super = [&] {
-          std::vector<NodeId> run;
-          if (args.spread.valid() || !args.fixed.empty()) {
-            run.push_back(values_array(args, ctx, p));
-          }
-          if (args.block.valid()) run.push_back(args.block);
-          run.push_back(rt.call("$nometh",
-                                {b.str_literal("super: no superclass method '"),
-                                 self, b.str_literal(fi.method_name)},
-                                p));
-          return b.block(run);
+          return rt.call("$nometh",
+                         {b.str_literal("super: no superclass method '"),
+                          self(), b.str_literal(fi.method_name)},
+                         p);
         };
-        if (fi.cls_base < 0) return no_super();
-        const NodeId base = read_var(fi.cls_base, ctx, p);
-        const NodeId blk =
-            args.block.valid() ? args.block : read_var(fi.params[0], ctx, p);
-        const int32_t mv = ctx.alloc_local("$super");
-        const NodeId M = b.varref(VarKind::Local, mv);
-        return b.block(
-            {b.assign(
-                 VarKind::Local, mv,
-                 rt.call("$mfind",
-                         {base, b.str_literal(fi.method_name)},
-                         p)),
-             b.make_if(
-                 b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
-                          b.str_literal("nil")),
-                 call_with(M, {blk, self}, args, p), no_super())});
+        // The arguments run once, held by Lets for whichever way follows.
+        return hold_args(args, p, [&](const Args& held) {
+          if (fi.cls_base < 0) return no_super();
+          const NodeId blk = held.block.valid()
+                                 ? held.block
+                                 : read_var(fi.params[0], ctx, p);
+          return b.let(
+              rt.call("$mfind",
+                      {read_var(fi.cls_base, ctx, p),
+                       b.str_literal(fi.method_name)},
+                      p),
+              [&](auto method) {
+                return b.make_if(
+                    b.binary(BinOp::Ne,
+                             b.intrinsic(IntrinsicId::TypeOf, {method()}),
+                             b.str_literal("nil")),
+                    call_with(method(), {blk, self()}, held, p), no_super());
+              });
+        });
       }
       case "notop"_:
         return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
@@ -1957,12 +1951,11 @@ struct Binder {
         const bool is_or = a.tag == "orexp"_;
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t);
-          acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, p), is_or ? keep : rhs,
-                                   is_or ? rhs : keep)});
+          acc = b.let(acc, [&](auto keep) {
+            return b.make_if(truthy(keep(), p), is_or ? keep() : rhs,
+                             is_or ? rhs : keep());
+          });
         }
         return acc;
       }
@@ -2008,18 +2001,16 @@ struct Binder {
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
         return b.array_lit(items);
       }
-      case "hashlit"_: {
-        const int32_t t = ctx.alloc_local("$hash");
-        const NodeId T = b.varref(VarKind::Local, t);
-        std::vector<NodeId> out{
-            b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}))};
-        for (const auto& c : a.nodes) {
-          out.push_back(b.set_index(T, emit_expr(*c->nodes[0], ctx),
-                                    emit_expr(*c->nodes[1], ctx)));
-        }
-        out.push_back(T);
-        return b.block(out);
-      }
+      case "hashlit"_:
+        return b.let(b.intrinsic(IntrinsicId::MapNew, {}), [&](auto h) {
+          std::vector<NodeId> out;
+          for (const auto& c : a.nodes) {
+            out.push_back(b.set_index(h(), emit_expr(*c->nodes[0], ctx),
+                                      emit_expr(*c->nodes[1], ctx)));
+          }
+          out.push_back(h());
+          return b.block(out);
+        });
       case "callexpr"_:
         return emit_callexpr(a, ctx);
       case "braceblock"_:
@@ -2080,29 +2071,30 @@ struct Binder {
     for (; k < items.size() && items[k]->tag != "splatarg"_; ++k) {
       run.push_back(emit_expr(*items[k], ctx));
     }
-    const int32_t t = ctx.alloc_local("$items");
-    const NodeId T = b.varref(VarKind::Local, t);
-    std::vector<NodeId> out{b.assign(VarKind::Local, t, b.array_lit(run))};
+    const NodeId first = b.array_lit(run);
     run.clear();
-    const auto flush = [&] {
-      if (!run.empty()) {
+    return b.let(first, [&](auto all) {
+      std::vector<NodeId> out;
+      const auto flush = [&] {
+        if (!run.empty()) {
+          out.push_back(
+              b.intrinsic(IntrinsicId::ArrayConcat, {all(), b.array_lit(run)}));
+        }
+        run.clear();
+      };
+      for (; k < items.size(); ++k) {
+        if (items[k]->tag != "splatarg"_) {
+          run.push_back(emit_expr(*items[k], ctx));
+          continue;
+        }
+        flush();
         out.push_back(
-            b.intrinsic(IntrinsicId::ArrayConcat, {T, b.array_lit(run)}));
-      }
-      run.clear();
-    };
-    for (; k < items.size(); ++k) {
-      if (items[k]->tag != "splatarg"_) {
-        run.push_back(emit_expr(*items[k], ctx));
-        continue;
+            b.intrinsic(IntrinsicId::ArrayConcat, {all(), splat(*items[k])}));
       }
       flush();
-      out.push_back(
-          b.intrinsic(IntrinsicId::ArrayConcat, {T, splat(*items[k])}));
-    }
-    flush();
-    out.push_back(T);
-    return b.block(out);
+      out.push_back(all());
+      return b.block(out);
+    });
   }
 
   // A call's arguments: the ones before the first `*x` one value each,
@@ -2147,15 +2139,35 @@ struct Binder {
   }
 
   // Every argument as one array, a spread included.
-  NodeId values_array(const Args& args, FnCtx& ctx, SrcPos p) {
+  NodeId values_array(const Args& args, SrcPos p) {
     auto b = Builder(m).at(p);
     if (!args.spread.valid()) return b.array_lit(args.fixed);
     if (args.fixed.empty()) return args.spread;
-    const int32_t t = ctx.alloc_local("$items");
-    const NodeId T = b.varref(VarKind::Local, t);
-    return b.block({b.assign(VarKind::Local, t, b.array_lit(args.fixed)),
-                    b.intrinsic(IntrinsicId::ArrayConcat, {T, args.spread}),
-                    T});
+    return b.let(b.array_lit(args.fixed), [&](auto items) {
+      return b.block(
+          {b.intrinsic(IntrinsicId::ArrayConcat, {items(), args.spread}),
+           items()});
+    });
+  }
+
+  // `body(held)` over `args`, each run once, in order -- the fixed ones,
+  // the spread, the block -- and held by a Let: a call that takes one of
+  // several ways once its receiver is known reads them in each way it
+  // might take, rather than compiling them into every one.
+  template <class F>
+  NodeId hold_args(const Args& args, SrcPos p, F body) {
+    std::vector<NodeId> values = args.fixed;
+    if (args.spread.valid()) values.push_back(args.spread);
+    if (args.block.valid()) values.push_back(args.block);
+    return Builder(m).at(p).lets(
+        values, [&](const std::vector<Builder::Temp>& t) {
+          Args held;
+          size_t k = 0;
+          for (; k < args.fixed.size(); ++k) held.fixed.push_back(t[k]());
+          if (args.spread.valid()) held.spread = t[k++]();
+          if (args.block.valid()) held.block = t[k++]();
+          return body(held);
+        });
   }
 
   // A builtin's arguments, one value each: the shapes this front end
@@ -2197,27 +2209,23 @@ struct Binder {
       return native("write", {acc}, p);
     }
     // p prints each argument and answers it -- nil for none, the array of
-    // them for several -- so each runs once, into a temporary that both
-    // the printing and the answer read.
+    // them for several -- so each runs once, held by a Let that both the
+    // printing and the answer read.
     if (name == "p") {
-      std::vector<NodeId> out;
-      std::vector<NodeId> vals;
-      for (const NodeId v : args) {
-        const int32_t t = ctx.alloc_local("$p");
-        out.push_back(b.assign(VarKind::Local, t, v));
-        vals.push_back(b.varref(VarKind::Local, t));
-      }
-      NodeId acc = b.str_literal("");
-      for (const NodeId v : vals) {
-        acc = b.binary(BinOp::Add, acc,
-                       b.binary(BinOp::Add, rt.call("$inspect", {v}, p),
-                                b.str_literal("\n")));
-      }
-      out.push_back(native("write", {acc}, p));
-      out.push_back(vals.empty()       ? b.nil_literal()
-                    : vals.size() == 1 ? vals[0]
-                                       : b.array_lit(vals));
-      return b.block(out);
+      return b.lets(args, [&](const std::vector<Builder::Temp>& vals) {
+        NodeId acc = b.str_literal("");
+        for (const auto& v : vals) {
+          acc = b.binary(BinOp::Add, acc,
+                         b.binary(BinOp::Add, rt.call("$inspect", {v()}, p),
+                                  b.str_literal("\n")));
+        }
+        std::vector<NodeId> answer;
+        for (const auto& v : vals) answer.push_back(v());
+        return b.block({native("write", {acc}, p),
+                        answer.empty()       ? b.nil_literal()
+                        : answer.size() == 1 ? answer[0]
+                                             : b.array_lit(answer)});
+      });
     }
     // raise
     if (args.empty()) {
@@ -2327,35 +2335,40 @@ struct Binder {
       }
     }
     const Args args = emit_call_args(list, ctx);
-    const int32_t t = ctx.alloc_local("$new");
-    const int32_t mv = ctx.alloc_local("$init");
-    const NodeId T = b.varref(VarKind::Local, t);
-    const NodeId M = b.varref(VarKind::Local, mv);
-    const NodeId blk = args.block.valid() ? args.block : b.nil_literal();
-    // No initialize anywhere up the chain is Object's own, which takes no
-    // arguments: given some, they run and an ArgumentError follows.
-    NodeId no_init;
-    if (!args.fixed.empty() || args.spread.valid() || args.block.valid()) {
-      const int32_t gv = ctx.alloc_local("$given");
-      const NodeId G = b.varref(VarKind::Local, gv);
-      std::vector<NodeId> run{b.assign(
-          VarKind::Local, gv,
-          b.intrinsic(IntrinsicId::Len, {values_array(args, ctx, p)}))};
-      if (args.block.valid()) run.push_back(args.block);
-      run.push_back(b.make_if(b.binary(BinOp::Ne, G, b.literal(0)),
-                              rt.call("$argerr", {G, b.str_literal("0")}, p)));
-      no_init = b.block(run);
-    }
-    return b.block(
-        {b.assign(VarKind::Local, t, new_instance(b, cls)),
-         b.assign(VarKind::Local, mv,
-                  rt.call("$mfind",
-                          {cls, b.str_literal("initialize")},
-                          p)),
-         b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
-                            b.str_literal("nil")),
-                   call_with(M, {blk, T}, args, p), no_init),
-         T});
+    // The arguments run first, as Ruby runs them before it calls `new`,
+    // each held by a Let; then the instance, and `initialize` up its
+    // class's chain, held the same way.
+    return b.let(cls, [&](auto c) {
+      return hold_args(args, p, [&](const Args& held) {
+        return b.let(new_instance(b, c()), [&](auto self) {
+          const NodeId blk =
+              held.block.valid() ? held.block : b.nil_literal();
+          // No initialize anywhere up the chain is Object's own, which
+          // takes no arguments (a block it ignores): given some, an
+          // ArgumentError follows.
+          NodeId no_init;
+          if (!held.fixed.empty() || held.spread.valid()) {
+            no_init = b.let(
+                b.intrinsic(IntrinsicId::Len, {values_array(held, p)}),
+                [&](auto given) {
+                  return b.make_if(
+                      b.binary(BinOp::Ne, given(), b.literal(0)),
+                      rt.call("$argerr", {given(), b.str_literal("0")}, p));
+                });
+          }
+          return b.block(
+              {b.let(rt.call("$mfind", {c(), b.str_literal("initialize")}, p),
+                     [&](auto init) {
+                       return b.make_if(
+                           b.binary(BinOp::Ne,
+                                    b.intrinsic(IntrinsicId::TypeOf, {init()}),
+                                    b.str_literal("nil")),
+                           call_with(init(), {blk, self()}, held, p), no_init);
+                     }),
+               self()});
+        });
+      });
+    });
   }
 
   // A class instance's own method wins over everything below -- tried by
@@ -2387,48 +2400,53 @@ struct Binder {
       }
     }
     if (!blk.valid()) blk = b.nil_literal();
-    const std::vector<NodeId>& args = cargs.fixed;
-    // The receiver runs once, into `$self`, and everything after reads
-    // that: the method lookup, a method of the program's own, and the
-    // builtin the call falls back to.
-    const int32_t t = ctx.alloc_local("$self");
-    const int32_t mv = ctx.alloc_local("$m");
-    const NodeId T = b.varref(VarKind::Local, t);
-    const NodeId M = b.varref(VarKind::Local, mv);
-    // A builtin reads one value per argument -- except push, which takes
-    // any number of them, and a Proc's call, which is a call like any
-    // other. Which one runs is decided when it runs (a class of the
-    // program's own may define a method of the same name), so a splat
-    // into any other builtin raises then, once its arguments have run.
-    const auto fallback = [&]() -> NodeId {
-      if ((name == "push" || name == "<<") &&
-          (cargs.spread.valid() || args.size() != 1)) {
-        return rt.call("$pushall", {T, values_array(cargs, ctx, p)}, p);
-      }
-      if (cargs.spread.valid()) {
-        if (name == "call") {
-          return call_with(T, {b.nil_literal()}, cargs, p);
-        }
-        return b.block(
-            {values_array(cargs, ctx, p),
-             rt.call("$exc",
-                     {b.str_literal("ArgumentError"),
-                      b.str_literal("a splat argument is not supported in "
-                                    "a call to " + name + " here")},
-                     p)});
-      }
-      return emit_suffix_builtin(T, sfx, name, cargs, blk, p);
-    };
-    return b.block(
-        {b.assign(VarKind::Local, t, recv),
-         b.assign(VarKind::Local, mv,
-                  rt.call("$mfind",
-                          {rt.call("$classof", {T}, p),
-                           b.str_literal(name)},
-                          p)),
-         b.make_if(b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {M}),
-                            b.str_literal("nil")),
-                   call_with(M, {blk, T}, cargs, p), fallback())});
+    // The receiver, the block and then the arguments run once, each held
+    // by a Let, and everything after reads them: the method lookup, a
+    // method of the program's own, and the builtin the call falls back to.
+    Args given = cargs;
+    given.block = NodeId{};  // held apart, as `blk`
+    return b.let(recv, [&](auto self) {
+      const NodeId T = self();
+      return b.let(blk, [&](auto block) {
+        const NodeId B = block();
+        return hold_args(given, p, [&](const Args& held) {
+          const std::vector<NodeId>& args = held.fixed;
+          // A builtin reads one value per argument -- except push, which
+          // takes any number of them, and a Proc's call, which is a call
+          // like any other. Which one runs is decided when it runs (a
+          // class of the program's own may define a method of the same
+          // name), so a splat into any other builtin raises then.
+          const auto fallback = [&]() -> NodeId {
+            if ((name == "push" || name == "<<") &&
+                (held.spread.valid() || args.size() != 1)) {
+              return rt.call("$pushall", {T, values_array(held, p)}, p);
+            }
+            if (held.spread.valid()) {
+              if (name == "call") {
+                return call_with(T, {b.nil_literal()}, held, p);
+              }
+              return rt.call("$exc",
+                             {b.str_literal("ArgumentError"),
+                              b.str_literal("a splat argument is not "
+                                            "supported in a call to " +
+                                            name + " here")},
+                             p);
+            }
+            return emit_suffix_builtin(T, sfx, name, held, B, p);
+          };
+          return b.let(
+              rt.call("$mfind",
+                      {rt.call("$classof", {T}, p), b.str_literal(name)}, p),
+              [&](auto method) {
+                return b.make_if(
+                    b.binary(BinOp::Ne,
+                             b.intrinsic(IntrinsicId::TypeOf, {method()}),
+                             b.str_literal("nil")),
+                    call_with(method(), {B, T}, held, p), fallback());
+              });
+        });
+      });
+    });
   }
 
   // A library method, by name: what runs when the receiver's class does
