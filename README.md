@@ -151,8 +151,17 @@ A few things worth knowing before you write a binder:
   fits -- and its own helper on the rest: the front end draws the line,
   and the call it would have made anyway is the fallback, now made only
   past it. `Index` takes one the same way, its receiver and key the
-  operands: a list's element at an index in range is the VM's, a negative
-  index or a missing key the language's.
+  operands, and a tag set for each: a list's element at an index in range,
+  or a map's or object's key it has, is the VM's, a negative index or a
+  missing key the language's. `SetIndex` takes one with a set for the
+  value too (Lua's `t[k] = nil` removes, so its set is everything but
+  nil), and it is a statement: the fallback's answer is dropped, so an
+  assignment that is an expression holds its value in a `Let`. Two more
+  flags widen what the VM answers where the language agrees: `kMissNil` (a
+  miss on a container with no meta reads nil, or creates the key; with a
+  meta, a miss is the fallback's whatever else is said, as with Lua's
+  `__index`), and `kAppend` (a store at an array's length appends); where
+  `kExact`, above, narrows it.
 
 The authoritative reference is the commentary in `vmlib.h` itself, in the
 `coreir/ir.h` and `coreir/semantics.h` sections.
@@ -937,13 +946,14 @@ make the executor faster", but "what does a front end's own compiled-down
 shape cost against the language it imitates" -- on more than one shape of
 work, since a front end that is competitive on recursive calls (`fib`)
 might not be on a tight arithmetic loop (`loop`), a container built and
-then walked (`array`), or naive string concatenation (`strings`). A fifth
-program, `startup`, prints a constant and does nothing else: process
+then walked (`array`), subscript stores into a list and a dictionary
+(`store`, for the six front ends with such containers), or naive string
+concatenation (`strings`). A further program, `startup`, prints a constant and does nothing else: process
 startup is not free, and it varies wildly across these eight real
 languages (roughly a millisecond for a compiled Go binary or `lua5.4`,
 fifty for `python3`, on the machine this was written on) -- reading a
 workload's `real_ms` next to `startup`'s own is what tells "this language
-is slow here" apart from "this language is slow to start". All five run
+is slow here" apart from "this language is slow to start". All of them run
 through each of the eight front ends' own binary and, where that real
 language is actually installed, through it too -- `python3`, `ruby`,
 `lua5.4`, `guile`, `culebra`, `node`, `dotnet`, `go`. (mini-scheme has no

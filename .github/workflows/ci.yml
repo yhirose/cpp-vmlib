@@ -129,7 +129,7 @@ jobs:
 
   # Two numbers, neither a pass/fail gate: the executor microbenchmarks
   # (bench/bench.cc, Core-IR built by hand -- what a change to a call, a
-  # binop, or a variable access costs) and five small programs (bare
+  # binop, or a variable access costs) and six small programs (bare
   # startup, calls, a tight loop, a container, string building) run
   # through each front end's own binary next to the real language it
   # imitates (bench/languages), installed by .github/actions/languages at

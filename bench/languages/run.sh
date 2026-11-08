@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Five small programs -- startup (prints a constant, nothing else),
+# Six small programs -- startup (prints a constant, nothing else),
 # fib(28) (recursion/calls), loop (a tight arithmetic loop, no calls),
 # array (building and then indexing a container), strings (naive repeated
-# concatenation) -- each run through every front end's own binary and,
+# concatenation), store (subscript stores into a list and a dictionary, a
+# checksum of what they left; the six front ends with such a container,
+# not Go or Scheme) -- each run through every front end's own binary and,
 # where the real language is installed, through it too. So the numbers
 # say what a front end costs beyond the language it is imitating on a few
 # different shapes of work, not just an absolute time nobody has a
@@ -94,7 +96,7 @@ if [ "${1:-}" = "--reps" ]; then REPS=$2; fi
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
-WORKLOADS=(startup fib loop array strings)
+WORKLOADS=(startup fib loop array strings store)
 
 # The front ends to time: every one the build registered that has a
 # program here (PL/0 has none). A build without the examples registers
@@ -118,6 +120,7 @@ declare -A EXPECT=(
   [loop]=968194995
   [array]=375082463
   [strings]=40000
+  [store]=999003
 )
 
 # Runs the command "$2"... REPS times and prints the best wall time in
@@ -178,6 +181,8 @@ row() {
 printf 'task\tlang\tmini\treal\treal_ms\n'
 for w in "${WORKLOADS[@]}"; do
   for i in "${!BINS[@]}"; do
+    # A front end without a program for this workload has no row.
+    [ -f "$w.${EXTS[$i]}" ] || continue
     row "$w" "$i"
   done
 done
