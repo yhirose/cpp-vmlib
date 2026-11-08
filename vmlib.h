@@ -1317,16 +1317,20 @@ enum class BinOp : uint8_t {
   // comparison does not care about sign -- and neither does Add/Sub/Mul,
   // whose wrapping result is the same bits either way.
   UDiv, UMod, UShr, ULt, ULe, UGt, UGe,
-  // Division rounding toward negative infinity, and the remainder that
-  // goes with it, which takes the divisor's sign -- Python's and Lua's `//`
-  // and `%`, Ruby's `%` and Integer `/`, Scheme's `floor/` and `modulo`,
-  // where Div and Mod are C's, truncating. Each of those front ends had
-  // written the correction over Div and Mod for itself, and each had tested
-  // the signs by multiplying them, which wraps past 2^63. On two ints a zero
-  // divisor traps, and so does the least int over -1, as for Div and Mod.
-  // A double widens the other operand, as for Add, and the answer is
-  // Div's floored and fmod's moved to the divisor's side (floor_mod) --
-  // with Div's inf and nan, not a trap, for a zero divisor.
+  // Division rounding toward negative infinity, and a remainder on the
+  // divisor's side -- Python's and Lua's `//` and `%`, Ruby's `%` and
+  // Integer `/`, Scheme's `floor/` and `modulo`, where Div and Mod are C's,
+  // truncating. Each of those front ends had written the correction over
+  // Div and Mod for itself, and each had tested the signs by multiplying
+  // them, which wraps past 2^63. On two ints the two go together (a ==
+  // FloorDiv * b + FloorMod), a zero divisor traps, and so does the least
+  // int over -1, as for Div and Mod. A double widens the other operand, as
+  // for Add, and the two are Lua's luai_numidiv and luai_nummod: Div's
+  // quotient floored, and fmod's remainder moved to the divisor's side
+  // (floor_mod), with Div's inf and nan, not a trap, for a zero divisor.
+  // Those need not go together: the quotient is floored after it was
+  // rounded, so 1 // 0.2 is 5.0 while 1 % 0.2 is about 0.2. A language
+  // whose `//` goes with its `%` (CPython's) writes it over these.
   FloorDiv, FloorMod,
 };
 
@@ -3737,16 +3741,33 @@ enum class Fault : uint8_t {
   IntKey, StrKey, Range,
 };
 
-// FloorMod on doubles: fmod's remainder, which is exact and takes the
-// dividend's sign, moved over by one divisor when it is nonzero and on the
-// other side of zero from the divisor -- Lua's luai_nummod and CPython's
-// float_rem. The sides are compared rather than the product's sign taken,
-// which a tiny remainder times a tiny divisor loses to underflow. A zero
-// remainder keeps fmod's sign, as Lua's and Ruby's do; CPython gives it
-// the divisor's, which a front end for Python says for itself.
-inline double floor_mod(double a, double b) {
-  const double m = std::fmod(a, b);
-  return m != 0 && (m < 0) != (b < 0) ? m + b : m;
+// Whether a truncated division's remainder `m` -- C's % on ints, fmod's
+// on doubles, either one with the dividend's sign -- is a floored one's off
+// by a divisor: it is nonzero and on the other side of zero from `b`, so
+// the quotient is a step too high. The sides are compared rather than a
+// product's sign taken, which wraps past 2^63 on ints and underflows to
+// zero for a tiny remainder over a tiny divisor on doubles.
+template <typename T>
+inline bool floor_steps(T m, T b) {
+  return m != 0 && (m < 0) != (b < 0);
+}
+
+// FloorMod, for two ints (a nonzero divisor, and not the least int over
+// -1) and for two doubles alike: the truncated remainder, which is exact,
+// moved over by one divisor where floor_steps says -- Lua's luai_nummod
+// and CPython's float_rem. m + b cannot leave int64: the two have
+// different signs. A zero remainder keeps the dividend's sign on doubles,
+// as Lua's and Ruby's do; CPython gives it the divisor's, which a front
+// end for Python says for itself.
+template <typename T>
+inline T floor_mod(T a, T b) {
+  T m;
+  if constexpr (std::is_integral_v<T>) {
+    m = a % b;
+  } else {
+    m = std::fmod(a, b);
+  }
+  return floor_steps(m, b) ? m + b : m;
 }
 
 // The check and the arithmetic in one walk of the operand ladder: on
@@ -3793,21 +3814,12 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
         switch (op) {
           case BinOp::Div:  out = Value::make_int(a / b); break;
           case BinOp::Mod:  out = Value::make_int(a % b); break;
-          // The truncated quotient and remainder, a step toward negative
-          // infinity when the division was inexact and the signs differ.
-          // The remainder's sign is the test -- it is nonzero and the
-          // dividend's -- so nothing is multiplied, and m + b cannot
-          // leave int64: the two have different signs.
-          case BinOp::FloorDiv: {
-            const int64_t m = a % b;
-            out = Value::make_int(a / b - (m != 0 && (m < 0) != (b < 0)));
+          // The truncated quotient, a step toward negative infinity when
+          // the remainder says so, and the remainder that goes with it.
+          case BinOp::FloorDiv:
+            out = Value::make_int(a / b - floor_steps(a % b, b));
             break;
-          }
-          case BinOp::FloorMod: {
-            const int64_t m = a % b;
-            out = Value::make_int(m != 0 && (m < 0) != (b < 0) ? m + b : m);
-            break;
-          }
+          case BinOp::FloorMod: out = Value::make_int(floor_mod(a, b)); break;
           case BinOp::UDiv: out = Value::make_int(static_cast<int64_t>(ua / ub)); break;
           default:          out = Value::make_int(static_cast<int64_t>(ua % ub)); break;
         }
