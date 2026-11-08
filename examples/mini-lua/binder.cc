@@ -108,7 +108,7 @@ bool is_global(const std::string& n) {
 // How many arguments each library function that takes one value each
 // reads, by its qualified name: kReadsEvery for one that reads all it is
 // given, the string natives, which check their own. The arguments past
-// those still run -- FrameLayout::spill_unread. A function missing here is
+// those still run -- Builder::reading. A function missing here is
 // not bound at all, rather than lowered without its count and so losing
 // the arguments it does not read. One that takes every value as one array
 // (print, io.write, select, pcall, table.pack) has none past them, and is
@@ -1150,12 +1150,11 @@ struct Binder {
         const bool is_or = a.tag == "orexp"_;
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t);
-          acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, p),
-                                   is_or ? keep : rhs, is_or ? rhs : keep)});
+          acc = b.let(acc, [&](auto keep) {
+            return b.make_if(truthy(keep(), p), is_or ? keep() : rhs,
+                             is_or ? rhs : keep());
+          });
         }
         return {acc};
       }
@@ -1226,38 +1225,37 @@ struct Binder {
   NodeId emit_table(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
-    const int32_t t = ctx.alloc_local("$tbl");
-    const NodeId T = b.varref(VarKind::Local, t);
-    std::vector<NodeId> out{
-        b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}))};
-    int64_t next = 1;
-    for (size_t i = 0; i < a.nodes.size(); ++i) {
-      const Ast& f = *a.nodes[i];
-      if (f.tag == "keyedfield"_) {
-        out.push_back(rt.call("$set",
-                              {T, emit_expr(*f.nodes[0], ctx),
-                               emit_expr(*f.nodes[1], ctx)},
-                              p));
-      } else if (f.tag == "namedfield"_) {
-        out.push_back(rt.call("$set",
-                              {T, b.str_literal(std::string(f.nodes[0]->token)),
-                               emit_expr(*f.nodes[1], ctx)},
-                              p));
-      } else if (i + 1 == a.nodes.size()) {
-        // The last positional field, when it is a call or `...`,
-        // contributes every value it has -- Lua's rule, and the same one
-        // emit_values applies to an expression list.
-        const Val v = emit_val(f, ctx);
-        out.push_back(
-            v.multi ? rt.call("$spread", {T, b.literal(next), v.n}, p)
-                    : rt.call("$set", {T, b.literal(next++), v.n}, p));
-      } else {
-        out.push_back(
-            rt.call("$set", {T, b.literal(next++), emit_expr(f, ctx)}, p));
+    return b.let(b.intrinsic(IntrinsicId::MapNew, {}), [&](auto T) {
+      std::vector<NodeId> out;
+      int64_t next = 1;
+      for (size_t i = 0; i < a.nodes.size(); ++i) {
+        const Ast& f = *a.nodes[i];
+        if (f.tag == "keyedfield"_) {
+          out.push_back(rt.call("$set",
+                                {T(), emit_expr(*f.nodes[0], ctx),
+                                 emit_expr(*f.nodes[1], ctx)},
+                                p));
+        } else if (f.tag == "namedfield"_) {
+          const std::string name(f.nodes[0]->token);
+          out.push_back(rt.call(
+              "$set", {T(), b.str_literal(name), emit_expr(*f.nodes[1], ctx)},
+              p));
+        } else if (i + 1 == a.nodes.size()) {
+          // The last positional field, when it is a call or `...`,
+          // contributes every value it has -- Lua's rule, and the same one
+          // emit_values applies to an expression list.
+          const Val v = emit_val(f, ctx);
+          out.push_back(
+              v.multi ? rt.call("$spread", {T(), b.literal(next), v.n}, p)
+                      : rt.call("$set", {T(), b.literal(next++), v.n}, p));
+        } else {
+          out.push_back(
+              rt.call("$set", {T(), b.literal(next++), emit_expr(f, ctx)}, p));
+        }
       }
-    }
-    out.push_back(T);
-    return b.block(out);
+      out.push_back(T());
+      return b.block(out);
+    });
   }
 
   Val emit_suffixed(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -1289,7 +1287,7 @@ struct Binder {
         case "callsfx"_: {
           const Values args =
               emit_args(sfx.nodes.empty() ? nullptr : sfx.nodes[0].get(), ctx);
-          cur = {call_any(recv, {}, args, ctx, p), true};
+          cur = {call_any(recv, {}, args, p), true};
           break;
         }
         default: {  // methodsfx
@@ -1307,20 +1305,22 @@ struct Binder {
             if (args.rest.valid()) {
               one_each.push_back(one(args.rest, p));
             }
-            // Every argument runs, read or not (FrameLayout::spill_unread).
-            auto bp = b.at(p);
-            const std::vector<NodeId> pre = ctx.spill_unread(
-                bp, one_each, *library_reads("string." + name));
-            cur = {bp.sequence(pre, string_call(name, one_each, p)), false};
+            // Every argument runs, read or not (Builder::reading).
+            cur = {b.at(p).reading(one_each, *library_reads("string." + name),
+                                   [&](const std::vector<NodeId>& read) {
+                                     return string_call(name, read, p);
+                                   }),
+                   false};
             break;
           }
-          const int32_t t = ctx.alloc_local("$self");
-          const NodeId T = b.varref(VarKind::Local, t, p);
-          cur = {b.block({b.assign(VarKind::Local, t, recv, p),
-                          call_any(rt.call("$get",
-                                           {T, b.str_literal(name, p)}, p),
-                                   {T}, args, ctx, p)},
-                         p),
+          cur = {b.let(recv,
+                       [&](auto self) {
+                         return call_any(
+                             rt.call("$get", {self(), b.str_literal(name, p)},
+                                     p),
+                             {self()}, args, p);
+                       },
+                       p),
                  true};
           break;
         }
@@ -1335,21 +1335,34 @@ struct Binder {
   // arguments have run -- as Lua does, so an argument that changes it is
   // seen. That path collects the arguments into an array; a plain call
   // never takes it, and `$fn` is read on both before any argument runs.
-  NodeId call_any(NodeId callee, std::vector<NodeId> before,
-                  const Values& args, FnCtx& ctx, SrcPos p) {
-    Builder b(m);
-    const int32_t fv = ctx.alloc_local("$fn");
-    const NodeId F = b.varref(VarKind::Local, fv, p);
-    Values all{before, args.rest};
-    all.firsts.insert(all.firsts.end(), args.firsts.begin(),
-                      args.firsts.end());
-    return b.block(
-        {b.assign(VarKind::Local, fv, callee, p),
-         b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {F}, p),
-                            b.str_literal("map", p), p),
-                   rt.call("$calltable", {F, values_array(all, p)}, p),
-                   call_with(F, before, args, p), p)},
-        p);
+  NodeId call_any(NodeId callee, const std::vector<NodeId>& before,
+                  const Values& args, SrcPos p) {
+    auto b = Builder(m).at(p);
+    // The callee, then `before` and the arguments, each run once and held
+    // by a Let, which both calls read.
+    std::vector<NodeId> values{callee};
+    values.insert(values.end(), before.begin(), before.end());
+    values.insert(values.end(), args.firsts.begin(), args.firsts.end());
+    if (args.rest.valid()) values.push_back(args.rest);
+    return b.lets(values, [&](const std::vector<Builder::Temp>& t) {
+      const auto held = [&](size_t from, size_t n) {
+        std::vector<NodeId> out;
+        for (size_t k = from; k < from + n; ++k) out.push_back(t[k]());
+        return out;
+      };
+      const size_t nb = before.size();
+      const size_t na = args.firsts.size();
+      const auto rest = [&] {
+        return args.rest.valid() ? t.back()() : NodeId{};
+      };
+      Values all{held(1, nb + na), rest()};
+      const Values given{held(1 + nb, na), rest()};
+      return b.make_if(
+          b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {t[0]()}),
+                   b.str_literal("map")),
+          rt.call("$calltable", {t[0](), values_array(all, p)}, p),
+          call_with(t[0](), held(1, nb), given, p));
+    });
   }
 
   // The standard library, in the shapes this front end knows. A library
@@ -1405,10 +1418,11 @@ struct Binder {
     if (!reads) fail(prim, "'" + name + "' is not supported here");
     std::vector<NodeId> args = vals.firsts;
     if (vals.rest.valid()) args.push_back(one(vals.rest, p));
-    auto bp = b.at(p);
-    const std::vector<NodeId> pre = ctx.spill_unread(bp, args, *reads);
+    // The arguments it reads, held by Builder::reading while the call is
+    // built over them; every argument runs, read or not.
+    const std::vector<NodeId>* read = &args;
     const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal(p);
+      return k < read->size() ? (*read)[k] : b.nil_literal(p);
     };
     const auto dispatch = [&]() -> Val {
       if (mem.empty()) {
@@ -1432,17 +1446,17 @@ struct Binder {
         // rawset/rawget: `$set`/`$get` without the metamethod detour --
         // `__newindex`'s own thunk needs one, on pain of calling itself.
         if (g == "rawset") {
-          // The table is both where the store goes and the answer, so it is
-          // kept in a temporary rather than evaluated twice.
-          // Fresh: the key and value run after it is set, and a scope of
-          // theirs (a pcall's) may have claimed and given back a slot.
-          const int32_t t = ctx.alloc_fresh_local("$rawset");
-          const NodeId T = b.varref(VarKind::Local, t, p);
-          return {b.block({b.assign(VarKind::Local, t, a0(0), p),
-                           b.set_index(T, rt.call("$key", {a0(1)}, p), a0(2),
-                                       p),
-                           T},
-                          p),
+          // The table is both where the store goes and the answer, so a
+          // Let holds it rather than its being evaluated twice.
+          return {b.let(a0(0),
+                        [&](auto t) {
+                          return b.block(
+                              {b.set_index(t(), rt.call("$key", {a0(1)}, p),
+                                           a0(2), p),
+                               t()},
+                              p);
+                        },
+                        p),
                   false};
         }
         if (g == "rawget") {
@@ -1496,8 +1510,14 @@ struct Binder {
       }
       fail(prim, "'" + g + "." + mem + "' is not supported here");
     };
-    Val v = dispatch();
-    v.n = bp.sequence(pre, v.n);
+    Val v{};
+    const NodeId n = b.at(p).reading(
+        args, *reads, [&](const std::vector<NodeId>& held) {
+          read = &held;
+          v = dispatch();
+          return v.n;
+        });
+    v.n = n;
     return v;
   }
 
@@ -1510,37 +1530,35 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     // f and its arguments run first, outside the protection: an error in
-    // an argument is the caller's own, not the call's, as in Lua. f is
-    // set before the arguments run and read after them, so its slot is a
-    // fresh one (FrameLayout::alloc_fresh_local).
-    const int32_t fv = ctx.alloc_fresh_local("$pf");
-    const int32_t av = ctx.alloc_local("$pargs");
-    const NodeId F = b.varref(VarKind::Local, fv);
-    const NodeId A = b.varref(VarKind::Local, av);
-    std::vector<NodeId> out;
-    if (!args.firsts.empty()) {
-      out.push_back(b.assign(VarKind::Local, fv, args.firsts[0]));
-      out.push_back(b.assign(
-          VarKind::Local, av,
-          values_array({{args.firsts.begin() + 1, args.firsts.end()},
-                        args.rest},
-                       p)));
-    } else if (args.rest.valid()) {
-      // `pcall(...)`: f is the first of the expanding argument's values.
-      out.push_back(b.assign(VarKind::Local, av, args.rest));
-      out.push_back(b.assign(VarKind::Local, fv, one(A, p)));
-      out.push_back(b.assign(
-          VarKind::Local, av,
-          rt.call("$select", {values_array({{b.literal(2)}, A}, p)}, p)));
-    } else {
-      out.push_back(b.assign(VarKind::Local, fv, b.nil_literal()));
-      out.push_back(b.assign(VarKind::Local, av, b.array_lit({})));
-    }
+    // an argument is the caller's own, not the call's, as in Lua. Both are
+    // held by Lets, read by the protected call.
+    const auto held = [&](const std::function<NodeId(NodeId, NodeId)>& k) {
+      if (!args.firsts.empty()) {
+        return b.lets(
+            {args.firsts[0],
+             values_array({{args.firsts.begin() + 1, args.firsts.end()},
+                           args.rest},
+                          p)},
+            [&](const std::vector<Builder::Temp>& t) {
+              return k(t[0](), t[1]());
+            });
+      }
+      if (args.rest.valid()) {
+        // `pcall(...)`: f is the first of the expanding argument's values.
+        return b.let(args.rest, [&](auto all) {
+          return b.lets(
+              {one(all(), p),
+               rt.call("$select", {values_array({{b.literal(2)}, all()}, p)},
+                       p)},
+              [&](const std::vector<Builder::Temp>& t) {
+                return k(t[0](), t[1]());
+              });
+        });
+      }
+      return k(b.nil_literal(), b.array_lit({}));
+    };
     const int32_t exc = ctx.alloc_local("$exc");
     const NodeId E = b.varref(VarKind::Local, exc);
-    const NodeId body = rt.call(
-        "$append", {b.array_lit({b.bool_literal(true)}), b.call_spread(F, {}, A)},
-        p);
     // A trap the executor raised arrives as its {message, line, col}
     // object (a table is a Map here, so an object is one of those); pcall
     // answers what Lua's would, a string with the chunk and line in front.
@@ -1559,9 +1577,16 @@ struct Binder {
                  b.index(E, b.str_literal("message"))));
     const NodeId handler =
         b.array_lit({b.bool_literal(false), b.make_if(trap, worded, E)});
-    out.push_back(b.make_try(exc, body, handler));
+    const NodeId call = held([&](NodeId f, NodeId a) {
+      return b.make_try(exc,
+                        rt.call("$append",
+                                {b.array_lit({b.bool_literal(true)}),
+                                 b.call_spread(f, {}, a)},
+                                p),
+                        handler);
+    });
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(out));
+    return b.scope(mark, end, call);
   }
 
   // -- Statements ---------------------------------------------------------
@@ -1590,17 +1615,17 @@ struct Binder {
           return bind_decl(decl_of.at(names.nodes[0].get()),
                            emit_expr(*a.nodes[1]->nodes[0], ctx), ctx, p);
         }
-        const int32_t t = ctx.alloc_local("$vals");
-        const NodeId T = b.varref(VarKind::Local, t);
-        std::vector<NodeId> out{
-            b.assign(VarKind::Local, t, emit_exprlist(*a.nodes[1], ctx))};
-        for (size_t k = 0; k < names.nodes.size(); ++k) {
-          out.push_back(bind_decl(
-              decl_of.at(names.nodes[k].get()),
-              rt.call("$nth", {T, b.literal(static_cast<int64_t>(k))}, p), ctx,
-              p));
-        }
-        return b.block(out);
+        return b.let(emit_exprlist(*a.nodes[1], ctx), [&](auto vals) {
+          std::vector<NodeId> out;
+          for (size_t k = 0; k < names.nodes.size(); ++k) {
+            out.push_back(bind_decl(
+                decl_of.at(names.nodes[k].get()),
+                rt.call("$nth", {vals(), b.literal(static_cast<int64_t>(k))},
+                        p),
+                ctx, p));
+          }
+          return b.block(out);
+        });
       }
       case "fnstat"_:
         return emit_fnstat(a, ctx);
@@ -1682,42 +1707,45 @@ struct Binder {
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     const int32_t iv = ctx.alloc_local("$i");
-    const int32_t lim = ctx.alloc_local("$limit");
-    const int32_t stp = ctx.alloc_local("$step");
-    const NodeId I = b.varref(VarKind::Local, iv);
-    const NodeId L = b.varref(VarKind::Local, lim);
-    const NodeId S = b.varref(VarKind::Local, stp);
+    const auto I = [&] { return b.varref(VarKind::Local, iv); };
 
     const Ast* step = nullptr;
     const Ast* blk = a.nodes.back().get();
     for (const auto& c : a.nodes) {
       if (c->tag == "forstep"_) step = c->nodes[0].get();
     }
-    std::vector<NodeId> out{
-        b.assign(VarKind::Local, iv, emit_expr(*a.nodes[1], ctx)),
-        b.assign(VarKind::Local, lim, emit_expr(*a.nodes[2], ctx)),
-        b.assign(VarKind::Local, stp,
-                 step != nullptr ? emit_expr(*step, ctx) : b.literal(1))};
-
-    const int32_t v = decl_of.at(a.nodes[0].get());
-    const int32_t bmark = ctx.mark();
-    std::vector<NodeId> body;
-    // A fresh binding per iteration, so a closure made in the body keeps
-    // the number it saw -- Lua's rule, and CellFresh's whole purpose.
-    fresh_cells({v}, ctx, body, p);
-    body.push_back(bind_decl(v, I, ctx, p));
-    body.push_back(emit_block(*blk, ctx));
-    body.push_back(b.assign(VarKind::Local, iv, b.binary(BinOp::Add, I, S)));
-    const int32_t bend = ctx.release(bmark);
-
-    const NodeId cond =
-        b.make_if(b.binary(BinOp::Gt, S, b.literal(0)),
-                  b.binary(BinOp::Le, I, L), b.binary(BinOp::Ge, I, L));
-    out.push_back(b.make_while(cond, bend > bmark
-                                         ? b.scope(bmark, bend, b.block(body))
-                                         : b.block(body)));
+    // The start, the limit and the step run once, in that order, held by
+    // Lets; the counter changes every step, so it is a local.
+    const NodeId loop = b.lets(
+        {emit_expr(*a.nodes[1], ctx), emit_expr(*a.nodes[2], ctx),
+         step != nullptr ? emit_expr(*step, ctx) : b.literal(1)},
+        [&](const std::vector<Builder::Temp>& t) {
+          const auto& limit = t[1];
+          const auto& by = t[2];
+          const int32_t v = decl_of.at(a.nodes[0].get());
+          const int32_t bmark = ctx.mark();
+          std::vector<NodeId> body;
+          // A fresh binding per iteration, so a closure made in the body
+          // keeps the number it saw -- Lua's rule, and CellFresh's whole
+          // purpose.
+          fresh_cells({v}, ctx, body, p);
+          body.push_back(bind_decl(v, I(), ctx, p));
+          body.push_back(emit_block(*blk, ctx));
+          body.push_back(
+              b.assign(VarKind::Local, iv, b.binary(BinOp::Add, I(), by())));
+          const int32_t bend = ctx.release(bmark);
+          const NodeId cond =
+              b.make_if(b.binary(BinOp::Gt, by(), b.literal(0)),
+                        b.binary(BinOp::Le, I(), limit()),
+                        b.binary(BinOp::Ge, I(), limit()));
+          return b.block(
+              {b.assign(VarKind::Local, iv, t[0]()),
+               b.make_while(cond, bend > bmark
+                                      ? b.scope(bmark, bend, b.block(body))
+                                      : b.block(body))});
+        });
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(out));
+    return b.scope(mark, end, loop);
   }
 
   // `for k, v in ipairs(t)` and `for k, v in pairs(t)`, matched whole.
@@ -1740,78 +1768,80 @@ struct Binder {
     if (args.nodes.empty()) fail(a, "ipairs/pairs takes a table");
 
     const int32_t mark = ctx.mark();
-    const int32_t tv = ctx.alloc_local("$t");
-    const NodeId T = b.varref(VarKind::Local, tv);
-    std::vector<NodeId> out{
-        b.assign(VarKind::Local, tv, emit_expr(*args.nodes[0], ctx))};
-    // ipairs and pairs read the table alone; anything after it still runs.
-    for (size_t k = 1; k < args.nodes.size(); ++k) {
-      out.push_back(emit_expr(*args.nodes[k], ctx));
-    }
-
     const auto& names = a.nodes[0]->nodes;
     const int32_t kv = decl_of.at(names[0].get());
     const int32_t vv =
         names.size() > 1 ? decl_of.at(names[1].get()) : -1;
-
-    std::vector<NodeId> body;
-    if (which == "ipairs") {
-      const int32_t iv = ctx.alloc_local("$i");
-      const NodeId I = b.varref(VarKind::Local, iv);
-      out.push_back(b.assign(VarKind::Local, iv, b.literal(1)));
-      const int32_t ev = ctx.alloc_local("$e");
-      const NodeId E = b.varref(VarKind::Local, ev);
-      body.push_back(b.assign(VarKind::Local, ev, rt.call("$get", {T, I}, p)));
-      body.push_back(
-          b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}),
-                             b.str_literal("nil")),
-                    b.make_break(), NodeId{}));
+    // One step's bindings and the loop's body, the step's key and value
+    // read from what holds them; the value is read only when there is a
+    // variable for it.
+    const auto step = [&](NodeId key, const std::function<NodeId()>& value) {
       const int32_t bmark = ctx.mark();
       std::vector<NodeId> inner;
       fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}
                           : std::vector<int32_t>{kv},
                   ctx, inner, p);
-      inner.push_back(bind_decl(kv, I, ctx, p));
-      if (vv >= 0) inner.push_back(bind_decl(vv, E, ctx, p));
+      inner.push_back(bind_decl(kv, key, ctx, p));
+      if (vv >= 0) inner.push_back(bind_decl(vv, value(), ctx, p));
       inner.push_back(emit_block(*a.nodes[2], ctx));
       const int32_t bend = ctx.release(bmark);
-      body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
-                                  : b.block(inner));
-      body.push_back(
-          b.assign(VarKind::Local, iv, b.binary(BinOp::Add, I, b.literal(1))));
-    } else {
-      const int32_t ks = ctx.alloc_local("$keys");
-      const int32_t ix = ctx.alloc_local("$ki");
-      const NodeId K = b.varref(VarKind::Local, ks);
-      const NodeId X = b.varref(VarKind::Local, ix);
-      out.push_back(b.assign(VarKind::Local, ks,
-                             b.intrinsic(IntrinsicId::ObjectKeys, {T})));
-      out.push_back(b.assign(VarKind::Local, ix, b.literal(0)));
-      const int32_t cur = ctx.alloc_local("$k");
-      const NodeId C = b.varref(VarKind::Local, cur);
-      body.push_back(
-          b.make_if(b.binary(BinOp::Ge, X, b.intrinsic(IntrinsicId::Len, {K})),
-                    b.make_break(), NodeId{}));
-      body.push_back(b.assign(VarKind::Local, cur, b.index(K, X)));
-      body.push_back(
-          b.assign(VarKind::Local, ix, b.binary(BinOp::Add, X, b.literal(1))));
-      const int32_t bmark = ctx.mark();
-      std::vector<NodeId> inner;
-      fresh_cells(vv >= 0 ? std::vector<int32_t>{kv, vv}
-                          : std::vector<int32_t>{kv},
-                  ctx, inner, p);
-      inner.push_back(bind_decl(kv, C, ctx, p));
-      if (vv >= 0) {
-        inner.push_back(bind_decl(vv, rt.call("$get", {T, C}, p), ctx, p));
-      }
-      inner.push_back(emit_block(*a.nodes[2], ctx));
-      const int32_t bend = ctx.release(bmark);
-      body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
-                                  : b.block(inner));
-    }
-    out.push_back(b.make_while(b.bool_literal(true), b.block(body)));
+      return bend > bmark ? b.scope(bmark, bend, b.block(inner))
+                          : b.block(inner);
+    };
+    // The table is held by a Let for the whole loop; ipairs and pairs
+    // read it alone, and anything after it still runs.
+    const NodeId loop =
+        b.let(emit_expr(*args.nodes[0], ctx), [&](auto table) {
+          std::vector<NodeId> out;
+          for (size_t k = 1; k < args.nodes.size(); ++k) {
+            out.push_back(emit_expr(*args.nodes[k], ctx));
+          }
+          if (which == "ipairs") {
+            const int32_t iv = ctx.alloc_local("$i");
+            const auto I = [&] { return b.varref(VarKind::Local, iv); };
+            out.push_back(b.assign(VarKind::Local, iv, b.literal(1)));
+            // Each element, held by a Let for its test and its binding.
+            const NodeId body =
+                b.let(rt.call("$get", {table(), I()}, p), [&](auto e) {
+                  return b.block(
+                      {b.make_if(
+                           b.binary(BinOp::Eq,
+                                    b.intrinsic(IntrinsicId::TypeOf, {e()}),
+                                    b.str_literal("nil")),
+                           b.make_break(), NodeId{}),
+                       step(I(), [&] { return e(); }),
+                       b.assign(VarKind::Local, iv,
+                                b.binary(BinOp::Add, I(), b.literal(1)))});
+                });
+            out.push_back(b.make_while(b.bool_literal(true), body));
+            return b.block(out);
+          }
+          // pairs: the keys, taken once and held, walked by an index.
+          out.push_back(b.let(
+              b.intrinsic(IntrinsicId::ObjectKeys, {table()}), [&](auto keys) {
+                const int32_t ix = ctx.alloc_local("$ki");
+                const auto X = [&] { return b.varref(VarKind::Local, ix); };
+                const NodeId body = b.block(
+                    {b.make_if(
+                         b.binary(BinOp::Ge, X(),
+                                  b.intrinsic(IntrinsicId::Len, {keys()})),
+                         b.make_break(), NodeId{}),
+                     b.let(b.index(keys(), X()), [&](auto key) {
+                       return b.block(
+                           {b.assign(VarKind::Local, ix,
+                                     b.binary(BinOp::Add, X(), b.literal(1))),
+                            step(key(), [&] {
+                              return rt.call("$get", {table(), key()}, p);
+                            })});
+                     })});
+                return b.block(
+                    {b.assign(VarKind::Local, ix, b.literal(0)),
+                     b.make_while(b.bool_literal(true), body)});
+              }));
+          return b.block(out);
+        });
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(out));
+    return b.scope(mark, end, loop);
   }
 
   // The real generic-`for` protocol: `exprlist` is (iterator function,
@@ -1823,51 +1853,51 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
-    const int32_t triple = ctx.alloc_local("$triple");
-    const NodeId TR = b.varref(VarKind::Local, triple);
-    const int32_t fv = ctx.alloc_local("$iterf");
-    const NodeId F = b.varref(VarKind::Local, fv);
-    const int32_t sv = ctx.alloc_local("$state");
-    const NodeId S = b.varref(VarKind::Local, sv);
+    // The function and the state are held by Lets for the loop, and each
+    // step's results, and the first of them, for the step; the control
+    // value changes every step, so it is a local.
     const int32_t cv = ctx.alloc_local("$control");
-    const NodeId C = b.varref(VarKind::Local, cv);
-    std::vector<NodeId> out{
-        b.assign(VarKind::Local, triple, emit_exprlist(*a.nodes[1], ctx)),
-        b.assign(VarKind::Local, fv, rt.call("$nth", {TR, b.literal(0)}, p)),
-        b.assign(VarKind::Local, sv, rt.call("$nth", {TR, b.literal(1)}, p)),
-        b.assign(VarKind::Local, cv, rt.call("$nth", {TR, b.literal(2)}, p))};
-
-    const int32_t rv = ctx.alloc_local("$results");
-    const NodeId R = b.varref(VarKind::Local, rv);
-    const int32_t first = ctx.alloc_local("$first");
-    const NodeId FI = b.varref(VarKind::Local, first);
-    std::vector<NodeId> body{
-        b.assign(VarKind::Local, rv, b.call_value(F, {S, C})),
-        b.assign(VarKind::Local, first, one(R, p)),
-        b.make_if(b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {FI}),
-                           b.str_literal("nil")),
-                  b.make_break(), NodeId{}),
-        b.assign(VarKind::Local, cv, FI)};
-
+    const auto C = [&] { return b.varref(VarKind::Local, cv); };
     const auto& names = a.nodes[0]->nodes;
     std::vector<int32_t> decls;
     for (const auto& n : names) decls.push_back(decl_of.at(n.get()));
-    const int32_t bmark = ctx.mark();
-    std::vector<NodeId> inner;
-    fresh_cells(decls, ctx, inner, p);
-    for (size_t k = 0; k < decls.size(); ++k) {
-      inner.push_back(bind_decl(
-          decls[k], rt.call("$nth", {R, b.literal(static_cast<int64_t>(k))}, p),
-          ctx, p));
-    }
-    inner.push_back(emit_block(*a.nodes[2], ctx));
-    const int32_t bend = ctx.release(bmark);
-    body.push_back(bend > bmark ? b.scope(bmark, bend, b.block(inner))
-                                : b.block(inner));
-
-    out.push_back(b.make_while(b.bool_literal(true), b.block(body)));
+    const NodeId exprs = emit_exprlist(*a.nodes[1], ctx);
+    const NodeId loop = b.let(exprs, [&](auto triple) {
+      const auto nth = [&](NodeId v, int64_t k) {
+        return rt.call("$nth", {v, b.literal(k)}, p);
+      };
+      return b.lets({nth(triple(), 0), nth(triple(), 1)},
+                    [&](const std::vector<Builder::Temp>& fs) {
+        const NodeId body =
+            b.let(b.call_value(fs[0](), {fs[1](), C()}), [&](auto results) {
+              return b.let(one(results(), p), [&](auto first) {
+                const int32_t bmark = ctx.mark();
+                std::vector<NodeId> inner;
+                fresh_cells(decls, ctx, inner, p);
+                for (size_t k = 0; k < decls.size(); ++k) {
+                  inner.push_back(bind_decl(
+                      decls[k],
+                      nth(results(), static_cast<int64_t>(k)), ctx, p));
+                }
+                inner.push_back(emit_block(*a.nodes[2], ctx));
+                const int32_t bend = ctx.release(bmark);
+                return b.block(
+                    {b.make_if(b.binary(BinOp::Eq,
+                                        b.intrinsic(IntrinsicId::TypeOf,
+                                                    {first()}),
+                                        b.str_literal("nil")),
+                               b.make_break(), NodeId{}),
+                     b.assign(VarKind::Local, cv, first()),
+                     bend > bmark ? b.scope(bmark, bend, b.block(inner))
+                                  : b.block(inner)});
+              });
+            });
+        return b.block({b.assign(VarKind::Local, cv, nth(triple(), 2)),
+                        b.make_while(b.bool_literal(true), body)});
+      });
+    });
     const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(out));
+    return b.scope(mark, end, loop);
   }
 
   NodeId emit_fnstat(const Ast& a, FnCtx& ctx) {
@@ -1909,28 +1939,43 @@ struct Binder {
       return emit_store(*targets.nodes[0], emit_expr(*values.nodes[0], ctx),
                         ctx, p);
     }
-    std::vector<NodeId> out;
+    // Each target's table and key, then the values, held by Lets in that
+    // order for the stores.
     std::vector<Target> ts;
-    for (const auto& t : targets.nodes) ts.push_back(emit_target(*t, ctx, out));
-    const int32_t v = ctx.alloc_local("$vals");
-    const NodeId V = b.varref(VarKind::Local, v);
-    out.push_back(b.assign(VarKind::Local, v, emit_exprlist(values, ctx)));
-    for (size_t k = ts.size(); k-- > 0;) {
-      out.push_back(store_to(
-          ts[k], rt.call("$nth", {V, b.literal(static_cast<int64_t>(k))}, p),
-          ctx, p));
+    std::vector<NodeId> inits;
+    std::vector<size_t> at;  // where a target's table is among the inits
+    for (const auto& t : targets.nodes) {
+      ts.push_back(emit_target(*t, ctx));
+      at.push_back(inits.size());
+      if (ts.back().ident == nullptr) {
+        inits.push_back(ts.back().table);
+        inits.push_back(ts.back().key);
+      }
     }
-    return b.block(out);
+    inits.push_back(emit_exprlist(values, ctx));
+    return b.lets(inits, [&](const std::vector<Builder::Temp>& held) {
+      std::vector<NodeId> out;
+      for (size_t k = ts.size(); k-- > 0;) {
+        const NodeId value = rt.call(
+            "$nth", {held.back()(), b.literal(static_cast<int64_t>(k))}, p);
+        out.push_back(
+            ts[k].ident != nullptr
+                ? emit_store(*ts[k].ident, value, ctx, p)
+                : rt.call("$set",
+                          {held[at[k]](), held[at[k] + 1](), value}, p));
+      }
+      return b.block(out);
+    });
   }
 
-  // An assignment target with its table and key evaluated now, into
-  // temporaries (appended to `out`), for a store that comes later.
+  // An assignment target: a variable, or the table and the key a store
+  // into it will take -- the expressions, which emit_assign holds.
   struct Target {
     const Ast* ident = nullptr;
     NodeId table, key;
   };
 
-  Target emit_target(const Ast& target, FnCtx& ctx, std::vector<NodeId>& out) {
+  Target emit_target(const Ast& target, FnCtx& ctx) {
     const SrcPos p = pos_of(target);
     auto b = Builder(m).at(p);
     if (target.tag == "ident"_) return {&target, NodeId{}, NodeId{}};
@@ -1938,9 +1983,7 @@ struct Binder {
       fail(target, "cannot assign to this expression");
     }
     const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
-    const NodeId R = recv.multi ? one(recv.n, p) : recv.n;
-    const int32_t tt = ctx.alloc_local("$table");
-    out.push_back(b.assign(VarKind::Local, tt, R));
+    const NodeId table = recv.multi ? one(recv.n, p) : recv.n;
     const Ast& last = *target.nodes.back();
     NodeId key;
     if (last.tag == "dotsfx"_) {
@@ -1950,14 +1993,7 @@ struct Binder {
     } else {
       fail(last, "cannot assign to a call");
     }
-    const int32_t tk = ctx.alloc_local("$key");
-    out.push_back(b.assign(VarKind::Local, tk, key));
-    return {nullptr, b.varref(VarKind::Local, tt), b.varref(VarKind::Local, tk)};
-  }
-
-  NodeId store_to(const Target& t, NodeId value, FnCtx& ctx, SrcPos p) {
-    if (t.ident != nullptr) return emit_store(*t.ident, value, ctx, p);
-    return rt.call("$set", {t.table, t.key, value}, p);
+    return {nullptr, table, key};
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
