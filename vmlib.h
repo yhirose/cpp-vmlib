@@ -6344,22 +6344,32 @@ inline std::string tag_set_text(uint32_t set) {
   return out + "}";
 }
 
+// A fallback's sets and flags in words, for both dumps: the receiver's (or
+// every operand's) tags, then `key {..}` and `value {..}` where it names
+// them, then each flag.
+inline std::string fallback_text(const Fallback& f) {
+  std::string out = tag_set_text(f.tags);
+  if (f.key_tags != 0) out += " key " + tag_set_text(f.key_tags);
+  if (f.value_tags != 0) out += " value " + tag_set_text(f.value_tags);
+  for (int32_t flag = 1; flag <= kKnownFlags; flag <<= 1) {
+    if ((f.flags & flag) != 0) {
+      out += " ";
+      out += flag_name(flag);
+    }
+  }
+  return out;
+}
+
 struct Dumper {
   const Module& m;
   std::ostringstream out;
 
   void indent(int d) { out << std::string(static_cast<size_t>(d) * 2, ' '); }
 
-  // An operation's fallback, if it has one: the tags it answers on, and
-  // whether exactly.
+  // An operation's fallback, if it has one: what it answers on.
   void fallback(const Fallback& f) {
     if (!f.valid()) return;
-    out << " or-call " << tag_set_text(f.tags);
-    if (f.key_tags != 0) out << " key " << tag_set_text(f.key_tags);
-    if (f.value_tags != 0) out << " value " << tag_set_text(f.value_tags);
-    for (int32_t flag = 1; flag <= kKnownFlags; flag <<= 1) {
-      if ((f.flags & flag) != 0) out << " " << flag_name(flag);
-    }
+    out << " or-call " << fallback_text(f);
   }
 
   void node(NodeId id, int d) {
@@ -7099,16 +7109,7 @@ inline std::string to_string(const Program& p) {
           if (in.op == Op::TrySetIndex) out << ", r" << (in.a + 3);
           const coreir::Fallback f =
               coreir::unpack_fallback(coreir::NodeId{}, try_bits(in.c, in.b));
-          out << ", " << coreir::detail::tag_set_text(f.tags);
-          if (f.key_tags != 0) {
-            out << " key " << coreir::detail::tag_set_text(f.key_tags);
-          }
-          if (f.value_tags != 0) {
-            out << " value " << coreir::detail::tag_set_text(f.value_tags);
-          }
-          for (int32_t flag = 1; flag <= coreir::kKnownFlags; flag <<= 1) {
-            if ((f.flags & flag) != 0) out << " " << coreir::flag_name(flag);
-          }
+          out << ", " << coreir::detail::fallback_text(f);
           out << ", " << in.d;
           break;
         }
