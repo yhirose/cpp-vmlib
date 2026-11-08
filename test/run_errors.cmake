@@ -16,11 +16,7 @@
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
 require_args(run_errors.cmake BIN DIR EXT)
 
-file(GLOB sources RELATIVE ${DIR} ${DIR}/*.${EXT})
-list(SORT sources)
-if(NOT sources)
-  message(FATAL_ERROR "no *.${EXT} cases in ${DIR}")
-endif()
+case_files(sources)
 
 set(failed 0)
 foreach(src ${sources})
@@ -48,8 +44,5 @@ foreach(src ${sources})
   endif()
 endforeach()
 
-if(failed)
-  message(FATAL_ERROR "error case output does not match expected/")
-endif()
-list(LENGTH sources n)
-message(STATUS "${n} error cases OK (message, position and exit code)")
+end_cases(${failed} sources "error case output does not match expected/"
+          "error cases OK (message, position and exit code)")

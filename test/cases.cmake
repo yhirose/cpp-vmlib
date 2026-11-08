@@ -1,5 +1,6 @@
-# What the three case scripts -- run_samples.cmake, run_errors.cmake and
-# run_effects.cmake, each run with `cmake -P` -- share, include()d by each.
+# What the case scripts -- run_samples.cmake, run_errors.cmake,
+# run_effects.cmake and run_shapes.cmake, each run with `cmake -P` --
+# share, include()d by each.
 
 # Stops the script unless every named -D argument was given. Each script's
 # cases are a glob of a directory it was handed, and a directory left out
@@ -22,6 +23,31 @@ function(drop_lead list)
     list(REMOVE_ITEM ${list} ${LEAD})
     set(${list} ${${list}} PARENT_SCOPE)
   endif()
+endfunction()
+
+# case_files(<out>) sets <out> to the cases of a directory of them, as
+# run_errors.cmake and run_shapes.cmake take theirs: every DIR/*.EXT, by
+# file name, sorted. A directory with none is a mistake, and stops the
+# script.
+function(case_files out)
+  file(GLOB sources RELATIVE ${DIR} ${DIR}/*.${EXT})
+  list(SORT sources)
+  if(NOT sources)
+    message(FATAL_ERROR "no *.${EXT} cases in ${DIR}")
+  endif()
+  set(${out} ${sources} PARENT_SCOPE)
+endfunction()
+
+# end_cases(<failed> <cases> <failure> <success>): how such a script
+# ends, after each case has reported its own failures with SEND_ERROR --
+# stopped with <failure> when <failed> is set, and otherwise saying
+# "<n> <success>" of the list <cases>.
+function(end_cases failed cases failure success)
+  if(failed)
+    message(FATAL_ERROR "${failure}")
+  endif()
+  list(LENGTH ${cases} n)
+  message(STATUS "${n} ${success}")
 endfunction()
 
 function(lead_for out case)

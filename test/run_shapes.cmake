@@ -14,11 +14,7 @@
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
 require_args(run_shapes.cmake BIN DIR EXT)
 
-file(GLOB sources RELATIVE ${DIR} ${DIR}/*.${EXT})
-list(SORT sources)
-if(NOT sources)
-  message(FATAL_ERROR "no *.${EXT} cases in ${DIR}")
-endif()
+case_files(sources)
 
 set(failed 0)
 foreach(src ${sources})
@@ -51,8 +47,5 @@ foreach(src ${sources})
   endforeach()
 endforeach()
 
-if(failed)
-  message(FATAL_ERROR "a case compiles to the wrong shape")
-endif()
-list(LENGTH sources n)
-message(STATUS "${n} cases, each the shape it should be")
+end_cases(${failed} sources "a case compiles to the wrong shape"
+          "cases, each the shape it should be")
