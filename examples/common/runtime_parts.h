@@ -179,9 +179,10 @@ inline NodeId set_kind_field(FuncWriter& w, NodeId v, int64_t i, NodeId x) {
 }
 
 // The same questions, asked in C++ by a host function, each a twin of a
-// part above or below. They start from the one walk to a kind record: the
-// items of `v`'s meta when `v` is an Object whose meta is an array, read
-// once, or null.
+// part above or below that test_runtime_parts.cc holds to the same
+// answers. They start from the one walk to a kind record: the items of
+// `v`'s meta when `v` is an Object whose meta is an array, read once, or
+// null.
 inline const std::vector<coreir::Value>* meta_items(const coreir::Value& v) {
   if (!v.is_object()) return nullptr;
   const coreir::Value& m = v.as_object()->meta;

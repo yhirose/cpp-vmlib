@@ -11,6 +11,14 @@ add_library(front-end-driver STATIC driver.cc)
 target_include_directories(front-end-driver PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(front-end-driver PUBLIC vmlib)
 
+# runtime_parts.h's IR parts and their C++ twins -- is_kind and
+# kind_record, the two instance_class, is_exception and exception_record --
+# answer alike over every shape a meta takes (test_runtime_parts.cc). It
+# registers as front ends do, whether or not VMLIB_BUILD_TESTS is on.
+add_executable(test_runtime_parts test_runtime_parts.cc)
+target_link_libraries(test_runtime_parts PRIVATE vmlib)
+add_test(NAME runtime_parts COMMAND test_runtime_parts)
+
 # add_front_end(<name> [EXT <ext> LANG <lang> [LEAD <file>]])
 #
 # The front end in the calling directory: the executable <name>, from that
