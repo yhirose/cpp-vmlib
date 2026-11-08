@@ -562,7 +562,10 @@ struct Binder {
   //
   //   binop_helpers  arithmetic and ordering on two numbers (number_tags),
   //                  each helper that BinOp and nothing else.
-  //   $modulo        `modulo` on two exact integers, FloorMod -- its rule.
+  //   $quotient      `quotient`, `remainder` and `modulo` on two exact
+  //   $remainder     integers: Div, Mod and FloorMod -- truncated, and
+  //   $modulo        floored. An inexact integer, and anything that is no
+  //                  integer, are the helper's.
   //   $true          a condition: only #f is false. Value::truthy()
   //                  answers that for everything but '(), 0 and 0.0, which
   //                  it calls false and Scheme true -- those are $true's.
@@ -571,7 +574,10 @@ struct Binder {
     for (const auto& h : binop_helpers()) {
       t.emplace(h.first, VmOp::binary(h.second, number_tags()));
     }
-    t.emplace("$modulo", VmOp::binary(BinOp::FloorMod, tags_named("int")));
+    const uint32_t ints = tags_named("int");
+    t.emplace("$quotient", VmOp::binary(BinOp::Div, ints));
+    t.emplace("$remainder", VmOp::binary(BinOp::Mod, ints));
+    t.emplace("$modulo", VmOp::binary(BinOp::FloorMod, ints));
     t.emplace("$true",
               VmOp::unary(UnOp::Truth,
                           truthy_tags_except({"nil", "int", "double"})));
@@ -658,16 +664,12 @@ struct Binder {
     one("$max", 2, [&](RT& r) {
       return r.iff(r.bin(BinOp::Gt, r.L(0), r.L(1)), r.L(0), r.L(1));
     }, {"a", "b"});
-    one("$quotient", 2, [&](RT& r) {
-      return r.bin(BinOp::Div, r.L(0), r.L(1));
-    }, {"a", "b"});
-    one("$remainder", 2, [&](RT& r) {
-      return r.bin(BinOp::Mod, r.L(0), r.L(1));
-    }, {"a", "b"});
     // `modulo` follows the divisor's sign; `remainder` follows the
     // dividend's -- BinOp::Mod is the second, and BinOp::FloorMod the
     // first.
-    rt_modulo();
+    rt_integer_division("quotient", "$quotient", BinOp::Div);
+    rt_integer_division("remainder", "$remainder", BinOp::Mod);
+    rt_integer_division("modulo", "$modulo", BinOp::FloorMod);
     rt_expt();
 
     // Predicates.
@@ -823,14 +825,46 @@ struct Binder {
     r.finish(value_rt(bi));
   }
 
-  void rt_modulo() {
+  // `quotient`, `remainder` and `modulo` take integers, exact or inexact:
+  // guile's (modulo -4.0 2) is 0.0, and its (modulo 7.5 2) an error. Two
+  // exact ones are the operator's, a zero divisor trapping. An inexact
+  // integer -- a double that fmod by 1 leaves nothing of -- is the same
+  // operator's on doubles, with guile's signs for a zero: a remainder of
+  // zero is 0.0, where fmod keeps the dividend's sign, and a quotient of
+  // zero is signed as a / b is. The quotient is (a - remainder) / b,
+  // which a whole multiple divides exactly, where Div would not truncate.
+  // A zero divisor or anything that is no integer is an error, as guile's
+  // is.
+  void rt_integer_division(const std::string& scheme, const char* name,
+                           BinOp op) {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
-                r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
-    // An inexact modulo is outside this subset, and Mod says so.
-    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
-    r.finish("$modulo");
+                r.ret(r.bin(op, r.L(a), r.L(b)))));
+    const auto integer = [&](FuncWriter::Slot v) {
+      return r.both(is_number(r, r.L(v)),
+                    r.bin(BinOp::Eq, r.bin(BinOp::Mod, r.L(v), r.D(1.0)),
+                          r.I(0)));
+    };
+    r.add(r.iff(r.b.unary(UnOp::Not, r.both(integer(a), integer(b))),
+                r.err(scheme + ": wrong type argument")));
+    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
+                r.err(scheme + ": numerical overflow")));
+    const auto [v] = r.locals("v");
+    if (op == BinOp::Div) {
+      r.add(r.set(v, r.bin(BinOp::Div,
+                           r.bin(BinOp::Sub, r.L(a),
+                                 r.bin(BinOp::Mod, r.L(a), r.L(b))),
+                           r.L(b))));
+      r.add(r.iff(r.bin(BinOp::Eq, r.L(v), r.I(0)),
+                  r.ret(r.bin(BinOp::Mul, r.D(0.0),
+                              r.bin(BinOp::Div, r.L(a), r.L(b))))));
+    } else {
+      r.add(r.set(v, r.bin(op, r.L(a), r.L(b))));
+      r.add(r.iff(r.bin(BinOp::Eq, r.L(v), r.I(0)), r.ret(r.D(0.0))));
+    }
+    r.add(r.ret(r.L(v)));
+    r.finish(name);
   }
 
   void rt_expt() {

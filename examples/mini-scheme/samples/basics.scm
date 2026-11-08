@@ -8,6 +8,14 @@
 ; Which way `modulo` rounds is the signs' to say, not their product's,
 ; which wraps past 2^63.
 (display (modulo -3 4611686018427387904)) (newline)
+; An inexact integer divides as an exact one does, a zero remainder 0.0.
+(display (modulo -4.0 2)) (display " ") (display (modulo -7.0 2))
+(display " ") (display (remainder -7.0 2)) (display " ")
+(display (quotient -7.0 2)) (display " ") (display (quotient 7 2.0))
+(newline)
+; The least integer over -1 leaves 0.
+(display (modulo -9223372036854775808 -1)) (display " ")
+(display (remainder -9223372036854775808 -1)) (newline)
 (display (/ 1.0 4)) (display " ") (display (expt 2 10)) (newline)
 (display (abs -3)) (display " ") (display (min 2 9)) (display " ")
 (display (max 2 9)) (newline)

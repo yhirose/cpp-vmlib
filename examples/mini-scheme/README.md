@@ -191,7 +191,10 @@ in tail position, so a tail call through it stays one too.
   builds the string, so `$fstr` does.
 * **`modulo` follows the divisor's sign** where `BinOp::Mod` (like C's
   `%`, and like `remainder`) follows the dividend's: on two exact
-  integers it is `BinOp::FloorMod`.
+  integers it is `BinOp::FloorMod`. `quotient`, `remainder` and `modulo`
+  take an inexact integer too -- `(modulo -4.0 2)` is `0.0` -- as the same
+  operators on doubles, with guile's signs for a zero, and refuse
+  anything that is no integer, as guile does.
 
 ## `case`, and `define-record-type` -- R7RS's answer to "a class"
 
