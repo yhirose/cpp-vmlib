@@ -802,14 +802,25 @@ struct Binder {
   //   $eq    `==` (equality_tags), a long and a double meeting as numbers;
   //          two types Eq refuses, and an object, compared by identity,
   //          are $eq's.
-  //   $idx   `a[i]` on an array or a string and an index in range; one out
-  //          of range, and a Dictionary (whose missing key throws, where
-  //          Index answers null), are $idx's.
+  //   $idx   `a[i]` on an array or a string and an index in range, or a
+  //          Dictionary and a key it has (an int or a string); one out of
+  //          range, and a key a Dictionary lacks (which throws), are
+  //          $idx's.
+  //   $setidx  `a[i] = v` on an array and an index in range, or on a
+  //          Dictionary, a new key included (its indexer adds); one out of
+  //          range is $setidx's.
+  //   $setf  `o.f = v` on an object; a field an instance does not have yet
+  //          (its meta is its class) and a null receiver are $setf's.
   static Operators::Table operators() {
     return {
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
-        {"$idx", VmOp::index(tags_named({"array", "string", "int"}))},
+        {"$idx", VmOp::index(tags_named({"array", "string", "map"}), 0,
+                             tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "map"}), kMissNil,
+                                    kAllTags)},
+        {"$setf", VmOp::set_index(tags_named("object"), kMissNil,
+                                  tags_named("string"))},
     };
   }
 
@@ -1801,11 +1812,10 @@ struct Binder {
 
 
   // `as_value` asks for the assigned value as the result -- what
-  // `Console.WriteLine(x = 5)` prints. A field's and an element's store
-  // already answers it; a local is read back after the write, and a
-  // property's value is kept in a temporary, since its setter answers
-  // nothing. A statement does not ask, and the store alone is what it
-  // compiles to.
+  // `Console.WriteLine(x = 5)` prints. A local is read back after the
+  // write, and a field's, an element's and a property's value is held by a
+  // Let and read after the store, since a store answers nothing. A
+  // statement does not ask, and the store alone is what it compiles to.
   template <typename Combine>
   NodeId emit_store(const Ast& target, size_t limit, FnCtx& ctx, SrcPos p,
                     bool as_value, Combine combine) {
@@ -1837,7 +1847,11 @@ struct Binder {
                 : this_of(ctx, p);
         return b.let(owner, [&](auto o) {
           const auto read = [&] { return rt.call("$getf", {o(), key}, p); };
-          return rt.call("$setf", {o(), key, combine(read)}, p);
+          const auto set = [&](NodeId v) {
+            return ops.call("$setf", {o(), key, v}, p);
+          };
+          return as_value ? stored_value(b, combine(read), set)
+                          : set(combine(read));
         });
       }
       if (prop_refs.count(&target)) {
@@ -1873,9 +1887,9 @@ struct Binder {
           return rt.call(member ? "$getf" : "$idx", {r, k}, p);
         },
         [&](NodeId r, NodeId k, NodeId v) {
-          return rt.call(member ? "$setf" : "$setidx", {r, k, v}, p);
+          return ops.call(member ? "$setf" : "$setidx", {r, k, v}, p);
         },
-        combine);
+        combine, as_value);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
@@ -1934,7 +1948,7 @@ struct Binder {
       for (const Ast* fd : ci.static_fields) {
         const FieldParts sf = field_parts(*fd);
         if (sf.init == nullptr) continue;
-        body.push_back(rt.call(
+        body.push_back(ops.call(
             "$setf",
             {read_var(ci.var, ctx, p), b.str_literal(std::string(sf.name->token)),
              emit_expr(*sf.init, ctx)},
@@ -1973,14 +1987,14 @@ struct Binder {
     for (const Ast* fd : ci.fields) {
       const FieldParts f = field_parts(*fd);
       if (f.name == nullptr) continue;
-      out.push_back(rt.call(
+      out.push_back(ops.call(
           "$setf",
           {this_of(ctx, p), b.str_literal(std::string(f.name->token)),
            f.init != nullptr ? emit_expr(*f.init, ctx) : default_of(f.type, p)},
           p));
     }
     for (const auto& ap : ci.auto_props) {
-      out.push_back(rt.call(
+      out.push_back(ops.call(
           "$setf",
           {this_of(ctx, p), b.str_literal(backing_field(ap.name)),
            ap.init != nullptr ? emit_expr(*ap.init, ctx)
