@@ -138,8 +138,8 @@ checked against `ruby`.
   third answer. `$truthy` is called only where the two differ, though, on
   a number: a condition on anything else is the VM's own test, and a
   comparison costs nothing beyond itself (an operator with a fallback,
-  vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are the VM's operators on numbers
-  and strings, where they are Ruby's, the same way.
+  vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are the VM's operators
+  on numbers and strings, where they are Ruby's, the same way.
 * **`/` and `%` on two Integers floor**, where `BinOp::Div` truncates and
   `BinOp::Mod` is C's: they are `BinOp::FloorDiv` and `BinOp::FloorMod`,
   with `$div` and `$mod` behind them for a Float and a zero divisor.

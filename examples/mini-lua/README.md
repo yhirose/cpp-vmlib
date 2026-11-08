@@ -95,9 +95,9 @@ zero too, so `$truthy`, and every condition is decided by it -- called,
 though, only on a number, where the VM's answer is not Lua's: on
 anything else the two agree, and a condition on it is the VM's own
 test, a comparison costing nothing beyond itself (an operator with a
-fallback, vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are arranged the same
-way: the VM's operator on the values where it is Lua's, the helper,
-with its metamethods, on the rest.
+fallback, vmlib.h's `Tag::Unary`). `+`, `-`, `*` and `==` are arranged
+the same way: the VM's operator on the values where it is Lua's, the
+helper, with its metamethods, on the rest.
 
 **`%` and `//` floor.** `-7 % 3` is 2 in Lua and -1 in C, and `BinOp::Mod`
 is C's; `-7 // 2` is -4 in Lua and -3 from `BinOp::Div`. On two numbers
