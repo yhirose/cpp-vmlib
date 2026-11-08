@@ -665,8 +665,12 @@ struct ObjectObj : HeapObj {
     if (Value* slot = find(k)) {
       *slot = std::move(v);
     } else {
-      props.emplace_back(k, std::move(v));
+      insert_new(k, std::move(v));
     }
+  }
+  // A key find() has just missed: no second search for it.
+  void insert_new(const std::string& k, Value v) {
+    props.emplace_back(k, std::move(v));
   }
 
   // Gives the object its destructor, or takes it away with nil
@@ -874,6 +878,10 @@ struct MapObj : HeapObj {
       entries[it->second].second = std::move(v);
       return;
     }
+    insert_new(k, std::move(v));
+  }
+  // A key find() has just missed: no second hash of it.
+  void insert_new(const Value& k, Value v) {
     entries.emplace_back(k, std::move(v));
     index.emplace(MapKeyRef::of(entries.back().first), entries.size() - 1);
     ++live;
@@ -10078,60 +10086,65 @@ struct Exec {
   // written, when the fallback's call that follows is to answer.
   static bool try_operator(Frame& f, const Insn& in) {
     const Fallback fb = unpack_fallback(NodeId{}, try_bits(in.c, in.b));
-    const bool exact = fb.exact();
     const Value& x = f.regs[static_cast<size_t>(in.a) + 1];
     if (!has_tag(fb.tags, x.tag())) return false;
     if (in.op == Op::TryUnary) {
       const auto op = static_cast<UnOp>(try_op(in.b));
       if (unop_fault(op, x) != Fault::None) return false;
-      if (exact && x.is_int() && wraps(op, x.as_int())) return false;
+      if (fb.exact() && x.is_int() && wraps(op, x.as_int())) return false;
       f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
       return true;
     }
     const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
-    if (in.op == Op::TrySetIndex) {
-      const Value& z = f.regs[static_cast<size_t>(in.a) + 3];
-      if (!has_tag(fb.key_mask(), y.tag())) return false;
-      if (fb.value_tags != 0 && !has_tag(fb.value_tags, z.tag())) return false;
-      if (const Fault e = index_fault(x, y, true); e != Fault::None) {
-        if (e != Fault::Range || !fb.append() ||
-            y.as_int() != index_bound(x)) {
-          return false;
-        }
-        x.as_array()->items.push_back(z);
-        return true;
-      }
-      if (Value* slot = index_slot(x, y)) {
-        *slot = z;
-        return true;
-      }
-      if (x.is_map() || x.is_object()) {
-        if (!fb.miss_nil() || !meta_slot(x)->is_nil()) return false;
-      }
-      index_set(x, y, z);
-      return true;
+    if (!has_tag(in.op == Op::TryBinary ? fb.tags : fb.key_mask(), y.tag())) {
+      return false;
+    }
+    if (in.op == Op::TryBinary) {
+      const auto op = static_cast<BinOp>(try_op(in.b));
+      if (fb.exact() && inexact(op, x, y)) return false;
+      return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
+             Fault::None;
     }
     if (in.op == Op::TryIndex) {
-      if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (index_fault(x, y) != Fault::None) return false;
       Value& dst = f.regs[static_cast<size_t>(in.a)];
       if (const Value* slot = index_slot(x, y)) {
         dst = *slot;
-        return true;
-      }
-      if (x.is_map() || x.is_object()) {
-        if (!fb.miss_nil() || !meta_slot(x)->is_nil()) return false;
+      } else if (x.is_map() || x.is_object()) {
+        if (!miss_is_vm(fb, x)) return false;
         dst = Value();
-        return true;
+      } else {
+        dst = index_get(x, y);
       }
-      dst = index_get(x, y);
       return true;
     }
-    if (!has_tag(fb.tags, y.tag())) return false;
-    const auto op = static_cast<BinOp>(try_op(in.b));
-    if (exact && inexact(op, x, y)) return false;
-    return binop_fault(op, x, y, f.regs[static_cast<size_t>(in.a)]) ==
-           Fault::None;
+    // TrySetIndex
+    const Value& z = f.regs[static_cast<size_t>(in.a) + 3];
+    if (fb.value_tags != 0 && !has_tag(fb.value_tags, z.tag())) return false;
+    if (const Fault e = index_fault(x, y, true); e != Fault::None) {
+      if (e != Fault::Range || !fb.append() || y.as_int() != index_bound(x)) {
+        return false;
+      }
+      x.as_array()->items.push_back(z);
+    } else if (Value* slot = index_slot(x, y)) {
+      *slot = z;
+    } else if (x.is_map()) {
+      if (!miss_is_vm(fb, x)) return false;
+      x.as_map()->insert_new(y, z);
+    } else if (x.is_object()) {
+      if (!miss_is_vm(fb, x)) return false;
+      x.as_object()->insert_new(y.as_str(), z);
+    } else {
+      index_set(x, y, z);  // an array element in range
+    }
+    return true;
+  }
+
+  // Whether a miss in the map or object `x` is the VM's: the fallback's
+  // flag says a miss reads nil or makes the key (kMissNil), and `x` has no
+  // meta whose protocol -- an __index, a class -- a miss would belong to.
+  static bool miss_is_vm(const Fallback& fb, const Value& x) {
+    return fb.miss_nil() && meta_slot(x)->is_nil();
   }
 
   void dispatch(size_t floor) {
