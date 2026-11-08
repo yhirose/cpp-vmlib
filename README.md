@@ -202,15 +202,13 @@ for one whose functions are static entities with a closure built at every
 call site (the call graph's fixpoint), `set_parent` for nesting learned
 after the fact, and `mark`/`rollback` for a prelude bound once with program
 after program compiled on top of it. `FrameLayout` is the slot
-bookkeeping that goes with it: `alloc_local` for the names, `mark`/
+bookkeeping that goes with it: `alloc_local` for the names, and `mark`/
 `release` so sibling blocks reuse slots and a frame's width is the deepest
-nesting rather than the total number of declarations, and
-`alloc_fresh_local` for a temporary written before expressions emitted
-earlier run -- a released slot could be one of their scopes' own. Its
-`spill_unread` is for a call that reads fewer arguments than it is given,
-a library function lowered by name: every argument still runs, in order,
-the read ones into fresh temporaries that stand in for them, and
-`Builder::sequence` puts those statements ahead of the call.
+nesting rather than the total number of declarations. A value held only
+for one expression needs no slot: `Builder::let` holds it (see `Let`,
+above). `Builder::reading` is for a call that reads fewer arguments than
+it is given, a library function lowered by name: every argument still
+runs, in order, the read ones held by Lets the call reads.
 
 A node reached from two parents is compiled under each, so it runs once per
 parent that runs. `verify()` allows it -- for a read it costs only time --
@@ -313,10 +311,10 @@ kept as the golden (see [Testing](#testing)).
 
 - *An argument the callee never reads still runs* -- every argument, in
   order, when a library function lowered by name reads fewer, and before a
-  call on a nil receiver fails. `spill_unread` and `Builder::sequence`,
-  above, are for this. An argument built and then left out of the call is
-  one no function body reaches, and `--check-effects`, above, reports it;
-  the order is the samples' to pin.
+  call on a nil receiver fails. `Builder::reading` and
+  `Builder::sequence`, above, are for this. An argument built and then
+  left out of the call is one no function body reaches, and
+  `--check-effects`, above, reports it; the order is the samples' to pin.
 - *Each operand runs once.* A `NodeId` used twice -- a receiver for its
   lookup and again for its call, the target of a desugared `x op= y` --
   runs twice, and `--check-effects`, above, reports it.
@@ -325,8 +323,8 @@ kept as the golden (see [Testing](#testing)).
   stores right to left; Python's `t[k] = v` evaluates `v` before `t` and
   `k`; a chained comparison runs an operand only once the link before it
   held; Go runs a struct literal's values in the order they are written.
-  Reordering takes temporaries, and one written before expressions emitted
-  earlier run is `alloc_fresh_local`'s, above.
+  Reordering takes temporaries, which is what `Let` is for: each value
+  runs where the language runs it, and is read where it is used.
 - *Every expression has the language's value.* An assignment, where it is
   an expression, is worth what it stored -- `Assign` is a statement, which
   `verify()` refuses in value position, so the binder stores and reads

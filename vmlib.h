@@ -2223,9 +2223,8 @@ public:
   }
   // `last`, with `first` run before it: a Block when there is anything to
   // run first, and `last` itself when there is not -- so a binder that only
-  // sometimes puts statements ahead of an expression (FrameLayout::
-  // spill_unread's) need not tell the two apart, and the common case
-  // builds what it would have without them.
+  // sometimes puts statements ahead of an expression need not tell the two
+  // apart, and the common case builds what it would have without them.
   NodeId sequence(std::vector<NodeId> first, NodeId last, SrcPos p) {
     if (first.empty()) return last;
     first.push_back(last);
@@ -3255,48 +3254,6 @@ struct FrameLayout {
     const int32_t end = next_local;
     next_local = mark_;
     return end;
-  }
-
-  // A slot above every slot this frame has used, so one no closed scope
-  // handed back. What a temporary needs when it is written and then has to
-  // outlive expressions emitted *before* it was claimed: alloc_local would
-  // reuse a slot a scope inside one of them released, that scope would
-  // write the slot while it runs and clear it on the way out, and the
-  // temporary would be gone. Claiming the temporary before emitting those
-  // expressions avoids the question, where a binder's order allows it.
-  int32_t alloc_fresh_local(const std::string& name) {
-    next_local = high_local;
-    return alloc_local(name);
-  }
-
-  // A call that reads fewer of its arguments than it is given -- a library
-  // function a binder lowers by name to an intrinsic or a helper, which
-  // takes only the ones it reads -- in a language that runs every argument
-  // anyway, in order, before the call. `args` keeps its first `reads`, each
-  // now a fresh local standing in for it (alloc_fresh_local: an argument
-  // after it runs once the local is set, and may hold a scope); the answer
-  // is what to run before the call: every argument, the read ones into
-  // those locals and the rest for their effects alone. Nothing, and `args`
-  // untouched, when none is left over, so that call builds as it would
-  // have without this:
-  //
-  //   const std::vector<NodeId> pre = layout.spill_unread(b, args, 1);
-  //   return b.sequence(pre, b.intrinsic(IntrinsicId::StrLen, {args[0]}));
-  std::vector<NodeId> spill_unread(Builder::At& b, std::vector<NodeId>& args,
-                                   size_t reads) {
-    std::vector<NodeId> pre;
-    if (args.size() <= reads) return pre;
-    for (size_t k = 0; k < args.size(); ++k) {
-      if (k >= reads) {
-        pre.push_back(args[k]);
-        continue;
-      }
-      const int32_t t = alloc_fresh_local("$arg");
-      pre.push_back(b.assign(VarKind::Local, t, args[k]));
-      args[k] = b.varref(VarKind::Local, t);
-    }
-    args.resize(reads);
-    return pre;
   }
 
   // The name table Func::local_names wants: exactly high_local long, which
