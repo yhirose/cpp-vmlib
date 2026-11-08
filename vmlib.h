@@ -2272,6 +2272,28 @@ public:
     }
     return out;
   }
+  // A call that reads fewer of its arguments than it is given -- a
+  // library function a binder lowers by name to an intrinsic or a helper,
+  // which takes only the ones it reads -- in a language that runs every
+  // argument anyway, in order, before the call. The first `reads` are held
+  // by Lets, the rest run for their effects alone, and then `call(read)`
+  // over the values the first ones held. Given no more than it reads, it
+  // is `call(args)`, built as it would have been without this.
+  template <class F>
+  NodeId reading(const std::vector<NodeId>& args, size_t reads, F call,
+                 SrcPos p) {
+    if (args.size() <= reads) return call(args);
+    const std::vector<NodeId> first(args.begin(),
+                                    args.begin() + static_cast<long>(reads));
+    return lets(first, [&](const std::vector<Temp>& t) {
+      std::vector<NodeId> out(args.begin() + static_cast<long>(reads),
+                              args.end());
+      std::vector<NodeId> read;
+      for (const Temp& x : t) read.push_back(x());
+      out.push_back(call(read));
+      return block(out, p);
+    }, p);
+  }
 
   NodeId scope(int32_t first_local, int32_t end_local, NodeId body, SrcPos p) {
     return emit(Tag::Scope, 0, p, first_local, end_local, {body});
@@ -2435,6 +2457,10 @@ public:
     template <class F>
     NodeId lets(const std::vector<NodeId>& inits, F body) {
       return b().lets(inits, body, p_);
+    }
+    template <class F>
+    NodeId reading(const std::vector<NodeId>& args, size_t reads, F call) {
+      return b().reading(args, reads, call, p_);
     }
     NodeId scope(int32_t lo, int32_t hi, NodeId body) {
       return b().scope(lo, hi, body, p_);
