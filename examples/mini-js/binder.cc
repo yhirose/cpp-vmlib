@@ -1876,7 +1876,7 @@ struct Binder {
     const NodeId built = b.block(
         {b.assign(VarKind::Local, kv,
                   read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
-         b.make_if(b.binary(BinOp::Eq, is_kind(b, K, meta, type, kClassKind),
+         b.make_if(b.binary(BinOp::Eq, is_kind(b, kv, meta, type, kClassKind),
                             b.bool_literal(false)),
                    rt.call("$throwtype",
                            {b.str_literal(n + " is not a constructor")}, p),

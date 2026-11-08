@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <string>
@@ -90,15 +91,31 @@ inline NodeId of_kind(FuncWriter& w, NodeId obj, const std::string& kind,
   return of_kind(w.b, obj, kind, state);
 }
 
-// Whether `v` carries a kind record of `kind`: any value can be asked, and
-// one that is no Object, or whose meta is no kind record of a kind's name,
-// is of none -- anything but an Object is answered by its first test,
-// which on the paths that ask of every number (`$add`'s "is this a
-// tuple") is the whole cost. The meta, and its head, are each read once,
-// into the two locals `m` and `h` the caller lends.
-inline NodeId is_kind(coreir::Builder::At& b, NodeId v, int32_t m, int32_t h,
+// The temporaries the parts below write and read inside one expression --
+// a value's meta, and its head -- are slots of their own, neither each
+// other nor the value's, which is read again after they are written. A
+// part checks this of the slots it is handed; FuncWriter::scratch says
+// why nothing else can make two uses of one temporary overlap.
+inline void check_scratch(std::initializer_list<int32_t> slots) {
+  for (auto i = slots.begin(); i != slots.end(); ++i) {
+    for (auto j = std::next(i); j != slots.end(); ++j) {
+      if (*i == *j) {
+        coreir_rt::fail("runtime_parts: a temporary shares a slot", 0, 0);
+      }
+    }
+  }
+}
+
+// Whether the local `v` carries a kind record of `kind`: any value can be
+// asked, and one that is no Object, or whose meta is no kind record of a
+// kind's name, is of none -- anything but an Object is answered by its
+// first test, which on the paths that ask of every number (`$add`'s "is
+// this a tuple") is the whole cost. The meta, and its head, are each read
+// once, into the locals `m` and `h` the caller lends.
+inline NodeId is_kind(coreir::Builder::At& b, int32_t v, int32_t m, int32_t h,
                       const std::string& kind) {
   using coreir::VarKind;
+  check_scratch({v, m, h});
   const auto is = [&](NodeId x, const char* type) {
     return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {x}),
                     b.str_literal(type));
@@ -106,9 +123,10 @@ inline NodeId is_kind(coreir::Builder::At& b, NodeId v, int32_t m, int32_t h,
   const auto L = [&](int32_t i) { return b.varref(VarKind::Local, i); };
   const NodeId no = b.bool_literal(false);
   return b.make_if(
-      is(v, "object"),
+      is(L(v), "object"),
       b.block(
-          {b.assign(VarKind::Local, m, b.intrinsic(IntrinsicId::MetaGet, {v})),
+          {b.assign(VarKind::Local, m,
+                    b.intrinsic(IntrinsicId::MetaGet, {L(v)})),
            b.make_if(is(L(m), "array"),
                      b.block({b.assign(VarKind::Local, h,
                                        b.index(L(m), b.literal(0))),
@@ -121,7 +139,7 @@ inline NodeId is_kind(coreir::Builder::At& b, NodeId v, int32_t m, int32_t h,
 }
 inline NodeId is_kind(FuncWriter& w, FuncWriter::Slot v,
                       const std::string& kind) {
-  return is_kind(w.b, w.L(v), w.local("$meta").i, w.local("$type").i, kind);
+  return is_kind(w.b, v.i, w.scratch("$meta").i, w.scratch("$type").i, kind);
 }
 
 // Element `i` of the kind record `v` carries, read and written.
@@ -197,9 +215,10 @@ inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
 // is an instance, as only an Object has a kind record (is_kind), so any
 // other value -- a receiver of a builtin type, the common case in a
 // method call -- is answered by its one type test. The meta is read once,
-// into a local of the writer's.
+// into a scratch local of the writer's.
 inline NodeId instance_class(FuncWriter& w, FuncWriter::Slot v) {
-  const auto m = w.local("$meta");
+  const auto m = w.scratch("$meta");
+  check_scratch({v.i, m.i});
   return w.iff(
       w.is(w.typ(v), "object"),
       w.blk({w.set(m, w.meta(w.L(v))),
@@ -292,10 +311,11 @@ inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
 
 // Whether `v` is an exception: a builtin one, or an instance of a
 // program's class that keeps a message. The meta and its head are each
-// read once, into locals of the writer's.
+// read once, into scratch locals of the writer's.
 inline NodeId is_exception(FuncWriter& w, FuncWriter::Slot v) {
-  const auto m = w.local("$meta");
-  const auto h = w.local("$type");
+  const auto m = w.scratch("$meta");
+  const auto h = w.scratch("$type");
+  check_scratch({v.i, m.i, h.i});
   return w.both(
       w.is(w.typ(v), "object"),
       w.blk({w.set(m, w.meta(w.L(v))),

@@ -1568,7 +1568,7 @@ struct Binder {
     const NodeId body = b.call_value(emit_form(*a.nodes[1], ctx),
                                      {b.make_closure(rt.func("$escape"), cm)});
     const NodeId mine = b.make_if(
-        is_kind(b, E, meta, type, kEscapeKind),
+        is_kind(b, exc, meta, type, kEscapeKind),
         b.intrinsic(IntrinsicId::Same, {kind_field(b, E, kEscapeTag), TAG}),
         b.bool_literal(false));
     const NodeId handler = b.make_if(mine, kind_field(b, E, kEscapeValue),
@@ -1644,7 +1644,7 @@ struct Binder {
       const NodeId E = b.varref(VarKind::Local, slot);
       stmts.push_back(b.make_try(
           slot, value,
-          b.make_if(is_kind(b, E, meta, type, kEscapeKind),
+          b.make_if(is_kind(b, slot, meta, type, kEscapeKind),
                     b.make_throw(b.str_literal(
                         "call/cc: a continuation was invoked after the "
                         "call/cc that made it had already returned. This "
