@@ -388,6 +388,11 @@ struct Binder {
     return names;
   }
 
+  // A key a table takes as it is: `$key` leaves an int, a string and a
+  // bool alone, normalises a float that is a whole number, and a nil or a
+  // NaN is no key.
+  static uint32_t lua_keys() { return tags_named({"int", "string", "bool"}); }
+
   // Lua's rules that are the VM's own operation on some values: the VM's
   // answer where the two agree, the helper's on the rest (runtime_parts.h's
   // Operators).
@@ -406,6 +411,11 @@ struct Binder {
   //                  for __eq.
   //   $one           the first of a call's results, Index's on an array
   //                  that has one and $one's nil on an empty one.
+  //   $get $set      `t[k]` and `t[k] = v` on a table, by a key `$key`
+  //                  leaves alone (lua_keys): a key the table has, and a
+  //                  miss when it has no metatable (kMissNil; with one the
+  //                  miss is __index's or __newindex's), and a store of
+  //                  anything but nil, which removes the key.
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth, nil_false_tags())},
@@ -415,7 +425,10 @@ struct Binder {
         {"$div", VmOp::binary(BinOp::Div, tags_named("double"))},
         {"$cat", VmOp::binary(BinOp::Add, tags_named("string"))},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
-        {"$one", VmOp::index(tags_named({"array", "int"}))},
+        {"$one", VmOp::index(tags_named("array"), 0, tags_named("int"))},
+        {"$get", VmOp::index(tags_named("map"), kMissNil, lua_keys())},
+        {"$set", VmOp::set_index(tags_named("map"), kMissNil, lua_keys(),
+                                 kAllTags & ~tags_named("nil"))},
     };
   }
 
@@ -1231,13 +1244,13 @@ struct Binder {
       for (size_t i = 0; i < a.nodes.size(); ++i) {
         const Ast& f = *a.nodes[i];
         if (f.tag == "keyedfield"_) {
-          out.push_back(rt.call("$set",
+          out.push_back(ops.call("$set",
                                 {T(), emit_expr(*f.nodes[0], ctx),
                                  emit_expr(*f.nodes[1], ctx)},
                                 p));
         } else if (f.tag == "namedfield"_) {
           const std::string name(f.nodes[0]->token);
-          out.push_back(rt.call(
+          out.push_back(ops.call(
               "$set", {T(), b.str_literal(name), emit_expr(*f.nodes[1], ctx)},
               p));
         } else if (i + 1 == a.nodes.size()) {
@@ -1247,10 +1260,10 @@ struct Binder {
           const Val v = emit_val(f, ctx);
           out.push_back(
               v.multi ? rt.call("$spread", {T(), b.literal(next), v.n}, p)
-                      : rt.call("$set", {T(), b.literal(next++), v.n}, p));
+                      : ops.call("$set", {T(), b.literal(next++), v.n}, p));
         } else {
           out.push_back(
-              rt.call("$set", {T(), b.literal(next++), emit_expr(f, ctx)}, p));
+              ops.call("$set", {T(), b.literal(next++), emit_expr(f, ctx)}, p));
         }
       }
       out.push_back(T());
@@ -1275,13 +1288,13 @@ struct Binder {
           cur.multi ? one(cur.n, p) : cur.n;
       switch (sfx.tag) {
         case "dotsfx"_:
-          cur = {rt.call("$get",
+          cur = {ops.call("$get",
                          {recv, b.str_literal(std::string(sfx.nodes[0]->token),
                                               p)},
                          p)};
           break;
         case "indexsfx"_:
-          cur = {rt.call("$get",
+          cur = {ops.call("$get",
                          {recv, emit_expr(*sfx.nodes[0], ctx)}, p)};
           break;
         case "callsfx"_: {
@@ -1317,7 +1330,7 @@ struct Binder {
           cur = {b.let(recv,
                        [&](auto self) {
                          return call_any(
-                             rt.call("$get", {self(), b.str_literal(name, p)},
+                             ops.call("$get", {self(), b.str_literal(name, p)},
                                      p),
                              {self()}, args, p);
                        },
@@ -1802,7 +1815,7 @@ struct Binder {
             out.push_back(b.assign(VarKind::Local, iv, b.literal(1)));
             // Each element, held by a Let for its test and its binding.
             const NodeId body =
-                b.let(rt.call("$get", {table(), I()}, p), [&](auto e) {
+                b.let(ops.call("$get", {table(), I()}, p), [&](auto e) {
                   return b.block(
                       {b.make_if(
                            b.binary(BinOp::Eq,
@@ -1831,7 +1844,7 @@ struct Binder {
                            {b.assign(VarKind::Local, ix,
                                      b.binary(BinOp::Add, X(), b.literal(1))),
                             step(key(), [&] {
-                              return rt.call("$get", {table(), key()}, p);
+                              return ops.call("$get", {table(), key()}, p);
                             })});
                      })});
                 return b.block(
@@ -1913,11 +1926,11 @@ struct Binder {
     }
     NodeId recv = emit_expr(*nm.nodes[0], ctx);
     for (size_t i = 1; i + 1 < nm.nodes.size(); ++i) {
-      recv = rt.call(
+      recv = ops.call(
           "$get",
           {recv, b.str_literal(std::string(nm.nodes[i]->nodes[0]->token))}, p);
     }
-    return rt.call(
+    return ops.call(
         "$set",
         {recv, b.str_literal(std::string(nm.nodes.back()->nodes[0]->token)),
          fn},
@@ -1961,7 +1974,7 @@ struct Binder {
         out.push_back(
             ts[k].ident != nullptr
                 ? emit_store(*ts[k].ident, value, ctx, p)
-                : rt.call("$set",
+                : ops.call("$set",
                           {held[at[k]](), held[at[k] + 1](), value}, p));
       }
       return b.block(out);
@@ -2021,7 +2034,7 @@ struct Binder {
     const Val recv = emit_suffixed(target, target.nodes.size() - 1, ctx);
     const NodeId R =
         recv.multi ? one(recv.n, p) : recv.n;
-    return rt.call("$set", {R, key, value}, p);
+    return ops.call("$set", {R, key, value}, p);
   }
 
   // -- One function's body -------------------------------------------------
