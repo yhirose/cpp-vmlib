@@ -1381,12 +1381,13 @@ inline constexpr bool can_be_exact(UnOp op) { return op == UnOp::Neg; }
 // the tags (vm::Op::TypeIn, vm::Op::SameType). A TypeOf stored in a
 // variable and compared later does build one, and so does each literal it
 // is compared to.
-// The numeric conversions and the two float operations a front end cannot
+// The numeric conversions and the float operation a front end cannot
 // write in-language: ToInt truncates a double toward zero (and traps on
 // NaN, an infinity, or a value outside int64's range); ToDouble widens an
-// int; Pow is std::pow over doubles. (fmod is BinOp::Mod on a double.) Integer
-// exponentiation is deliberately absent -- a loop over wrapping Mul writes
-// it in-language, in whatever overflow discipline the language wants.
+// int; Pow is std::pow over doubles. (fmod is BinOp::Mod on a double.)
+// Integer exponentiation is deliberately absent -- a loop over wrapping
+// Mul writes it in-language, in whatever overflow discipline the language
+// wants.
 enum class IntrinsicId : uint8_t {
   Print, ReadInt, Len, ToStr, TypeOf, ToInt, ToDouble, Pow,
   // Print without the trailing newline, through coreir_rt_out_raw. The value
