@@ -402,8 +402,9 @@ struct Binder {
   //   $add $subm     `+`, `-` and `*` on two numbers, integers wrapping
   //   $mulm          and a float on either side making a float, as Lua's
   //                  do; anything else looks for a metamethod.
-  //   $idiv $mod     `//` and `%` on two integers, Lua's own floor; a float
-  //                  or a zero divisor is the helper's.
+  //   $idiv $mod     `//` and `%` on two numbers, Lua's own floor, a float
+  //                  on either side making a float and a zero float divisor
+  //                  inf or nan; an integer zero divisor is the helper's.
   //   $div           `/` on two floats, IEEE as Lua's is; an integer,
   //                  which `/` makes a float first, is $div's.
   //   $cat           `..` on two strings; a number, written the way
@@ -413,14 +414,13 @@ struct Binder {
   //   $one           the first of a call's results, Index's on an array
   //                  that has one and $one's nil on an empty one.
   static Operators::Table operators() {
-    const uint32_t ints = tags_named("int");
     return {
         {"$truthy", VmOp::unary(UnOp::Truth, nil_false_tags())},
         {"$add", VmOp::binary(BinOp::Add, number_tags())},
         {"$subm", VmOp::binary(BinOp::Sub, number_tags())},
         {"$mulm", VmOp::binary(BinOp::Mul, number_tags())},
-        {"$idiv", VmOp::binary(BinOp::FloorDiv, ints)},
-        {"$mod", VmOp::binary(BinOp::FloorMod, ints)},
+        {"$idiv", VmOp::binary(BinOp::FloorDiv, number_tags())},
+        {"$mod", VmOp::binary(BinOp::FloorMod, number_tags())},
         {"$div", VmOp::binary(BinOp::Div, tags_named("double"))},
         {"$cat", VmOp::binary(BinOp::Add, tags_named("string"))},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
@@ -488,37 +488,24 @@ struct Binder {
 
   // Lua's `%` and `//` floor; C's (and BinOp::Mod's, and BinOp::Div's on
   // two ints) truncate toward zero. `-7 % 3` is 2 here and -1 there, and
-  // `-7 // 2` is -4 here and -3 there. On two integers that is
-  // BinOp::FloorMod and BinOp::FloorDiv, which the operators in the
-  // program are (Binder::floor), with these behind them for a float and a
-  // zero divisor.
+  // `-7 // 2` is -4 here and -3 there. On two numbers that is
+  // BinOp::FloorMod and BinOp::FloorDiv, a float's as well as an
+  // integer's, which the operators in the program are (Binder::operators).
+  // These behind them see only what those refuse -- an integer zero
+  // divisor, the least integer over -1, a value that is no number -- and
+  // refuse it too, in the operator's words: Lua's own (an error, a
+  // wrapped quotient, arithmetic on a string) are not this subset's.
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto [f] = r.locals("f");
-    r.add(r.iff(
-        r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
-        r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
-    // The float path: fmod, corrected when the signs disagree.
-    r.add(r.set(f, r.in(IntrinsicId::FMod, {r.L(a), r.L(b)})));
-    r.add(r.iff(r.b.make_if(r.bin(BinOp::Ne, r.L(f), r.D(0.0)),
-                            r.bin(BinOp::Lt, r.bin(BinOp::Mul, r.L(f), r.L(b)),
-                                  r.D(0.0)),
-                            r.Bo(false)),
-                r.set(f, r.bin(BinOp::Add, r.L(f), r.L(b)))));
-    r.add(r.ret(r.L(f)));
+    r.add(r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b))));
     r.finish("$mod");
   }
 
   void rt_idiv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(
-        r.b.make_if(r.is(r.typ(a), "int"), r.is(r.typ(b), "int"), r.Bo(false)),
-        r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
-    r.add(r.ret(
-        r.nat("floor", {r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {r.L(a)}),
-                              r.in(IntrinsicId::ToDouble, {r.L(b)}))})));
+    r.add(r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b))));
     r.finish("$idiv");
   }
 

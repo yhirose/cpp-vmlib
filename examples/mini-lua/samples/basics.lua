@@ -6,8 +6,18 @@ print(1 + 2 * 3, 7 - 2, 3 * 4)
 -- `/` is always a float, `//` floors, and `%` follows `//`. BinOp::Div on
 -- two ints truncates and BinOp::Mod is C's, so both of these are
 -- BinOp::FloorDiv and BinOp::FloorMod, with a func this front end writes
--- behind them for a float and a zero divisor.
+-- behind them for a zero divisor.
 print(7 / 2, 7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)
+-- A float on either side floors too, and the answer is a float: the
+-- quotient of the rounded division, the remainder on the divisor's side
+-- (a zero one on the dividend's, and a tiny one whose product with the
+-- divisor underflows all the same), and a zero divisor's inf or nan.
+print(7.5 // 2, -7.5 // 2, 7 // 2.5, 1 // 0.2, 7.5 // 0, -7.5 // 0)
+print(7.5 % 2, -7.5 % 2, 7 % 2.5, 7.5 % -2, -4.0 % 2, 4.0 % -2)
+print(1e-320 % -1e-10)
+-- A nan is asked about rather than printed: Lua spells it as the C
+-- library does, "-nan" on one machine and "nan" on another.
+print(7.5 % 0 ~= 7.5 % 0)
 -- Which way to round is the signs' to say, not their product's, which
 -- wraps past 2^63.
 print(-3 % 4611686018427387904, -3 // 4611686018427387904)
