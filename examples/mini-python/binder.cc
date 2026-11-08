@@ -808,8 +808,8 @@ struct Binder {
   //
   //   $truthy         a condition: None, a bool, a number and a function
   //                   are false or true as Value::truthy() says; a string,
-  //                   a list and a dict, false when empty, and an object,
-  //                   which may say for itself, are $truthy's.
+  //                   a list, a dict and a tuple (an object here), false
+  //                   when empty, and any other object are $truthy's.
   //   $add $sub $mul  `+`, `-` and `*` on two numbers, and `+` on two
   //   $neg            strings, and `-x` on a number -- an int answer
   //                   exactly, since one that would wrap goes to the limbs
@@ -1484,6 +1484,10 @@ struct Binder {
         r.either(r.is(r.typ(v), "string"),
                  r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "map"))),
         r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0)))));
+    // A tuple is an object here, false when empty as a list is.
+    r.add(r.iff(r.call("$istup", {r.L(v)}),
+                r.ret(r.bin(BinOp::Gt, r.len(r.call("$untup", {r.L(v)})),
+                            r.I(0)))));
     r.add(r.ret(r.Bo(true)));
     r.finish("$truthy");
   }

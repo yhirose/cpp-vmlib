@@ -23,17 +23,17 @@ print(str(1), str(1.0), str(10 / 2), str(0.1 + 0.2), str(None), str(True))
 print(type(1).__name__, type(1.0).__name__, type("s").__name__)
 print(type([]).__name__, type({}).__name__, type(None).__name__)
 
-# Truthiness: 0, "", [], {} and None are false. Value::truthy() agrees
-# about the first and the last and disagrees about the middle three, which
+# Truthiness: 0, "", [], {}, () and None are false. Value::truthy() agrees
+# about the first and the last and disagrees about the middle four, which
 # its own comment gives as the reason it will not decide.
 def t(v):
     if v:
         return "T"
     return "F"
 
-print(t(0), t(""), t([]), t({}), t(None), t(False))
-print(t(1), t("x"), t([0]), t({"a": 1}), t(True), t(0.5))
-print(not 0, not 1, not "", not [1])
+print(t(0), t(""), t([]), t({}), t(()), t(None), t(False))
+print(t(1), t("x"), t([0]), t({"a": 1}), t((0,)), t(True), t(0.5))
+print(not 0, not 1, not "", not [1], not (), bool(()), bool((0,)))
 
 # `==` across two types is False rather than an error.
 print(1 == 1.0, 1 == "1", "a" == "a", None == False, [1] == [1])

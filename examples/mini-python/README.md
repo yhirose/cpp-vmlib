@@ -249,9 +249,9 @@ continues the logical line, and a `#` or a bracket inside a string is text.
 
 ## What Python does not share with the VM's defaults
 
-* **Truthiness.** `0`, `""`, `[]`, `{}` and `None` are false.
+* **Truthiness.** `0`, `""`, `[]`, `{}`, `()` and `None` are false.
   `Value::truthy()` agrees about the first and the last and calls the
-  middle three true -- which its own comment gives as the reason it refuses
+  middle four true -- which its own comment gives as the reason it refuses
   to decide.
 * **`//` and `%` floor**, where `BinOp::Div` truncates and `BinOp::Mod` is
   C's -- on two ints they are `BinOp::FloorDiv` and `BinOp::FloorMod`,
