@@ -82,6 +82,9 @@ endfunction()
 #                     in its words, or PL/0's errors at run time -- as
 #                     errors/expected/ holds each case's report
 #                     (test/run_errors.cmake).
+#   <prefix>shapes    Only with a shapes/ directory: what a case compiles
+#                     to holds each text the number of times
+#                     shapes/expected/ lists (test/run_shapes.cmake).
 #   <prefix>effects   Nothing a program could observe is evaluated twice
 #                     (coreir::shared_effects) or built and dropped
 #                     (coreir::dropped_effects): every sample, uncaught
@@ -124,6 +127,11 @@ function(front_end_tests prefix target)
     add_test(NAME ${prefix}errors
              COMMAND ${run} -DDIR=${arg_DIR}/errors
                      -P ${scripts}/run_errors.cmake)
+  endif()
+  if(EXISTS ${arg_DIR}/shapes)
+    add_test(NAME ${prefix}shapes
+             COMMAND ${run} -DDIR=${arg_DIR}/shapes
+                     -P ${scripts}/run_shapes.cmake)
   endif()
   add_test(NAME ${prefix}effects
            COMMAND ${run} -DSRC=${arg_DIR} ${lead}
