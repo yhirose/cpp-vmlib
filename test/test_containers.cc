@@ -1001,6 +1001,100 @@ int main() {
     check_eq(joined(), "W|1|2|W|2|W|2|W|2|2|", "kAppend");
   }
 
+  // kIntegralKey: a double that holds an integer in int64's range is that
+  // int, as a key, before the key set judges it and the fallback sees it;
+  // anything else -- a fraction, a double past int64, NaN -- stays a double
+  // and NaN is never the VM's. The fallback answers the type of the key it
+  // was given, so the cases tell the VM's answer from the fallback's, and
+  // an int key from a double one.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 2, 0, NodeId{}, {"xs", "mp"}, {}});
+    Func rd{"read", 2, 0, NodeId{}, {"r", "k"}, {}};
+    rd.num_params = 2;
+    rd.lenient_arity = true;
+    rd.body = b.make_return(
+        b.intrinsic(IntrinsicId::TypeOf, {b.varref(VarKind::Local, 1, p)}, p),
+        p);
+    m.funcs.push_back(rd);
+    Func wr{"write", 3, 0, NodeId{}, {"r", "k", "v"}, {}};
+    wr.num_params = 3;
+    wr.lenient_arity = true;
+    wr.body = b.intrinsic(
+        IntrinsicId::Print,
+        {b.intrinsic(IntrinsicId::TypeOf, {b.varref(VarKind::Local, 1, p)}, p)},
+        p);
+    m.funcs.push_back(wr);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    const NodeId mp = b.varref(VarKind::Local, 1, p);
+    const auto D = [&](double v) { return b.double_literal(v, p); };
+    const auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const uint32_t kList = tags_named({"array", "map"});
+    const auto get = [&](NodeId r, NodeId k, int32_t flags, uint32_t keys) {
+      return print(b.index(r, k,
+                           {b.make_closure(1, 0, p), kList, flags, keys}, p));
+    };
+    const auto put = [&](NodeId r, NodeId k, int32_t flags, uint32_t keys) {
+      return b.set_index(r, k, b.literal(9, p),
+                         {b.make_closure(2, 0, p), kList, flags, keys}, p);
+    };
+    const int32_t kI = kIntegralKey | kAppend | kMissNil;
+    const int32_t kG = kIntegralKey | kMissNil;  // Index has no kAppend
+    const uint32_t kInt = tags_named("int");
+    std::vector<NodeId> body{
+        b.assign(VarKind::Local, 0,
+                 b.array_lit({b.literal(10, p), b.literal(20, p),
+                              b.literal(30, p)},
+                             p),
+                 p),
+        b.assign(VarKind::Local, 1, b.intrinsic(IntrinsicId::MapNew, {}, p),
+                 p),
+        // 1.0 and -0.0 are elements; 2^53 is an int the fallback gets; 2^63,
+        // a fraction and NaN stay doubles; and without the flag 1.0 is one.
+        get(xs, D(1.0), kG, kInt), get(xs, D(-0.0), kG, kInt),
+        get(xs, D(9007199254740992.0), kG, kInt),
+        get(xs, D(9223372036854775808.0), kG, kInt), get(xs, D(1.5), kG, kInt),
+        get(xs, D(std::nan("")), kG, kInt), get(xs, D(1.0), kMissNil, kInt),
+        print(b.literal(0, p)),
+        // A store: 3.0 is the length, so it appends under kAppend; 1.0 is
+        // in range; 5.0 is past it; NaN and a fraction are the fallback's.
+        put(xs, D(3.0), kI, kInt), put(xs, D(1.0), kI, kInt),
+        put(xs, D(5.0), kI, kInt), put(xs, D(std::nan("")), kI, kInt),
+        put(xs, D(1.5), kI, kInt),
+        print(b.intrinsic(IntrinsicId::Len, {xs}, p)), print(b.index(xs, b.literal(1, p), p)),
+        print(b.literal(0, p)),
+        // A map: 2.0 makes the int key 2, 1.5 a double key, NaN is the
+        // fallback's for a read and a write alike.
+        put(mp, D(2.0), kI, kInt | tags_named("double")),
+        put(mp, D(1.5), kI, kInt | tags_named("double")),
+        put(mp, D(std::nan("")), kI, kInt | tags_named("double")),
+        get(mp, D(2.0), kG, kInt | tags_named("double")),
+        get(mp, D(1.5), kG, kInt | tags_named("double")),
+        get(mp, D(std::nan("")), kG, kInt | tags_named("double")),
+        print(b.intrinsic(IntrinsicId::Len, {mp}, p)),
+        print(b.index(mp, b.literal(2, p), p)),
+        print(b.literal(0, p)),
+        // A held key is not changed by the Try that normalised its copy.
+        b.at(p).let(D(1.0), [&](auto k) {
+          return b.block({get(xs, k(), kG, kInt),
+                          print(b.intrinsic(IntrinsicId::TypeOf, {k()}, p))},
+                         p);
+        })};
+    m.funcs[0].body = b.scope(0, 2, b.block(body, p), p);
+    check_eq(run_module(m, "kIntegralKey"), "",
+             "kIntegralKey: unexpected failure");
+    check_eq(joined(),
+             "20|10|int|double|double|double|double|0|"
+             "int|double|double|4|9|0|"
+             "double|9|9|double|2|9|0|"
+             "9|double|",
+             "kIntegralKey");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;

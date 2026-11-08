@@ -1414,13 +1414,24 @@ inline constexpr int32_t kMissNil = 2;
 // IndexError, C#'s and culebra's.
 inline constexpr int32_t kAppend = 4;
 
+// kIntegralKey (Index and SetIndex): the key operand is normalised before
+// anything else, on the VM's path and the fallback's alike: a Double that
+// holds an integer in int64's range becomes that int (-0.0 the int 0), as
+// Lua's `t[1.0]` is `t[1]` and JavaScript's `a[1.0]` is `a[1]`. A fraction,
+// an infinity and a double past int64 stay doubles, for the key set to
+// judge; NaN is always the fallback's. A language where `a[1.0]` is an
+// error (Python, C#) or truncates (Ruby) leaves it clear.
+inline constexpr int32_t kIntegralKey = 8;
+
 // Every flag there is, and a flag's word.
-inline constexpr int32_t kKnownFlags = kExact | kMissNil | kAppend;
+inline constexpr int32_t kKnownFlags =
+    kExact | kMissNil | kAppend | kIntegralKey;
 inline constexpr const char* flag_name(int32_t flag) {
   return flag == kExact     ? "exact"
          : flag == kMissNil ? "missnil"
          : flag == kAppend  ? "append"
-                            : "flagged";
+         : flag == kIntegralKey ? "integralkey"
+                                : "flagged";
 }
 
 // The signed divisions: the operators a zero divisor makes untrue, and
@@ -1447,9 +1458,9 @@ inline constexpr int32_t allowed_flags(Tag t, uint8_t op) {
     case Tag::Binary:
       return can_be_exact(static_cast<BinOp>(op)) ? kExact : 0;
     case Tag::Index:
-      return kMissNil;
+      return kMissNil | kIntegralKey;
     case Tag::SetIndex:
-      return kMissNil | kAppend;
+      return kMissNil | kAppend | kIntegralKey;
     default:
       return 0;
   }
@@ -2040,6 +2051,7 @@ struct Fallback {
   bool exact() const { return (flags & kExact) != 0; }
   bool miss_nil() const { return (flags & kMissNil) != 0; }
   bool append() const { return (flags & kAppend) != 0; }
+  bool integral_key() const { return (flags & kIntegralKey) != 0; }
   uint32_t key_mask() const { return key_tags != 0 ? key_tags : tags; }
 };
 
@@ -4276,6 +4288,19 @@ VMLIB_INLINE Value index_get(const Value& recv, const Value& key) {
   }
   const Value* v = recv.as_object()->find(key.as_str());
   return v ? *v : Value();
+}
+
+// kIntegralKey's normalisation, in place: false for the one key it refuses,
+// NaN, and true otherwise, the key an int if it was a double holding one.
+VMLIB_INLINE bool integral_key(Value& key) {
+  if (!key.is_double()) return true;
+  const double d = key.as_double();
+  if (std::isnan(d)) return false;
+  if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+      d == std::trunc(d)) {
+    key = Value::make_int(static_cast<int64_t>(d));
+  }
+  return true;
 }
 
 // The slot a key names in a map or an object, or null for a miss -- and for
@@ -10101,7 +10126,8 @@ struct Exec {
       f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
       return true;
     }
-    const Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    Value& y = f.regs[static_cast<size_t>(in.a) + 2];
+    if (fb.integral_key() && !integral_key(y)) return false;
     if (!has_tag(in.op == Op::TryBinary ? fb.tags : fb.key_mask(), y.tag())) {
       return false;
     }
