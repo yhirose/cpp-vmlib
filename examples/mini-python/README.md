@@ -54,15 +54,21 @@ and `$mul` the same exact operator stands before `$bigadd` and `$bigmul`.
 That is what keeps a loop counter a loop counter, at the cost of one
 instruction rather than a call. The VM answers the same way for two floats
 or a float and an int, for `+` on two strings, for an ordering of two ints
-or two strings, for `==` on None, bools, ints and strings, for `-x`, and
-for the truth of anything but a string, a list, a dict or an object;
+or two strings, for `==` on None, bools, ints and strings, for `-x`, for
+`//` and `%` on two ints and `/` on two floats (exact too, so a zero
+divisor is the helper's, which raises ZeroDivisionError), and for the
+truth of anything but a string, a list, a dict or an object;
 everything else is the helper's, as it always was.
 
-**The demotion rule.** `$mkbig` strips leading zero limbs and, at two limbs
-or fewer, hands back an ordinary `Int` -- 10^18 fits an int64 with room to
-spare. Without it every result of a big operation would stay big forever,
-and `big - (big - 7)` would be a heap object holding 7. `samples/bignums.py`
-asks `type(...).__name__` about exactly that.
+**The demotion rule.** `$mkbig` strips leading zero limbs and hands back an
+ordinary `Int` for whatever fits an int64 -- a magnitude under 2^63, or 2^63
+itself when negative -- so an integer has one representation: `-2**63` is
+the least int, equal to it and its `%` an int's. Without it every result of
+a big operation would stay big forever, and `big - (big - 7)` would be a
+heap object holding 7. `samples/bignums.py` asks `type(...).__name__` about
+exactly that. The least int's own negation, and its quotient by -1, go
+the other way: `-x` and `x // -1` are exact (vmlib.h's `kExact`), so the
+VM's wrapped answer falls back to the limbs.
 
 A literal too wide for an int64 is built at bind time, by long-dividing its
 decimal digits by 10^9 -- the same base the runtime works in, so the

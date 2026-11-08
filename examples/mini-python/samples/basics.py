@@ -14,6 +14,14 @@ print(-3 % 4611686018427387904, -3 // 4611686018427387904)
 print(7.5 // 2, -7.5 // 2, 7 // 2.5, 1 // 0.2, 68.2 // 2.8, -0.5 // -2)
 print(7.5 % 2, -7.5 % 2, 7 % 2.5, 7.5 % -2, -4.0 % 2, 4.0 % -2)
 print(1 % 0.2, 1e-320 % -1e-10)
+# The least int: its negation, its quotient by -1 and its product with -1
+# grow past int64, and -2**63 is that same int, not a bignum beside it.
+least = -9223372036854775807 - 1
+print(-least, least // -1, least * -1, 0 - least, abs(least), least % -1)
+print(-2**63 == least, type(-2**63).__name__, (-2**63) % -1)
+# `/` raises for a zero divisor, but a quotient past the largest float,
+# over a nonzero one, is inf.
+print(7.5 / 2, 1e308 / 1e-10)
 # `/` is always a float, even on two ints.
 print(7 / 2, 6 / 3, 1 / 4)
 print(-3, - -3, abs(-5), abs(5))
