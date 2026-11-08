@@ -1499,12 +1499,13 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [i, ks, k, f_] = r.locals("i", "ks", "k", "f");
-    const auto numeric = [&](NodeId t, NodeId v) {
-      return r.either(r.is(t, "int"),
-                      r.either(r.is(t, "double"), r.call("$isbig", {v})));
+    const auto numeric = [&](FuncWriter::Slot v) {
+      return r.either(r.is(r.typ(v), "int"),
+                      r.either(r.is(r.typ(v), "double"),
+                               r.call("$isbig", {r.L(v)})));
     };
     r.add(r.iff(
-        r.both(numeric(r.typ(a), r.L(a)), numeric(r.typ(b), r.L(b))),
+        r.both(numeric(a), numeric(b)),
         r.ret(r.bin(BinOp::Eq, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0)))));
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
@@ -1627,10 +1628,12 @@ struct Binder {
     const auto put = [&](NodeId x) {
       return r.set(out, r.bin(BinOp::Add, r.L(out), x));
     };
-    const NodeId hex = r.S("0123456789abcdef");
     const auto digit = [&](NodeId d) {
-      return r.in(IntrinsicId::StrSlice,
-                  {hex, d, r.bin(BinOp::Add, d, r.I(1))});
+      return r.let(d, [&](auto x) {
+        return r.in(IntrinsicId::StrSlice,
+                    {r.S("0123456789abcdef"), x(),
+                     r.bin(BinOp::Add, x(), r.I(1))});
+      });
     };
     r.add(r.set(q, r.S("'")));
     r.add(
@@ -2738,12 +2741,16 @@ struct Binder {
     const auto [s, mode, chars] = r.params("s", "mode", "chars");
     const auto [i, j] = r.locals("i", "j");
     const auto ch = [&](NodeId i) {
-      return r.in(IntrinsicId::StrSlice,
-                  {r.L(s), i, r.bin(BinOp::Add, i, r.I(1))});
+      return r.let(i, [&](auto x) {
+        return r.in(IntrinsicId::StrSlice,
+                    {r.L(s), x(), r.bin(BinOp::Add, x(), r.I(1))});
+      });
     };
     const auto strips = [&](NodeId c) {
-      return r.iff(r.is(r.typ(chars), "nil"), r.call("$isspace", {c}),
-                   r.call("$in", {c, r.L(chars)}));
+      return r.let(c, [&](auto x) {
+        return r.iff(r.is(r.typ(chars), "nil"), r.call("$isspace", {x()}),
+                     r.call("$in", {x(), r.L(chars)}));
+      });
     };
     r.add(r.iff(r.both(r.isnt(r.typ(chars), "nil"),
                        r.isnt(r.typ(chars), "string")),
@@ -3057,13 +3064,17 @@ struct Binder {
         r.locals("s", "fill", "align", "i", "rest", "t", "half", "w", "pad",
                  "dot", "prec");
     const auto ch = [&](NodeId str, NodeId i) {
-      return r.in(IntrinsicId::StrSlice,
-                  {str, i, r.bin(BinOp::Add, i, r.I(1))});
+      return r.let(i, [&](auto x) {
+        return r.in(IntrinsicId::StrSlice,
+                    {str, x(), r.bin(BinOp::Add, x(), r.I(1))});
+      });
     };
     const auto is_align = [&](NodeId c) {
-      return r.either(r.bin(BinOp::Eq, c, r.S("<")),
-                      r.either(r.bin(BinOp::Eq, c, r.S(">")),
-                               r.bin(BinOp::Eq, c, r.S("^"))));
+      return r.let(c, [&](auto x) {
+        return r.either(r.bin(BinOp::Eq, x(), r.S("<")),
+                        r.either(r.bin(BinOp::Eq, x(), r.S(">")),
+                                 r.bin(BinOp::Eq, x(), r.S("^"))));
+      });
     };
     r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(spec)), r.I(0)),
                 r.ret(r.call("$str", {r.L(v)}))));
@@ -3272,13 +3283,13 @@ struct Binder {
   // ones as given, then one entry per keyword `t.kw` names -- invalid where
   // the call did not pass it. Every argument runs once, in source order,
   // whatever order `make` reads them in: when the keywords came in another
-  // order, they all go into fresh temporaries first. A count or a keyword
+  // order, they are all held by Lets first. A count or a keyword
   // the builtin refuses runs them all and raises CPython's TypeError, and
   // one CPython takes but this front end does not implement raises
   // NotImplementedError. `qual` is CPython's name for it, `list.append` or
   // `len`.
   NodeId takes(const Given& g, const Takes& t, const std::string& qual,
-               FnCtx& ctx, SrcPos p,
+               SrcPos p,
                const std::function<NodeId(const std::vector<NodeId>&,
                                           const std::vector<NodeId>&)>& make) {
     auto b = Builder(m).at(p);
@@ -3353,16 +3364,18 @@ struct Binder {
       at.push_back(i);
     }
     if (std::is_sorted(at.begin(), at.end())) return make(g.pos, kwv);
-    std::vector<NodeId> pre;
-    std::vector<NodeId> pos;
-    const auto spill = [&](NodeId v) {
-      const int32_t s = ctx.alloc_fresh_local("$arg");
-      pre.push_back(b.assign(VarKind::Local, s, v));
-      return b.varref(VarKind::Local, s);
-    };
-    for (const NodeId v : g.pos) pos.push_back(spill(v));
-    for (size_t j = 0; j < g.kw.size(); ++j) kwv[at[j]] = spill(g.kw[j].second);
-    return b.sequence(pre, make(pos, kwv));
+    // Out of order: each runs in source order, held by a Let, and the
+    // call reads them in the order it takes them.
+    std::vector<NodeId> values = g.pos;
+    for (const auto& kv : g.kw) values.push_back(kv.second);
+    return b.lets(values, [&](const std::vector<Builder::Temp>& held) {
+      std::vector<NodeId> pos;
+      for (size_t j = 0; j < g.pos.size(); ++j) pos.push_back(held[j]());
+      for (size_t j = 0; j < g.kw.size(); ++j) {
+        kwv[at[j]] = held[g.pos.size() + j]();
+      }
+      return make(pos, kwv);
+    });
   }
 
   // -- The calling convention, at the call site ---------------------------
@@ -3398,18 +3411,18 @@ struct Binder {
     } else {
       // A `*xs` decides a count at run time, so the array is built rather
       // than written -- which is the whole reason this convention exists.
-      const int32_t t = ctx.alloc_local("$args");
-      const NodeId T = b.varref(VarKind::Local, t);
-      std::vector<NodeId> steps{
-          b.assign(VarKind::Local, t, b.array_lit(front))};
-      for (const Ast* e : pos) {
-        steps.push_back(
-            e->tag == "splat"_
-                ? rt.call("$aext", {T, emit_expr(*e->nodes[0], ctx)}, p)
-                : b.intrinsic(IntrinsicId::ArrayPush, {T, emit_expr(*e, ctx)}));
-      }
-      steps.push_back(T);
-      A = b.block(steps);
+      A = b.let(b.array_lit(front), [&](auto t) {
+        std::vector<NodeId> steps;
+        for (const Ast* e : pos) {
+          steps.push_back(
+              e->tag == "splat"_
+                  ? rt.call("$aext", {t(), emit_expr(*e->nodes[0], ctx)}, p)
+                  : b.intrinsic(IntrinsicId::ArrayPush,
+                                {t(), emit_expr(*e, ctx)}));
+        }
+        steps.push_back(t());
+        return b.block(steps);
+      });
     }
     NodeId K;
     if (kw.empty()) {
@@ -3422,18 +3435,19 @@ struct Binder {
       }
       K = b.object_lit(kvs);
     } else {
-      const int32_t t = ctx.alloc_local("$kw");
-      const NodeId T = b.varref(VarKind::Local, t);
-      std::vector<NodeId> steps{b.assign(VarKind::Local, t, b.object_lit({}))};
-      for (const Ast* e : kw) {
-        steps.push_back(
-            e->tag == "kwsplat"_
-                ? rt.call("$kwmerge", {T, emit_expr(*e->nodes[0], ctx)}, p)
-                : b.set_index(T, b.str_literal(std::string(e->nodes[0]->token)),
-                              emit_expr(*e->nodes[1], ctx)));
-      }
-      steps.push_back(T);
-      K = b.block(steps);
+      K = b.let(b.object_lit({}), [&](auto t) {
+        std::vector<NodeId> steps;
+        for (const Ast* e : kw) {
+          steps.push_back(
+              e->tag == "kwsplat"_
+                  ? rt.call("$kwmerge", {t(), emit_expr(*e->nodes[0], ctx)}, p)
+                  : b.set_index(t(),
+                                b.str_literal(std::string(e->nodes[0]->token)),
+                                emit_expr(*e->nodes[1], ctx)));
+        }
+        steps.push_back(t());
+        return b.block(steps);
+      });
     }
     return {A, K};
   }
@@ -3478,27 +3492,26 @@ struct Binder {
         return emit_block(a, ctx);
       case "funcdef"_: {
         const int32_t g = fn_of.at(&a);
-        std::vector<NodeId> out;
         // `@a @b def f` is `f = a(b(f))`: the decorator expressions run
-        // first, top to bottom, then the defaults, and the nearest
-        // decorator is applied first.
+        // first, top to bottom, each held by a Let, then the defaults, and
+        // the nearest decorator is applied first.
         std::vector<NodeId> decorators;
         if (a.nodes[0]->tag == "decorators"_) {
           for (const auto& d : a.nodes[0]->nodes) {
-            const int32_t t = ctx.alloc_local("$dec");
-            out.push_back(
-                b.assign(VarKind::Local, t, emit_expr(*d->nodes[0], ctx)));
-            decorators.push_back(b.varref(VarKind::Local, t));
+            decorators.push_back(emit_expr(*d->nodes[0], ctx));
           }
         }
-        emit_defaults(g, ctx, out, p);
-        NodeId value = emit_closure(g, ctx, p);
-        for (size_t k = decorators.size(); k-- > 0;) {
-          value = b.call_value(decorators[k],
-                               {b.array_lit({value}), b.nil_literal()});
-        }
-        out.push_back(write_var(decl_of.at(fn_ident(a)), value, ctx, p));
-        return b.block(out);
+        return b.lets(decorators, [&](const std::vector<Builder::Temp>& dec) {
+          std::vector<NodeId> out;
+          emit_defaults(g, ctx, out, p);
+          NodeId value = emit_closure(g, ctx, p);
+          for (size_t k = dec.size(); k-- > 0;) {
+            value = b.call_value(dec[k](),
+                                 {b.array_lit({value}), b.nil_literal()});
+          }
+          out.push_back(write_var(decl_of.at(fn_ident(a)), value, ctx, p));
+          return b.block(out);
+        });
       }
       case "classdef"_:
         return emit_class(a, ctx);
@@ -3603,6 +3616,22 @@ struct Binder {
     return els;
   }
 
+  // A loop's `k, v` target: the value taken apart once, by $unpack, and
+  // each part written to its variable, the parts held by a Let.
+  NodeId unpack_into(const Ast& targets, NodeId value, FnCtx& ctx, SrcPos p) {
+    auto b = Builder(m).at(p);
+    const auto n = static_cast<int64_t>(targets.nodes.size());
+    return b.let(rt.call("$unpack", {value, b.literal(n)}, p), [&](auto u) {
+      std::vector<NodeId> out;
+      for (int64_t k = 0; k < n; ++k) {
+        const Ast& t = *targets.nodes[static_cast<size_t>(k)];
+        out.push_back(
+            write_var(decl_of.at(&t), b.index(u(), b.literal(k)), ctx, p));
+      }
+      return b.block(out);
+    });
+  }
+
   NodeId emit_for(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
@@ -3615,18 +3644,7 @@ struct Binder {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
       // `for k, v in d.items()`: the same unpack an assignment does.
-      const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u);
-      loop.push_back(b.assign(
-          VarKind::Local, u,
-          rt.call("$unpack",
-                  {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
-                  p)));
-      for (size_t k = 0; k < tg.nodes.size(); ++k) {
-        loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
-                                 b.index(U, b.literal(static_cast<int64_t>(k))),
-                                 ctx, p));
-      }
+      loop.push_back(unpack_into(tg, value, ctx, p));
     }
     loop.push_back(emit_block(*a.nodes[2], ctx));
     return for_each(rt, p, it, st,
@@ -3763,20 +3781,19 @@ struct Binder {
     // `a, b = expr`: one value, taken apart.
     if (targets.nodes.size() > 1 && values.nodes.size() == 1) {
       if (op != "=") fail(a, "cannot augment a multiple assignment");
-      const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u);
-      std::vector<NodeId> out{b.assign(
-          VarKind::Local, u,
-          rt.call("$unpack",
-                  {emit_expr(*values.nodes[0], ctx),
-                   b.literal(static_cast<int64_t>(targets.nodes.size()))},
-                  p))};
-      for (size_t i = 0; i < targets.nodes.size(); ++i) {
-        out.push_back(emit_store(*targets.nodes[i],
-                                 b.index(U, b.literal(static_cast<int64_t>(i))),
-                                 ctx, p));
-      }
-      return b.block(out);
+      const auto n = static_cast<int64_t>(targets.nodes.size());
+      return b.let(
+          rt.call("$unpack", {emit_expr(*values.nodes[0], ctx), b.literal(n)},
+                  p),
+          [&](auto u) {
+            std::vector<NodeId> out;
+            for (int64_t i = 0; i < n; ++i) {
+              out.push_back(
+                  emit_store(*targets.nodes[static_cast<size_t>(i)],
+                             b.index(u(), b.literal(i)), ctx, p));
+            }
+            return b.block(out);
+          });
     }
     // `a, b = c, d`: every value is computed before any is stored. One
     // target and several values is not this -- it is a tuple.
@@ -3784,45 +3801,35 @@ struct Binder {
       if (op != "=" || targets.nodes.size() != values.nodes.size()) {
         fail(a, "this multiple assignment is not supported here");
       }
-      std::vector<NodeId> out;
-      std::vector<int32_t> temps;
-      for (const auto& v : values.nodes) {
-        const int32_t t = ctx.alloc_local("$tmp");
-        temps.push_back(t);
-        out.push_back(b.assign(VarKind::Local, t, emit_expr(*v, ctx)));
-      }
-      for (size_t i = 0; i < targets.nodes.size(); ++i) {
-        out.push_back(emit_store(*targets.nodes[i],
-                                 b.varref(VarKind::Local, temps[i]), ctx, p));
-      }
-      return b.block(out);
+      std::vector<NodeId> computed;
+      for (const auto& v : values.nodes) computed.push_back(emit_expr(*v, ctx));
+      return b.lets(computed, [&](const std::vector<Builder::Temp>& t) {
+        std::vector<NodeId> out;
+        for (size_t i = 0; i < targets.nodes.size(); ++i) {
+          out.push_back(emit_store(*targets.nodes[i], t[i](), ctx, p));
+        }
+        return b.block(out);
+      });
     }
     const Ast& target = *targets.nodes[0];
-    // `cur` reads the target's present value; `pure` says reading it twice
-    // is free of effects, which a variable's is and a subscript's is not.
-    const auto combine = [&](const std::function<NodeId()>& cur,
-                             bool pure) -> NodeId {
+    // `cur` reads the target's present value.
+    const auto combine = [&](const std::function<NodeId()>& cur) -> NodeId {
       const NodeId v = emit_exprs(&values, ctx, p);
       if (op == "=") return v;
       // `a += b` on a list extends it in place from any iterable and it
       // stays the same list (list.__iadd__), which every other name for it
       // sees; anything else is `a + b`. Tested here rather than in a
       // helper of its own, which would put a second call on every
-      // `n += 1`.
+      // `n += 1`. The present value is read first, then b runs, each
+      // once, held by a Let for the test and whichever arm follows it.
       if (op == "+=") {
-        std::vector<NodeId> pre;
-        std::function<NodeId()> now = cur;
-        if (!pure) {
-          const int32_t c = ctx.alloc_local("$cur");
-          pre.push_back(b.assign(VarKind::Local, c, cur()));
-          now = [&b, c] { return b.varref(VarKind::Local, c); };
-        }
-        return b.sequence(
-            pre, b.make_if(b.binary(BinOp::Eq,
-                                    b.intrinsic(IntrinsicId::TypeOf, {now()}),
-                                    b.str_literal("array")),
-                           rt.call("$aext", {now(), v}, p),
-                           ops.call("$add", {now(), v}, p)));
+        return b.lets({cur(), v}, [&](const std::vector<Builder::Temp>& t) {
+          return b.make_if(
+              b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {t[0]()}),
+                       b.str_literal("array")),
+              rt.call("$aext", {t[0](), t[1]()}, p),
+              ops.call("$add", {t[0](), t[1]()}, p));
+        });
       }
       return arith(op.substr(0, op.size() - 1), cur(), v, p);
     };
@@ -3830,8 +3837,8 @@ struct Binder {
     if (target.tag == "ident"_) {
       const auto it = decl_of.find(&target);
       const int32_t v = it != decl_of.end() ? it->second : ref_of.at(&target);
-      return write_var(
-          v, combine([&] { return read_var(v, ctx, p); }, true), ctx, p);
+      return write_var(v, combine([&] { return read_var(v, ctx, p); }), ctx,
+                       p);
     }
     if (target.tag != "postfix"_ || target.nodes.size() < 2) {
       fail(target, "cannot assign to this expression");
@@ -3844,25 +3851,20 @@ struct Binder {
     // `t[k] = v` runs v first, then t and k (Python's assignment statement:
     // the value, then the target); `t[k] += v` reads t[k] before v runs.
     if (op == "=") {
-      const int32_t tv = ctx.alloc_local("$val");
-      return b.block(
-          {b.assign(VarKind::Local, tv, emit_exprs(&values, ctx, p)),
-           emit_store(target, b.varref(VarKind::Local, tv), ctx, p)});
+      return b.let(emit_exprs(&values, ctx, p), [&](auto v) {
+        return emit_store(target, v(), ctx, p);
+      });
     }
     const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
                             : emit_expr(*last.nodes[0], ctx);
-    const int32_t tr = ctx.alloc_local("$recv");
-    const int32_t tk = ctx.alloc_local("$key");
     const NodeId recv = emit_postfix(target, target.nodes.size() - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr);
-    const NodeId K = b.varref(VarKind::Local, tk);
-    const auto cur = [&] {
-      return rt.call(attr ? "$getattr" : "$idx", {R, K}, p);
-    };
-    return b.block(
-        {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         rt.call(attr ? "$setattr" : "$setidx", {R, K, combine(cur, false)},
-                 p)});
+    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
+      const auto cur = [&] {
+        return rt.call(attr ? "$getattr" : "$idx", {t[0](), t[1]()}, p);
+      };
+      return rt.call(attr ? "$setattr" : "$setidx",
+                     {t[0](), t[1](), combine(cur)}, p);
+    });
   }
 
   NodeId emit_store(const Ast& target, NodeId value, FnCtx& ctx, SrcPos p) {
@@ -3932,13 +3934,12 @@ struct Binder {
     // The class value is its constructor closure, and the table keeps a
     // reference to it: that is the identity `isinstance` and `except`
     // compare, since there is nothing else a class could be.
-    const int32_t t = ctx.alloc_local("$class");
-    const NodeId K = b.varref(VarKind::Local, t);
-    out.push_back(
-        b.assign(VarKind::Local, t,
-                 b.make_closure(rs.fns[static_cast<size_t>(ctor)].index, cm)));
-    out.push_back(set_kind_field(b, T, kClassId, K));
-    out.push_back(write_var(v, K, ctx, p));
+    out.push_back(b.let(
+        b.make_closure(rs.fns[static_cast<size_t>(ctor)].index, cm),
+        [&](auto k) {
+          return b.block({set_kind_field(b, T, kClassId, k()),
+                          write_var(v, k(), ctx, p)});
+        }));
     return b.block(out);
   }
 
@@ -4110,31 +4111,28 @@ struct Binder {
         const bool is_or = a.tag == "orexp"_;
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t);
-          acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, p),
-                                   is_or ? keep : rhs, is_or ? rhs : keep)});
+          acc = b.let(acc, [&](auto keep) {
+            return b.make_if(truthy(keep(), p), is_or ? keep() : rhs,
+                             is_or ? rhs : keep());
+          });
         }
         return acc;
       }
       // Comparisons *chain*: `a < b <= c` means `a < b and b <= c` with
       // `b` evaluated once, which no left fold can express -- the fold
-      // would compare a bool with c. Each operand lands in a slot, and
+      // would compare a bool with c. Each operand is held by a Let, and
       // each operand after the second runs only once the link before it
       // held, so `1 > 2 < f()` never calls f: the short-circuit is
       // Python's too.
       case "cmpexp"_: {
         const size_t links = (a.nodes.size() - 1) / 2;
-        std::vector<int32_t> slots;
-        std::vector<NodeId> sets;
+        std::vector<NodeId> operands;
         for (size_t k = 0; k < a.nodes.size(); k += 2) {
-          const int32_t t = ctx.alloc_local("$cmp");
-          slots.push_back(t);
-          sets.push_back(
-              b.assign(VarKind::Local, t, emit_expr(*a.nodes[k], ctx)));
+          operands.push_back(emit_expr(*a.nodes[k], ctx));
         }
+        // Link k compares operands k and k+1, read through `held`.
+        std::vector<Builder::Temp> held;
         const auto link = [&](size_t k) {
           const Ast& op = *a.nodes[k * 2 + 1];
           std::string t(op.token);
@@ -4143,8 +4141,8 @@ struct Binder {
             t = t.find("not") != std::string::npos ? "is not" : "is";
           }
           const SrcPos op_p = pos_of(op);
-          const NodeId lhs = b.varref(VarKind::Local, slots[k]);
-          const NodeId rhs = b.varref(VarKind::Local, slots[k + 1]);
+          const NodeId lhs = held[k]();
+          const NodeId rhs = held[k + 1]();
           if (t == "==") return ops.call("$eq", {lhs, rhs}, op_p);
           if (t == "!=") {
             return b.at(op_p).unary(UnOp::Not,
@@ -4167,14 +4165,26 @@ struct Binder {
                                       : "$ge";
           return ops.call(h, {lhs, rhs}, op_p);
         };
-        // Link k compares operands k and k+1; operand k+1 is set just
-        // before it, except the first two, which run before anything.
-        NodeId chain = link(links - 1);
-        for (size_t k = links - 1; k-- > 0;) {
-          chain = b.make_if(link(k), b.block({sets[k + 2], chain}),
-                            b.bool_literal(false));
-        }
-        return b.block({sets[0], sets[1], chain});
+        // Operand k+1 is held just before link k, except the first two,
+        // which run before anything: each Let's body is the rest of the
+        // chain, built from the first link out.
+        const std::function<NodeId(size_t)> from = [&](size_t k) -> NodeId {
+          if (k + 1 == links) return link(k);
+          return b.make_if(link(k),
+                           b.let(operands[k + 2],
+                                 [&](auto t) {
+                                   held.push_back(t);
+                                   const NodeId rest = from(k + 1);
+                                   held.pop_back();
+                                   return rest;
+                                 }),
+                           b.bool_literal(false));
+        };
+        return b.lets({operands[0], operands[1]},
+                      [&](const std::vector<Builder::Temp>& t) {
+                        held = t;
+                        return from(0);
+                      });
       }
       case "addexp"_:
       case "mulexp"_: {
@@ -4191,18 +4201,16 @@ struct Binder {
         for (const auto& c : a.nodes) items.push_back(emit_expr(*c, ctx));
         return b.array_lit(items);
       }
-      case "dictlit"_: {
-        const int32_t t = ctx.alloc_local("$dict");
-        const NodeId T = b.varref(VarKind::Local, t);
-        std::vector<NodeId> out{
-            b.assign(VarKind::Local, t, b.intrinsic(IntrinsicId::MapNew, {}))};
-        for (const auto& c : a.nodes) {
-          out.push_back(b.set_index(T, emit_expr(*c->nodes[0], ctx),
-                                    emit_expr(*c->nodes[1], ctx)));
-        }
-        out.push_back(T);
-        return b.block(out);
-      }
+      case "dictlit"_:
+        return b.let(b.intrinsic(IntrinsicId::MapNew, {}), [&](auto d) {
+          std::vector<NodeId> out;
+          for (const auto& c : a.nodes) {
+            out.push_back(b.set_index(d(), emit_expr(*c->nodes[0], ctx),
+                                      emit_expr(*c->nodes[1], ctx)));
+          }
+          out.push_back(d());
+          return b.block(out);
+        });
       case "postfix"_:
         return emit_postfix(a, a.nodes.size(), ctx);
       default:
@@ -4338,19 +4346,40 @@ struct Binder {
                      FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
     const Ast* argnode = call.nodes.empty() ? nullptr : call.nodes[0].get();
-    // The receiver lands in a slot first, because both branches below
-    // read it and one of them reads it twice.
-    const int32_t t = ctx.alloc_local("$self");
-    const NodeId T = b.varref(VarKind::Local, t);
-    // A method declares `self` itself, so the receiver goes in front.
-    if (!is_method_name(name)) {
-      return b.block(
-          {b.assign(VarKind::Local, t, recv),
-           emit_pycall(rt.call("$getattr", {T, b.str_literal(name)}, p),
-                       argnode, ctx, {T}, p)});
-    }
-    // The arguments run once, in source order, whichever method takes them.
-    const Given g = emit_given(argnode, ctx);
+    // The receiver is held by a Let, because both branches below read it
+    // and one of them reads it twice.
+    return b.let(recv, [&](auto self) {
+      // A method declares `self` itself, so the receiver goes in front.
+      if (!is_method_name(name)) {
+        return emit_pycall(
+            rt.call("$getattr", {self(), b.str_literal(name)}, p), argnode,
+            ctx, {self()}, p);
+      }
+      // The arguments run once, in source order, whichever method takes them
+      // -- each held by a Let, so that every arm reads it, a leaf, rather
+      // than compiling it again.
+      const Given given_args = emit_given(argnode, ctx);
+      std::vector<NodeId> values = given_args.pos;
+      for (const auto& kv : given_args.kw) values.push_back(kv.second);
+      return b.lets(values, [&](const std::vector<Builder::Temp>& held) {
+        Given g;
+        for (size_t k = 0; k < given_args.pos.size(); ++k) {
+          g.pos.push_back(held[k]());
+        }
+        for (size_t k = 0; k < given_args.kw.size(); ++k) {
+          g.kw.emplace_back(given_args.kw[k].first,
+                            held[given_args.pos.size() + k]());
+        }
+        return emit_method_call(self(), g, name, p);
+      });
+    });
+  }
+
+  // `T.name(g)` once T and g are held: the program's own method by the
+  // name, or the builtin each type that has one answers with.
+  NodeId emit_method_call(NodeId T, const Given& g, const std::string& name,
+                          SrcPos p) {
+    auto b = Builder(m).at(p);
     // A method of the program's own by this name takes them as any call
     // does, keywords and all.
     std::vector<NodeId> front{T};
@@ -4369,7 +4398,7 @@ struct Binder {
     const auto add = [&](const char* want, const char* tname, const Takes& t,
                          const std::function<NodeId(Args, Args)>& make) {
       cands.emplace_back(
-          want, takes(g, t, std::string(tname) + "." + name, ctx, p, make));
+          want, takes(g, t, std::string(tname) + "." + name, p, make));
     };
     const auto h = [&](const char* n, std::vector<NodeId> as) {
       return rt.call(n, as, p);
@@ -4486,7 +4515,7 @@ struct Binder {
                                b.str_literal(cands[k].first)),
                       cands[k].second, cur);
     }
-    return b.block({b.assign(VarKind::Local, t, recv), cur});
+    return cur;
   }
 
   NodeId emit_builtin(const Ast& a, size_t limit, FnCtx& ctx, size_t& i) {
@@ -4526,7 +4555,7 @@ struct Binder {
     };
     const auto call_it = [&](const Takes& t,
                              const std::function<NodeId(Args, Args)>& make) {
-      return takes(given, t, g, ctx, p, make);
+      return takes(given, t, g, p, make);
     };
     const size_t any = std::string::npos;
     const Takes one{1, 1, 1, Shape::One};
@@ -4950,44 +4979,43 @@ struct Binder {
     for (size_t i = head; i < a.nodes.size(); ++i) {
       clauses.push_back(a.nodes[i].get());
     }
-    int32_t acc = -1;
-    if (!gen) acc = ctx.alloc_local("$acc");
-    const NodeId ACC = gen ? NodeId{} : b.varref(VarKind::Local, acc);
-
-    // Built innermost-first, so each clause wraps what it produces.
-    NodeId inner;
-    if (gen) {
-      inner = b.make_yield(emit_expr(*a.nodes[0], ctx));
-    } else if (dict) {
-      inner = b.set_index(ACC, emit_expr(*a.nodes[0], ctx),
-                          emit_expr(*a.nodes[1], ctx));
-    } else {
-      inner = b.intrinsic(IntrinsicId::ArrayPush,
-                          {ACC, emit_expr(*a.nodes[0], ctx)});
-    }
-    for (size_t k = clauses.size(); k-- > 0;) {
-      const Ast& c = *clauses[k];
-      if (c.tag == "compif"_) {
-        inner = b.make_if(truthy(emit_expr(*c.nodes[0], ctx), p),
-                          inner, NodeId{});
-        continue;
+    // The loops, innermost first, around the element's push, store or
+    // yield into `acc` -- a list's or a dict's accumulator, held by a Let.
+    const auto loops = [&](const std::function<NodeId()>& acc) {
+      NodeId inner;
+      if (gen) {
+        inner = b.make_yield(emit_expr(*a.nodes[0], ctx));
+      } else if (dict) {
+        inner = b.set_index(acc(), emit_expr(*a.nodes[0], ctx),
+                            emit_expr(*a.nodes[1], ctx));
+      } else {
+        inner = b.intrinsic(IntrinsicId::ArrayPush,
+                            {acc(), emit_expr(*a.nodes[0], ctx)});
       }
-      // The first `for` walks the iterator it was handed.
-      const NodeId given =
-          &c == &first_for(a)
-              ? b.index(b.varref(VarKind::Local, ctx.args_slot), b.literal(0))
-              : NodeId{};
-      inner = emit_comp_for(c, inner, given, ctx, p);
-    }
-    std::vector<NodeId> out;
-    if (!gen) {
-      out.push_back(b.assign(
-          VarKind::Local, acc,
-          dict ? b.intrinsic(IntrinsicId::MapNew, {}) : b.array_lit({})));
-    }
-    out.push_back(inner);
-    out.push_back(b.make_return(gen ? b.nil_literal() : ACC));
-    return b.block(out);
+      for (size_t k = clauses.size(); k-- > 0;) {
+        const Ast& c = *clauses[k];
+        if (c.tag == "compif"_) {
+          inner = b.make_if(truthy(emit_expr(*c.nodes[0], ctx), p),
+                            inner, NodeId{});
+          continue;
+        }
+        // The first `for` walks the iterator it was handed.
+        const NodeId given =
+            &c == &first_for(a)
+                ? b.index(b.varref(VarKind::Local, ctx.args_slot),
+                          b.literal(0))
+                : NodeId{};
+        inner = emit_comp_for(c, inner, given, ctx, p);
+      }
+      return inner;
+    };
+    if (gen) return b.block({loops({}), b.make_return(b.nil_literal())});
+    return b.let(
+        dict ? b.intrinsic(IntrinsicId::MapNew, {}) : b.array_lit({}),
+        [&](auto acc) {
+          return b.block({loops([&] { return acc(); }),
+                          b.make_return(acc())});
+        });
   }
 
   // `given` is the iterator to walk, when the caller already made it.
@@ -5002,18 +5030,7 @@ struct Binder {
     if (tg.nodes.size() == 1) {
       loop.push_back(write_var(decl_of.at(tg.nodes[0].get()), value, ctx, p));
     } else {
-      const int32_t u = ctx.alloc_local("$unp");
-      const NodeId U = b.varref(VarKind::Local, u);
-      loop.push_back(b.assign(
-          VarKind::Local, u,
-          rt.call("$unpack",
-                  {value, b.literal(static_cast<int64_t>(tg.nodes.size()))},
-                  p)));
-      for (size_t k = 0; k < tg.nodes.size(); ++k) {
-        loop.push_back(write_var(decl_of.at(tg.nodes[k].get()),
-                                 b.index(U, b.literal(static_cast<int64_t>(k))),
-                                 ctx, p));
-      }
+      loop.push_back(unpack_into(tg, value, ctx, p));
     }
     loop.push_back(inner);
     const NodeId iter = given.valid()
