@@ -318,6 +318,30 @@ int main() {
     check_eq(run(true), "recv|key|7|", "read_modify_write: =");
   }
 
+  // read_modify_write as an expression: the store has no value, so the
+  // one stored is held by a Let and read after it -- `x = (a[k] += 5)`.
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    const NodeId rmw = read_modify_write(
+        b, b.varref(VarKind::Local, 0), b.literal(0),
+        [&](NodeId r, NodeId k) { return b.index(r, k); },
+        [&](NodeId r, NodeId k, NodeId v) { return b.set_index(r, k, v); },
+        [&](const std::function<NodeId()>& read) {
+          return b.binary(BinOp::Add, read(), b.literal(5));
+        },
+        true);
+    run_body(b.block({b.assign(VarKind::Local, 0,
+                               b.array_lit({b.literal(10)})),
+                      b.intrinsic(IntrinsicId::Print, {rmw}),
+                      b.intrinsic(IntrinsicId::Print,
+                                  {b.index(b.varref(VarKind::Local, 0),
+                                           b.literal(0))})}),
+             m, 1, "read_modify_write as a value");
+    check_eq(joined(), "15|15|", "read_modify_write: as a value");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "runtime_parts: %d failure(s)\n", g_failures);
     return 1;

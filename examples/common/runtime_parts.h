@@ -305,20 +305,37 @@ inline NodeId reading(coreir::Builder::At& b, const std::vector<NodeId>& args,
   });
 }
 
+// `store(v)` for `value` held by a Let, then `v`: an assignment as an
+// expression, whose value is what was assigned and not what the store
+// answers (a store, a SetIndex, answers none).
+template <class Store>
+inline NodeId stored_value(coreir::Builder::At& b, NodeId value, Store store) {
+  return b.let(value, [&](auto v) { return b.block({store(v()), v()}); });
+}
+
 // `recv[key] = combine(recv[key])`, the receiver and the key each run once
 // and held by a Let for the read and for the write: a compound assignment
 // to a field, an element or a property. The binder supplies how to read
 // one (`get(recv, key)`), how to write one (`set(recv, key, value)`), and
 // `combine(read)`, the new value over a callable that makes the present
 // one -- never called for a plain `=`, which has no use for it.
+//
+// A SetIndex is a statement: it has no value, whatever its fallback
+// answers. A store that is itself an expression whose value is the one
+// stored -- Ruby's, JavaScript's, C#'s, culebra's, `x = (h[k] = v)` --
+// asks for `as_value`, and the new value is held by a Let and read after
+// the store (stored_value, below).
 template <class Get, class Set, class Combine>
 inline NodeId read_modify_write(coreir::Builder::At& b, NodeId recv,
-                                NodeId key, Get get, Set set,
-                                Combine combine) {
+                                NodeId key, Get get, Set set, Combine combine,
+                                bool as_value = false) {
   return b.lets({recv, key}, [&](const std::vector<coreir::Builder::Temp>& t) {
     const NodeId value =
         combine([&] { return get(t[0](), t[1]()); });
-    return set(t[0](), t[1](), value);
+    if (!as_value) return set(t[0](), t[1](), value);
+    return stored_value(b, value, [&](NodeId v) {
+      return set(t[0](), t[1](), v);
+    });
   });
 }
 
@@ -543,21 +560,38 @@ inline uint32_t equality_tags() {
 }
 
 // The VM's operation that stands in for a helper: which one -- a UnOp, a
-// BinOp, or Index -- the tags it answers on, and whether exactly.
+// BinOp, Index or SetIndex -- the tags it answers on, and its flags. An
+// Index or a SetIndex names a set for each operand: `tags` is the
+// receiver's, `key_tags` the key's (0: the same), `value_tags` a stored
+// value's (0: any). The flags are vmlib.h's: kExact, and for Index and
+// SetIndex kMissNil, and for SetIndex kAppend.
 struct VmOp {
-  enum class Kind : uint8_t { Unary, Binary, Index };
+  enum class Kind : uint8_t { Unary, Binary, Index, SetIndex };
   Kind kind;
-  uint8_t op;  // the UnOp or the BinOp; nothing for Index
+  uint8_t op;  // the UnOp or the BinOp; nothing for Index and SetIndex
   uint32_t tags;
-  bool exact;
+  int32_t flags;
+  uint32_t key_tags = 0;
+  uint32_t value_tags = 0;
 
   static VmOp unary(UnOp op, uint32_t tags, bool exact = false) {
-    return {Kind::Unary, static_cast<uint8_t>(op), tags, exact};
+    return {Kind::Unary, static_cast<uint8_t>(op), tags,
+            exact ? coreir::kExact : 0};
   }
   static VmOp binary(BinOp op, uint32_t tags, bool exact = false) {
-    return {Kind::Binary, static_cast<uint8_t>(op), tags, exact};
+    return {Kind::Binary, static_cast<uint8_t>(op), tags,
+            exact ? coreir::kExact : 0};
   }
-  static VmOp index(uint32_t tags) { return {Kind::Index, 0, tags, false}; }
+  static VmOp index(uint32_t tags, int32_t flags = 0, uint32_t key_tags = 0) {
+    return {Kind::Index, 0, tags, flags, key_tags};
+  }
+  static VmOp set_index(uint32_t tags, int32_t flags = 0,
+                        uint32_t key_tags = 0, uint32_t value_tags = 0) {
+    return {Kind::SetIndex, 0, tags, flags, key_tags, value_tags};
+  }
+  size_t operands() const {
+    return kind == Kind::Unary ? 1 : kind == Kind::SetIndex ? 3 : 2;
+  }
 };
 
 // A front end's operations by the helper each stands in for: one table,
@@ -583,13 +617,13 @@ class Operators {
     const auto it = table_.find(helper);
     if (it == table_.end()) return rt_.call(helper, args, p);
     const VmOp& o = it->second;
-    const size_t operands = o.kind == VmOp::Kind::Unary ? 1 : 2;
-    if (args.size() != operands) {
+    if (args.size() != o.operands()) {
       coreir_rt::fail("Operators: " + helper + " takes " +
-                          std::to_string(operands) + " operands",
+                          std::to_string(o.operands()) + " operands",
                       0, 0);
     }
-    const Fallback f{rt_.ref(helper, p), o.tags, o.exact ? coreir::kExact : 0};
+    const Fallback f{rt_.ref(helper, p), o.tags, o.flags, o.key_tags,
+                     o.value_tags};
     auto b = coreir::Builder(rt_.module()).at(p);
     switch (o.kind) {
       case VmOp::Kind::Unary:
@@ -598,6 +632,8 @@ class Operators {
         return b.binary(static_cast<BinOp>(o.op), args[0], args[1], f);
       case VmOp::Kind::Index:
         return b.index(args[0], args[1], f);
+      case VmOp::Kind::SetIndex:
+        return b.set_index(args[0], args[1], args[2], f);
     }
     return NodeId{};
   }
