@@ -63,3 +63,16 @@ const n = {};
 n[1] = "one";
 n[2.5] = "two and a half";
 console.log(n[1], n["1"], n[2.5], Object.keys(n).join(","));
+
+// a number that is a whole number indexes an array; a fraction, NaN and one
+// past the array are properties, not elements
+const e = [10, 20, 30];
+console.log(e[1.0], e[-0], e[1.5], e[NaN], e[3], e[-1]);
+e[1.0] = 21;
+e[-0] = 11;
+e[3.0] = 40;
+console.log(e[0], e[1], e[3], e.length);
+const w = {};
+w[1.0] = "a";
+w[2.5] = "b";
+console.log(w[1], w["1"], w[2.5], Object.keys(w).join(","));

@@ -1002,11 +1002,11 @@ int main() {
   }
 
   // kIntegralKey: a double that holds an integer in int64's range is that
-  // int, as a key, before the key set judges it and the fallback sees it;
+  // int, as a key, when the key set and the array and the map judge it;
   // anything else -- a fraction, a double past int64, NaN -- stays a double
-  // and NaN is never the VM's. The fallback answers the type of the key it
-  // was given, so the cases tell the VM's answer from the fallback's, and
-  // an int key from a double one.
+  // and NaN is never the VM's. The fallback is given the key as it was
+  // written, and answers its type, so the cases tell the VM's answer from
+  // the fallback's.
   {
     Module m;
     Builder b(m);
@@ -1053,8 +1053,9 @@ int main() {
                  p),
         b.assign(VarKind::Local, 1, b.intrinsic(IntrinsicId::MapNew, {}, p),
                  p),
-        // 1.0 and -0.0 are elements; 2^53 is an int the fallback gets; 2^63,
-        // a fraction and NaN stay doubles; and without the flag 1.0 is one.
+        // 1.0 and -0.0 are elements; 2^53 is out of range and the fallback
+        // gets it as it was written, as it does 2^63, a fraction and NaN,
+        // and 1.0 without the flag.
         get(xs, D(1.0), kG, kInt), get(xs, D(-0.0), kG, kInt),
         get(xs, D(9007199254740992.0), kG, kInt),
         get(xs, D(9223372036854775808.0), kG, kInt), get(xs, D(1.5), kG, kInt),
@@ -1078,7 +1079,7 @@ int main() {
         print(b.intrinsic(IntrinsicId::Len, {mp}, p)),
         print(b.index(mp, b.literal(2, p), p)),
         print(b.literal(0, p)),
-        // A held key is not changed by the Try that normalised its copy.
+        // A held key is not changed by the Try that normalised it.
         b.at(p).let(D(1.0), [&](auto k) {
           return b.block({get(xs, k(), kG, kInt),
                           print(b.intrinsic(IntrinsicId::TypeOf, {k()}, p))},
@@ -1088,8 +1089,8 @@ int main() {
     check_eq(run_module(m, "kIntegralKey"), "",
              "kIntegralKey: unexpected failure");
     check_eq(joined(),
-             "20|10|int|double|double|double|double|0|"
-             "int|double|double|4|9|0|"
+             "20|10|double|double|double|double|double|0|"
+             "double|double|double|4|9|0|"
              "double|9|9|double|2|9|0|"
              "9|double|",
              "kIntegralKey");

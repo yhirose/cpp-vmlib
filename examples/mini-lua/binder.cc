@@ -388,10 +388,13 @@ struct Binder {
     return names;
   }
 
-  // A key a table takes as it is: `$key` leaves an int, a string and a
-  // bool alone, normalises a float that is a whole number, and a nil or a
-  // NaN is no key.
-  static uint32_t lua_keys() { return tags_named({"int", "string", "bool"}); }
+  // A key a table takes: an int, a string, a bool or a float, a float that
+  // is a whole number being the int (kIntegralKey, which is `$key`'s rule
+  // in the VM). A nil is no key, and NaN, which kIntegralKey leaves to
+  // the fallback, is none either.
+  static uint32_t lua_keys() {
+    return tags_named({"int", "string", "bool", "double"});
+  }
 
   // Lua's rules that are the VM's own operation on some values: the VM's
   // answer where the two agree, the helper's on the rest (runtime_parts.h's
@@ -411,8 +414,8 @@ struct Binder {
   //                  for __eq.
   //   $one           the first of a call's results, Index's on an array
   //                  that has one and $one's nil on an empty one.
-  //   $get $set      `t[k]` and `t[k] = v` on a table, by a key `$key`
-  //                  leaves alone (lua_keys): a key the table has, and a
+  //   $get $set      `t[k]` and `t[k] = v` on a table, by a key of
+  //                  lua_keys: a key the table has, and a
   //                  miss when it has no metatable (kMissNil; with one the
   //                  miss is __index's or __newindex's), and a store of
   //                  anything but nil, which removes the key.
@@ -426,8 +429,10 @@ struct Binder {
         {"$cat", VmOp::binary(BinOp::Add, tags_named("string"))},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
         {"$one", VmOp::index(tags_named("array"), 0, tags_named("int"))},
-        {"$get", VmOp::index(tags_named("map"), kMissNil, lua_keys())},
-        {"$set", VmOp::set_index(tags_named("map"), kMissNil, lua_keys(),
+        {"$get", VmOp::index(tags_named("map"), kMissNil | kIntegralKey,
+                             lua_keys())},
+        {"$set", VmOp::set_index(tags_named("map"), kMissNil | kIntegralKey,
+                                 lua_keys(),
                                  kAllTags & ~tags_named("nil"))},
     };
   }
@@ -615,9 +620,11 @@ struct Binder {
               r.blk({r.set(idx, r.idx(r.L(mt), r.S("__index"))),
                      r.iff(r.is(r.typ(idx), "map"),
                            r.ret(r.call("$get", {r.L(idx), r.L(key)}))),
+                     // The key as it was written: `t[1.0]` calls __index
+                     // with 1.0, not the integer it is looked up as.
                      r.ret(r.call("$one",
                                   {r.b.call_value(r.L(idx),
-                                                  {r.L(t), r.L(key)})}))}))));
+                                                  {r.L(t), r.L(k)})}))}))));
     r.add(r.ret(r.Nil()));
     r.finish("$get");
   }

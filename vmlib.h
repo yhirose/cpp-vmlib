@@ -1414,13 +1414,15 @@ inline constexpr int32_t kMissNil = 2;
 // IndexError, C#'s and culebra's.
 inline constexpr int32_t kAppend = 4;
 
-// kIntegralKey (Index and SetIndex): the key operand is normalised before
-// anything else, on the VM's path and the fallback's alike: a Double that
-// holds an integer in int64's range becomes that int (-0.0 the int 0), as
-// Lua's `t[1.0]` is `t[1]` and JavaScript's `a[1.0]` is `a[1]`. A fraction,
-// an infinity and a double past int64 stay doubles, for the key set to
-// judge; NaN is always the fallback's. A language where `a[1.0]` is an
-// error (Python, C#) or truncates (Ruby) leaves it clear.
+// kIntegralKey (Index and SetIndex): the VM takes the key to be the int
+// when it is a Double that holds an integer in int64's range (-0.0 is the
+// int 0), as Lua's `t[1.0]` is `t[1]` and JavaScript's `a[1.0]` is `a[1]`,
+// and judges that key: by the key set, the array's length, the map. A
+// fraction, an infinity and a double past int64 stay doubles, for the key
+// set to judge; NaN is always the fallback's. The fallback is called with
+// the key as it was given, which is what Lua's __index is: a metamethod
+// sees `1.0`. A language where `a[1.0]` is an error (Python, C#) or
+// truncates (Ruby) leaves it clear.
 inline constexpr int32_t kIntegralKey = 8;
 
 // Every flag there is, and a flag's word.
@@ -4290,16 +4292,15 @@ VMLIB_INLINE Value index_get(const Value& recv, const Value& key) {
   return v ? *v : Value();
 }
 
-// kIntegralKey's normalisation, in place: false for the one key it refuses,
-// NaN, and true otherwise, the key an int if it was a double holding one.
-VMLIB_INLINE bool integral_key(Value& key) {
-  if (!key.is_double()) return true;
-  const double d = key.as_double();
-  if (std::isnan(d)) return false;
-  if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
-      d == std::trunc(d)) {
-    key = Value::make_int(static_cast<int64_t>(d));
+// Whether the double `d` holds an integer in int64's range -- -0.0 does,
+// and 0 is the int; NaN, a fraction, an infinity and 2^63 do not -- and
+// that integer: kIntegralKey's rule.
+VMLIB_INLINE bool integral_int(double d, int64_t& out) {
+  if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0) ||
+      d != std::trunc(d)) {
+    return false;
   }
+  out = static_cast<int64_t>(d);
   return true;
 }
 
@@ -10126,8 +10127,17 @@ struct Exec {
       f.regs[static_cast<size_t>(in.a)] = apply_unop(op, x);
       return true;
     }
-    Value& y = f.regs[static_cast<size_t>(in.a) + 2];
-    if (fb.integral_key() && !integral_key(y)) return false;
+    Value norm;  // the key as an int, when kIntegralKey makes it one
+    const Value* yp = &f.regs[static_cast<size_t>(in.a) + 2];
+    if (fb.integral_key() && yp->is_double()) {
+      const double d = yp->as_double();
+      if (std::isnan(d)) return false;
+      if (int64_t i = 0; integral_int(d, i)) {
+        norm = Value::make_int(i);
+        yp = &norm;
+      }
+    }
+    const Value& y = *yp;
     if (!has_tag(in.op == Op::TryBinary ? fb.tags : fb.key_mask(), y.tag())) {
       return false;
     }

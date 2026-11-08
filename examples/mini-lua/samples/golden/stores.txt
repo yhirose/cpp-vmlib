@@ -13,3 +13,7 @@ false	default
 20	10
 nil	nil
 false	0	nil
+one	zero	big	big	huge	frac	nil
+again	again	1
+6
+float	float	float	float	string

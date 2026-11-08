@@ -60,3 +60,20 @@ local s = {}
 s.f = false
 s.z = 0
 print(s.f, s.z, s.nope)
+
+-- a float key that is a whole number is the integer, wherever it is
+local f = {}
+f[1] = "one"
+f[0] = "zero"
+f[2^53] = "big"
+f[2^63] = "huge"
+f[1.5] = "frac"
+print(f[1.0], f[-0.0], f[2^53], f[9007199254740992], f[2^63], f[1.5], f[0/0])
+f[3.0] = "three"
+f[3] = "again"
+print(f[3.0], f[3], #f)
+local n = 0
+for k, v in pairs(f) do n = n + 1 end
+print(n)
+local g = setmetatable({}, {__index = function(_, k) return math.type(k) or type(k) end})
+print(g[1.0], g[1.5], g[2^53], g[2^63], g.x)

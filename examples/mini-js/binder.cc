@@ -524,15 +524,17 @@ struct Binder {
   //   $seq     `===`: two values of one type compare as Eq does, but for
   //            an int beside a double -- Eq says 1 == 1.0, and $seq, which
   //            compares the types first, says not -- so an int is $seq's.
-  //   $index   `o.k` and `o[k]` on an object and a string key: its own
-  //            property, found by name, or undefined for one it lacks
-  //            (kMissNil), unless it has a meta -- a class's instance, a
-  //            Map -- whose misses are the prototype chain's and whose
-  //            `size` is $index's. An array is $index's whole: every
-  //            JavaScript number is a double here, an index too, which no
-  //            fast path takes.
-  //   $setidx  `o.k = v` and `o[k] = v` on the same, a new property
-  //            included.
+  //   $index   `o.k` and `o[k]`: an array's element at an index in
+  //            range (a double that is a whole number is one,
+  //            kIntegralKey), or an object's own property found by a
+  //            string, or undefined for one it lacks (kMissNil) unless it
+  //            has a meta -- a class's instance, a Map -- whose misses are
+  //            the prototype chain's. A string key on an array (`length`,
+  //            `push`), an index out of range, a fraction, NaN, and a
+  //            Map's `size` are $index's.
+  //   $setidx  `o.k = v` and `o[k] = v` on the same, a new property and an
+  //            element at the array's length included (kAppend); an
+  //            element past it or a negative one is $setidx's.
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth,
@@ -540,10 +542,12 @@ struct Binder {
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},
-        {"$index", VmOp::index(tags_named("object"), kMissNil,
-                               tags_named("string"))},
-        {"$setidx", VmOp::set_index(tags_named("object"), kMissNil,
-                                    tags_named("string"))},
+        {"$index", VmOp::index(tags_named({"array", "object"}),
+                               kMissNil | kIntegralKey,
+                               tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "object"}),
+                                    kMissNil | kAppend | kIntegralKey,
+                                    tags_named({"int", "string"}))},
     };
   }
 
@@ -787,7 +791,12 @@ struct Binder {
                r.ret(r.L(val))}));
     // A Map's and a Set's `size` is the count, which $index answers first
     // whatever the object holds, so a store to it keeps nothing: a key
-    // stored there would be found by the VM before $index was asked.
+    // stored there would be found by the VM before $index was asked. This
+    // is JavaScript's own rule (`size` is a read-only accessor), kept here
+    // and not in a VM flag: every new key of an object with a meta -- a
+    // Map's kind record, a class -- is this function's to admit, so the
+    // key cannot be there; and a flag declining the hits of every object
+    // with a meta would decline every field read of every instance.
     arms.emplace_back(
         r.S("object"),
         r.blk({r.set(k, r.call("$str", {r.L(key)})),
