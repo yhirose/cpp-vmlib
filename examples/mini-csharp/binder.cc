@@ -1402,7 +1402,7 @@ struct Binder {
                          p);
         }
         if (prop_refs.count(&a)) {
-          return emit_prop_get(this_of(ctx, p), std::string(a.token), ctx, p);
+          return emit_prop_get(this_of(ctx, p), std::string(a.token), p);
         }
         const auto sf = static_field_refs.find(&a);
         if (sf != static_field_refs.end()) {
@@ -1544,15 +1544,14 @@ struct Binder {
         for (const auto& c : init->nodes) items.push_back(emit_expr(*c, ctx));
       }
       if (args.empty()) return b.array_lit(items);
-      const int32_t t = ctx.alloc_local("$list");
-      const NodeId T = b.varref(VarKind::Local, t);
-      std::vector<NodeId> out{
-          b.assign(VarKind::Local, t, rt.call("$newlist", {args[0]}, p))};
-      for (const NodeId v : items) {
-        out.push_back(b.intrinsic(IntrinsicId::ArrayPush, {T, v}));
-      }
-      out.push_back(T);
-      return b.block(out);
+      return b.let(rt.call("$newlist", {args[0]}, p), [&](auto list) {
+        std::vector<NodeId> out;
+        for (const NodeId v : items) {
+          out.push_back(b.intrinsic(IntrinsicId::ArrayPush, {list(), v}));
+        }
+        out.push_back(list());
+        return b.block(out);
+      });
     }
     if (base == "Dictionary") {
       if (args.empty()) return b.intrinsic(IntrinsicId::MapNew, {});
@@ -1569,26 +1568,23 @@ struct Binder {
                : args[0]},
           p);
       if (args.size() < 2) return made;
-      std::vector<NodeId> rest(args.begin() + 1, args.end());
-      const int32_t t = ctx.alloc_local("$exc");
-      std::vector<NodeId> out{b.assign(VarKind::Local, t, made)};
-      out.insert(out.end(), rest.begin(), rest.end());
-      out.push_back(b.varref(VarKind::Local, t));
-      return b.block(out);
+      return b.let(made, [&](auto exc) {
+        std::vector<NodeId> out(args.begin() + 1, args.end());
+        out.push_back(exc());
+        return b.block(out);
+      });
     }
     const auto it = class_by_name.find(base);
     if (it == class_by_name.end()) fail(a, "unknown type '" + base + "'");
     const ClassInfo& ci = classes[static_cast<size_t>(it->second)];
-    const int32_t t = ctx.alloc_local("$new");
-    const NodeId T = b.varref(VarKind::Local, t);
-    std::vector<NodeId> callargs{T};
-    callargs.insert(callargs.end(), args.begin(), args.end());
-    return b.block({b.assign(VarKind::Local, t,
-                             new_instance(b, read_var(ci.mt_var, ctx, p))),
-                    b.call_value(kind_field(b, read_var(ci.mt_var, ctx, p),
-                                            kClassCtor),
-                                 callargs),
-                    T});
+    return b.let(new_instance(b, read_var(ci.mt_var, ctx, p)), [&](auto self) {
+      std::vector<NodeId> callargs{self()};
+      callargs.insert(callargs.end(), args.begin(), args.end());
+      return b.block({b.call_value(kind_field(b, read_var(ci.mt_var, ctx, p),
+                                              kClassCtor),
+                                   callargs),
+                      self()});
+    });
   }
 
   NodeId emit_postfix(const Ast& a, size_t limit, FnCtx& ctx) {
@@ -1634,7 +1630,7 @@ struct Binder {
           // A user-declared property wins before the four built-in ones,
           // exactly as an instance method wins over a library name.
           if (property_names.count(name)) {
-            cur = emit_prop_get(cur, name, ctx, p);
+            cur = emit_prop_get(cur, name, p);
             break;
           }
           // `.Count`, `.Length`, `.Message` and `.Result` are the four
@@ -1674,16 +1670,14 @@ struct Binder {
   // also why an override, on a method or an accessor, needs no code of
   // its own to win: the walk always starts at the receiver's own table.
   NodeId emit_dispatch(NodeId recv, const std::string& name,
-                       const std::vector<NodeId>& args, FnCtx& ctx, SrcPos p) {
+                       const std::vector<NodeId>& args, SrcPos p) {
     auto b = Builder(m).at(p);
-    const int32_t t = ctx.alloc_local("$recv");
-    const NodeId T = b.varref(VarKind::Local, t);
-    std::vector<NodeId> callargs{T};
-    callargs.insert(callargs.end(), args.begin(), args.end());
-    const NodeId method =
-        rt.call("$mfind", {T, b.str_literal(name)}, p);
-    return b.block(
-        {b.assign(VarKind::Local, t, recv), b.call_value(method, callargs)});
+    return b.let(recv, [&](auto self) {
+      std::vector<NodeId> callargs{self()};
+      callargs.insert(callargs.end(), args.begin(), args.end());
+      return b.call_value(rt.call("$mfind", {self(), b.str_literal(name)}, p),
+                          callargs);
+    });
   }
 
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
@@ -1697,62 +1691,56 @@ struct Binder {
     // walk a call uses, and only a receiver without one gets the
     // library's. A List is checked first, since its Add is the one a loop
     // makes. Which of them runs is known only when the receiver is, so
-    // each argument runs once, after the receiver, into a slot claimed
-    // before any of them runs, and each way reads the slots.
+    // the receiver and then each argument run once, held by Lets, and
+    // each way reads what they hold.
     if (name == "Add" || name == "Wait") {
-      const int32_t t = ctx.alloc_local("$recv");
-      const int32_t mt = ctx.alloc_local("$m");
-      std::vector<int32_t> slots;
-      for (size_t k = 0; k < arglist.size(); ++k) {
-        slots.push_back(ctx.alloc_local("$arg"));
-      }
-      std::vector<NodeId> steps{b.assign(VarKind::Local, t, recv)};
-      for (size_t k = 0; k < arglist.size(); ++k) {
-        steps.push_back(
-            b.assign(VarKind::Local, slots[k], emit_expr(*arglist[k], ctx)));
-      }
-      const auto L = [&](int32_t slot) {
-        return b.varref(VarKind::Local, slot);
-      };
-      const auto arg = [&](size_t k) {
-        return k < slots.size() ? L(slots[k]) : b.nil_literal();
-      };
-      std::vector<NodeId> callargs{L(t)};
-      for (const int32_t slot : slots) callargs.push_back(L(slot));
-      const NodeId library =
-          name == "Add" ? rt.call("$dictadd", {L(t), arg(0), arg(1)}, p)
-                        : rt.call("$await", {L(t)}, p);
-      NodeId call = b.block(
-          {b.assign(VarKind::Local, mt,
-                    rt.call("$mlookup", {L(t), b.str_literal(name)}, p)),
-           b.make_if(b.binary(BinOp::Ne,
-                              b.intrinsic(IntrinsicId::TypeOf, {L(mt)}),
-                              b.str_literal("nil")),
-                     b.call_value(L(mt), callargs), library)});
-      if (name == "Add") {
-        call = b.make_if(
-            b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {L(t)}),
-                     b.str_literal("array")),
-            b.intrinsic(IntrinsicId::ArrayPush, {L(t), arg(0)}), call);
-      }
-      steps.push_back(call);
-      return b.block(steps);
+      std::vector<NodeId> values{recv};
+      for (const auto& c : arglist) values.push_back(emit_expr(*c, ctx));
+      return b.lets(values, [&](const std::vector<Builder::Temp>& v) {
+        const auto self = [&] { return v[0](); };
+        const auto arg = [&](size_t k) {
+          return k + 1 < v.size() ? v[k + 1]() : b.nil_literal();
+        };
+        const auto callargs = [&] {
+          std::vector<NodeId> out;
+          for (const auto& t : v) out.push_back(t());
+          return out;
+        };
+        const NodeId library =
+            name == "Add" ? rt.call("$dictadd", {self(), arg(0), arg(1)}, p)
+                          : rt.call("$await", {self()}, p);
+        NodeId call = b.let(
+            rt.call("$mlookup", {self(), b.str_literal(name)}, p),
+            [&](auto method) {
+              return b.make_if(
+                  b.binary(BinOp::Ne,
+                           b.intrinsic(IntrinsicId::TypeOf, {method()}),
+                           b.str_literal("nil")),
+                  b.call_value(method(), callargs()), library);
+            });
+        if (name == "Add") {
+          call = b.make_if(
+              b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {self()}),
+                       b.str_literal("array")),
+              b.intrinsic(IntrinsicId::ArrayPush, {self(), arg(0)}), call);
+        }
+        return call;
+      });
     }
     std::vector<NodeId> args;
     for (const auto& c : arglist) args.push_back(emit_expr(*c, ctx));
     // An ordinary method call: the lookup walks the class chain, which is
     // what makes an override win.
-    return emit_dispatch(recv, name, args, ctx, p);
+    return emit_dispatch(recv, name, args, p);
   }
 
-  NodeId emit_prop_get(NodeId recv, const std::string& name, FnCtx& ctx,
-                       SrcPos p) {
-    return emit_dispatch(recv, "get_" + name, {}, ctx, p);
+  NodeId emit_prop_get(NodeId recv, const std::string& name, SrcPos p) {
+    return emit_dispatch(recv, "get_" + name, {}, p);
   }
 
   NodeId emit_prop_set(NodeId recv, const std::string& name, NodeId value,
-                       FnCtx& ctx, SrcPos p) {
-    return emit_dispatch(recv, "set_" + name, {value}, ctx, p);
+                       SrcPos p) {
+    return emit_dispatch(recv, "set_" + name, {value}, p);
   }
 
   bool is_static_call(const Ast& a, size_t limit) const {
@@ -1831,11 +1819,10 @@ struct Binder {
     }
     const auto set_prop = [&](NodeId self, const std::string& name,
                               NodeId value) {
-      if (!as_value) return emit_prop_set(self, name, value, ctx, p);
-      const int32_t tv = ctx.alloc_local("$val");
-      const NodeId V = b.varref(VarKind::Local, tv);
-      return b.block({b.assign(VarKind::Local, tv, value),
-                      emit_prop_set(self, name, V, ctx, p), V});
+      if (!as_value) return emit_prop_set(self, name, value, p);
+      return b.let(value, [&](auto v) {
+        return b.block({emit_prop_set(self, name, v(), p), v()});
+      });
     };
     if (target.tag == "ident"_) {
       const auto it = ref_of.find(&target);
@@ -1852,16 +1839,15 @@ struct Binder {
             sf != static_field_refs.end()
                 ? read_var(classes[static_cast<size_t>(sf->second)].var, ctx, p)
                 : this_of(ctx, p);
-        const int32_t t = ctx.alloc_local("$owner");
-        const NodeId T = b.varref(VarKind::Local, t);
-        const auto read = [&] { return rt.call("$getf", {T, key}, p); };
-        return b.block({b.assign(VarKind::Local, t, owner),
-                        rt.call("$setf", {T, key, combine(read)}, p)});
+        return b.let(owner, [&](auto o) {
+          const auto read = [&] { return rt.call("$getf", {o(), key}, p); };
+          return rt.call("$setf", {o(), key, combine(read)}, p);
+        });
       }
       if (prop_refs.count(&target)) {
         const std::string name(target.token);
         const NodeId self = this_of(ctx, p);
-        const auto read = [&] { return emit_prop_get(self, name, ctx, p); };
+        const auto read = [&] { return emit_prop_get(self, name, p); };
         return set_prop(self, name, combine(read));
       }
       fail(target, "cannot assign to this");
@@ -1876,26 +1862,22 @@ struct Binder {
     }
     if (member && property_names.count(std::string(last.nodes[0]->token))) {
       const std::string name(last.nodes[0]->token);
-      const int32_t tr = ctx.alloc_local("$recv");
       const NodeId recv = emit_postfix(target, limit - 1, ctx);
-      const NodeId R = b.varref(VarKind::Local, tr);
-      const auto read = [&] { return emit_prop_get(R, name, ctx, p); };
-      return b.block({b.assign(VarKind::Local, tr, recv),
-                      set_prop(R, name, combine(read))});
+      return b.let(recv, [&](auto r) {
+        const auto read = [&] { return emit_prop_get(r(), name, p); };
+        return set_prop(r(), name, combine(read));
+      });
     }
     const NodeId key = member ? b.str_literal(std::string(last.nodes[0]->token))
                               : emit_expr(*last.nodes[0], ctx);
-    const int32_t tr = ctx.alloc_local("$recv");
-    const int32_t tk = ctx.alloc_local("$key");
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr);
-    const NodeId K = b.varref(VarKind::Local, tk);
-    const auto read = [&] {
-      return rt.call(member ? "$getf" : "$idx", {R, K}, p);
-    };
-    return b.block(
-        {b.assign(VarKind::Local, tr, recv), b.assign(VarKind::Local, tk, key),
-         rt.call(member ? "$setf" : "$setidx", {R, K, combine(read)}, p)});
+    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
+      const auto read = [&] {
+        return rt.call(member ? "$getf" : "$idx", {t[0](), t[1]()}, p);
+      };
+      return rt.call(member ? "$setf" : "$setidx",
+                     {t[0](), t[1](), combine(read)}, p);
+    });
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
