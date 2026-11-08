@@ -844,9 +844,17 @@ struct Binder {
   //   $eq             `==` on None, bools, ints and strings; two types Eq
   //                   refuses, a bignum, a float, a container or an
   //                   object's own `__eq__` are $eq's.
-  //   $idx            `c[k]` on a list or a string and an index in range;
-  //                   a negative one, one out of range (IndexError), a
-  //                   tuple and a dict are $idx's.
+  //   $idx            `c[k]` on a list or a string and an index in range,
+  //                   or a dict and a key it has (an int or a string);
+  //                   a negative index, one out of range (IndexError), a
+  //                   tuple, and a key a dict lacks (KeyError) are $idx's.
+  //   $setidx         `c[k] = v` on a list and an index in range, or a
+  //                   dict and an int or string key, a new one included
+  //                   (a dict with a meta -- a defaultdict -- leaves that to
+  //                   $setidx); a negative index and one out of range
+  //                   (IndexError) are $setidx's.
+  //   $setattr        `o.x = v` on an object; a new attribute of an
+  //                   instance, whose meta is its class, is $setattr's.
   static Operators::Table operators() {
     const uint32_t ints = tags_named("int");
     const uint32_t order = tags_named({"int", "string"});
@@ -867,7 +875,12 @@ struct Binder {
         {"$ge", VmOp::binary(BinOp::Ge, order)},
         {"$eq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "int",
                                                     "string"}))},
-        {"$idx", VmOp::index(tags_named({"array", "string", "int"}))},
+        {"$idx", VmOp::index(tags_named({"array", "string", "map"}), 0,
+                             tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "map"}), kMissNil,
+                                    tags_named({"int", "string"}))},
+        {"$setattr", VmOp::set_index(tags_named("object"), kMissNil,
+                                     tags_named("string"))},
     };
   }
 
@@ -3863,7 +3876,7 @@ struct Binder {
           return rt.call(attr ? "$getattr" : "$idx", {r, k}, p);
         },
         [&](NodeId r, NodeId k, NodeId v) {
-          return rt.call(attr ? "$setattr" : "$setidx", {r, k, v}, p);
+          return ops.call(attr ? "$setattr" : "$setidx", {r, k, v}, p);
         },
         combine);
   }
@@ -3882,10 +3895,10 @@ struct Binder {
     const bool attr = last.tag == "dotsfx"_;
     const NodeId key = attr ? b.str_literal(std::string(last.nodes[0]->token))
                             : emit_expr(*last.nodes[0], ctx);
-    return rt.call(attr ? "$setattr" : "$setidx",
-                   {emit_postfix(target, target.nodes.size() - 1, ctx), key,
-                    value},
-                   p);
+    return ops.call(attr ? "$setattr" : "$setidx",
+                    {emit_postfix(target, target.nodes.size() - 1, ctx), key,
+                     value},
+                    p);
   }
 
   // class C: -- a method table in a cell, and a constructor closure over

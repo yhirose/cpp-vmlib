@@ -1,0 +1,17 @@
+[11, 20, 33] 20 11
+5 6 two three 4
+None 5
+0
+KeyError 'zzz'
+KeyError 99
+IndexError list index out of range
+IndexError list index out of range
+IndexError list assignment index out of range
+IndexError list assignment index out of range
+TypeError
+TypeError
+float none 2
+2 3
+AttributeError
+15 1
+[11, 40, 33]
