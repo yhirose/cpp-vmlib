@@ -619,15 +619,24 @@ struct Binder {
     auto S = [&](const char* s) { return b.str_literal(s, p); };
     auto len = [&](NodeId v) { return b.intrinsic(IntrinsicId::Len, {v}, p); };
     // queue[0], and queue = queue[1:] -- the take-the-first step both
-    // directions share; `w` is the local the waiter lands in.
-    auto take_first = [&](NodeId ch, const char* q, int32_t w) {
-      const NodeId queue = b.index(ch, S(q), p);
-      return std::vector<NodeId>{
-          b.assign(VarKind::Local, w, b.index(queue, b.literal(0, p), p), p),
-          b.set_index(ch, S(q),
-                      b.intrinsic(IntrinsicId::ArraySlice,
-                                  {queue, b.literal(1, p), len(queue)}, p),
-                      p)};
+    // directions share, the queue read once; `ch` is the channel's local
+    // and `w` the one the waiter lands in.
+    auto take_first = [&](int32_t ch, const char* q, int32_t w) {
+      return std::vector<NodeId>{b.let(
+          b.index(L(ch), S(q), p),
+          [&](auto queue) {
+            return b.block(
+                {b.assign(VarKind::Local, w,
+                          b.index(queue(), b.literal(0, p), p), p),
+                 b.set_index(L(ch), S(q),
+                             b.intrinsic(IntrinsicId::ArraySlice,
+                                         {queue(), b.literal(1, p),
+                                          len(queue())},
+                                         p),
+                             p)},
+                p);
+          },
+          p)};
     };
     auto waiting = [&](NodeId ch, const char* q) {
       return b.binary(BinOp::Gt, len(b.index(ch, S(q), p)), b.literal(0, p),
@@ -651,7 +660,7 @@ struct Binder {
 
     // $chan_send(ch, v): locals ch, v, w.
     {
-      std::vector<NodeId> handoff = take_first(L(0), "recvq", 2);
+      std::vector<NodeId> handoff = take_first(0, "recvq", 2);
       handoff.push_back(b.set_index(L(2), S("value"), L(1), p));
       handoff.push_back(wake(2));
       Func f;
@@ -669,7 +678,7 @@ struct Binder {
     }
     // $chan_recv(ch) -> value: locals ch, w.
     {
-      std::vector<NodeId> take = take_first(L(0), "sendq", 1);
+      std::vector<NodeId> take = take_first(0, "sendq", 1);
       take.push_back(wake(1));
       take.push_back(b.make_return(b.index(L(1), S("value"), p), p));
       std::vector<NodeId> wait = park(L(0), "recvq", 1, b.nil_literal(p));
@@ -1475,14 +1484,19 @@ struct Binder {
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const Ast& c = *a.nodes[i];
           // Both arm kinds carry their statements identically -- a "stmts"
-          // child compiled into one Block at the arm's own position -- so
-          // the body is built once here and the tag only decides where it
-          // gets hung: on the default, or on every key in this arm's
-          // intlist, all sharing this one NodeId (the top-level README's
-          // `case a, b:` point).
-          const NodeId body = emit_block(*find_child(c, "stmts"), ctx, c);
+          // child compiled into one Block at the arm's own position -- and
+          // the tag only decides where a body is hung: on the default, or
+          // on each key in this arm's intlist, each key a body of its own
+          // built from the same statements (the top-level README's `case
+          // a, b:` point). Each build declares what the one before it did,
+          // so each starts from the declarations the arm started with.
+          const FuncCtx before = ctx;
+          const auto body = [&] {
+            ctx = before;
+            return emit_block(*find_child(c, "stmts"), ctx, c);
+          };
           if (c.tag != "case"_) {  // "defaultcase"_
-            default_body = body;
+            default_body = body();
             continue;
           }
           for (const auto& numAst : find_child(c, "intlist")->nodes) {
@@ -1490,7 +1504,7 @@ struct Binder {
             if (!seen_keys.insert(key).second) {
               fail(*numAst, "duplicate case value " + std::to_string(key));
             }
-            arms.emplace_back(b.at(pos_of(*numAst)).literal(key), body);
+            arms.emplace_back(b.at(pos_of(*numAst)).literal(key), body());
           }
         }
         return b.make_switch(subj.node, arms, default_body);

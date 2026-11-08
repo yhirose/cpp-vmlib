@@ -67,9 +67,9 @@ inside `square.pas`'s loop. A Go call site, possibly reached many times, is
 exactly the case Static calls describes.
 
 `samples/switch/switch.go`'s `classify` has a `case 1, 2:` -- one body,
-two keys. `--dump-ir` shows the two keys pointing at the identical `block`
-(same source position, same contents, because it is the same `NodeId`
-compiled twice, once per position it is referenced from):
+two keys. `--dump-ir` shows each key with a `block` of its own, built
+from the same statements (same source position, same contents): a single
+body hung under both keys would be compiled once per key all the same.
 
 ```
 switch  @8:2

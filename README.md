@@ -594,10 +594,10 @@ Java's case fallthrough         ->  duplicate the falling-through arms'
                                      bodies rather than trying to jump
                                      between them
 Go's `case a, b:` (multiple      ->  one (key, body) child pair per label,
-  keys, one body)                    all pointing at the same body NodeId --
-                                     safe to share since nothing about a
-                                     node's identity is mutated by compiling
-                                     it, just emitted again at each position
+  keys, one body)                    each body built from the same source:
+                                     a body hung under two keys would be
+                                     compiled once per key anyway, so
+                                     building it twice costs no code
 ```
 
 ## Maps
