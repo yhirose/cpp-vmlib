@@ -757,10 +757,10 @@ struct Binder {
   // Ruby's `%` floors on Floats as on Integers, which is FloorMod on any
   // two numbers, and raises ZeroDivisionError for a zero divisor of
   // either, where FloorMod traps on an Integer one and answers NaN for a
-  // Float one -- the one answer the exact operator in the program leaves
-  // to this, with what is no number. (Ruby takes the divisor's side from a product's sign, which
-  // a tiny remainder over a tiny divisor underflows: 1e-320 % -1e-10 is
-  // 1.0e-320 there and -1.0e-10 here.)
+  // Float one. The exact operator in the program leaves it reached only
+  // for a zero divisor or a non-number. (Ruby takes the divisor's side
+  // from a product's sign, which a tiny remainder over a tiny divisor
+  // underflows: 1e-320 % -1e-10 is 1.0e-320 there and -1.0e-10 here.)
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");

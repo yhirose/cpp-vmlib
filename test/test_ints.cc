@@ -627,23 +627,14 @@ int main() {
   }
   // The least int over -1 does not trap: a quotient wraps, as Mul's
   // negation of it does, and a remainder is 0 -- Lua's, Go's and Java's
-  // rule, where C++'s own / and % are undefined there. Each op its own
-  // run, so one that traps does not hide the rest.
-  for (const auto& [op, want] :
-       {std::pair{BinOp::Div, std::numeric_limits<int64_t>::min()},
-        std::pair{BinOp::FloorDiv, std::numeric_limits<int64_t>::min()},
-        std::pair{BinOp::Mod, int64_t{0}},
-        std::pair{BinOp::FloorMod, int64_t{0}}}) {
-    Module m;
-    Builder b(m);
-    const SrcPos p{1, 1};
-    const std::string what =
-        std::string(name_of(op)) + " of the least int by -1";
-    const auto lines = run_batch(
-        {b.binary(op, b.literal(std::numeric_limits<int64_t>::min(), p),
-                  b.literal(-1, p), p)},
-        m, b, p, what);
-    if (lines.size() == 1) check_eq(parse_line(lines[0]), want, what);
+  // rule, where C++'s own / and % are undefined there. FloorDiv's and
+  // FloorMod's are test_floor_division's.
+  {
+    constexpr int64_t lo = std::numeric_limits<int64_t>::min();
+    test_binop(BinOp::Div, "Div of the least int by -1", {{lo, -1}},
+               [](int64_t, int64_t) { return lo; });
+    test_binop(BinOp::Mod, "Mod of the least int by -1", {{lo, -1}},
+               [](int64_t, int64_t) { return int64_t{0}; });
   }
   {
     Module m;

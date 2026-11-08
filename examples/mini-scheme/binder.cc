@@ -667,9 +667,9 @@ struct Binder {
     // `modulo` follows the divisor's sign; `remainder` follows the
     // dividend's -- BinOp::Mod is the second, and BinOp::FloorMod the
     // first.
-    rt_integer_division("quotient", "$quotient", BinOp::Div);
-    rt_integer_division("remainder", "$remainder", BinOp::Mod);
-    rt_integer_division("modulo", "$modulo", BinOp::FloorMod);
+    rt_integer_division(*find_builtin("quotient"), BinOp::Div);
+    rt_integer_division(*find_builtin("remainder"), BinOp::Mod);
+    rt_integer_division(*find_builtin("modulo"), BinOp::FloorMod);
     rt_expt();
 
     // Predicates.
@@ -835,8 +835,8 @@ struct Binder {
   // which a whole multiple divides exactly, where Div would not truncate.
   // A zero divisor or anything that is no integer is an error, as guile's
   // is.
-  void rt_integer_division(const std::string& scheme, const char* name,
-                           BinOp op) {
+  void rt_integer_division(const Builtin& bi, BinOp op) {
+    const std::string scheme = bi.scheme;
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
@@ -864,7 +864,7 @@ struct Binder {
       r.add(r.iff(r.bin(BinOp::Eq, r.L(v), r.I(0)), r.ret(r.D(0.0))));
     }
     r.add(r.ret(r.L(v)));
-    r.finish(name);
+    r.finish(bi.rt);
   }
 
   void rt_expt() {

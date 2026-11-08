@@ -39,12 +39,11 @@
 // Tag::If with no call in front of it. `/` on two Longs is integer
 // division and `%` is C's, which is BinOp::Div and BinOp::Mod -- but for
 // a zero divisor, a Float's too, which raises ZeroDivisionError, so the
-// two are exact (vmlib.h's kExact) with a helper for that. Only equality
-// needed writing (`==` across two types is `false` in
-// culebra and a trap in the VM, and arrays and objects compare
-// structurally), and only display did (culebra prints a whole Float as
-// "4.0", which to_display's comment names as the reason it does not grow a
-// mode).
+// two are exact (vmlib.h's kExact) with a helper for that. Beside it,
+// equality needed writing (`==` across two types is `false` in culebra
+// and a trap in the VM, and arrays and objects compare structurally), and
+// display did (culebra prints a whole Float as "4.0", which to_display's
+// comment names as the reason it does not grow a mode).
 
 #include "binder.h"
 
