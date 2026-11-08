@@ -32,7 +32,7 @@
 //     *true*. Value::truthy() calls 0 false, and its comment says why it
 //     refuses to decide: "Lua calls neither [falsy]". So `$truthy`.
 //   * **`%` and `//` floor.** `-7 % 3` is 2 in Lua and -1 in C, and
-//     BinOp::Mod is C's. So `$mod` and `$idiv`.
+//     BinOp::Mod is C's. So BinOp::FloorMod and BinOp::FloorDiv.
 //   * **`==` across types is false**, where BinOp::Eq traps. So `$eq`.
 //
 // A table is a value-keyed Map (IntrinsicId::MapNew), which is what a Lua
@@ -379,7 +379,7 @@ struct Binder {
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
-        "$truthy", "$eq",   "$mod",  "$idiv", "$div",  "$cat",   "$str",
+        "$truthy", "$eq",   "$div",  "$cat",  "$str",
         "$key",    "$get",  "$set",  "$len",  "$one",  "$nth",   "$append",
         "$resume", "$costatus", "$wrap", "$wrapped", "$concat", "$insert",
         "$spread", "$error", "$mm", "$add", "$subm", "$mulm",
@@ -398,9 +398,6 @@ struct Binder {
   //   $add $subm     `+`, `-` and `*` on two numbers, integers wrapping
   //   $mulm          and a float on either side making a float, as Lua's
   //                  do; anything else looks for a metamethod.
-  //   $idiv $mod     `//` and `%` on two numbers, Lua's own floor, a float
-  //                  on either side making a float and a zero float divisor
-  //                  inf or nan; an integer zero divisor is the helper's.
   //   $div           `/` on two floats, IEEE as Lua's is; an integer,
   //                  which `/` makes a float first, is $div's.
   //   $cat           `..` on two strings; a number, written the way
@@ -415,8 +412,6 @@ struct Binder {
         {"$add", VmOp::binary(BinOp::Add, number_tags())},
         {"$subm", VmOp::binary(BinOp::Sub, number_tags())},
         {"$mulm", VmOp::binary(BinOp::Mul, number_tags())},
-        {"$idiv", VmOp::binary(BinOp::FloorDiv, number_tags())},
-        {"$mod", VmOp::binary(BinOp::FloorMod, number_tags())},
         {"$div", VmOp::binary(BinOp::Div, tags_named("double"))},
         {"$cat", VmOp::binary(BinOp::Add, tags_named("string"))},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
@@ -475,29 +470,6 @@ struct Binder {
                                            r.L(m), {r.L(a), r.L(b)})})})))})));
     r.add(r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)})));
     r.finish("$eq");
-  }
-
-  // Lua's `%` and `//` floor; C's (and BinOp::Mod's, and BinOp::Div's on
-  // two ints) truncate toward zero. `-7 % 3` is 2 here and -1 there, and
-  // `-7 // 2` is -4 here and -3 there. On two numbers that is
-  // BinOp::FloorMod and BinOp::FloorDiv, a float's as well as an
-  // integer's, which the operators in the program are (Binder::operators).
-  // These behind them see only what those refuse -- an integer zero
-  // divisor, the least integer over -1, a value that is no number -- and
-  // refuse it too, in the operator's words: Lua's own (an error, a
-  // wrapped quotient, arithmetic on a string) are not this subset's.
-  void rt_mod() {
-    RT r(*this);
-    const auto [a, b] = r.params("a", "b");
-    r.add(r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b))));
-    r.finish("$mod");
-  }
-
-  void rt_idiv() {
-    RT r(*this);
-    const auto [a, b] = r.params("a", "b");
-    r.add(r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b))));
-    r.finish("$idiv");
   }
 
   // `/` is always float in Lua, even on two integers.
@@ -944,7 +916,7 @@ struct Binder {
   }
 
   void emit_runtime() {
-    rt_truthy(); rt_eq(); rt_mod(); rt_idiv(); rt_div(); rt_cat(); rt_str();
+    rt_truthy(); rt_eq(); rt_div(); rt_cat(); rt_str();
     rt_key(); rt_get(); rt_set(); rt_len(); rt_one(); rt_nth(); rt_append();
     rt_resume(); rt_costatus(); rt_wrap(); rt_wrapped(); rt_concat();
     rt_insert(); rt_insertat(); rt_calltable(); rt_spread(); rt_error();
@@ -1227,9 +1199,16 @@ struct Binder {
           else if (t == "-") acc = ops.call("$subm", {acc, rhs}, op_p);
           else if (t == "*") acc = ops.call("$mulm", {acc, rhs}, op_p);
           else if (t == "/") acc = ops.call("$div", {acc, rhs}, op_p);
+          // Lua's `//` and `%` floor, on a float as on an integer: they
+          // are FloorDiv and FloorMod, which vmlib.h makes Lua's
+          // luai_numidiv and luai_nummod, with no helper behind them. What those refuse --
+          // an integer zero divisor, the least integer over -1, what is no
+          // number -- they refuse in their own words, at the divisor;
+          // Lua's own (an error, a wrapped quotient, arithmetic on a
+          // string) are not this subset's.
           else if (t == "//")
-            acc = ops.call("$idiv", {acc, rhs}, op_p);
-          else acc = ops.call("$mod", {acc, rhs}, op_p);
+            acc = b.at(op_p).binary(BinOp::FloorDiv, acc, rhs);
+          else acc = b.at(op_p).binary(BinOp::FloorMod, acc, rhs);
         }
         return {acc};
       }

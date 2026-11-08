@@ -5,8 +5,7 @@
 print(1 + 2 * 3, 7 - 2, 3 * 4)
 -- `/` is always a float, `//` floors, and `%` follows `//`. BinOp::Div on
 -- two ints truncates and BinOp::Mod is C's, so both of these are
--- BinOp::FloorDiv and BinOp::FloorMod, with a func this front end writes
--- behind them for a zero divisor.
+-- BinOp::FloorDiv and BinOp::FloorMod.
 print(7 / 2, 7 // 2, -7 // 2, 7 % 3, -7 % 3, 7 % -3)
 -- A float on either side floors too, and the answer is a float: the
 -- quotient of the rounded division, the remainder on the divisor's side

@@ -103,9 +103,9 @@ helper, with its metamethods, on the rest.
 is C's; `-7 // 2` is -4 in Lua and -3 from `BinOp::Div`. On two numbers
 they are `BinOp::FloorMod` and `BinOp::FloorDiv`, the floor itself, a
 float's as well as an integer's: `7.5 // 2` is 3.0, and a zero float
-divisor gives inf or nan as Lua's does. `$mod` and `$idiv` behind them
-see only an integer zero divisor and what is no number. (`/` is a third:
-it is *always* a float in Lua, even on two integers.)
+divisor gives inf or nan as Lua's does. No helper stands behind them: an
+integer zero divisor and what is no number are the operators' traps.
+(`/` is a third: it is *always* a float in Lua, even on two integers.)
 
 **`==` across two types is `false`**, where `binop_fault` refuses the
 comparison -- *"a question a language answers, not the VM."*
