@@ -319,18 +319,16 @@ int main() {
              return n;
            }),
            "unknown operator flag", "a flag that is not kExact");
-  const char* const not_exact =
-      "only Add, Sub, Mul, Div, Mod, FloorDiv, FloorMod and Neg can be exact";
   check_eq(verdict([&](Module&, Builder& b) {
              return b.binary(BinOp::Lt, b.literal(1, p), b.literal(2, p),
                              {callee(b), 1, true}, p);
            }),
-           not_exact, "an exact comparison");
+           "lt cannot be exact", "an exact comparison");
   check_eq(verdict([&](Module&, Builder& b) {
              return b.unary(UnOp::Not, b.literal(1, p), {callee(b), 1, true},
                             p);
            }),
-           not_exact, "an exact Not");
+           "not cannot be exact", "an exact Not");
   check_eq(verdict([&](Module&, Builder& b) {
              return add(b, {callee(b), kAllTags, true});
            }) + verdict([&](Module&, Builder& b) {
@@ -371,7 +369,7 @@ int main() {
              return b.index(b.array_lit({}, p), b.literal(0, p),
                             {callee(b), 1, true}, p);
            }),
-           not_exact, "an exact Index");
+           "index cannot be exact", "an exact Index");
   check_eq(verdict([&](Module& m, Builder& b) {
              const NodeId n = b.index(b.array_lit({}, p), b.literal(0, p),
                                       {callee(b), 1}, p);

@@ -1112,7 +1112,8 @@ enum class Tag : uint8_t {
   // callable. With one, `a` is a set of tags (bit t for ValueTag t, the
   // form coreir::tags_named builds), and the operator answers only when
   // every operand's tag is in the set, the operator does not trap on them,
-  // and -- with kExact in `b` -- its answer is the operation's true value.
+  // and -- with kExact in `b` -- no int result is out of range and no
+  // divisor is zero.
   // Otherwise the fallback is evaluated, after the operands and only
   // then, and called with the operands' values, and what it returns is the
   // node's value. Which tags go in the set is the language's to say: the
@@ -1323,8 +1324,8 @@ enum class BinOp : uint8_t {
   // truncating. Each of those front ends had written the correction over
   // Div and Mod for itself, and each had tested the signs by multiplying
   // them, which wraps past 2^63. On two ints the two go together (a ==
-  // FloorDiv * b + FloorMod), a zero divisor traps, and so does the least
-  // int over -1, as for Div and Mod. A double widens the other operand, as
+  // FloorDiv * b + FloorMod), a zero divisor traps, and the least int over
+  // -1 is itself with a remainder of 0, as for Div and Mod. A double widens the other operand, as
   // for Add, and the two are Lua's luai_numidiv and luai_nummod: Div's
   // quotient floored, and fmod's remainder moved to the divisor's side
   // (floor_mod), with Div's inf and nan, not a trap, for a zero divisor.
@@ -1341,29 +1342,30 @@ inline constexpr BinOp kLastBinOp = BinOp::FloorMod;
 
 // An operator's flags, in Node::b when it has a fallback (Tag::Unary).
 //
-// kExact: the VM answers only when its answer is the operation's true
-// value, and the fallback answers the rest. The two ways it is not are an
-// int result that wrapped -- Add, Sub, Mul and Neg past int64, and Div or
-// FloorDiv of the least int by -1 -- and a zero divisor, whose int
-// division traps and whose double division is inf or nan. Nothing else:
-// a double quotient that overflows to inf over a nonzero divisor, or one
-// that rounds, is IEEE's answer and stays the VM's, as it is CPython's
+// kExact: the fallback, not the VM, answers two cases. An int result out
+// of int64's range: an Add, Sub, Mul or Neg that wrapped, or the least
+// int over -1 for Div or FloorDiv. And a zero divisor for Div, Mod,
+// FloorDiv or FloorMod: an int's already faults, which any fallback
+// takes, and a double's would be inf or nan. Nothing else: a double
+// quotient that overflows to inf over a nonzero divisor, or one that
+// rounds, is IEEE's answer and stays the VM's, as it is CPython's
 // (1e308 / 1e-10 is inf there too). A language whose integers do not wrap
 // (Python's grow) or whose zero divisor raises (Python's, culebra's,
-// Ruby's `%`) takes the VM's answer only where it is the true one.
+// Ruby's `%`) marks its operators exact.
 inline constexpr int32_t kExact = 1;
 
-// The operators kExact means anything for: those whose answer can be
-// untrue in one of those two ways.
+// The signed divisions: the operators a zero divisor makes untrue, and
+// whose failure the compiler reports at the divisor.
+inline constexpr bool is_division(BinOp op) {
+  return op == BinOp::Div || op == BinOp::Mod || op == BinOp::FloorDiv ||
+         op == BinOp::FloorMod;
+}
+
+// The operators kExact means anything for: those whose answer can be out
+// of range or have a zero divisor.
 inline constexpr bool can_be_exact(BinOp op) {
-  switch (op) {
-    case BinOp::Add: case BinOp::Sub: case BinOp::Mul:
-    case BinOp::Div: case BinOp::Mod:
-    case BinOp::FloorDiv: case BinOp::FloorMod:
-      return true;
-    default:
-      return false;
-  }
+  return op == BinOp::Add || op == BinOp::Sub || op == BinOp::Mul ||
+         is_division(op);
 }
 inline constexpr bool can_be_exact(UnOp op) { return op == UnOp::Neg; }
 
@@ -3661,17 +3663,11 @@ inline bool wraps(BinOp op, int64_t a, int64_t b) {
   }
 }
 inline bool wraps(UnOp op, int64_t a) {
-  return op == UnOp::Neg && a == std::numeric_limits<int64_t>::min();
+  return can_be_exact(op) && a == std::numeric_limits<int64_t>::min();
 }
 
-inline constexpr bool is_division(BinOp op) {
-  return op == BinOp::Div || op == BinOp::Mod || op == BinOp::FloorDiv ||
-         op == BinOp::FloorMod;
-}
-
-// Whether the operation's answer for these operands is not its true value
-// -- kExact's question, both of its halves: an int result that wraps, or a
-// zero divisor, an int's or a double's.
+// kExact's question, both of its halves: whether the int result for these
+// operands is out of range, or the divisor is zero, an int's or a double's.
 inline bool inexact(BinOp op, const Value& l, const Value& r) {
   if (is_division(op) && r.is_number() && r.as_number() == 0) return true;
   return l.is_int() && r.is_int() && wraps(op, l.as_int(), r.as_int());
@@ -3810,8 +3806,7 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       case BinOp::Div: case BinOp::Mod:
       case BinOp::UDiv: case BinOp::UMod:
       case BinOp::FloorDiv: case BinOp::FloorMod: {
-        // Every division form traps on a zero divisor -- one statement of
-        // that.
+        // Every division form traps on a zero divisor.
         if (b == 0) return Fault::DivideByZero;
         // A signed division by -1 is a negation, which wraps for the least
         // int as Mul's does, and leaves no remainder: answered here because
@@ -4315,7 +4310,8 @@ enum class Op : uint8_t {
   // An operator with a fallback (coreir's Tag::Unary has the rule): the
   // operator's answer, into a, from the operands in the registers after
   // it, when every operand's tag is in the set c, it does not trap, and --
-  // kExact in b's flags -- its answer is the true value; then on at d.
+  // kExact in b's flags -- no int result is out of range and no divisor is
+  // zero; then on at d.
   // Otherwise nothing is written and the next instruction runs, which is
   // the fallback's call over those same operand registers, ending at d.
   // Lua 5.4's arithmetic opcodes skip the OP_MMBIN after them the same way.
@@ -5729,8 +5725,9 @@ struct Verifier {
   // An operation that may name a fallback (Tag::Unary): its operands and
   // at most the fallback after them; no tag set or flag without one, since
   // nothing would read them; with one, tags that exist and flags that do,
-  // and kExact only where an answer can be untrue (can_be_exact).
-  bool check_fallback(const Node& n, bool exactable) {
+  // and kExact only where an answer can be out of range or have a zero
+  // divisor (can_be_exact).
+  bool check_fallback(const Node& n) {
     const uint32_t k = operands_of(n.tag);
     if (n.num_children != k && n.num_children != k + 1) {
       return fail(std::string(name_of(n.tag)) + " takes " +
@@ -5745,10 +5742,16 @@ struct Verifier {
       return fail("operator's tag set names no tag");
     }
     if ((n.b & ~kExact) != 0) return fail("unknown operator flag");
+    const bool unary = n.tag == Tag::Unary, binary = n.tag == Tag::Binary;
+    const bool exactable =
+        unary    ? can_be_exact(static_cast<UnOp>(n.op))
+        : binary ? can_be_exact(static_cast<BinOp>(n.op))
+                 : false;
     if ((n.b & kExact) != 0 && !exactable) {
-      return fail(
-          "only Add, Sub, Mul, Div, Mod, FloorDiv, FloorMod and Neg can be "
-          "exact");
+      const char* what = unary    ? name_of(static_cast<UnOp>(n.op))
+                         : binary ? name_of(static_cast<BinOp>(n.op))
+                                  : name_of(n.tag);
+      return fail(std::string(what) + " cannot be exact");
     }
     return true;
   }
@@ -5871,20 +5874,16 @@ struct Verifier {
         if (n.op > static_cast<uint8_t>(kLastUnOp)) {
           return fail("unknown unary operator");
         }
-        if (!check_fallback(n, can_be_exact(static_cast<UnOp>(n.op)))) {
-          return false;
-        }
+        if (!check_fallback(n)) return false;
         break;
       case Tag::Binary:
         if (n.op > static_cast<uint8_t>(kLastBinOp)) {
           return fail("unknown binary operator");
         }
-        if (!check_fallback(n, can_be_exact(static_cast<BinOp>(n.op)))) {
-          return false;
-        }
+        if (!check_fallback(n)) return false;
         break;
       case Tag::Index:
-        if (!check_fallback(n, false)) return false;
+        if (!check_fallback(n)) return false;
         break;
       case Tag::VarRef:
       case Tag::Assign: {
@@ -7739,10 +7738,7 @@ struct FnCompiler {
         if (const auto r = compile_type_test(v, n.pos)) return *r;
         // A failing division reports at its right operand, so that is the
         // position stamped on the instruction that can trap.
-        const bool divides = v.op == BinOp::Div || v.op == BinOp::Mod ||
-                             v.op == BinOp::FloorDiv ||
-                             v.op == BinOp::FloorMod;
-        const uint32_t pos = divides ? m.at(v.rhs).pos : n.pos;
+        const uint32_t pos = is_division(v.op) ? m.at(v.rhs).pos : n.pos;
         return compile_op(op_of(v.op), pos, v.lhs, v.rhs);
       }
       case Tag::Intrinsic:
