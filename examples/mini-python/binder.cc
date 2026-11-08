@@ -1281,14 +1281,20 @@ struct Binder {
     r.finish("$listadd");
   }
 
+  // `/`, `//` and `%` raise for a zero divisor, an int's or a float's,
+  // where the VM traps on the one and answers inf or nan for the other.
+  NodeId raise_on_zero(RT& r, NodeId divisor) {
+    return r.iff(r.bin(BinOp::Eq, divisor, r.I(0)),
+                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
+                                       r.S("division by zero")})));
+  }
+
   void rt_fdiv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [d] = r.locals("d");
     r.add(r.set(d, r.call("$tofloat", {r.L(b)})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(0.0)),
-                r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
-                                      r.S("division by zero")}))));
+    r.add(raise_on_zero(r, r.L(d)));
     r.add(r.ret(r.bin(BinOp::Div, r.call("$tofloat", {r.L(a)}), r.L(d))));
     r.finish("$fdiv");
   }
@@ -1305,9 +1311,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [t, q, f] = r.locals("t", "q", "f");
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
-                r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
-                                      r.S("division by zero")}))));
+    r.add(raise_on_zero(r, r.L(b)));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
                 r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
     // FloorDiv floors the rounded quotient, which may have rounded up to a
@@ -1337,9 +1341,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [m] = r.locals("m");
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
-                r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
-                                      r.S("division by zero")}))));
+    r.add(raise_on_zero(r, r.L(b)));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
                 r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
     // FloorMod's, but for a zero remainder, which keeps the dividend's sign

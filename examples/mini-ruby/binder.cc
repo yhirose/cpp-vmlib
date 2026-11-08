@@ -729,14 +729,22 @@ struct Binder {
     r.finish("$mul");
   }
 
+  // `/` and `%` raise for a zero divisor -- `%` a Float's too -- where the
+  // VM traps on an Integer one and answers NaN or Infinity for a Float one.
+  // Anything that is no number goes on to the operator, which refuses it.
+  NodeId raise_on_zero(RT& r, FuncWriter::Slot divisor) {
+    return r.iff(r.both(is_number(r, r.L(divisor)),
+                        r.bin(BinOp::Eq, r.L(divisor), r.I(0))),
+                 r.ret(r.call("$exc", {r.S("ZeroDivisionError"),
+                                       r.S("divided by 0")})));
+  }
+
   void rt_div() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Div, r.L(a), r.L(b)))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
-                r.ret(r.call(
-                    "$exc", {r.S("ZeroDivisionError"), r.S("divided by 0")}))));
+    r.add(raise_on_zero(r, b));
     r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
                 r.ret(r.bin(BinOp::FloorDiv, r.L(a), r.L(b)))));
     // Anything else Div refuses, in its own words.
@@ -753,10 +761,7 @@ struct Binder {
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(
-        r.both(is_number(r, r.L(b)), r.bin(BinOp::Eq, r.L(b), r.I(0))),
-        r.ret(r.call("$exc",
-                     {r.S("ZeroDivisionError"), r.S("divided by 0")}))));
+    r.add(raise_on_zero(r, b));
     // Anything else FloorMod refuses, in its own words.
     r.add(r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b))));
     r.finish("$mod");
