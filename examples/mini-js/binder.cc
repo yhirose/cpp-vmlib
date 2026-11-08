@@ -572,11 +572,13 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
-    const NodeId scalar = r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)));
+    // Each key its own body, built alike: one body under two keys would
+    // be compiled twice anyway.
+    const auto scalar = [&] { return r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))); };
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(true)));
     for (const char* t : {"bool", "int", "double", "string"}) {
-      arms.emplace_back(r.S(t), scalar);
+      arms.emplace_back(r.S(t), scalar());
     }
     r.add(r.b.make_switch(r.typ(a), arms,
                           r.ret(r.in(IntrinsicId::Same, {r.L(a), r.L(b)}))));
@@ -591,9 +593,8 @@ struct Binder {
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("nil"), r.ret(r.S("undefined")));
     arms.emplace_back(r.S("bool"), r.ret(r.S("boolean")));
-    const NodeId num = r.ret(r.S("number"));
-    arms.emplace_back(r.S("int"), num);
-    arms.emplace_back(r.S("double"), num);
+    arms.emplace_back(r.S("int"), r.ret(r.S("number")));
+    arms.emplace_back(r.S("double"), r.ret(r.S("number")));
     arms.emplace_back(r.S("string"), r.ret(r.S("string")));
     arms.emplace_back(r.S("function"), r.ret(r.S("function")));
     r.add(r.b.make_switch(r.typ(v), arms, r.ret(r.S("object"))));
@@ -634,9 +635,9 @@ struct Binder {
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("string"), r.ret(r.L(v)));
     arms.emplace_back(r.S("nil"), r.ret(r.S("undefined")));
-    const NodeId tostr = r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}));
-    arms.emplace_back(r.S("bool"), tostr);
-    arms.emplace_back(r.S("int"), tostr);
+    for (const char* t : {"bool", "int"}) {
+      arms.emplace_back(r.S(t), r.ret(r.in(IntrinsicId::ToStr, {r.L(v)})));
+    }
     arms.emplace_back(r.S("double"), r.ret(r.call("$numstr", {r.L(v)})));
     arms.emplace_back(r.S("function"), r.ret(r.S("[Function]")));
     // Array::toString is Array::join with ",", which is why these two are
@@ -707,7 +708,8 @@ struct Binder {
     const auto [recv, key] = r.params("recv", "key");
     const auto [i, n, k, v, cls] = r.locals("i", "n", "k", "v", "cls");
     std::vector<std::pair<NodeId, NodeId>> arms;
-    const NodeId seq = r.blk({
+    // An array's and a string's are one walk, built once for each key.
+    const auto seq = [&] { return r.blk({
         r.iff(r.is(r.typ(key), "string"),
               r.blk({r.iff(r.is(r.L(key), "length"),
                            r.ret(r.in(IntrinsicId::ToDouble,
@@ -724,9 +726,9 @@ struct Binder {
         r.iff(r.bin(BinOp::Ne, r.in(IntrinsicId::ToDouble, {r.L(i)}), r.L(key)),
               r.ret(r.Nil())),
         r.ret(r.idx(r.L(recv), r.L(i))),
-    });
-    arms.emplace_back(r.S("array"), seq);
-    arms.emplace_back(r.S("string"), seq);
+    }); };
+    arms.emplace_back(r.S("array"), seq());
+    arms.emplace_back(r.S("string"), seq());
     // A Map or a Set is an object wrapping the value-keyed map, so that
     // `typeof` can answer "object" (JavaScript's own answer) and the two
     // stay tellable apart -- which one vmlib Map alone could not do.
@@ -1290,26 +1292,23 @@ struct Binder {
   // matches by name read them by position, so a spread has nowhere to go.
   // `lead` goes in front -- a method's receiver, which runs first.
   // JavaScript runs every argument of a call, whether the function reads
-  // it or not, so the ones past `reads` still run (FrameLayout::
-  // spill_unread): `String(1, f())` calls f, after the 1 and before
-  // String.
-  struct BuiltinArgs {
-    std::vector<NodeId> args;  // the lead, then the arguments
-    std::vector<NodeId> pre;   // to run before the call (spill_unread)
-  };
-  BuiltinArgs emit_args(const Ast& args, size_t reads, FnCtx& ctx,
-                        NodeId lead = NodeId{}) {
-    BuiltinArgs out;
-    if (lead.valid()) out.args.push_back(lead);
+  // it or not, so the ones past `reads` still run (Builder::reading):
+  // `String(1, f())` calls f, after the 1 and before String. `make` builds
+  // the call over the lead and the arguments it reads.
+  using ArgList = const std::vector<NodeId>&;
+  template <class F>
+  NodeId with_args(const Ast& args, size_t reads, FnCtx& ctx, F make,
+                   NodeId lead = NodeId{}) {
+    std::vector<NodeId> all;
+    if (lead.valid()) all.push_back(lead);
     for (const auto& c : args.nodes) {
       if (c->tag == "spread"_) {
         fail(*c, "a spread argument is not supported in this call here");
       }
-      out.args.push_back(emit_expr(*c, ctx));
+      all.push_back(emit_expr(*c, ctx));
     }
-    auto b = Builder(m).at(pos_of(args));
-    out.pre = ctx.spill_unread(b, out.args, reads + (lead.valid() ? 1 : 0));
-    return out;
+    return Builder(m).at(pos_of(args)).reading(
+        all, reads + (lead.valid() ? 1 : 0), make);
   }
 
   static bool has_spread(const Ast& list) {
@@ -1344,14 +1343,15 @@ struct Binder {
     }
     if (!run.empty() || segs.empty()) segs.push_back(b.array_lit(run));
     if (segs.size() == 1) return segs[0];
-    const int32_t t = ctx.alloc_local("$items");
-    std::vector<NodeId> out{b.assign(VarKind::Local, t, segs[0])};
-    for (size_t k = 1; k < segs.size(); ++k) {
-      out.push_back(b.intrinsic(IntrinsicId::ArrayConcat,
-                                {b.varref(VarKind::Local, t), segs[k]}));
-    }
-    out.push_back(b.varref(VarKind::Local, t));
-    return b.block(out);
+    return b.let(segs[0], [&](auto items) {
+      std::vector<NodeId> out;
+      for (size_t k = 1; k < segs.size(); ++k) {
+        out.push_back(
+            b.intrinsic(IntrinsicId::ArrayConcat, {items(), segs[k]}));
+      }
+      out.push_back(items());
+      return b.block(out);
+    });
   }
 
   // A call's arguments: the ones before the first `...` one value each,
@@ -1518,12 +1518,10 @@ struct Binder {
     const auto& cells = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
     if (loopvar >= 0 && cells.count(loopvar)) {
       const int32_t c = cells.at(loopvar);
-      const int32_t carry = ctx.alloc_local("$carry");
-      step.push_back(
-          b.assign(VarKind::Local, carry, b.varref(VarKind::Cell, c)));
-      step.push_back(b.cell_fresh(c));
-      step.push_back(
-          b.assign(VarKind::Cell, c, b.varref(VarKind::Local, carry)));
+      step.push_back(b.let(b.varref(VarKind::Cell, c), [&](auto carry) {
+        return b.block({b.cell_fresh(c),
+                        b.assign(VarKind::Cell, c, carry())});
+      }));
     }
     for (const auto& c : a.nodes[2]->nodes) {
       step.push_back(emit_expr_stmt(*c, ctx));
@@ -1662,18 +1660,17 @@ struct Binder {
                          emit_expr(*a.nodes[1], ctx),
                          emit_expr(*a.nodes[2], ctx));
       // `a || b` answers one of its operands, not a bool, so the left one
-      // is kept in a slot to be tested and then handed back.
+      // is held by a Let to be tested and then handed back.
       case "logor"_:
       case "logand"_: {
         const bool is_or = a.tag == "logor"_;
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i < a.nodes.size(); ++i) {
-          const int32_t t = ctx.alloc_local(is_or ? "$or" : "$and");
           const NodeId rhs = emit_expr(*a.nodes[i], ctx);
-          const NodeId keep = b.varref(VarKind::Local, t);
-          acc = b.block({b.assign(VarKind::Local, t, acc),
-                         b.make_if(truthy(keep, p), is_or ? keep : rhs,
-                                   is_or ? rhs : keep)});
+          acc = b.let(acc, [&](auto keep) {
+            return b.make_if(truthy(keep(), p), is_or ? keep() : rhs,
+                             is_or ? rhs : keep());
+          });
         }
         return acc;
       }
@@ -1836,46 +1833,43 @@ struct Binder {
     // new Map(entries) and new Set(values), filled by $mfill/$sfill from
     // anything for...of walks.
     if (n == "Map" || n == "Set") {
-      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
-      const NodeId empty =
-          of_kind(b, b.object_lit({}), n == "Map" ? kMapKind : kSetKind,
-                  {b.intrinsic(IntrinsicId::MapNew, {})});
-      const NodeId made =
-          xs.args.empty()
-              ? empty
-              : rt.call(n == "Map" ? "$mfill" : "$sfill", {empty, xs.args[0]},
-                        p);
-      return chain(b.sequence(xs.pre, made));
+      return chain(with_args(arglist, 1, ctx, [&](ArgList args) {
+        const NodeId empty =
+            of_kind(b, b.object_lit({}), n == "Map" ? kMapKind : kSetKind,
+                    {b.intrinsic(IntrinsicId::MapNew, {})});
+        return args.empty() ? empty
+                            : rt.call(n == "Map" ? "$mfill" : "$sfill",
+                                      {empty, args[0]}, p);
+      }));
     }
     // new Promise((resolve, reject) => ...): the two halves are closures
     // over a cell of *this* frame holding the promise, which is the one
     // place a `new` needs storage of its own. CellFresh gives a `new
     // Promise` inside a loop its own cell per iteration.
     if (n == "Promise") {
-      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
-      const std::vector<NodeId>& args = xs.args;
       const int32_t c = ctx.next_cell++;
       const std::vector<CaptureSrc> cs{{VarKind::Cell, c}};
       const int32_t cm1 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
       const int32_t cm2 = static_cast<int32_t>(m.capture_maps.size());
       m.capture_maps.push_back(cs);
-      return chain(b.sequence(
-          xs.pre,
-          b.block({b.cell_fresh(c),
-                   b.assign(VarKind::Cell, c, rt.call("$pnew", {}, p)),
-                   b.call_value(arg_or_nil(args, 0, p),
-                                {b.make_closure(rt.func("$presolve1"), cm1),
-                                 b.make_closure(rt.func("$preject1"), cm2)}),
-                   b.varref(VarKind::Cell, c)})));
+      return chain(with_args(arglist, 1, ctx, [&](ArgList args) {
+        return b.block(
+            {b.cell_fresh(c),
+             b.assign(VarKind::Cell, c, rt.call("$pnew", {}, p)),
+             b.call_value(arg_or_nil(args, 0, p),
+                          {b.make_closure(rt.func("$presolve1"), cm1),
+                           b.make_closure(rt.func("$preject1"), cm2)}),
+             b.varref(VarKind::Cell, c)});
+      }));
     }
     if (n == "Error" || n == "TypeError" || n == "RangeError") {
-      const BuiltinArgs xs = emit_args(arglist, 1, ctx);
-      return chain(b.sequence(
-          xs.pre,
-          b.object_lit({{b.str_literal("name"), b.str_literal(n)},
-                        {b.str_literal("message"),
-                         rt.call("$str", {arg_or_nil(xs.args, 0, p)}, p)}})));
+      return chain(with_args(arglist, 1, ctx, [&](ArgList args) {
+        return b.object_lit(
+            {{b.str_literal("name"), b.str_literal(n)},
+             {b.str_literal("message"),
+              rt.call("$str", {arg_or_nil(args, 0, p)}, p)}});
+      }));
     }
     // `new SomeClass(...)`: not a builtin, so it has to be a class, which
     // is a value like any other -- read at run time, through whatever name
@@ -1886,28 +1880,27 @@ struct Binder {
     if (!ref_of.count(a.nodes[0].get())) {
       fail(*a.nodes[0], "'" + n + "' is not a class known here");
     }
-    const int32_t mark = ctx.mark();
-    const int32_t kv = ctx.alloc_local("$cls");
-    const int32_t tv = ctx.alloc_local("$this");
-    const NodeId K = b.varref(VarKind::Local, kv);
-    const NodeId T = b.varref(VarKind::Local, tv);
-    const NodeId built = b.block(
-        {b.assign(VarKind::Local, kv,
-                  read_var(ref_of.at(a.nodes[0].get()), ctx, p)),
-         b.make_if(b.binary(BinOp::Eq, is_kind(b, b.varref(VarKind::Local, kv), kClassKind),
-                            b.bool_literal(false)),
-                   rt.call("$throwtype",
-                           {b.str_literal(n + " is not a constructor")}, p),
-                   NodeId{}),
-         b.assign(VarKind::Local, tv,
-                  new_instance(b, kind_field(b, K, kClassProto))),
-         rt.call("$newresult",
-                 {call_with(kind_field(b, K, kClassCtor), {T},
-                            emit_call_args(arglist, ctx), p),
-                  T},
-                 p)});
-    const int32_t end = ctx.release(mark);
-    return chain(b.scope(mark, end, built));
+    // The class and the instance are held by Lets for the reads below.
+    const NodeId built = b.let(
+        read_var(ref_of.at(a.nodes[0].get()), ctx, p), [&](auto k) {
+          return b.block(
+              {b.make_if(b.binary(BinOp::Eq, is_kind(b, k(), kClassKind),
+                                  b.bool_literal(false)),
+                         rt.call("$throwtype",
+                                 {b.str_literal(n + " is not a constructor")},
+                                 p),
+                         NodeId{}),
+               b.let(new_instance(b, kind_field(b, k(), kClassProto)),
+                     [&](auto t) {
+                       return rt.call(
+                           "$newresult",
+                           {call_with(kind_field(b, k(), kClassCtor), {t()},
+                                      emit_call_args(arglist, ctx), p),
+                            t()},
+                           p);
+                     })});
+        });
+    return chain(built);
   }
 
   // A primary followed by `limit - 1` suffixes. The limit is what lets an
@@ -1985,9 +1978,9 @@ struct Binder {
       const Ast* c = call_at(1);
       if (c == nullptr) fail(prim, "String must be called here");
       i = 2;
-      const BuiltinArgs xs = emit_args(*c->nodes[0], 1, ctx);
-      return b.sequence(xs.pre,
-                        rt.call("$str", {arg_or_nil(xs.args, 0, p)}, p), p);
+      return with_args(*c->nodes[0], 1, ctx, [&](ArgList args) {
+        return rt.call("$str", {arg_or_nil(args, 0, p)}, p);
+      });
     }
     const std::string mem = member(1);
     const Ast* c = call_at(2);
@@ -2005,8 +1998,7 @@ struct Binder {
       // value each, and any past those still run first (emit_args).
       using Args = const std::vector<NodeId>&;
       const auto builtin = [&](size_t reads, const auto& make) {
-        const BuiltinArgs xs = emit_args(*c->nodes[0], reads, ctx);
-        return b.sequence(xs.pre, make(xs.args), p);
+        return with_args(*c->nodes[0], reads, ctx, make);
       };
       // console.log(a, b): JavaScript joins its arguments with a space,
       // and this subset's samples hand it a string the program built
@@ -2063,13 +2055,19 @@ struct Binder {
     auto b = Builder(m).at(p);
     const Ast& arglist = *call.nodes[0];
     // A builtin reads its receiver and then `reads` arguments, one value
-    // each; any argument past those still runs (spill_unread), after the
-    // receiver as JavaScript orders them. A method of the program's own
-    // takes its arguments the way any call does.
+    // each; any argument past those still runs (Builder::reading), after
+    // the receiver as JavaScript orders them. A method of the program's
+    // own takes its arguments the way any call does.
     const auto builtin = [&](size_t reads, const auto& make) {
-      const BuiltinArgs xs = emit_args(arglist, reads, ctx, recv);
-      const auto at = [&](size_t k) { return arg_or_nil(xs.args, k + 1, p); };
-      return b.sequence(xs.pre, make(xs.args[0], at));
+      return with_args(
+          arglist, reads, ctx,
+          [&](ArgList args) {
+            const auto at = [&](size_t k) {
+              return arg_or_nil(args, k + 1, p);
+            };
+            return make(args[0], at);
+          },
+          recv);
     };
 
     // push takes any number of values, and a spread among them.
@@ -2140,49 +2138,40 @@ struct Binder {
     // receiver as `this` -- or, when the receiver has a property of the
     // name itself, that property, called as any value is. JavaScript
     // reads the callee before it runs the arguments, and so does this:
-    // the receiver, its method or else its property are settled first;
-    // then each argument runs once, into a slot of its own; then the call
-    // is made, with `this` when it is a method. The two calls differ in
-    // what they pass, so each reads the arguments from the slots, which
-    // -- like the receiver's and the callee's -- belong to a scope around
-    // the call alone, claimed before the arguments run.
-    const int32_t mark = ctx.mark();
-    const int32_t t = ctx.alloc_local("$recv");
-    const int32_t mt = ctx.alloc_local("$method");
-    const int32_t pr = ctx.alloc_local("$property");
-    const auto L = [&](int32_t slot) { return b.varref(VarKind::Local, slot); };
-    const size_t fixed = fixed_args(arglist);
-    std::vector<int32_t> slots;
-    for (size_t k = 0; k < fixed; ++k) slots.push_back(ctx.alloc_local("$arg"));
-    const bool spread = fixed < arglist.nodes.size();
-    const int32_t rest = spread ? ctx.alloc_local("$spread") : -1;
+    // the receiver, its method, else its property, then each argument,
+    // each held by a Let; then the call, with `this` when it is a method.
+    // The two calls differ in what they pass, so each reads the values
+    // the Lets hold rather than compiling the arguments twice.
     const Args args = emit_call_args(arglist, ctx);
-    const auto no_method = [&] {
-      return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {L(mt)}),
-                      b.str_literal("nil"));
-    };
-    std::vector<NodeId> body{
-        b.assign(VarKind::Local, t, recv),
-        b.assign(VarKind::Local, mt,
-                 rt.call("$method", {L(t), b.str_literal(name)}, p)),
-        b.make_if(no_method(),
-                  b.assign(VarKind::Local, pr,
-                           rt.call("$index", {L(t), b.str_literal(name)}, p)),
-                  NodeId{})};
-    for (size_t k = 0; k < fixed; ++k) {
-      body.push_back(b.assign(VarKind::Local, slots[k], args.fixed[k]));
-    }
-    if (spread) body.push_back(b.assign(VarKind::Local, rest, args.spread));
-    const auto slotted = [&] {
-      Args a;
-      for (const int32_t slot : slots) a.fixed.push_back(L(slot));
-      if (spread) a.spread = L(rest);
-      return a;
-    };
-    body.push_back(b.make_if(no_method(), call_with(L(pr), {}, slotted(), p),
-                             call_with(L(mt), {L(t)}, slotted(), p)));
-    const int32_t end = ctx.release(mark);
-    return b.scope(mark, end, b.block(body));
+    std::vector<NodeId> values = args.fixed;
+    if (args.spread.valid()) values.push_back(args.spread);
+    return b.let(recv, [&](auto t) {
+      return b.let(rt.call("$method", {t(), b.str_literal(name)}, p),
+                   [&](auto mt) {
+        const auto no_method = [&] {
+          return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {mt()}),
+                          b.str_literal("nil"));
+        };
+        return b.let(
+            b.make_if(no_method(),
+                      rt.call("$index", {t(), b.str_literal(name)}, p),
+                      b.nil_literal()),
+            [&](auto pr) {
+              return b.lets(values, [&](const std::vector<Builder::Temp>& v) {
+                const auto held = [&] {
+                  Args a;
+                  for (size_t k = 0; k < args.fixed.size(); ++k) {
+                    a.fixed.push_back(v[k]());
+                  }
+                  if (args.spread.valid()) a.spread = v.back()();
+                  return a;
+                };
+                return b.make_if(no_method(), call_with(pr(), {}, held(), p),
+                                 call_with(mt(), {t()}, held(), p));
+              });
+            });
+      });
+    });
   }
 
   // Assignment, in the one shape both a variable and a property need: let
@@ -2231,17 +2220,13 @@ struct Binder {
     } else {
       fail(last, "cannot assign to this expression");
     }
-    // Receiver and key land in slots first: `o[i()] += 1` must evaluate
-    // each of them once, not once for the read and again for the write.
-    const int32_t tr = ctx.alloc_local("$recv");
-    const int32_t tk = ctx.alloc_local("$key");
+    // Receiver and key are held by Lets: `o[i()] += 1` must evaluate each
+    // of them once, not once for the read and again for the write.
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
-    const NodeId R = b.varref(VarKind::Local, tr);
-    const NodeId K = b.varref(VarKind::Local, tk);
-    const auto read = [&] { return rt.call("$index", {R, K}, p); };
-    return b.block({b.assign(VarKind::Local, tr, recv),
-                    b.assign(VarKind::Local, tk, key),
-                    rt.call("$setidx", {R, K, combine(read)}, p)});
+    return b.lets({recv, key}, [&](const std::vector<Builder::Temp>& t) {
+      const auto read = [&] { return rt.call("$index", {t[0](), t[1]()}, p); };
+      return rt.call("$setidx", {t[0](), t[1](), combine(read)}, p);
+    });
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {
