@@ -524,6 +524,16 @@ struct Binder {
   //   $seq     `===`: two values of one type compare as Eq does, but for
   //            an int beside a double -- Eq says 1 == 1.0, and $seq, which
   //            compares the types first, says not -- so an int is $seq's.
+  //   $index   `o[k]` and `o.k`: an array's element at an int in range,
+  //            or an object's own property, found by its name (an int key
+  //            on an object, a string on an array, `length`, a Map's
+  //            `size` are $index's); a property it lacks is undefined
+  //            (kMissNil), unless it has a meta -- a class's instance, a
+  //            Map, whose misses are the prototype chain's.
+  //   $setidx  `o[k] = v` and `o.k = v`: the same two, a new property
+  //            included, and an array's element at its length, which
+  //            grows it (kAppend); an element past the length or a
+  //            negative one is $setidx's.
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth,
@@ -531,6 +541,11 @@ struct Binder {
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},
+        {"$index", VmOp::index(tags_named({"array", "object"}), kMissNil,
+                               tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "object"}),
+                                    kMissNil | kAppend,
+                                    tags_named({"int", "string"}))},
     };
   }
 
@@ -762,7 +777,7 @@ struct Binder {
   void rt_setidx() {
     RT r(*this);
     const auto [recv, key, val] = r.params("recv", "key", "val");
-    const auto [t, n, i] = r.locals("t", "n", "i");
+    const auto [t, n, i, k] = r.locals("t", "n", "i", "k");
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(
         r.S("array"),
@@ -772,10 +787,17 @@ struct Binder {
                      r.in(IntrinsicId::ArrayPush, {r.L(recv), r.L(val)}),
                      r.b.set_index(r.L(recv), r.L(i), r.L(val))),
                r.ret(r.L(val))}));
+    // A Map's and a Set's `size` is the count, which $index answers first
+    // whatever the object holds, so a store to it keeps nothing: a key
+    // stored there would be found by the VM before $index was asked.
     arms.emplace_back(
         r.S("object"),
-        r.blk({r.b.set_index(r.L(recv), r.call("$str", {r.L(key)}), r.L(val)),
-               r.ret(r.L(val))}));
+        r.blk({r.set(k, r.call("$str", {r.L(key)})),
+               r.iff(r.both(r.is(r.L(k), "size"),
+                            r.either(is_kind(r, recv, kMapKind),
+                                     is_kind(r, recv, kSetKind))),
+                     r.ret(r.L(val))),
+               r.b.set_index(r.L(recv), r.L(k), r.L(val)), r.ret(r.L(val))}));
     arms.emplace_back(
         r.S("map"),
         r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
@@ -1926,11 +1948,11 @@ struct Binder {
             ++i;
             break;
           }
-          cur = rt.call("$index", {cur, b.str_literal(name, p)}, p);
+          cur = ops.call("$index", {cur, b.str_literal(name, p)}, p);
           break;
         }
         case "indexsfx"_:
-          cur = rt.call("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
+          cur = ops.call("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_:
           cur = call_with(cur, {}, emit_call_args(*sfx.nodes[0], ctx), p);
@@ -2154,7 +2176,7 @@ struct Binder {
         };
         return b.let(
             b.make_if(no_method(),
-                      rt.call("$index", {t(), b.str_literal(name)}, p),
+                      ops.call("$index", {t(), b.str_literal(name)}, p),
                       b.nil_literal()),
             [&](auto pr) {
               return b.lets(values, [&](const std::vector<Builder::Temp>& v) {
@@ -2181,7 +2203,8 @@ struct Binder {
   //
   // `as_value` asks for the assigned value as the result, which is what
   // `z = (y = 5)` and `return y = 3` read: a variable is read back after
-  // the write, and a property store's $setidx already answers the value.
+  // the write, and a property store is held by a Let and read after it (a
+  // store has no value of its own).
   // A statement does not ask, and the write alone is what it compiles to.
   template <typename Combine>
   NodeId emit_store(const Ast& target, size_t limit, FnCtx& ctx, SrcPos p,
@@ -2223,11 +2246,11 @@ struct Binder {
     const NodeId recv = emit_postfix(target, limit - 1, ctx);
     return read_modify_write(
         b, recv, key,
-        [&](NodeId r, NodeId k) { return rt.call("$index", {r, k}, p); },
+        [&](NodeId r, NodeId k) { return ops.call("$index", {r, k}, p); },
         [&](NodeId r, NodeId k, NodeId v) {
-          return rt.call("$setidx", {r, k, v}, p);
+          return ops.call("$setidx", {r, k, v}, p);
         },
-        combine);
+        combine, as_value);
   }
 
   NodeId emit_assign(const Ast& a, FnCtx& ctx, bool as_value) {

@@ -1,0 +1,15 @@
+5 6 7 undefined
+function 1 undefined
+undefined
+2 3
+undefined
+3
+11 20 40 undefined 4
+9 9
+4 4 50 50
+21 21
+19 12 2
+1
+2 1
+2
+one one two and a half 1,2.5
