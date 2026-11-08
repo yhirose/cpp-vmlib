@@ -85,8 +85,11 @@ puts nested.inspect
 # A raise from inside a block reaches the handler around the iteration.
 puts attempt { [1, 2, 3].each { |x| raise "at #{x}" } }
 
-# ZeroDivisionError is raised by this front end, not trapped by the VM.
+# ZeroDivisionError is raised by this front end, not trapped by the VM,
+# for `%` as for `/`, and for a Float divisor as for an Integer.
 puts attempt { 1 / 0 }
+puts attempt { 1 % 0 }
+puts attempt { 7.5 % 0 }
 
 # A library method runs every argument it was given before it refuses a
 # count it does not take, as Ruby's own do; so does a call of a method

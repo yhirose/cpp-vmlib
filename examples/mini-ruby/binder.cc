@@ -745,13 +745,22 @@ struct Binder {
     r.finish("$div");
   }
 
+  // Ruby's `%` floors on Floats as on Integers, which is FloorMod on any
+  // two numbers, and raises ZeroDivisionError for a zero divisor of
+  // either, where FloorMod traps on an Integer one and answers NaN for a
+  // Float one. (Ruby takes the divisor's side from a product's sign, which
+  // a tiny remainder over a tiny divisor underflows: 1e-320 % -1e-10 is
+  // 1.0e-320 there and -1.0e-10 here.)
   void rt_mod() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    r.add(r.iff(r.both(r.is(r.typ(a), "int"), r.is(r.typ(b), "int")),
-                r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
-    // Anything else Mod refuses, in its own words.
-    r.add(r.ret(r.bin(BinOp::Mod, r.L(a), r.L(b))));
+    r.add(r.iff(
+        r.both(r.either(r.is(r.typ(b), "int"), r.is(r.typ(b), "double")),
+               r.bin(BinOp::Eq, r.L(b), r.I(0))),
+        r.ret(r.call("$exc",
+                     {r.S("ZeroDivisionError"), r.S("divided by 0")}))));
+    // Anything else FloorMod refuses, in its own words.
+    r.add(r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b))));
     r.finish("$mod");
   }
 

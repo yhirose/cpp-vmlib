@@ -9,6 +9,8 @@ rescued: deep
 ["inner saw inner", "inner ensure", "outer saw rethrown"]
 rescued: at 1
 rescued: divided by 0
+rescued: divided by 0
+rescued: divided by 0
 length
 ArgumentError
 wrong number of arguments (given 1, expected 0)

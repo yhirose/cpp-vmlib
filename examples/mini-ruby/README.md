@@ -143,6 +143,9 @@ checked against `ruby`.
 * **`/` and `%` on two Integers floor**, where `BinOp::Div` truncates and
   `BinOp::Mod` is C's: they are `BinOp::FloorDiv` and `BinOp::FloorMod`,
   with `$div` and `$mod` behind them for a Float and a zero divisor.
+  `%` floors a Float too: `$mod` hands it to `BinOp::FloorMod` once it
+  has raised ZeroDivisionError for a zero divisor, where the operator
+  would answer NaN.
 * **`+` concatenates** strings and arrays.
 * **A whole Float prints with a point** -- `to_display`'s output plus the
   one rule its comment leaves to a front end.
