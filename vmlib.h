@@ -1399,10 +1399,20 @@ inline constexpr int32_t kExact = 1;
 // it widens what the VM answers, where kExact narrows what it would.
 inline constexpr int32_t kMissNil = 2;
 
+// kAppend (SetIndex): a store at the index that is the array's length
+// appends, as JavaScript's and Ruby's do; below zero or past the end it is
+// still the fallback's, and so is any other key (a double, which no fast
+// path reaches). Without it every store out of range is, which is Python's
+// IndexError, C#'s and culebra's.
+inline constexpr int32_t kAppend = 4;
+
 // Every flag there is, and a flag's word.
-inline constexpr int32_t kKnownFlags = kExact | kMissNil;
+inline constexpr int32_t kKnownFlags = kExact | kMissNil | kAppend;
 inline constexpr const char* flag_name(int32_t flag) {
-  return flag == kExact ? "exact" : flag == kMissNil ? "missnil" : "flagged";
+  return flag == kExact     ? "exact"
+         : flag == kMissNil ? "missnil"
+         : flag == kAppend  ? "append"
+                            : "flagged";
 }
 
 // The signed divisions: the operators a zero divisor makes untrue, and
@@ -1429,8 +1439,9 @@ inline constexpr int32_t allowed_flags(Tag t, uint8_t op) {
     case Tag::Binary:
       return can_be_exact(static_cast<BinOp>(op)) ? kExact : 0;
     case Tag::Index:
-    case Tag::SetIndex:
       return kMissNil;
+    case Tag::SetIndex:
+      return kMissNil | kAppend;
     default:
       return 0;
   }
@@ -2020,6 +2031,7 @@ struct Fallback {
   bool valid() const { return callee.valid(); }
   bool exact() const { return (flags & kExact) != 0; }
   bool miss_nil() const { return (flags & kMissNil) != 0; }
+  bool append() const { return (flags & kAppend) != 0; }
   uint32_t key_mask() const { return key_tags != 0 ? key_tags : tags; }
 };
 
@@ -10080,7 +10092,14 @@ struct Exec {
       const Value& z = f.regs[static_cast<size_t>(in.a) + 3];
       if (!has_tag(fb.key_mask(), y.tag())) return false;
       if (fb.value_tags != 0 && !has_tag(fb.value_tags, z.tag())) return false;
-      if (index_fault(x, y, true) != Fault::None) return false;
+      if (const Fault e = index_fault(x, y, true); e != Fault::None) {
+        if (e != Fault::Range || !fb.append() ||
+            y.as_int() != index_bound(x)) {
+          return false;
+        }
+        x.as_array()->items.push_back(z);
+        return true;
+      }
       if (Value* slot = index_slot(x, y)) {
         *slot = z;
         return true;

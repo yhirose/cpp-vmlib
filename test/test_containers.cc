@@ -961,6 +961,46 @@ int main() {
              "kMissNil");
   }
 
+  // kAppend: a store at the array's length appends; one below zero, past
+  // the end, with a key that is no int, or into a string is still the
+  // fallback's; and without the flag the length itself is.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back({"main", 1, 0, NodeId{}, {"xs"}, {}});
+    Func wr{"write", 3, 0, NodeId{}, {"r", "k", "v"}, {}};
+    wr.num_params = 3;
+    wr.lenient_arity = true;
+    wr.body = b.intrinsic(IntrinsicId::Print, {b.str_literal("W", p)}, p);
+    m.funcs.push_back(wr);
+    const NodeId xs = b.varref(VarKind::Local, 0, p);
+    const auto put = [&](NodeId k, int32_t flags) {
+      return b.set_index(xs, k, b.literal(7, p),
+                         {b.make_closure(1, 0, p),
+                          tags_named({"array", "int", "double"}), flags},
+                         p);
+    };
+    const auto len = [&] {
+      return b.intrinsic(IntrinsicId::Print,
+                         {b.intrinsic(IntrinsicId::Len, {xs}, p)}, p);
+    };
+    m.funcs[0].body = b.scope(
+        0, 1,
+        b.block({b.assign(VarKind::Local, 0, b.array_lit({b.literal(1, p)}, p),
+                          p),
+                 put(b.literal(1, p), 0), len(),
+                 put(b.literal(1, p), kAppend), len(),
+                 put(b.literal(3, p), kAppend), len(),
+                 put(b.literal(-1, p), kAppend), len(),
+                 put(b.double_literal(2.0, p), kAppend), len(),
+                 put(b.literal(0, p), kAppend), len()},
+                p),
+        p);
+    check_eq(run_module(m, "kAppend"), "", "kAppend: unexpected failure");
+    check_eq(joined(), "W|1|2|W|2|W|2|W|2|2|", "kAppend");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "containers: %d failure(s)\n", g_failures);
     return 1;

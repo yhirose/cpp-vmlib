@@ -376,6 +376,23 @@ int main() {
            }),
            "", "a SetIndex's miss");
   check_eq(verdict([&](Module&, Builder& b) {
+             return b.block(
+                 {b.set_index(b.array_lit({}, p), b.literal(0, p),
+                              b.literal(1, p), {callee(b), 1, kAppend}, p),
+                  b.literal(0, p)},
+                 p);
+           }),
+           "", "a SetIndex's append");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.index(b.array_lit({}, p), b.literal(0, p),
+                            {callee(b), 1, kAppend}, p);
+           }),
+           "index cannot be append", "an Index's append");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return add(b, {callee(b), 1, kAppend});
+           }),
+           "add cannot be append", "a Binary's append");
+  check_eq(verdict([&](Module&, Builder& b) {
              return add(b, {callee(b), 1, 0, 2});
            }),
            "binary has no key to name tags for", "a Binary with a key set");
