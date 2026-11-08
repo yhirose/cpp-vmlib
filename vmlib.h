@@ -6352,6 +6352,50 @@ struct Dumper {
   }
 };
 
+// A node one parent holds once. A node under two parents is compiled
+// under each, and for anything but a leaf -- a literal, a variable, a
+// native, a LetRef -- that is a front end's mistake: one that only reads
+// costs time per parent, one that calls, stores or builds runs twice, and
+// the code of a nested pair doubles at every level (a method call over
+// two arms, five deep, held its argument 32 times). A value read twice is
+// held by a Let, whose LetRefs are leaves. Counted over the nodes a
+// function body reaches, a child once for each use of it.
+inline std::optional<std::string> shared_node(const Module& m) {
+  std::vector<uint32_t> uses(m.nodes.size(), 0);
+  std::vector<char> seen(m.nodes.size(), 0);
+  std::vector<uint32_t> stack;
+  for (const Func& f : m.funcs) stack.push_back(f.body.v);
+  while (!stack.empty()) {
+    const uint32_t n = stack.back();
+    stack.pop_back();
+    if (seen[n]) continue;
+    seen[n] = 1;
+    for (uint32_t i = 0; i < m.nodes[n].num_children; ++i) {
+      const uint32_t c = m.child(NodeId{n}, i).v;
+      ++uses[c];
+      stack.push_back(c);
+    }
+  }
+  for (uint32_t n = 0; n < m.nodes.size(); ++n) {
+    if (uses[n] < 2) continue;
+    switch (m.nodes[n].tag) {
+      case Tag::Literal:
+      case Tag::VarRef:
+      case Tag::NativeRef:
+      case Tag::LetRef:
+        continue;
+      default: {
+        const SrcPos p = m.positions[m.nodes[n].pos];
+        return std::string(name_of(m.nodes[n].tag)) + " at " +
+               std::to_string(p.line) + ":" + std::to_string(p.col) +
+               " is under " + std::to_string(uses[n]) +
+               " parents; hold a value read twice with a Let";
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace detail
 
 inline std::optional<std::string> verify(const Module& m) {
@@ -6384,6 +6428,7 @@ inline std::optional<std::string> verify(const Module& m) {
     }
     if (!v.check_node(f.body, f, 0, 0)) return v.err;
   }
+  if (const auto shared = detail::shared_node(m)) return *shared;
   if (!m.funcs[0].capture_names.empty()) {
     return std::string("entry function must capture nothing");
   }

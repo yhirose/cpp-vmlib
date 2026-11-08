@@ -579,13 +579,14 @@ int main() {
       const auto n = static_cast<int32_t>(locals.size());
       m.funcs.push_back({name, n, 0, body, std::move(locals), {}});
       m.funcs.back().num_params = params;
-      return b.make_closure(static_cast<int32_t>(m.funcs.size() - 1), 0, p);
+      return static_cast<int32_t>(m.funcs.size() - 1);
     };
+    const auto closure = [&](int32_t fn) { return b.make_closure(fn, 0, p); };
     m.funcs.push_back({});  // main, wired below
     const auto owned = [&](const char* name) {
-      return b.intrinsic(IntrinsicId::DropSet,
-                         {b.object_lit({}, p), func(name, {"o"}, 1, say(name))},
-                         p);
+      return b.intrinsic(
+          IntrinsicId::DropSet,
+          {b.object_lit({}, p), closure(func(name, {"o"}, 1, say(name)))}, p);
     };
     const NodeId ret = b.make_return(
         b.make_if(L(0), b.literal(1, p),
@@ -596,11 +597,11 @@ int main() {
     const NodeId inner = b.scope(
         3, 4,
         b.block({b.assign(VarKind::Local, 3, owned("b"), p),
-                 b.make_defer(func("D", {}, 0, say("D")), p), ret,
+                 b.make_defer(closure(func("D", {}, 0, say("D"))), p), ret,
                  say("past")},
                 p),
         p);
-    const NodeId f = func(
+    const int32_t f = func(
         "f", {"x", "y", "a", "b"}, 2,
         b.block({b.scope(2, 3,
                          b.block({b.assign(VarKind::Local, 2, owned("a"), p),
@@ -609,12 +610,13 @@ int main() {
                          p),
                  b.nil_literal(p)},
                 p));
-    const NodeId g = func(
+    const int32_t g = func(
         "g", {"x"}, 1,
         b.make_if(L(0), b.literal(3, p),
                   b.block({say("g"), b.literal(4, p)}, p), p));
-    const auto call = [&](NodeId fn, std::vector<NodeId> args) {
-      return b.intrinsic(IntrinsicId::Print, {b.call_value(fn, args, p)}, p);
+    const auto call = [&](int32_t fn, std::vector<NodeId> args) {
+      return b.intrinsic(
+          IntrinsicId::Print, {b.call_value(closure(fn), args, p)}, p);
     };
     const NodeId T = b.bool_literal(true, p);
     const NodeId F = b.bool_literal(false, p);

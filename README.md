@@ -186,17 +186,16 @@ lexically. `push_scope`/`declare`/`resolve` as you walk the source;
 `number_captures(m)` once afterwards; then `read(m, fn, var, p)` and
 `write(m, fn, var, value, p)` emit the `VarRef` or `Assign` a use needs --
 through `access(fn, var)`, which answers the `(VarKind, index)` pair: a
-local slot, a cell of this function's own, or a capture -- and
-`closure(m, here, target, p)` emits the `MakeClosure` for `target`, with
-the forwarding table (`capture_map`) expressed in `here`'s frame. What it
-gets right, and a per-function capture list would not, is the propagation:
-a name read two levels in is recorded as free in *every* function between
-the reader and the owner, because a closure's capture map is written in the
-frame that builds it and the frame two levels down cannot name a cell it
-does not own.
-It knows nothing about any parse tree -- names and integers go in, and the
-front end keeps its own per-function record beside it. Past that walk it
-has hooks for the less regular cases: `declare_var` for a front end that
+local slot, a cell of this function's own, or a capture -- and `closure(m,
+here, target, p)` emits the `MakeClosure` for `target`, with the forwarding
+table (`capture_map`) expressed in `here`'s frame. What it gets right, and a
+per-function capture list would not, is the propagation: a name read two
+levels in is recorded as free in *every* function between the reader and the
+owner, because a closure's capture map is written in the frame that builds
+it and the frame two levels down cannot name a cell it does not own. It
+knows nothing about any parse tree -- names and integers go in, and the
+front end keeps its own per-function record beside it. Past that walk it has
+hooks for the less regular cases: `declare_var` for a front end that
 resolves names through its own tables, `note_call` plus `close_over_calls`
 for one whose functions are static entities with a closure built at every
 call site (the call graph's fixpoint), `set_parent` for nesting learned

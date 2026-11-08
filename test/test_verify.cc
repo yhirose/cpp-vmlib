@@ -155,14 +155,48 @@ int main() {
            }),
            "node is its own ancestor", "cycle");
 
-  // Sharing is not a cycle: one literal under two parents, and a shared
-  // subtree under two siblings.
+  // Sharing is not a cycle, and a leaf under two parents is fine: a
+  // literal, a variable, a host function, a LetRef (a variable and a host
+  // function are leaves the same way, and the shipped programs hold both). Anything else under
+  // two parents is compiled under each, and is refused: a binder holds a
+  // value it reads twice with a Let.
   check_eq(verdict([&](Module&, Builder& b) {
              const NodeId one = b.literal(1, p);
-             const NodeId sum = b.binary(BinOp::Add, one, one, p);
+             return b.binary(BinOp::Add, one, one, p);
+           }),
+           "", "a literal under two parents is fine");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.let(b.literal(1, p), [&](Builder::Temp t) {
+               const NodeId r = t();
+               return b.binary(BinOp::Add, r, r, p);
+             }, p);
+           }),
+           "", "a LetRef under two parents is fine");
+  check_eq(verdict([&](Module&, Builder& b) {
+             const NodeId one = b.literal(1, p);
+             const NodeId sum = b.binary(BinOp::Add, one, one, {2, 3});
              return b.binary(BinOp::Mul, sum, sum, p);
            }),
-           "", "a shared node is fine");
+           "binary at 2:3 is under 2 parents; hold a value read twice with a "
+           "Let",
+           "a shared operation is refused");
+  check_eq(verdict([&](Module&, Builder& b) {
+             const NodeId sum = b.binary(BinOp::Add, b.literal(1, p),
+                                         b.literal(2, p), {2, 3});
+             return b.make_if(b.bool_literal(true, p), sum, sum, p);
+           }),
+           "binary at 2:3 is under 2 parents; hold a value read twice with a "
+           "Let",
+           "so is one under both arms of an If, though only one arm runs");
+  check_eq(verdict([&](Module&, Builder& b) {
+             const NodeId let = b.let(b.literal(1, p),
+                                      [&](Builder::Temp t) { return t(); },
+                                      {2, 3});
+             return b.block({let, let}, p);
+           }),
+           "let at 2:3 is under 2 parents; hold a value read twice with a "
+           "Let",
+           "the same Let node twice is refused");
 
   // shared_effects: a call is at 2:2, what holds it at 3:3 and 4:4. Its
   // callee is a read, so the call itself is what makes it observable.
