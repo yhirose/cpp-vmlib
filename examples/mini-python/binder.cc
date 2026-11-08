@@ -1320,7 +1320,7 @@ struct Binder {
     // leaves only near a whole number: a step down when the remainder is
     // on the other side of zero from b, then snapped to the nearest, and a
     // zero signed as a / b is.
-    r.add(r.set(t, r.in(IntrinsicId::FMod, {r.L(a), r.L(b)})));
+    r.add(r.set(t, r.bin(BinOp::Mod, r.L(a), r.L(b))));
     r.add(r.set(q, r.bin(BinOp::Div, r.bin(BinOp::Sub, r.L(a), r.L(t)),
                          r.L(b))));
     r.add(r.iff(r.both(r.bin(BinOp::Ne, r.L(t), r.D(0.0)),

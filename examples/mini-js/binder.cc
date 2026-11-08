@@ -1173,6 +1173,14 @@ struct Binder {
   // operators().
   NodeId truthy(NodeId v, SrcPos p) { return ops.call("$truthy", {v}, p); }
 
+  // `%`: Number::remainder, which is fmod -- Mod on a double, the dividend
+  // made one first so that the answer is a double even of two ints, as
+  // every JavaScript number is: `-4 % 2` is -0, and `7 % 0` NaN.
+  NodeId remainder(NodeId x, NodeId y, SrcPos p) {
+    auto b = Builder(m).at(p);
+    return b.binary(BinOp::Mod, b.intrinsic(IntrinsicId::ToDouble, {x}), y);
+  }
+
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
     return rs.closure(m, ctx.fn, g, p);
   }
@@ -1699,12 +1707,9 @@ struct Binder {
           const Ast& op = *a.nodes[i];
           const NodeId rhs = emit_expr(*a.nodes[i + 1], ctx);
           const std::string t(op.token);
-          // `%` is fmod, not truncation: BinOp::Mod refuses doubles, and
-          // JavaScript's own `-7 % 3` is -1, which is fmod's answer.
           acc = t == "*" ? b.at(pos_of(op)).binary(BinOp::Mul, acc, rhs)
-                : t == "/"
-                    ? b.at(pos_of(op)).binary(BinOp::Div, acc, rhs)
-                    : b.at(pos_of(op)).intrinsic(IntrinsicId::FMod, {acc, rhs});
+                : t == "/" ? b.at(pos_of(op)).binary(BinOp::Div, acc, rhs)
+                           : remainder(acc, rhs, pos_of(op));
         }
         return acc;
       }
@@ -2241,7 +2246,7 @@ struct Binder {
       if (op == "-=") return b.binary(BinOp::Sub, cur(), v);
       if (op == "*=") return b.binary(BinOp::Mul, cur(), v);
       if (op == "/=") return b.binary(BinOp::Div, cur(), v);
-      return b.intrinsic(IntrinsicId::FMod, {cur(), v});
+      return remainder(cur(), v, p);
     });
   }
 

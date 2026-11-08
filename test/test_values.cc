@@ -491,7 +491,7 @@ int main() {
     check_eq(joined(), "42|4|0.75|true|nil|ab|", "tostr output");
   }
 
-  // --- 12b. Numeric conversions and the two float operations. ------------
+  // --- 12b. Numeric conversions and the float power. ----------------------
   {
     Module m;
     Builder b(m);
@@ -510,14 +510,13 @@ int main() {
     const NodeId body = b.block(
         {pr1(IntrinsicId::ToInt, b.double_literal(-2.9, p)),
          pr1(IntrinsicId::ToDouble, b.literal(3, p)),
-         pr2(IntrinsicId::FMod, b.double_literal(5.5, p), b.literal(2, p)),
          pr2(IntrinsicId::Pow, b.double_literal(2.0, p),
              b.double_literal(0.5, p))},
         p);
     m.funcs.push_back({"main", 0, 0, body, {}, {}});
     const std::string failed = run_module(m, "numerics");
     check_eq(failed, "", "numerics: unexpected failure");
-    check_eq(joined(), "-2|3|1.5|1.4142135623730951|",
+    check_eq(joined(), "-2|3|1.4142135623730951|",
              "numerics output");
   }
   {

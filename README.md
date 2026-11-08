@@ -412,7 +412,7 @@ rounds any in-range value, and only the true overflow boundary goes to
 infinity -- and `NaN` passes through unchanged.
 
 A front end re-applies `ToFloat32` after every operation whose result can
-leave float precision -- `Add`/`Sub`/`Mul`/`Div`, `FMod`, `Pow`, and after
+leave float precision -- `Add`/`Sub`/`Mul`/`Div`/`Mod`, `Pow`, and after
 widening through `ToDouble` -- the same discipline `WrapI32` et al. use
 above, once more per operation. A comparison (`Lt`, `Eq`, ...) needs no
 `ToFloat32`: comparing two already-rounded doubles is exact.

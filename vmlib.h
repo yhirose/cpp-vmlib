@@ -1384,12 +1384,11 @@ inline constexpr bool can_be_exact(UnOp op) { return op == UnOp::Neg; }
 // The numeric conversions and the two float operations a front end cannot
 // write in-language: ToInt truncates a double toward zero (and traps on
 // NaN, an infinity, or a value outside int64's range); ToDouble widens an
-// int; FMod is IEEE fmod over doubles (int operands widen; a zero divisor
-// traps, like integer Mod); Pow is std::pow over doubles. Integer
+// int; Pow is std::pow over doubles. (fmod is BinOp::Mod on a double.) Integer
 // exponentiation is deliberately absent -- a loop over wrapping Mul writes
 // it in-language, in whatever overflow discipline the language wants.
 enum class IntrinsicId : uint8_t {
-  Print, ReadInt, Len, ToStr, TypeOf, ToInt, ToDouble, FMod, Pow,
+  Print, ReadInt, Len, ToStr, TypeOf, ToInt, ToDouble, Pow,
   // Print without the trailing newline, through coreir_rt_out_raw. The value
   // is formatted the way ToStr formats it.
   PrintRaw,
@@ -1839,7 +1838,6 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
     case IntrinsicId::TypeOf:  return 1;
     case IntrinsicId::ToInt:   return 1;
     case IntrinsicId::ToDouble: return 1;
-    case IntrinsicId::FMod:    return 2;
     case IntrinsicId::Pow:     return 2;
     case IntrinsicId::PrintRaw: return 1;
     case IntrinsicId::ArrayPush: return 2;
@@ -4325,7 +4323,6 @@ enum class Op : uint8_t {
   TryIndex,     // a = dst, a + 1 = receiver, a + 2 = key, c, d as TryUnary
   ToInt,        // a = dst, b = src   (truncate toward zero; traps off-range)
   ToDouble,     // a = dst, b = src
-  FMod,         // a = dst, b = lhs, c = rhs   (IEEE fmod; 0 divisor traps)
   Pow,          // a = dst, b = lhs, c = rhs   (std::pow over doubles)
   NewObject,    // a = dst   (empty; ObjectLit fills it with SetIndex)
   // Generators. Yield suspends the frame back into its GeneratorObj and
@@ -4453,7 +4450,6 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
     case I::TypeOf:       return Op::TypeOf;
     case I::ToInt:        return Op::ToInt;
     case I::ToDouble:     return Op::ToDouble;
-    case I::FMod:         return Op::FMod;
     case I::Pow:          return Op::Pow;
     case I::ArrayPush:    return Op::ArrayPush;
     case I::ArrayPop:     return Op::ArrayPop;
@@ -5611,7 +5607,6 @@ inline const char* name_of(IntrinsicId id) {
     case IntrinsicId::TypeOf:  return "typeof";
     case IntrinsicId::ToInt:   return "toint";
     case IntrinsicId::ToDouble: return "todouble";
-    case IntrinsicId::FMod:    return "fmod";
     case IntrinsicId::Pow:     return "pow";
     case IntrinsicId::PrintRaw: return "printraw";
     case IntrinsicId::ArrayPush: return "arraypush";
@@ -6346,7 +6341,6 @@ inline constexpr bool observable(IntrinsicId id) {
     case IntrinsicId::TypeOf:
     case IntrinsicId::ToInt:
     case IntrinsicId::ToDouble:
-    case IntrinsicId::FMod:
     case IntrinsicId::Pow:
     case IntrinsicId::ObjectHas:
     case IntrinsicId::ArgCount:
@@ -6659,7 +6653,6 @@ inline const char* name_of(Op op) {
     case Op::TryIndex:    return "tryindex";
     case Op::ToInt:       return "toint";
     case Op::ToDouble:    return "todouble";
-    case Op::FMod:        return "fmod";
     case Op::Pow:         return "pow";
     case Op::NewObject:   return "newobject";
     case Op::Yield:       return "yield";
@@ -6828,7 +6821,7 @@ inline std::string to_string(const Program& p) {
         // destination when it writes one -- compile_intrinsic's layout.
         case Op::Out: case Op::OutRaw: case Op::In: case Op::Len:
         case Op::ToStr: case Op::TypeOf: case Op::ToInt: case Op::ToDouble:
-        case Op::FMod: case Op::Pow: case Op::ArrayPush: case Op::ArrayPop:
+        case Op::Pow: case Op::ArrayPush: case Op::ArrayPop:
         case Op::ArrayConcat: case Op::ArrayFill: case Op::ObjectHas:
         case Op::ObjectKeys: case Op::ObjectRemove: case Op::ArgCount:
         case Op::Same: case Op::FnArity: case Op::Collect: case Op::HeapStats:
@@ -10236,18 +10229,6 @@ struct Exec {
                         " to float");
           }
           f.regs[in.a] = Value::make_double(to_float32(v.as_number()));
-          break;
-        }
-        case Op::FMod: {
-          const Value& l = f.regs[in.b];
-          const Value& r = f.regs[in.c];
-          if (!l.is_number() || !r.is_number()) {
-            fail(f, std::string("cannot fmod ") + type_name(l.tag()) +
-                        " and " + type_name(r.tag()));
-          }
-          if (r.as_number() == 0.0) fail(f, "divide by zero");
-          f.regs[in.a] =
-              Value::make_double(std::fmod(l.as_number(), r.as_number()));
           break;
         }
         case Op::Pow: {
