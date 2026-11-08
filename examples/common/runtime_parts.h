@@ -178,16 +178,26 @@ inline NodeId set_kind_field(FuncWriter& w, NodeId v, int64_t i, NodeId x) {
   return set_kind_field(w.b, v, i, x);
 }
 
-// The same questions, asked in C++ by a host function. The kind record `v`
-// carries when it is of `kind`, or null -- of an Object only, as is_kind.
+// The same questions, asked in C++ by a host function, each a twin of a
+// part above or below. They start from the one walk to a kind record: the
+// items of `v`'s meta when `v` is an Object whose meta is an array, read
+// once, or null.
+inline const std::vector<coreir::Value>* meta_items(const coreir::Value& v) {
+  if (!v.is_object()) return nullptr;
+  const coreir::Value& m = v.as_object()->meta;
+  return m.is_array() ? &m.as_array()->items : nullptr;
+}
+
+// The kind record `v` carries when it is of `kind`, or null: is_kind's
+// twin.
 inline const std::vector<coreir::Value>* kind_record(const coreir::Value& v,
                                                      std::string_view kind) {
-  if (!v.is_object() || !v.as_object()->meta.is_array()) return nullptr;
-  const std::vector<coreir::Value>& rec = v.as_object()->meta.as_array()->items;
-  if (rec.empty() || !rec[0].is_str() || rec[0].as_str() != kind) {
+  const auto* rec = meta_items(v);
+  if (!rec || rec->empty() || !(*rec)[0].is_str() ||
+      (*rec)[0].as_str() != kind) {
     return nullptr;
   }
-  return &rec;
+  return rec;
 }
 
 // ---- Classes ---------------------------------------------------------------
@@ -235,18 +245,21 @@ inline NodeId new_instance(coreir::Builder::At& b, NodeId cls) {
 // state beside its fields -- and nil for anything else. Only an Object
 // is an instance, as only an Object has a kind record (is_kind), so any
 // other value -- a receiver of a builtin type, the common case in a
-// method call -- is answered by its one type test. The meta is read once,
-// into a scratch local of the writer's.
+// method call -- is answered by its one type test. The meta and its head
+// are each read once, into scratch locals of the writer's.
 inline NodeId instance_class(PartsWriter& w, FuncWriter::Slot v) {
   const auto m = w.scratch("$meta");
-  check_scratch({v.i, m.i});
+  const auto h = w.scratch("$type");
+  check_scratch({v.i, m.i, h.i});
   return w.iff(
       w.is(w.typ(v), "object"),
       w.blk({w.set(m, w.meta(w.L(v))),
              w.iff(w.is(w.typ(m), "object"), w.L(m),
-                   w.iff(w.both(w.is(w.typ(m), "array"),
-                                w.is(w.typ(w.idx(w.L(m), w.I(0))), "object")),
-                         w.idx(w.L(m), w.I(0)), w.Nil()))}),
+                   w.iff(w.is(w.typ(m), "array"),
+                         w.blk({w.set(h, w.idx(w.L(m), w.I(0))),
+                                w.iff(w.is(w.typ(h), "object"), w.L(h),
+                                      w.Nil())}),
+                         w.Nil()))}),
       w.Nil());
 }
 
@@ -260,13 +273,11 @@ inline NodeId class_name(FuncWriter& w, NodeId table) {
 // `table` is none; and the name of `v`'s class.
 inline const coreir::Value* instance_class(const coreir::Value& v) {
   if (!v.is_object()) return nullptr;
-  const coreir::Value* m = &v.as_object()->meta;
-  if (m->is_object()) return m;
-  if (m->is_array() && !m->as_array()->items.empty() &&
-      m->as_array()->items[0].is_object()) {
-    return &m->as_array()->items[0];
-  }
-  return nullptr;
+  const coreir::Value& m = v.as_object()->meta;
+  if (m.is_object()) return &m;
+  const auto* rec = meta_items(v);
+  return rec && !rec->empty() && (*rec)[0].is_object() ? &(*rec)[0]
+                                                        : nullptr;
 }
 inline const std::string* class_name(const coreir::Value& table) {
   const auto* rec = kind_record(table, kClassKind);
@@ -354,14 +365,11 @@ inline NodeId is_exception(PartsWriter& w, FuncWriter::Slot v) {
 // in is_exception's order, the meta read once.
 inline const std::vector<coreir::Value>* exception_record(
     const coreir::Value& v) {
-  if (!v.is_object()) return nullptr;
-  const coreir::Value& m = v.as_object()->meta;
-  if (!m.is_array()) return nullptr;
-  const std::vector<coreir::Value>& rec = m.as_array()->items;
-  if (rec.size() <= static_cast<size_t>(kExcMessage)) return nullptr;
-  const coreir::Value& type = rec[0];
+  const auto* rec = meta_items(v);
+  if (!rec || rec->size() <= static_cast<size_t>(kExcMessage)) return nullptr;
+  const coreir::Value& type = (*rec)[0];
   return (type.is_str() && type.as_str() == kExcKind) || type.is_object()
-             ? &rec
+             ? rec
              : nullptr;
 }
 
