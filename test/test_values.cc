@@ -1230,6 +1230,11 @@ int main() {
   {
     using coreir::BinOp;
     using coreir::Value;
+    const auto apply = [](BinOp op, const Value& l, const Value& r) {
+      Value out;
+      coreir::binop_fault(op, l, r, out);
+      return out;
+    };
     const auto mirror = [](BinOp op) {
       switch (op) {
         case BinOp::Lt: return BinOp::Gt;
@@ -1243,8 +1248,8 @@ int main() {
                            const char* what) {
       const Value vi = Value::make_int(i);
       const Value vd = Value::make_double(d);
-      const Value a = coreir::apply_binop(op, vi, vd);
-      const Value b = coreir::apply_binop(mirror(op), vd, vi);
+      const Value a = apply(op, vi, vd);
+      const Value b = apply(mirror(op), vd, vi);
       check(a.is_bool() && a.as_bool() == want, std::string(what));
       check(b.is_bool() && b.as_bool() == want,
             std::string(what) + " (operands swapped)");
@@ -1255,8 +1260,8 @@ int main() {
     holds(BinOp::Eq, p53, d53, true, "2^53 == 2^53.0");
     holds(BinOp::Eq, p53 + 1, d53, false, "2^53+1 != 2^53.0");
     holds(BinOp::Gt, p53 + 1, d53, true, "2^53+1 > 2^53.0");
-    check(!coreir::apply_binop(BinOp::Eq, Value::make_int(p53),
-                               Value::make_int(p53 + 1)).as_bool(),
+    check(!apply(BinOp::Eq, Value::make_int(p53), Value::make_int(p53 + 1))
+               .as_bool(),
           "2^53 != 2^53+1");
 
     holds(BinOp::Lt, INT64_MAX, coreir::kTwo63, true, "INT64_MAX < 2^63.0");

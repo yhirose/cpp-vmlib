@@ -460,7 +460,7 @@ struct Binder {
 
   // culebra's `==`. Two numbers compare numerically whatever their widths
   // (`1 == 1.0` is true); two values of different types are unequal rather
-  // than an error, which is where eval_binop stops -- "a question a
+  // than an error, which is where binop_fault stops -- "a question a
   // language answers, not the VM"; and arrays and objects compare
   // *structurally*, which is culebra's rule and the reason this is a
   // recursive function rather than an intrinsic.
@@ -1211,7 +1211,7 @@ struct Binder {
       case "multiplicative"_: {
         // Straight to BinOp, with no helper in the way: culebra's `/` on
         // two Longs is integer division and its `%` is C's, which is what
-        // eval_binop already does for two Ints.
+        // binop_fault already does for two Ints.
         NodeId acc = emit_expr(*a.nodes[0], ctx);
         for (size_t i = 1; i + 1 < a.nodes.size(); i += 2) {
           const Ast& op = *a.nodes[i];

@@ -178,7 +178,7 @@ const std::vector<Builtin>& builtins() {
 }
 
 // The helpers that are one BinOp over their two arguments: Scheme's
-// arithmetic and ordering are eval_binop's on two numbers, two exact
+// arithmetic and ordering are binop_fault's on two numbers, two exact
 // integers staying exact. Each helper's body is written from here, and a
 // direct call of one is that BinOp on two numbers (Binder::operators).
 const std::map<std::string, BinOp>& binop_helpers() {
@@ -632,7 +632,7 @@ struct Binder {
         [&](RT& r) { return r.b.unary(UnOp::Not, r.call("$true", {r.L(0)})); },
         {"v"});
 
-    // Numbers. Two exact integers stay exact, which is eval_binop's own
+    // Numbers. Two exact integers stay exact, which is binop_fault's own
     // rule; `/` on two exact integers would be a *rational* in Scheme, and
     // this subset has none -- see README.md.
     for (const auto& h : binop_helpers()) {

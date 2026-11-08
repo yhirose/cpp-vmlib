@@ -127,7 +127,7 @@ rather than contradicts:
 
 * `$add`, because `"count: " + 3` concatenates -- the *operands* need
   converting, not the arithmetic.
-* `$eq`, because `eval_binop` refuses a cross-type comparison ("a
+* `$eq`, because `binop_fault` refuses a cross-type comparison ("a
   question a language answers, not the VM") and `x == null` is exactly
   that question. C#'s answer is: numbers compare numerically, different
   types are unequal, `null == null`, and two references are equal when

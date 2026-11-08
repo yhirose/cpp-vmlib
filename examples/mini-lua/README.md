@@ -107,7 +107,7 @@ divisor gives inf or nan as Lua's does. `$mod` and `$idiv` behind them
 see only an integer zero divisor and what is no number. (`/` is a third:
 it is *always* a float in Lua, even on two integers.)
 
-**`==` across two types is `false`**, where `eval_binop` refuses the
+**`==` across two types is `false`**, where `binop_fault` refuses the
 comparison -- *"a question a language answers, not the VM."*
 
 A fourth, which had to be a host function rather than an IR one:

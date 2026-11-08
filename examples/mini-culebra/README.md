@@ -42,7 +42,7 @@ culebra mostly does not:
   culebra; mini-culebra does not raise it, which is the one place it is
   laxer than the language.)
 * **`/` on two Longs is integer division and `%` is C's**, which is
-  `BinOp::Div` and `BinOp::Mod` unchanged: `eval_binop`'s "two ints stay
+  `BinOp::Div` and `BinOp::Mod` unchanged: `binop_fault`'s "two ints stay
   integers" is culebra's rule already.
 * **A Long is `Value`'s Int and a Float is its Double.** There is no single
   number type to normalize into and back out of.
@@ -50,7 +50,7 @@ culebra mostly does not:
 Two things did need writing, and they are exactly the two the header
 predicts:
 
-**`==`.** `eval_binop` refuses two values of different types -- *"a
+**`==`.** `binop_fault` refuses two values of different types -- *"a
 question a language answers, not the VM"* -- where culebra answers `false`;
 and culebra compares arrays and objects *structurally*, which no intrinsic
 does. `$eq` is that, recursively -- called only past the values where

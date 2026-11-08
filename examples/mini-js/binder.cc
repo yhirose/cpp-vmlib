@@ -490,7 +490,7 @@ struct Binder {
   //
   // Every rule here is JavaScript's, not the VM's, which is exactly why it
   // lives in this file: the header's own comments say so for each of them
-  // (Value::truthy on the empty string and NaN, eval_binop refusing to
+  // (Value::truthy on the empty string and NaN, binop_fault refusing to
   // compare across types, to_display's shortest-round-trip doubles). The
   // `$` prefix only marks them as the runtime's, as examples/mini-go's
   // channel runtime does: they are reached through the HelperTable, never
@@ -564,7 +564,7 @@ struct Binder {
   }
 
   // `===`, ES2023 7.2.16. BinOp::Eq refuses two values of different types
-  // -- "a question a language answers, not the VM", says eval_binop -- and
+  // -- "a question a language answers, not the VM", says binop_fault -- and
   // this is that answer: different types are unequal rather than an error,
   // and two objects are equal only when they are the same object, which is
   // what IntrinsicId::Same is for.

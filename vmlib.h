@@ -3724,9 +3724,9 @@ inline int compare_int_double(int64_t i, double d) {
 }
 
 // Why an operation has no answer, without the words: binop_fault,
-// unop_fault and index_fault answer with the kind, and only a trap, or a
-// front end folding a constant, asks fault_text to build the diagnostic
-// from it, the operation and the operands. The fast paths -- an operation
+// unop_fault and index_fault answer with the kind, and only a trap asks
+// fault_text to build the diagnostic from it, the operation and the
+// operands. The fast paths -- an operation
 // with a fallback, which asks often and has the fallback answer instead --
 // ask only whether, and a message built and thrown away cost a fallback
 // more than the operation it fell back from.
@@ -3779,8 +3779,7 @@ inline T floor_mod(T a, T b) {
 // One walk rather than two because this is the instruction a loop spends its
 // time in, and asking what the operands are and then asking again in order to
 // act on the answer was a type ladder per instruction more than the work
-// needs. binop_error and apply_binop below are this same function asked for
-// one half at a time, for a front end folding constants at compile time.
+// needs.
 VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
                          Value& out) {
   constexpr Fault ok = Fault::None;
@@ -3935,28 +3934,6 @@ inline std::string fault_text(Fault e, BinOp op, const Value& l,
       return std::string("cannot ") + name_of(op) + " " +
              type_name(l.tag()) + " and " + type_name(r.tag());
   }
-}
-
-// Both: empty on success, the diagnostic on failure.
-inline std::string eval_binop(BinOp op, const Value& l, const Value& r,
-                              Value& out) {
-  const Fault e = binop_fault(op, l, r, out);
-  return e == Fault::None ? std::string() : fault_text(e, op, l, r);
-}
-
-// Whether the operation is defined for these operands: empty when it is, the
-// diagnostic when it is not. The result eval_binop computed on the way to
-// the answer is dropped, which is what a caller asking only this wants.
-inline std::string binop_error(BinOp op, const Value& l, const Value& r) {
-  Value unused;
-  return eval_binop(op, l, r, unused);
-}
-
-// The other half. Only valid when binop_error returned empty.
-inline Value apply_binop(BinOp op, const Value& l, const Value& r) {
-  Value out;
-  eval_binop(op, l, r, out);
-  return out;
 }
 
 inline bool is_wrap(UnOp op) {
@@ -9738,7 +9715,7 @@ struct Exec {
         case Op::UDiv: case Op::UMod: case Op::UShr:
         case Op::ULt: case Op::ULe: case Op::UGt: case Op::UGe:
         case Op::FloorDiv: case Op::FloorMod: {
-          // Straight into the destination register: eval_binop computes
+          // Straight into the destination register: binop_fault computes
           // the whole result before it assigns, so the compiler reusing an
           // operand's register as the destination -- which it does freely --
           // needs no temporary here. A failure leaves the register alone.

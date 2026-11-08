@@ -814,7 +814,7 @@ function and returns; mini-go does exactly that.
 ## Arbitrary-precision integers
 
 `Value` holds an `int64` or a `double` and nothing wider, and this is a
-decision rather than a gap: a third numeric tag would sit in `eval_binop`'s
+decision rather than a gap: a third numeric tag would sit in `binop_fault`'s
 hot path and tax every language's integer arithmetic for the few that need
 bignums. A front end that does (Python's `int`, Ruby's `Integer`, Scheme's
 numbers) carries them itself, as a little-endian `Array` of `Int` limbs in
@@ -1146,7 +1146,7 @@ the dynamic-typed value, `Map` is its dictionary, `Generator` and
 [examples/mini-js/](examples/mini-js/) is that paragraph as a working front
 end, checked against `node`. What it still had to write itself is the part
 worth knowing: truthiness, `===` and `Number::toString`, because the VM
-refuses to decide those three (`Value::truthy()` and `eval_binop` say so in
+refuses to decide those three (`Value::truthy()` and `binop_fault` say so in
 their own comments), plus a Promise over the scheduler's three primitives.
 A managed,
 statically-typed language (a C#, Java or Go subset) is in scope too -- a

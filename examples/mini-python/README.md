@@ -13,7 +13,7 @@ That section is worth quoting, because this front end is its consequence:
 
 > `Value` holds an `int64` or a `double` and nothing wider, and this is a
 > decision rather than a gap: a third numeric tag would sit in
-> `eval_binop`'s hot path and tax every language's integer arithmetic for
+> `binop_fault`'s hot path and tax every language's integer arithmetic for
 > the few that need bignums. A front end that does (Python's `int`, Ruby's
 > `Integer`, Scheme's numbers) carries them itself, as a little-endian
 > `Array` of `Int` limbs in base 10^9.
@@ -265,7 +265,7 @@ continues the logical line, and a `#` or a bracket inside a string is text.
   are not quite the operators': `1 // 0.2` is 4.0, the quotient of
   `1 - 1 % 0.2`, where `FloorDiv` floors the rounded quotient, 5.0, and a
   zero remainder takes the divisor's sign rather than the dividend's.
-* **`==` across two types is `False`**, where `eval_binop` refuses the
+* **`==` across two types is `False`**, where `binop_fault` refuses the
   comparison.
 * **Comparisons chain.** `a < b <= c` means `a < b and b <= c` with `b`
   evaluated once, which no left fold can express -- the fold would compare

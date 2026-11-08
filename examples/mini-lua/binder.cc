@@ -446,7 +446,7 @@ struct Binder {
 
   // `==`: numbers compare numerically across integer and float, values of
   // different types are unequal rather than an error (which is where
-  // eval_binop stops), and everything else is identity.
+  // binop_fault stops), and everything else is identity.
   void rt_eq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
