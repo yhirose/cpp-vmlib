@@ -574,13 +574,11 @@ struct VmOp {
   uint32_t key_tags = 0;
   uint32_t value_tags = 0;
 
-  static VmOp unary(UnOp op, uint32_t tags, bool exact = false) {
-    return {Kind::Unary, static_cast<uint8_t>(op), tags,
-            exact ? coreir::kExact : 0};
+  static VmOp unary(UnOp op, uint32_t tags, int32_t flags = 0) {
+    return {Kind::Unary, static_cast<uint8_t>(op), tags, flags};
   }
-  static VmOp binary(BinOp op, uint32_t tags, bool exact = false) {
-    return {Kind::Binary, static_cast<uint8_t>(op), tags,
-            exact ? coreir::kExact : 0};
+  static VmOp binary(BinOp op, uint32_t tags, int32_t flags = 0) {
+    return {Kind::Binary, static_cast<uint8_t>(op), tags, flags};
   }
   static VmOp index(uint32_t tags, int32_t flags = 0, uint32_t key_tags = 0) {
     return {Kind::Index, 0, tags, flags, key_tags};

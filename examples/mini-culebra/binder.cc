@@ -450,8 +450,8 @@ struct Binder {
                                     tags_named({"int", "string"}))},
         {"$setmem", VmOp::set_index(tags_named("object"), kMissNil,
                                     tags_named("string"))},
-        {"$div", VmOp::binary(BinOp::Div, number_tags(), true)},
-        {"$mod", VmOp::binary(BinOp::Mod, number_tags(), true)},
+        {"$div", VmOp::binary(BinOp::Div, number_tags(), kExact)},
+        {"$mod", VmOp::binary(BinOp::Mod, number_tags(), kExact)},
     };
   }
 

@@ -613,7 +613,7 @@ struct Binder {
         {"$sub", VmOp::binary(BinOp::Sub, number_tags())},
         {"$mul", VmOp::binary(BinOp::Mul, number_tags())},
         {"$div", VmOp::binary(BinOp::FloorDiv, ints)},
-        {"$mod", VmOp::binary(BinOp::FloorMod, number_tags(), true)},
+        {"$mod", VmOp::binary(BinOp::FloorMod, number_tags(), kExact)},
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
         {"$idx", VmOp::index(tags_named({"array", "string", "map"}), kMissNil,
                              tags_named({"int", "string"}))},
