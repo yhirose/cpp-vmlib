@@ -1,0 +1,10 @@
+array: [11, 20, 33]
+caught: IndexError
+caught: IndexError
+caught: TypeError
+fields: 7 new nil nil
+caught: KeyError
+caught: TypeError
+value: 99 99
+chained: 5 5
+compound: 18 2

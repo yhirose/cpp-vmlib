@@ -1,0 +1,59 @@
+# xs[i] = v, o['k'] = v and o.k = v: an index in range and out of it, a key
+# an instance has or lacks, nil stored (found, so no KeyError), and an
+# assignment that is itself a value.
+
+let xs = [10, 20, 30]
+xs[0] = 11
+xs[2] = 33
+println("array: {xs}")
+
+fn put(a, k, v) { a[k] = v }
+for i in [3, -1] {
+  try {
+    put(xs, i, 1)
+  } catch e {
+    println("caught: {e.kind}")
+  }
+}
+try {
+  put(xs, 'x', 1)
+} catch e {
+  println("caught: {e.kind}")
+}
+
+class Box {
+  new(v) { self.v = v }
+}
+let b = Box.new(1)
+b.v = 2
+b.extra = 'new'
+b['v'] = b['v'] + 5
+b['other'] = nil
+println("fields: {b.v} {b.extra} {b['other']} {b.missing}")
+try {
+  println(b['missing'])
+} catch e {
+  println("caught: {e.kind}")
+}
+try {
+  println('abc'[0])
+} catch e {
+  println("caught: {e.kind}")
+}
+
+# an assignment is its value
+fn last(a) { a[1] = 99 }
+println("value: {last(xs)} {xs[1]}")
+mut y = 0
+y = xs[0] = 5
+println("chained: {y} {xs[0]}")
+
+# a compound store evaluates the receiver once
+let calls = [0]
+fn which() {
+  calls[0] = calls[0] + 1
+  b
+}
+which().v += 10
+which()['v'] += 1
+println("compound: {b.v} {calls[0]}")

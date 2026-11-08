@@ -430,16 +430,26 @@ struct Binder {
   //   $eq   `==` (equality_tags): two numbers numerically, two types Eq
   //         refuses unequal; arrays and objects, compared structurally,
   //         are $eq's.
-  //   $idx  `xs[i]` on an array and an index in range; one out of range
-  //         or not a Long, and an object (whose missing key is a
-  //         KeyError, where Index answers nil), are $idx's.
+  //   $idx  `xs[i]` on an array and an index in range, or `o['k']` on an
+  //         object and a key it has; one out of range or not a Long, a
+  //         key an object lacks (a KeyError, where Index answers nil), a
+  //         string receiver (a TypeError) are $idx's.
+  //   $setidx  `xs[i] = v` and `o['k'] = v` on the same, a new key
+  //         included; an index out of range is $setidx's.
+  //   $setmem  `o.k = v` on an object, a new key included (an object with a
+  //         meta leaves that to $setmem).
   //   $div  `/` and `%` on two numbers, exact: a zero divisor, a Float's
   //   $mod  as well as a Long's, raises ZeroDivisionError, which is the
   //         helper's.
   static Operators::Table operators() {
     return {
         {"$eq", VmOp::binary(BinOp::Eq, equality_tags())},
-        {"$idx", VmOp::index(tags_named({"array", "int"}))},
+        {"$idx", VmOp::index(tags_named({"array", "object"}), 0,
+                             tags_named({"int", "string"}))},
+        {"$setidx", VmOp::set_index(tags_named({"array", "object"}), kMissNil,
+                                    tags_named({"int", "string"}))},
+        {"$setmem", VmOp::set_index(tags_named("object"), kMissNil,
+                                    tags_named("string"))},
         {"$div", VmOp::binary(BinOp::Div, number_tags(), true)},
         {"$mod", VmOp::binary(BinOp::Mod, number_tags(), true)},
     };
@@ -1456,8 +1466,12 @@ struct Binder {
       const NodeId cur =
           op == "=" ? NodeId{}
                     : rt.call(member ? "$mem" : "$idx", {t[1](), t[2]()}, p);
-      return rt.call(member ? "$setmem" : "$setidx",
-                     {t[1](), t[2](), apply(cur, t[0]())}, p);
+      const auto store = [&](NodeId v) {
+        return ops.call(member ? "$setmem" : "$setidx",
+                        {t[1](), t[2](), v}, p);
+      };
+      return as_value ? stored_value(b, apply(cur, t[0]()), store)
+                      : store(apply(cur, t[0]()));
     });
   }
 
