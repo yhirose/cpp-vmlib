@@ -645,14 +645,11 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [i, ks, k, c, m_] = r.locals("i", "ks", "k", "c", "m");
-    const auto num = [&](NodeId t) {
-      return r.either(r.is(t, "int"), r.is(t, "double"));
-    };
-    r.add(r.iff(r.both(num(r.typ(a)), num(r.typ(b))),
+    r.add(r.iff(r.both(is_number(r, r.L(a)), is_number(r, r.L(b))),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     // A number's == hands anything that is not a number to that value's
     // own == (Integer#== and Float#== in Ruby).
-    r.add(r.iff(r.both(num(r.typ(a)), r.is(r.typ(b), "object")),
+    r.add(r.iff(r.both(is_number(r, r.L(a)), r.is(r.typ(b), "object")),
                 r.ret(r.call("$eq", {r.L(b), r.L(a)}))));
     // `a == b` is a call of a's ==, so an instance whose class defines one
     // answers whatever it says, whatever b is; without one it is identity.
@@ -757,8 +754,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(
-        r.both(r.either(r.is(r.typ(b), "int"), r.is(r.typ(b), "double")),
-               r.bin(BinOp::Eq, r.L(b), r.I(0))),
+        r.both(is_number(r, r.L(b)), r.bin(BinOp::Eq, r.L(b), r.I(0))),
         r.ret(r.call("$exc",
                      {r.S("ZeroDivisionError"), r.S("divided by 0")}))));
     // Anything else FloorMod refuses, in its own words.

@@ -481,6 +481,12 @@ inline void add_for_each(HelperWriter& r, FuncWriter::Slot it,
 // Numbers: two of them add, subtract, multiply and compare as the VM's
 // operators do, an int and a double meeting as numbers.
 inline uint32_t number_tags() { return coreir::tags_named({"int", "double"}); }
+// The same line asked of one value inside a helper's body: whether `v` is
+// an int or a double.
+inline NodeId is_number(FuncWriter& w, NodeId v) {
+  const NodeId t = w.typ(v);
+  return w.either(w.is(t, "int"), w.is(t, "double"));
+}
 // `+`: two numbers add and two strings concatenate, which is Add -- in
 // JavaScript, C#, Ruby and Python; a string beside anything else is each
 // language's own.

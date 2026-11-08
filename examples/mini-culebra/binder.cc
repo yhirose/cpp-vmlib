@@ -478,12 +478,9 @@ struct Binder {
                      r.Bo(false)),
                r.ret(r.Bo(false))),
          equal_entries(r, a, b, i, ks, k, "$eq")});
-    const auto numeric = [&](NodeId t) {
-      return r.b.make_if(r.is(t, "int"), r.Bo(true), r.is(t, "double"));
-    };
-    r.add(r.iff(
-        numeric(r.typ(a)),
-        r.iff(numeric(r.typ(b)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
+    r.add(r.iff(is_number(r, r.L(a)),
+                r.iff(is_number(r, r.L(b)),
+                      r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
 
     std::vector<std::pair<NodeId, NodeId>> arms;

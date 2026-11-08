@@ -424,14 +424,9 @@ struct Binder {
     };
   }
 
-  // One helper of the runtime above, with the front end's own addition to
-  // coreir::HelperWriter.
+  // One helper of the runtime above.
   struct RT : HelperWriter {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
-
-    // `t` is a value's *type string*, from `typ(v)`: true when it names
-    // one of Lua's two number types.
-    NodeId is_num(NodeId t) { return b.make_if(is(t, "int"), Bo(true), is(t, "double")); }
   };
 
   // Only nil and false are false. Value::truthy() calls 0 false and says in
@@ -452,8 +447,8 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const auto [m] = r.locals("m");
     r.add(r.iff(
-        r.is_num(r.typ(a)),
-        r.iff(r.is_num(r.typ(b)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
+        is_number(r, r.L(a)),
+        r.iff(is_number(r, r.L(b)), r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b))))));
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
     r.add(
@@ -550,8 +545,8 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [mv] = r.locals("m");
-    r.add(r.iff(r.is_num(r.typ(a)),
-                r.iff(r.is_num(r.typ(b)), r.ret(r.bin(op, r.L(a), r.L(b))))));
+    r.add(r.iff(is_number(r, r.L(a)),
+                r.iff(is_number(r, r.L(b)), r.ret(r.bin(op, r.L(a), r.L(b))))));
     const auto try_mm = [&](FuncWriter::Slot recv) {
       return std::vector<NodeId>{
           r.set(mv, r.call("$mm", {r.L(recv), r.S(mm)})),
@@ -563,7 +558,7 @@ struct Binder {
     for (const NodeId n : try_mm(b)) r.add(n);
     // Named by the operand that is not a number, the left one first -- the
     // one Lua's own message names.
-    const NodeId bad = r.iff(r.is_num(r.typ(a)), r.L(b), r.L(a));
+    const NodeId bad = r.iff(is_number(r, r.L(a)), r.L(b), r.L(a));
     r.add(r.b.make_throw(r.bin(
         BinOp::Add,
         r.bin(BinOp::Add, r.S("attempt to perform arithmetic on a "),
@@ -580,7 +575,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto ok = [&](FuncWriter::Slot v) {
-      return r.either(r.is(r.typ(v), "string"), r.is_num(r.typ(v)));
+      return r.either(r.is(r.typ(v), "string"), is_number(r, r.L(v)));
     };
     r.add(r.iff(r.both(ok(a), ok(b)),
                 r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),

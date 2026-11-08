@@ -672,7 +672,7 @@ struct Binder {
 
     // Predicates.
     one("$numberp", 1, [&](RT& r) {
-      return r.either(r.is(r.typ(r.L(0)), "int"), r.is(r.typ(r.L(0)), "double"));
+      return is_number(r, r.L(0));
     }, {"v"});
     one("$stringp", 1, [&](RT& r) { return r.is(r.typ(r.L(0)), "string"); },
         {"v"});

@@ -830,7 +830,7 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S(""))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
-    r.add(r.iff(r.either(r.is(r.typ(v), "int"), r.is(r.typ(v), "double")),
+    r.add(r.iff(is_number(r, r.L(v)),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
     r.add(r.iff(is_kind(r, v, kExcKind),
@@ -860,10 +860,7 @@ struct Binder {
   void rt_eq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    const auto num = [&](NodeId t) {
-      return r.either(r.is(t, "int"), r.is(t, "double"));
-    };
-    r.add(r.iff(r.both(num(r.typ(a)), num(r.typ(b))),
+    r.add(r.iff(r.both(is_number(r, r.L(a)), is_number(r, r.L(b))),
                 r.ret(r.bin(BinOp::Eq, r.L(a), r.L(b)))));
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
