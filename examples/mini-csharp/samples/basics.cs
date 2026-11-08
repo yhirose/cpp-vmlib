@@ -68,6 +68,12 @@ class Program {
     Console.WriteLine(-7 / 2);
     Console.WriteLine(7 % 3);
     Console.WriteLine(-7 % 3);
+    // On a double `%` is fmod, truncated the same way, a zero remainder
+    // keeping the dividend's sign.
+    Console.WriteLine(7.5 % 2);
+    Console.WriteLine(-7.5 % 2);
+    Console.WriteLine(7 % 2.5);
+    Console.WriteLine(-4.0 % 2);
 
     // One double anywhere widens the whole expression.
     Console.WriteLine(1.0 / 4);

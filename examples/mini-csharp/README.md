@@ -118,6 +118,7 @@ neither:
 | `Value::truthy()` calls `0`, `null` and `false` false, `""` and NaN true | only `bool` is a condition | passes the condition through |
 | `to_display` prints `4.0` as `4` | `Console.WriteLine(4.0)` prints `4` | prints what `ToStr` gives |
 | `BinOp::Div` and `Mod` truncate toward zero, C-style | `/` and `%` on two `int`s do the same, including `-7 / 2 == -3` | emits the `BinOp` |
+| `BinOp::Mod` on a double is fmod | `%` on a `double` is too: `-7.5 % 2 == -1.5` | emits the `BinOp` |
 | two ints stay int, a double widens the pair | the same | emits the `BinOp` |
 
 `samples/basics.cs` is that table, run against `dotnet`.
@@ -215,7 +216,8 @@ delegates and lambdas, `struct` value semantics (examples/mini-go proves
 that recipe), a `static` property, operator overloading, `partial`,
 attributes, namespaces, and the `checked` arithmetic of `int` overflow --
 mini-go proves the fixed-width recipe, and an `int` here is the VM's
-int64.
+int64, which wraps. So does its division: the least int64 over -1 is
+itself and leaves 0, where .NET throws OverflowException for a `long`.
 
 Quietly different:
 
