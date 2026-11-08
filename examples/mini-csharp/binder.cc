@@ -1689,43 +1689,57 @@ struct Binder {
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
                      FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
-    std::vector<NodeId> args;
-    for (const auto& c : call.nodes[0]->nodes) args.push_back(emit_expr(*c, ctx));
-    const auto a0 = [&](size_t k) {
-      return k < args.size() ? args[k] : b.nil_literal();
-    };
+    const auto& arglist = call.nodes[0]->nodes;
     // ToString is $str's to resolve, an override included.
     if (name == "ToString") return rt.call("$str", {recv}, p);
     // List.Add, Dictionary.Add and Task.Wait are also ordinary method
     // names: a class instance's own method of the name wins, found by the
     // walk a call uses, and only a receiver without one gets the
     // library's. A List is checked first, since its Add is the one a loop
-    // makes.
+    // makes. Which of them runs is known only when the receiver is, so
+    // each argument runs once, after the receiver, into a slot claimed
+    // before any of them runs, and each way reads the slots.
     if (name == "Add" || name == "Wait") {
       const int32_t t = ctx.alloc_local("$recv");
       const int32_t mt = ctx.alloc_local("$m");
-      const NodeId T = b.varref(VarKind::Local, t);
-      const NodeId M = b.varref(VarKind::Local, mt);
-      std::vector<NodeId> callargs{T};
-      callargs.insert(callargs.end(), args.begin(), args.end());
-      const NodeId library = name == "Add"
-                                 ? rt.call("$dictadd", {T, a0(0), a0(1)}, p)
-                                 : rt.call("$await", {T}, p);
+      std::vector<int32_t> slots;
+      for (size_t k = 0; k < arglist.size(); ++k) {
+        slots.push_back(ctx.alloc_local("$arg"));
+      }
+      std::vector<NodeId> steps{b.assign(VarKind::Local, t, recv)};
+      for (size_t k = 0; k < arglist.size(); ++k) {
+        steps.push_back(
+            b.assign(VarKind::Local, slots[k], emit_expr(*arglist[k], ctx)));
+      }
+      const auto L = [&](int32_t slot) {
+        return b.varref(VarKind::Local, slot);
+      };
+      const auto arg = [&](size_t k) {
+        return k < slots.size() ? L(slots[k]) : b.nil_literal();
+      };
+      std::vector<NodeId> callargs{L(t)};
+      for (const int32_t slot : slots) callargs.push_back(L(slot));
+      const NodeId library =
+          name == "Add" ? rt.call("$dictadd", {L(t), arg(0), arg(1)}, p)
+                        : rt.call("$await", {L(t)}, p);
       NodeId call = b.block(
           {b.assign(VarKind::Local, mt,
-                    rt.call("$mlookup", {T, b.str_literal(name)}, p)),
+                    rt.call("$mlookup", {L(t), b.str_literal(name)}, p)),
            b.make_if(b.binary(BinOp::Ne,
-                              b.intrinsic(IntrinsicId::TypeOf, {M}),
+                              b.intrinsic(IntrinsicId::TypeOf, {L(mt)}),
                               b.str_literal("nil")),
-                     b.call_value(M, callargs), library)});
+                     b.call_value(L(mt), callargs), library)});
       if (name == "Add") {
         call = b.make_if(
-            b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {T}),
+            b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {L(t)}),
                      b.str_literal("array")),
-            b.intrinsic(IntrinsicId::ArrayPush, {T, a0(0)}), call);
+            b.intrinsic(IntrinsicId::ArrayPush, {L(t), arg(0)}), call);
       }
-      return b.block({b.assign(VarKind::Local, t, recv), call});
+      steps.push_back(call);
+      return b.block(steps);
     }
+    std::vector<NodeId> args;
+    for (const auto& c : arglist) args.push_back(emit_expr(*c, ctx));
     // An ordinary method call: the lookup walks the class chain, which is
     // what makes an override win.
     return emit_dispatch(recv, name, args, ctx, p);
