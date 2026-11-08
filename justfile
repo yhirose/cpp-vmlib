@@ -35,13 +35,31 @@ goldens *args:
     test/goldens.sh {{args}}
 
 # ASan/UBSan/LeakSanitizer, in their own build directory so this never
-# touches the normal one.
+# touches the normal one. The same two halves as CI's sanitizers job: the
+# test suite at -O0 (it compiles two to three times faster and runs fast
+# either way) and the front ends at -O1 (their tail-call samples are far
+# too slow at -O0). -g1 keeps the file:line frames of a report at roughly
+# half the compile time of -g, whose variable-level debug information only
+# a debugger reads. Set CCACHE=1 (with CCACHE_DIR and CCACHE_BASEDIR under
+# ~/Projects) to compile an unchanged file once across rounds and worktrees.
 sanitizers:
-    cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DVMLIB_BUILD_EXAMPLES=ON \
+    cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS_DEBUG=-g1 \
+        -DVMLIB_BUILD_EXAMPLES=OFF -DVMLIB_BUILD_BENCH=OFF \
+        ${CCACHE:+-DCMAKE_CXX_COMPILER_LAUNCHER=ccache} \
+        -DCMAKE_CXX_FLAGS="-O0 -fsanitize=address,undefined -fno-omit-frame-pointer"
+    cmake -S . -B build-asan-examples -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS_DEBUG=-g1 \
+        -DVMLIB_BUILD_EXAMPLES=ON -DVMLIB_BUILD_TESTS=OFF \
+        -DVMLIB_BUILD_BENCH=OFF \
+        ${CCACHE:+-DCMAKE_CXX_COMPILER_LAUNCHER=ccache} \
         -DCMAKE_CXX_FLAGS="-O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
     cmake --build build-asan -j
+    cmake --build build-asan-examples -j
     ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
         ctest --test-dir build-asan --output-on-failure
+    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+        ctest --test-dir build-asan-examples --output-on-failure
 
 # Every allocation collects -- the premature-sweep class of bug, not only
 # test_gc.cc's arranged scenes. deep_calls is excluded: its hundred-
@@ -52,4 +70,4 @@ gc-stress: build
 
 # Remove the build directories.
 clean:
-    rm -rf build build-asan build-goldens
+    rm -rf build build-asan build-asan-examples build-goldens

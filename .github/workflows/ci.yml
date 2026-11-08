@@ -114,12 +114,15 @@ jobs:
       # compiles two to three times faster at -O0 (test_values.cc and
       # examples/common/driver.cc under g++ and clang alike), so it keeps
       # -O0.
+      # -g1, not Debug's -g: a report still carries file:line frames, and
+      # the variable-level debug information that -g adds only a debugger
+      # reads, at about twice the compile time under the sanitizers.
       # Ninja, because the Makefile generator builds the targets named on
       # --target one after another (its top-level Makefile is .NOTPARALLEL):
       # the four front ends were compiled two files at a time.
       - run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug ${{ matrix.cmake }}
-          -DVMLIB_BUILD_BENCH=OFF
+          -DCMAKE_CXX_FLAGS_DEBUG=-g1 -DVMLIB_BUILD_BENCH=OFF
           -DCMAKE_CXX_FLAGS="${{ matrix.opt }} -fsanitize=address,undefined -fno-omit-frame-pointer"
       - run: cmake --build build ${FRONTENDS:+--target $FRONTENDS}
       - run: ctest --test-dir build --output-on-failure ${FRONTENDS:+-R "^(${FRONTENDS// /|})-"}
