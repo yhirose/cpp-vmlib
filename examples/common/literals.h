@@ -54,6 +54,16 @@ inline IntLiteral parse_int_literal(std::string_view text, int base = 10,
   return {true, static_cast<int64_t>(bits)};
 }
 
+// A digit run written with a leading zero and more digits (010, -07): octal
+// in Ruby, Go and sloppy JavaScript, a SyntaxError in Python, plain decimal
+// in Lua, C#, Scheme and culebra. The front ends whose language reads it as
+// octal do not do octal, and refuse it rather than read it as decimal.
+inline bool has_leading_zero(std::string_view digits) {
+  if (!digits.empty() && digits.front() == '-') digits.remove_prefix(1);
+  return digits.size() > 1 && digits[0] == '0' && digits[1] >= '0' &&
+         digits[1] <= '9';
+}
+
 // A unary minus over a bare integer literal, folded into the literal: C# and
 // Go read -9223372036854775808 that way (the constant is checked after the
 // minus, not before). Answers nullopt when `operand` is not a bare integer

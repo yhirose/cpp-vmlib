@@ -46,6 +46,7 @@
 
 #include "double_format.h"
 #include "escapes.h"
+#include "literals.h"
 
 #include <cstdlib>
 #include <limits>
@@ -1687,6 +1688,9 @@ struct Binder {
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
+        if (literals::has_leading_zero(a.token)) {
+          fail(a, "octal literals are not supported here");
+        }
         // Every number is a double: JavaScript has one numeric type, and
         // keeping ints out of the frame is what makes `1 === 1.0` and
         // `String(3)` need no special case.

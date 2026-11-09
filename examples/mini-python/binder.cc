@@ -4093,6 +4093,11 @@ struct Binder {
         for (const char c : t) {
           if (c != '_') digits.push_back(c);
         }
+        if (literals::has_leading_zero(digits) &&
+            digits.find_first_not_of('0') != std::string::npos) {
+          fail(a, "leading zeros in decimal integer literals are not "
+                  "permitted; use an 0o prefix for octal integers");
+        }
         return int_literal(digits, p);
       }
       case "float"_:

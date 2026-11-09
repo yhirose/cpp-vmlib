@@ -131,6 +131,9 @@ SrcPos pos_of(const Ast& a) {
 }
 
 int64_t parse_int(const std::string& s, const Ast& at) {
+  if (literals::has_leading_zero(s)) {
+    fail(at, "octal literals are not supported here");
+  }
   const auto n = literals::parse_int_literal(s);
   if (!n.fits) fail(at, "integer literal out of range");
   return n.value;

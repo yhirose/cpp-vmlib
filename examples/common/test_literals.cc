@@ -13,6 +13,7 @@
 
 #include "literals.h"
 
+using literals::has_leading_zero;
 using literals::parse_int_literal;
 
 namespace {
@@ -63,6 +64,21 @@ int main() {
   check("8000000000000000", 16, true, true, kMin);
   check("777", 8, false, true, 511);
   check("101", 2, false, true, 5);
+
+  // A leading zero before more digits is octal in Ruby, Go and sloppy JS.
+  const auto zero = [](const char* text, bool want) {
+    if (has_leading_zero(text) == want) return;
+    std::fprintf(stderr, "FAIL: has_leading_zero(\"%s\"): want %d\n", text, want);
+    ++g_failed;
+  };
+  zero("0", false);
+  zero("00", true);
+  zero("010", true);
+  zero("-07", true);
+  zero("10", false);
+  zero("0.5", false);
+  zero("0e1", false);
+  zero("", false);
 
   if (g_failed != 0) {
     std::fprintf(stderr, "%d failures\n", g_failed);

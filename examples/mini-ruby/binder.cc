@@ -1954,6 +1954,9 @@ struct Binder {
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_: {
+        if (literals::has_leading_zero(a.token)) {
+          fail(a, "octal literals are not supported here");
+        }
         const auto n = literals::parse_int_literal(a.token);
         if (!n.fits) {
           fail(a, "integer literal " + std::string(a.token) +
