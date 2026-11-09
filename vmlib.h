@@ -1469,10 +1469,12 @@ inline constexpr int32_t allowed_flags(Tag t, uint8_t op) {
 }
 
 // ToStr formats any value the way to_display (coreir/semantics.h) does --
-// shortest-round-trip doubles included. A language whose display rules
-// differ (culebra prints whole doubles as "4.0") post-processes the result
-// rather than this growing a mode; what it cannot do in-language is produce
-// digits from a number at all, which is why this is an intrinsic.
+// shortest-round-trip doubles included, in one layout that is no language's
+// own. A language whose display rules differ does not ask ToStr for a
+// double, and this does not grow a mode: it calls a host function (the
+// examples' double_format.h is a table of such styles). What a front end
+// cannot do in-language is produce digits from a number at all, which is why
+// this is an intrinsic.
 // TypeOf yields the value's tag as a string -- type_name's vocabulary
 // ("int", "double", "string", ...). A dynamic front end needs it for any
 // dispatch its own semantics do on a value's kind; its own type names are
@@ -4376,8 +4378,10 @@ inline std::string slice_error(const Value& recv, const Value& i,
 // How a non-string scalar prints, when a front end has not formatted it
 // itself. Shortest round-trip for a double, so 3.5 is "3.5" and not
 // "3.500000", and 4.0 is "4" -- whether a whole double should show a decimal
-// point is a language's decision, and a front end that cares builds the
-// string rather than asking this to grow a mode. A NaN is "nan" whatever its
+// point is a language's decision, and a front end that cares formats the
+// double itself (the examples call a host function, double_format.h) rather
+// than asking this to grow a mode. This is what the IR dump and a profile
+// table show, language-neutral debug text. A NaN is "nan" whatever its
 // sign bit, which is not part of its value and not the same across machines
 // (0.0/0.0 sets it on x86, not on ARM).
 inline std::string to_display(const Value& v) {
@@ -11153,7 +11157,8 @@ inline std::string profile_row(
   return out + label + "\n";
 }
 
-// A profile table's every fraction: one decimal.
+// A profile table's every fraction: one decimal. (Debug output, the same
+// for every language; not a language's double.)
 inline std::string profile_decimal(double x) {
   char buf[32];
   std::snprintf(buf, sizeof buf, "%.1f", x);

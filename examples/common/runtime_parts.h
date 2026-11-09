@@ -673,43 +673,6 @@ inline uint32_t nil_false_tags() {
   return truthy_tags_except({"int", "double"});
 }
 
-// ---- How a float prints ----------------------------------------------------
-//
-// `(d)`: a double as shortest round trip -- ToStr, which is to_display --
-// with ".0" forced onto a whole one, so that 4.0 prints "4.0" and not "4".
-// to_display's comment calls that a language's decision, and Python, Ruby,
-// Guile and culebra all make it the same way. -0.0 is whole, and its
-// integer has lost the sign, so it is spelled out before the whole-number
-// path. How the three doubles that are no number print is each language's
-// own -- "nan", "NaN", "+nan.0"; "inf", "Infinity", "+inf.0" -- and they
-// are tested after the whole numbers, which none of them is.
-struct NonFinite {
-  std::string nan, inf, neg_inf;
-};
-inline void float_str(FuncWriter& w, const NonFinite& spell) {
-  const double lim = 9007199254740992.0;  // 2^53: every whole double below
-                                          // it has an int64 of its own
-  const double inf = std::numeric_limits<double>::infinity();
-  const auto [d] = w.params("d");
-  const auto [i] = w.locals("i");
-  w.add(w.iff(w.in(IntrinsicId::Same, {w.L(d), w.D(-0.0)}),
-              w.ret(w.S("-0.0"))));
-  w.add(w.iff(
-      w.bin(BinOp::Gt, w.L(d), w.D(-lim)),
-      w.iff(w.bin(BinOp::Lt, w.L(d), w.D(lim)),
-            w.blk({w.set(i, w.in(IntrinsicId::ToInt, {w.L(d)})),
-                   w.iff(w.bin(BinOp::Eq,
-                               w.in(IntrinsicId::ToDouble, {w.L(i)}), w.L(d)),
-                         w.ret(w.bin(BinOp::Add,
-                                     w.in(IntrinsicId::ToStr, {w.L(i)}),
-                                     w.S(".0"))))}))));
-  w.add(w.iff(w.bin(BinOp::Ne, w.L(d), w.L(d)), w.ret(w.S(spell.nan))));
-  w.add(w.iff(w.bin(BinOp::Eq, w.L(d), w.D(inf)), w.ret(w.S(spell.inf))));
-  w.add(w.iff(w.bin(BinOp::Eq, w.L(d), w.D(-inf)),
-              w.ret(w.S(spell.neg_inf))));
-  w.add(w.ret(w.in(IntrinsicId::ToStr, {w.L(d)})));
-}
-
 // ---- Equality, of containers -----------------------------------------------
 //
 // Ruby, Python and culebra compare containers by what they hold: two
@@ -1035,6 +998,10 @@ inline void write_async(HelperTable& rt, int32_t index, coreir::Func body,
 // * `$add`. JavaScript and C# agree that a string on either side makes `+`
 //   a concatenation, but that is two front ends and five lines; Python and
 //   Ruby refuse the mixed case, and Lua turns the string into a number.
+// * How a double prints. It is not the same decision twice: the fixed-versus-
+//   exponent thresholds, the exponent's spelling, ".0", inf, nan and -0 are
+//   each language's own, so they are a table of styles, not a part of IR:
+//   double_format.h, which a front end calls as a host function.
 // * mini-ruby's iteration. Its cursor walks a Hash too, and a Hash's step
 //   answers a key beside the value; it has no generator to step. Its
 //   $iternext builds its cursors and its steps with the shared parts, but

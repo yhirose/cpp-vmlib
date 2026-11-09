@@ -296,7 +296,7 @@ finds a method, what is false, how a value prints. Where front ends here
 made the same decision and wrote it the same way, it is kept once, outside
 `vmlib.h`, in [examples/common/runtime_parts.h](examples/common/runtime_parts.h)
 -- the class layout and the walk up its bases, a for-each loop and the
-cursor it steps, the nil-and-false truthiness, a float printed with its ".0",
+cursor it steps, the nil-and-false truthiness,
 two containers compared by what they hold, a promise settled once and
 awaited, an operator that is the VM's where the language agrees with it
 and the language's helper elsewhere -- and the end of that file lists
