@@ -279,8 +279,9 @@ Quietly different:
   here; every `rescue` catches every raise.
 * **`raise` always makes a RuntimeError**, and `e.message` is the string
   it was given.
-* **Bignums are absent**: an Integer that leaves int64 wraps.
-  examples/mini-python is where that recipe lives.
+* **Bignums are absent**: an Integer that leaves int64 wraps, and an
+  integer *literal* past int64 is refused where it is read ("not supported
+  here"), not clamped. examples/mini-python is where the recipe lives.
 * **`sort` is an insertion sort** over the array, with no block form. The
   collections a sample sorts are small, and a comparison sort is not what
   this front end is here to show.

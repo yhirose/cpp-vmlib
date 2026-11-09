@@ -42,6 +42,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <cstdlib>
 #include <functional>
@@ -1866,9 +1867,14 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
-      case "number"_:
-        return b.literal(
-            std::strtoll(std::string(a.token).c_str(), nullptr, 10));
+      case "number"_: {
+        const auto n = literals::parse_int_literal(a.token);
+        if (!n.fits) {
+          fail(a, "integer literal " + std::string(a.token) +
+                      " is not supported here (no Bignum)");
+        }
+        return b.literal(n.value);
+      }
       case "float"_:
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));

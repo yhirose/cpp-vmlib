@@ -136,7 +136,7 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   addop      <- < '+' ![=] / '-' ![=] > _
   mulexp     <- unary (mulop unary)*
   mulop      <- < '**' / '*' ![*=] / '/' ![=] / '%' ![=] > _
-  unary      <- negexp / postfix
+  unary      <- postfix / negexp
   negexp     <- '-' ![=] _ unary                             { no_ast_opt }
 
   postfix    <- primary suffix*
@@ -183,8 +183,12 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   hpair      <- expr '=>' _ expr
   literal    <- < ('true' / 'false' / 'nil') ![a-zA-Z0-9_] > hs
 
-  float      <- < [0-9]+ '.' [0-9]+ ([eE] [-+]? [0-9]+)? > hs
-  number     <- < [0-9]+ > hs
+  # A numeric literal owns a minus written right against its digits: `-2.abs`
+  # is (-2).abs, while `- 2.abs` negates the call and `2 -1` subtracts (the
+  # `2` is already a primary by the time the '-' is seen). A literal that
+  # is -9223372036854775808 can only be read as one token.
+  float      <- < '-'? [0-9]+ '.' [0-9]+ ([eE] [-+]? [0-9]+)? > hs
+  number     <- < '-'? [0-9]+ > hs
   string     <- ['] < (!['\\] . / '\\' .)* > ['] hs
   istring    <- ["] ipart* ["] hs                            { no_ast_opt }
   ipart      <- ihole / itext

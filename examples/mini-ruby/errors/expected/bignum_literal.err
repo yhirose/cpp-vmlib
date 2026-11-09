@@ -1,0 +1,1 @@
+bignum_literal.rb:4:6: integer literal 9223372036854775808 is not supported here (no Bignum)
