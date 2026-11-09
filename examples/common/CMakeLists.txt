@@ -19,6 +19,12 @@ add_executable(test_runtime_parts test_runtime_parts.cc)
 target_link_libraries(test_runtime_parts PRIVATE vmlib)
 add_test(NAME runtime_parts COMMAND test_runtime_parts)
 
+# double_format.h's per-language styles against the strings the real
+# languages print for the same doubles. Pure C++ (no VM), so it is quick.
+add_executable(test_double_format test_double_format.cc)
+target_link_libraries(test_double_format PRIVATE vmlib)
+add_test(NAME double_format COMMAND test_double_format)
+
 # add_front_end(<name> [EXT <ext> LANG <lang> [LEAD <file>]])
 #
 # The front end in the calling directory: the executable <name>, from that
