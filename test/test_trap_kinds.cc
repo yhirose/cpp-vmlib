@@ -6,12 +6,12 @@
 //
 // Also pinned: the record is invisible to a program (the trap object keeps
 // its three keys), a re-raised trap keeps its kind and facts, a host's trap
-// is Host unless it names another kind, and RunOptions::describe_traps hands
-// an uncaught trap to describe.
+// is Host unless it names another kind, and RunOptions::describe is handed an
+// uncaught trap, and a value that carries an origin keeps it when it is
+// raised again.
 //
 // Not reachable from a program, so not here: "too many arguments to spread"
-// (a count past INT32_MAX), and "yield outside a generator" (verify()
-// precludes it).
+// (a count past INT32_MAX).
 
 #include <cstdio>
 #include <functional>
@@ -359,11 +359,11 @@ void cases() {
          add_func(m, b, "r", 0, call_fn(b, self));
          return call_fn(b, self);
        },
-       "Depth|-|nil|nil||0|0|recursion limit exceeded", 8},
+       "Depth|-|nil|nil||nil|nil|recursion limit exceeded", 8},
       {"host", [](Module&, Builder& b) { return nat(b, kHost, {}); },
-       "Host|-|nil|nil||0|0|host said no"},
+       "Host|-|nil|nil||nil|nil|host said no"},
       {"host kind", [](Module&, Builder& b) { return nat(b, kHostKind, {}); },
-       "Range|-|nil|nil||0|0|host range"},
+       "Range|-|nil|nil||nil|nil|host range"},
       // ---- generators and coroutines ---------------------------------------
       {"gen resume type", [](Module&, Builder& b) { return in(b, I::GenResume, {nil(b), nil(b)}); },
        "Operands|I:genresume|nil|nil||0|0|cannot resume nil"},
@@ -468,12 +468,20 @@ void shape() {
            "object: fact");
 }
 
-// ---- describe_traps ----------------------------------------------------------
+// ---- describe, and where a raised value says it came from -------------------
 
 std::string g_described;
 std::string describe(const Value& v) {
   g_described = describe_trap(v);
   return "T[" + std::string(kind_name(trap_kind(v))) + "]";
+}
+
+// stamp(e): the position a front end's conversion would stamp.
+bool native_stamp(NativeCall& c) {
+  Value e = c.arg(0);
+  stamp_origin(e, SrcPos{9, 9});
+  c.result = e;
+  return true;
 }
 
 void uncaught() {
@@ -484,20 +492,52 @@ void uncaught() {
                      b.binary(BinOp::Div, num(b, 1), b.literal(0, {7, 3}), P),
                      {"e"}, {}});
   vm::RunOptions o = options();
+  // No describe: the trap's own message, at its own position.
+  check_eq(run_module(m, "bare", o), "divide by zero", "no describe: message");
+  check_eq(std::to_string(g_fail_pos.line) + ":" + std::to_string(g_fail_pos.col),
+           "7:3", "no describe: the trap's position");
+  // A describe is handed the trap itself.
   o.describe = &describe;
   g_described.clear();
-  check_eq(run_module(m, "off", o), "divide by zero",
-           "describe_traps off: the trap's own message");
-  check_eq(g_described, "", "describe_traps off: describe is not asked");
-  check_eq(std::to_string(g_fail_pos.line), "7", "off: the trap's line");
-  o.describe_traps = true;
-  check_eq(run_module(m, "on", o), "uncaught: T[DivideByZero]",
-           "describe_traps on: describe's words");
-  check_eq(g_described,
-           "DivideByZero|B:div|int|int||0|0|divide by zero",
+  check_eq(run_module(m, "described", o), "uncaught: T[DivideByZero]",
+           "describe's words");
+  check_eq(g_described, "DivideByZero|B:div|int|int||0|0|divide by zero",
            "describe is handed the trap itself");
   check_eq(std::to_string(g_fail_pos.line) + ":" + std::to_string(g_fail_pos.col),
-           "7:3", "on: the trap's position");
+           "7:3", "describe: the trap's position");
+
+  // A value that carries an origin keeps it when it is thrown again; one
+  // that does not is reported where it was thrown.
+  for (const bool stamped : {false, true}) {
+    Module t;
+    Builder tb(t);
+    t.natives = m.natives;
+    t.natives.push_back("stamp");
+    const NodeId made = tb.object_lit({{tb.str_literal("k", P), num(tb, 1)}}, P);
+    const NodeId value =
+        stamped ? tb.call_value(tb.native_ref(5, P), {made}, P) : made;
+    t.funcs.push_back({"main", 1, 0, tb.make_throw(value, {3, 3}), {"e"}, {}});
+    vm::RunOptions to = options();
+    to.natives.push_back({"stamp", 1, &native_stamp, nullptr});
+    to.describe = [](const Value&) { return std::string("obj"); };
+    check_eq(run_module(t, "origin", to), "uncaught: obj", "origin: message");
+    check_eq(std::to_string(g_fail_pos.line),
+             stamped ? "9" : "3", stamped ? "a stamped value keeps its origin"
+                                          : "an unstamped value: the throw");
+  }
+
+  // A trap with no facts to carry (a host's) has no record, and reads as nil.
+  Module h;
+  Builder hb(h);
+  h.natives = m.natives;
+  h.funcs.push_back({"main", 1, 0,
+                     hb.make_try(0, nat(hb, kHost, {}),
+                                 nat(hb, kProbe, {loc(hb, 0)}), P),
+                     {"e"}, {}});
+  g_seen.clear();
+  run_module(h, "factless", options());
+  check_eq(g_seen.size() == 1 ? g_seen[0] : "?",
+           "Host|-|nil|nil||nil|nil|host said no", "a trap with no facts");
 }
 
 }  // namespace

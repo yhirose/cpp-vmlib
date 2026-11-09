@@ -4457,7 +4457,7 @@ enum class TrapKind : uint8_t {
   State,
   // A host function's own failure (NativeCall::trap).
   Host,
-  // What verify() precludes, reached anyway.
+  // What verify() precludes, reached anyway (a field slot past the object).
   Internal,
 };
 static_assert(static_cast<unsigned>(TrapKind::Internal) < 16,
@@ -4489,6 +4489,20 @@ struct Verb {
   VerbClass cls = VerbClass::None;
   int id = 0;
   bool operator==(const Verb&) const = default;
+  // Whether this is the operation named: the class is checked with the id,
+  // since the ids of the four enums overlap.
+  bool is(BinOp op) const {
+    return cls == VerbClass::Binary && id == static_cast<int>(op);
+  }
+  bool is(UnOp op) const {
+    return cls == VerbClass::Unary && id == static_cast<int>(op);
+  }
+  bool is(IntrinsicId i) const {
+    return cls == VerbClass::Intrinsic && id == static_cast<int>(i);
+  }
+  bool is(Tag t) const {
+    return cls == VerbClass::Node && id == static_cast<int>(t);
+  }
 };
 constexpr int64_t verb_of(BinOp op) {
   return (static_cast<int64_t>(VerbClass::Binary) << 8) | static_cast<int>(op);
@@ -4531,13 +4545,8 @@ inline std::string trap_text(TrapKind kind, const TrapFacts& t) {
   const Value& l = t.l ? *t.l : kNil;
   const Value& r = t.r ? *t.r : kNil;
   const Verb v = verb_decode(t.verb);
-  // The verb is one of three enums' values, so every test names its class.
-  const auto is = [&](IntrinsicId x) {
-    return v.cls == VerbClass::Intrinsic && v.id == static_cast<int>(x);
-  };
-  const auto at = [&](Tag x) {
-    return v.cls == VerbClass::Node && v.id == static_cast<int>(x);
-  };
+  const auto is = [&](IntrinsicId x) { return v.is(x); };
+  const auto at = [&](Tag x) { return v.is(x); };
   const auto ty = [](const Value& x) { return std::string(type_name(x.tag())); };
   switch (kind) {
     case TrapKind::DivideByZero:
@@ -4598,7 +4607,6 @@ inline std::string trap_text(TrapKind kind, const TrapFacts& t) {
       if (is(IntrinsicId::CoroResume)) return "coroutine already running";
       return "generator already running";
     case TrapKind::Internal:
-      if (at(Tag::Yield)) return "yield outside a generator";
       return "field '" + *t.name + "' out of range";
     case TrapKind::Host:
     case TrapKind::None:
@@ -5253,7 +5261,8 @@ struct NativeCall {
   // executor's own would be (a front end's conversion maps it as it does
   // those); a native has no verb or operands to record.
   Value trap(const std::string& msg) const;
-  Value trap(TrapKind kind, const std::string& msg) const;
+  Value trap(TrapKind kind, const std::string& msg,
+             const TrapFacts& facts = {}) const;
 
   NativeExec* exec = nullptr;  // set by the executor
 };
@@ -5262,15 +5271,17 @@ struct NativeCall {
 // to what, and the few names and counts the message is built from.
 enum class TrapFact : uint8_t { Verb, Left, Right, Name, N, M };
 
-// The value a trap carries: a fresh {message, line, col} object, marked as
-// a trap and of a kind, with its facts in the object's meta -- the slot no
-// key names, so nothing a program does with keys reaches them. Built here
-// for the executor's own failures and NativeCall::trap's alike, rather
-// than each front end inventing its own materialization.
+// The record is [verb, l, r, name, n, m]: one item per TrapFact, the verb --
+// an int, which no front end's own record (runtime_parts.h's exception,
+// headed "exc" or a class) begins with -- first. Writer (make_trap) and
+// reader (trap_fact) share the length.
+inline constexpr size_t kTrapRecordSize = static_cast<size_t>(TrapFact::M) + 1;
+
+// The kind of a trap lives in the header (HeapObj::trap_kind) and nowhere
+// else; the facts are the meta's.
 //
-// The meta is the record ["trap", verb, l, r, name, n, m]: headed by a
-// string no front end's own record (runtime_parts.h's exception, "exc")
-// shares, so none mistakes it for one.
+// A trap that has no facts to carry (a host's own, the call depth) has no
+// record, and every fact reads as nil.
 inline Value make_trap(TrapKind kind, const std::string& msg, SrcPos pos,
                        const TrapFacts& t = {}) {
   Value e = Value::make_object();
@@ -5280,11 +5291,12 @@ inline Value make_trap(TrapKind kind, const std::string& msg, SrcPos pos,
   o->set("col", Value::make_int(pos.col));
   o->trap = true;
   o->trap_kind = static_cast<uint8_t>(kind);
-  o->meta = Value::make_array(
-      {Value::make_str("trap"), Value::make_int(t.verb),
-       t.l ? *t.l : Value(), t.r ? *t.r : Value(),
-       t.name ? Value::make_str(*t.name) : Value(), Value::make_int(t.n),
-       Value::make_int(t.m)});
+  if (t.verb != 0 || t.l || t.r || t.name || t.n != 0 || t.m != 0) {
+    o->meta = Value::make_array(
+        {Value::make_int(t.verb), t.l ? *t.l : Value(), t.r ? *t.r : Value(),
+         t.name ? Value::make_str(*t.name) : Value(), Value::make_int(t.n),
+         Value::make_int(t.m)});
+  }
   return e;
 }
 inline Value make_trap(const std::string& msg, SrcPos pos) {
@@ -5294,8 +5306,9 @@ inline Value make_trap(const std::string& msg, SrcPos pos) {
 inline Value NativeCall::trap(const std::string& msg) const {
   return trap(TrapKind::Host, msg);
 }
-inline Value NativeCall::trap(TrapKind kind, const std::string& msg) const {
-  return make_trap(kind, msg, exec->attributed(pos));
+inline Value NativeCall::trap(TrapKind kind, const std::string& msg,
+                              const TrapFacts& facts) const {
+  return make_trap(kind, msg, exec->attributed(pos), facts);
 }
 
 // A trap's kind, None for any other value: what a front end's conversion
@@ -5306,19 +5319,63 @@ inline TrapKind trap_kind(const Value& v) {
 }
 
 // One of a trap's facts, nil for any other value, and for a trap that
-// carries none (a host's). The two operands are the Values themselves, so
-// a front end names their types as its language does -- a class, not a tag.
+// carries none. The two operands are the Values themselves, so a front end
+// names their types as its language does -- a class, not a tag.
 inline Value trap_fact(const Value& v, TrapFact i) {
   if (trap_kind(v) == TrapKind::None) return Value();
   const Value& rec = v.as_object()->meta;
   if (!rec.is_array()) return Value();
   const auto& items = rec.as_array()->items;
-  const auto k = static_cast<size_t>(i) + 1;
-  return k < items.size() ? items[k] : Value();
+  if (items.size() != kTrapRecordSize || !items[0].is_int()) return Value();
+  return items[static_cast<size_t>(i)];
 }
 inline Verb trap_verb(const Value& v) {
   const Value f = trap_fact(v, TrapFact::Verb);
   return f.is_int() ? verb_decode(f.as_int()) : Verb{};
+}
+
+// The executor's own words for a trap, whatever its kind.
+inline std::string trap_message(const Value& trap) {
+  const Value* m = trap.is_object() ? trap.as_object()->find("message") : nullptr;
+  return m && m->is_str() ? m->as_str() : std::string();
+}
+
+// Where a raised value says it came from. A front end that converts a trap
+// into its own exception stamps the trap's position into the exception's
+// meta -- the three items "@", line, col at the end of an array, after
+// whatever else the front end keeps there -- so that raising the exception
+// again (a `raise e`, a `throw e`) reports the place it first failed, as the
+// real languages' tracebacks lead with. The executor reads it where it
+// raises (Exec::raise).
+inline constexpr char kOriginMarker[] = "@";
+
+inline void stamp_origin(Value& e, SrcPos pos) {
+  if (!e.is_object()) return;
+  Value& meta = e.as_object()->meta;
+  const std::vector<Value> mark = {Value::make_str(kOriginMarker),
+                                   Value::make_int(pos.line),
+                                   Value::make_int(pos.col)};
+  if (meta.is_array()) {
+    auto& items = meta.as_array()->items;
+    items.insert(items.end(), mark.begin(), mark.end());
+  } else if (meta.is_nil()) {
+    meta = Value::make_array(mark);
+  }
+}
+
+inline std::optional<SrcPos> origin_of(const Value& v) {
+  if (!v.is_object()) return std::nullopt;
+  const Value& meta = v.as_object()->meta;
+  if (!meta.is_array()) return std::nullopt;
+  const auto& items = meta.as_array()->items;
+  const size_t n = items.size();
+  if (n < 3 || !items[n - 3].is_str() ||
+      items[n - 3].as_str() != kOriginMarker || !items[n - 2].is_int() ||
+      !items[n - 1].is_int()) {
+    return std::nullopt;
+  }
+  return SrcPos{static_cast<uint32_t>(items[n - 2].as_int()),
+                static_cast<uint32_t>(items[n - 1].as_int())};
 }
 
 // What an uncaught raise of `v` reports when `v` is a trap: its message and
@@ -5385,22 +5442,20 @@ struct RunOptions {
   // (Program::natives) must be here, or the run fails before its first
   // instruction; names the program does not declare are simply unused.
   std::vector<NativeDef> natives;
-  // How a raised value that is not a trap is worded where the executor
-  // reports one itself: after "uncaught: " when nothing caught it, after
-  // "drop: " when a destructor let it out. Null: to_display's. A front end
-  // whose exceptions are objects of its own answers what its language
-  // would print ("IndexError: list index out of range") rather than
-  // "<object>"; one that raises plain strings needs nothing.
+  // How a raised value is worded where the executor reports one itself:
+  // after "uncaught: " when nothing caught it, after "drop: " when a
+  // destructor let it out. Null: to_display's -- and, for a trap, the
+  // executor's own message at its position, with no "uncaught: " (what PL/0
+  // reports). A front end whose exceptions are objects of its own answers
+  // what its language would print ("IndexError: list index out of range")
+  // rather than "<object>"; one that raises plain strings needs nothing.
+  //
+  // A trap (coreir::trap_kind != None) is handed to describe as it is raised,
+  // with its kind and facts (trap_fact): the front end that converts traps at
+  // its catch words an uncaught one the same way (runtime_parts.h's
+  // converted_or_self). A describe with no words for traps hands them back
+  // as the message.
   std::string (*describe)(const coreir::Value&) = nullptr;
-  // Whether `describe` words an executor's trap too (a raised value that
-  // is coreir::trap_kind != None), as the counterpart of the conversion a
-  // front end applies at its catch: an uncaught trap then reports as
-  // "uncaught: " and what describe says, at the position the trap holds,
-  // like any other raised value. Off, a trap reports its own message and
-  // position, byte for byte, which is what a front end with no words of
-  // its own for one (PL/0) wants. describe is handed the trap itself and
-  // reads its kind and facts (coreir::trap_kind, trap_fact).
-  bool describe_traps = false;
 };
 
 // Run the bytecode, on a heap the caller owns. Use this to inspect what a
@@ -9234,8 +9289,6 @@ struct Exec {
   size_t max_frames;  // live at once, the bottom frame included
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
-  bool describe_traps;     // RunOptions::describe_traps; beside the other
-                           // bool, in padding, so no member moves
   std::string (*describe)(const Value&);  // RunOptions::describe
   // max_frames as configured: an ExitHeadroom raises max_frames from it.
   const size_t depth_bound = max_frames;
@@ -9358,6 +9411,9 @@ struct Exec {
 
   // Every raise goes through one of these two.
   [[noreturn]] void raise(Value v, SrcPos pos) {
+    // A value that says where it first failed (stamp_origin) keeps that
+    // place when it is raised again.
+    if (const auto origin = origin_of(v)) pos = *origin;
     throw Raise{std::move(v), attributed(pos)};
   }
   // A trap: the executor's own failure, catchable like any Throw. The
@@ -9953,9 +10009,7 @@ struct Exec {
 
   void report_uncaught(const Raise& r) {
     if (const auto d = coreir::trap_diagnostic(r.value)) {
-      if (!describe_traps) {
-        coreir_rt::fail(d->message, d->pos.line, d->pos.col);
-      }
+      if (!describe) coreir_rt::fail(d->message, d->pos.line, d->pos.col);
       coreir_rt::fail("uncaught: " + worded(r.value), d->pos.line, d->pos.col);
     }
     coreir_rt::fail("uncaught: " + worded(r.value), r.pos.line, r.pos.col);
@@ -10087,7 +10141,7 @@ struct Exec {
       } catch (Raise& r) {
         const auto d = coreir::trap_diagnostic(r.value);
         const std::string what =
-            d && !self->describe_traps ? d->message : self->worded(r.value);
+            d && !self->describe ? d->message : self->worded(r.value);
         std::fprintf(stderr, "drop: %s\n", what.c_str());
       }
     } catch (const std::bad_alloc&) {
@@ -10242,7 +10296,6 @@ struct Exec {
     const std::vector<Value>& items = s.as_array()->items;
     // An argument count is an int32_t from here on.
     if (items.size() > static_cast<size_t>(INT32_MAX - in.d)) {
-      // mutation-exempt: an array of 2^31 elements
       fail(f, TrapKind::Arity, {.verb = verb_of(Tag::CallSpread)});
     }
     std::vector<Value> args;
@@ -10968,16 +11021,18 @@ struct Exec {
           // A length the allocator refuses is a trap like any other, not a
           // C++ exception out of vm::run past every handler in the program.
           std::vector<Value> items;
+          bool too_large = false;
           try {
             items.assign(static_cast<size_t>(n.as_int()), f.regs[in.c]);
           } catch (const std::length_error&) {
-            fail(f, TrapKind::BadValue,
-               {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n, .n = n.as_int()});
+            too_large = true;
           } catch (const std::bad_alloc&) {
-            // mutation-exempt: the allocator refusing, which
-            // test_alloc_failure injects
+            too_large = true;
+          }
+          if (too_large) {
             fail(f, TrapKind::BadValue,
-               {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n, .n = n.as_int()});
+                 {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n,
+                  .n = n.as_int()});
           }
           f.regs[in.a] = Value::make_array(std::move(items));
           break;
@@ -11216,10 +11271,7 @@ struct Exec {
           // Suspend: the frame's storage moves back into the generator, the
           // frame pops, and the resumer gets {value, done: false} -- the
           // same delivery shape as Ret, one level up.
-          if (!f.gen_self.is_generator()) {
-            // mutation-exempt: verify() precludes it
-            fail(f, TrapKind::Internal, {.verb = verb_of(Tag::Yield)});
-          }
+          assert(f.gen_self.is_generator());  // verify() precludes a Yield outside one
           Value self = std::move(f.gen_self);
           GeneratorObj* go = self.as_generator();
           Value out = f.regs[in.b];
@@ -11443,7 +11495,6 @@ void run_with(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
       .max_frames = max_frames,
       .rt = rt,
       .entry_frame_drops = opts.entry_frame_drops,
-      .describe_traps = opts.describe_traps,
       .describe = opts.describe,
       .frames = FrameStack<Prof>(std::forward<ProfArgs>(prof_args)...)};
   // Link the program's declared host functions before anything runs: a

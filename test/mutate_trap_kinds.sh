@@ -15,9 +15,13 @@ mkdir "$tmp/inc"
 sites=$(grep -nE '(fail\(f,|raise_trap\()[[:space:]]*(TrapKind::[A-Za-z]+|kind_of\(e\))' vmlib.h | cut -d: -f1)
 bad=0
 n=0
+# The sites no program reaches, each named by its line's text. A name that
+# matches no line fails the script, so an exemption cannot outlive its site.
+#   an array of 2^31 spread arguments:
+exempt='fail(f, TrapKind::Arity, {.verb = verb_of(Tag::CallSpread)});'
+grep -qF -- "$exempt" vmlib.h || { echo "stale exemption: $exempt"; exit 1; }
 for line in $sites; do
-  # A site no program reaches says so beside it (mutation-exempt).
-  if sed -n "$((line - 2)),${line}p" vmlib.h | grep -q mutation-exempt; then
+  if [ "$(sed -n "${line}p" vmlib.h | sed 's/^ *//')" = "$exempt" ]; then
     continue
   fi
   n=$((n + 1))

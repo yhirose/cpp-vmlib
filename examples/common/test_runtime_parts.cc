@@ -87,15 +87,19 @@ void run_body(NodeId body, Module& m, int32_t locals, const std::string& what) {
 // message.
 Value convert_trap(const Value& trap, const void* ctx) {
   return make_exception(static_cast<const char*>(ctx),
-                        *trap.as_object()->find("message"));
+                        Value::make_str(trap_message(trap)));
 }
 
 // report(v): the exception's name and message, or the value as it is.
 bool report_native(NativeCall& c) {
   const auto* exc = exception_record(c.arg(0));
-  g_out.push_back(exc ? (*exc)[kExcName].as_str() + ":" +
-                            (*exc)[kExcMessage].as_str()
-                      : to_display(c.arg(0)));
+  const auto at = origin_of(c.arg(0));
+  g_out.push_back((exc ? (*exc)[kExcName].as_str() + ":" +
+                             (*exc)[kExcMessage].as_str()
+                       : to_display(c.arg(0))) +
+                  (at ? "@" + std::to_string(at->line) + ":" +
+                            std::to_string(at->col)
+                      : ""));
   return true;
 }
 
@@ -398,7 +402,8 @@ int main() {
 
   // The conversion at a catch: a trap becomes the front end's exception, and
   // what is not a trap passes through, so a second catch (or a catch of a
-  // thrown string) leaves it alone.
+  // thrown string) leaves it alone; and a converted exception carries the
+  // place of the trap.
   {
     Module m;
     Builder bld(m);
@@ -420,7 +425,7 @@ int main() {
         {trap_convert_def<&convert_trap>("Conv"),
          {"report", 1, &report_native, nullptr}},
         "converted");
-    check_eq(joined(), "Conv:divide by zero|plain|Conv:divide by zero|",
+    check_eq(joined(), "Conv:divide by zero@1:1|plain|Conv:divide by zero@1:1|",
              "converted: a trap, a string, and a converted one");
   }
 
@@ -432,6 +437,10 @@ int main() {
     check_eq(binop_symbol(BinOp::Le), "<=", "binop_symbol: le");
     check_eq(binop_symbol(BinOp::UShr), name_of(BinOp::UShr),
              "binop_symbol: unsigned falls back to its name");
+    check_eq(is_ordering(BinOp::Ge) && !is_ordering(BinOp::Eq) ? "y" : "n", "y",
+             "is_ordering");
+    check_eq(is_bitwise(BinOp::Shl) && !is_bitwise(BinOp::Add) ? "y" : "n", "y",
+             "is_bitwise");
     check_eq(unop_symbol(UnOp::Neg), "-", "unop_symbol: neg");
     check_eq(unop_symbol(UnOp::BitNot), "~", "unop_symbol: bitnot");
   }

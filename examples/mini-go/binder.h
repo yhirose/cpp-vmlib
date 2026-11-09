@@ -17,8 +17,8 @@ coreir::Module bind_source(const std::string& source);
 // float32 print (double_format.h's kGo).
 const std::vector<vm::NativeDef>& stdlib();
 
-// How an uncaught trap reads (vm::RunOptions::describe, with
-// describe_traps): go's first line for the same fault, "panic: runtime
+// How an uncaught trap reads (vm::RunOptions::describe):
+// go's first line for the same fault, "panic: runtime
 // error: index out of range [5] with length 3".
 std::string describe(const coreir::Value& v);
 

@@ -420,9 +420,9 @@ inline coreir::Value make_exception(const std::string& name,
 // trap: what comes back is not a trap, so a second catch passes it by.
 //
 // A handler that only re-raises (a `finally`, a `rescue` that matched
-// nothing) does not convert, and the raw trap goes on, keeping its
-// position; one that converts re-raises the converted exception, which
-// reports where it is re-raised, as a helper's exception does.
+// nothing) does not convert, and the raw trap goes on. A converted exception
+// carries the trap's position (coreir::stamp_origin), so raising it again
+// reports where it first failed.
 
 inline constexpr char kTrapConvert[] = "trapcvt";
 
@@ -431,14 +431,27 @@ inline coreir::NodeId converted(coreir::Builder::At& b, coreir::NodeId caught) {
 }
 
 // `Convert(trap, ctx)` makes the front end's exception for a trap; ctx is the
-// native's own (a style, a chunk name), as double_format's styles are. The
-// def is registered with the run's natives.
+// native's own (a style, a chunk name), as double_format's styles are.
+// converted_or_self is the one place it is applied: a value that is no trap
+// is its own answer, and a converted exception is stamped with the place the
+// trap was raised (coreir::stamp_origin), so raising it again reports that
+// place. The front end's `describe` runs a raised value through it too, so
+// that describe never sees a trap.
+template <coreir::Value (*Convert)(const coreir::Value& trap, const void* ctx)>
+coreir::Value converted_or_self(const coreir::Value& v,
+                                const void* ctx = nullptr) {
+  if (coreir::trap_kind(v) == coreir::TrapKind::None) return v;
+  coreir::Value e = Convert(v, ctx);
+  if (const auto d = coreir::trap_diagnostic(v)) {
+    coreir::stamp_origin(e, d->pos);
+  }
+  return e;
+}
+
+// The def is registered with the run's natives.
 template <coreir::Value (*Convert)(const coreir::Value& trap, const void* ctx)>
 bool trap_convert_native(coreir::NativeCall& c) {
-  const coreir::Value& v = c.arg(0);
-  c.result = coreir::trap_kind(v) == coreir::TrapKind::None
-                 ? v
-                 : Convert(v, c.ctx);
+  c.result = converted_or_self<Convert>(c.arg(0), c.ctx);
   return true;
 }
 template <coreir::Value (*Convert)(const coreir::Value& trap, const void* ctx)>
@@ -448,6 +461,18 @@ vm::NativeDef trap_convert_def(const void* ctx = nullptr) {
 }
 
 // ---- Operators -------------------------------------------------------------
+
+// `<`, `<=`, `>` and `>=`: the operators a message words as a comparison.
+inline bool is_ordering(coreir::BinOp op) {
+  using B = coreir::BinOp;
+  return op == B::Lt || op == B::Le || op == B::Gt || op == B::Ge;
+}
+// `&`, `|`, `^`, `<<` and `>>`: the operators that take two ints only.
+inline bool is_bitwise(coreir::BinOp op) {
+  using B = coreir::BinOp;
+  return op == B::BitAnd || op == B::BitOr || op == B::BitXor ||
+         op == B::Shl || op == B::Shr;
+}
 
 // The spelling of an operator in the C family's notation, which Python,
 // Ruby and culebra share for every one of these: a diagnostic that names

@@ -288,9 +288,10 @@ int main() {
     check_eq(fail_at(), "3:1", "unwinding defer: position");
   }
 
-  // --- 4e. RunOptions::describe words an uncaught value that is not a
-  //         trap -- a front end's own exception object -- and leaves a
-  //         trap's diagnostic alone. -------------------------------------
+  // --- 4e. RunOptions::describe words an uncaught value -- a front end's
+  //         own exception object, or a trap, which it is handed like any
+  //         other (a describe with no words for traps answers the
+  //         message). --------------------------------------------------------
   // throw {kind: "Oops"}  /  print(1 / 0)
   for (const bool trap : {false, true}) {
     Module m;
@@ -308,11 +309,15 @@ int main() {
          {}, {}});
     vm::RunOptions opts;
     opts.describe = [](const Value& v) {
+      if (coreir::trap_kind(v) != coreir::TrapKind::None) {
+        return coreir::trap_message(v);
+      }
       return v.is_object() ? v.as_object()->find("kind")->as_str() + "!"
                            : std::string("?");
     };
     check_eq(run_module(m, "describe", opts),
-             trap ? "divide by zero" : "uncaught: Oops!", "describe: message");
+             trap ? "uncaught: divide by zero" : "uncaught: Oops!",
+             "describe: message");
   }
 
   // --- 5. Nested: the inner handler rethrows; the outer one catches. ------
