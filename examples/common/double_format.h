@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "vmlib.h"
 
@@ -180,6 +181,14 @@ inline bool f32str_native(coreir::NativeCall& c) {
           ? format_float32(v.as_double(), *static_cast<const DoubleStyle*>(c.ctx))
           : coreir::to_display(v));
   return true;
+}
+
+// The NativeDef of one of those, with the style as its ctx -- `native_def(
+// "dstr", dstr_native, kPython)`. A style is a constant object that outlives
+// every run, and NativeDef::ctx is the untyped pointer a host function reads.
+inline vm::NativeDef native_def(std::string name, coreir::NativeFn fn,
+                                const DoubleStyle& style) {
+  return {std::move(name), 1, fn, const_cast<DoubleStyle*>(&style)};
 }
 
 }  // namespace double_format

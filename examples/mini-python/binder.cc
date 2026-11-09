@@ -30,6 +30,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -1570,13 +1572,14 @@ struct Binder {
 
   // -- Display -------------------------------------------------------------
   //
-  // Python's float repr is shortest-round-trip with a ".0" forced onto a
-  // whole value -- which is to_display's output plus the one rule
-  // to_display's comment says a front end should add for itself, and the
-  // rule runtime_parts.h's float_str writes for Ruby, Guile and culebra too.
+  // Python's float repr is the shortest round trip, written in the layout
+  // double_format.h's kPython holds: 1e-05 and 1e+16 past the 1e-4..1e16
+  // range, a ".0" on a whole number in it. The host does that (dstr), since
+  // ToStr's own choice of fixed or exponent is no language's.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, {"nan", "inf", "-inf"});
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.nat("dstr", {r.L(v)})));
     r.finish("$fstr");
   }
 
@@ -5116,6 +5119,8 @@ const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"print", 1, nat_print, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kPython),
   };
   return defs;
 }
@@ -5125,7 +5130,7 @@ const std::vector<vm::NativeDef>& stdlib() {
 // program's own class names itself in its table.
 std::string describe(const Value& v) {
   const auto* exc = runtime_parts::exception_record(v);
-  if (!exc) return to_display(v);
+  if (!exc) return double_format::display_with(v, double_format::kPython);
   const Value& msg = (*exc)[kExcMessage];
   std::string name;
   if (const Value& k = (*exc)[kExcName]; k.is_str()) {
@@ -5133,8 +5138,11 @@ std::string describe(const Value& v) {
   } else if (const std::string* n = runtime_parts::class_name((*exc)[0])) {
     name = *n;
   }
-  if (name.empty() || msg.is_nil()) return to_display(v);
-  const std::string text = to_display(msg);
+  if (name.empty() || msg.is_nil()) {
+    return double_format::display_with(v, double_format::kPython);
+  }
+  const std::string text =
+      double_format::display_with(msg, double_format::kPython);
   return text.empty() ? name : name + ": " + text;
 }
 
