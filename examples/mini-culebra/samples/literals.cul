@@ -4,3 +4,17 @@ println(9223372036854775807)
 println(-9223372036854775807 - 1)
 println(5 - -3)
 println(0)
+
+# String escapes: in double quotes \n \t \r \\ \" \{ \xHH (a byte) \uHHHH and
+# \UHHHHHHHH (UTF-8); any other backslash stays, with its character.
+# Single quotes are raw.
+println("\x41\x4a\x4A\u0042\u00e9\U0001F600")
+println("\xe9".size())
+println("tab\tq\"\\")
+println("a\qb\0c\}d\'e\$f\b\f\v")
+println("\{x}")
+println("a{1 + 1}b{"\x41\u0042\n"}c")
+println('a\nb\x41\\{x}')
+println('\'.size())
+println("a\
+b")

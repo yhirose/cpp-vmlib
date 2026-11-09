@@ -1,0 +1,1 @@
+surrogate_escape.cul:2:10: invalid \u escape: not a Unicode scalar value (surrogate).

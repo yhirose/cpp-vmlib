@@ -1,0 +1,2 @@
+# A surrogate is not a Unicode scalar value: culebra says "SyntaxError: invalid \u escape: U+D800 is not a Unicode scalar value (surrogate)."
+println("\uD800")

@@ -1,0 +1,2 @@
+# \u takes exactly four hex digits: culebra says "SyntaxError: invalid \u escape: expected 4 hex digits."
+println("\u{43}")

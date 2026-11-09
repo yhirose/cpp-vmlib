@@ -1,0 +1,1 @@
+bad_hex_escape.cul:2:10: invalid \x escape: expected two hex digits (\xHH).

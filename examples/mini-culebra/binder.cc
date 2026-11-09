@@ -48,6 +48,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <cstdlib>
@@ -106,26 +107,59 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
-      out.push_back(tok[i]);
+// The text of a double-quoted string between its holes, as the bytes it
+// stands for -- culebra's rules: `\n \t \r \\ \"`, `\{` (a brace that does
+// not open a hole), `\xHH` (one byte), `\uHHHH` and `\UHHHHHHHH` (a Unicode
+// scalar value, in UTF-8). A bad \x, \u or \U is an error at parse time. A
+// backslash before any other character stays, with it: `\q`, `\0`, `\}`.
+// (A single-quoted string has no escapes at all, and is not decoded.)
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'n', '\n'}, {'t', '\t'}, {'r', '\r'}, {'\\', '\\'}, {'"', '"'},
+      {'{', '{'},
+  };
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\' || u.i == raw.size()) {
+      u.out.push_back(c);
       continue;
     }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case 'r': out.push_back('\r'); break;
-      case '\\': out.push_back('\\'); break;
-      case '\'': out.push_back('\''); break;
-      case '"': out.push_back('"'); break;
-      case '{': out.push_back('{'); break;
-      case '}': out.push_back('}'); break;
-      default: out.push_back(tok[i]); break;
+    const char e = raw[u.i];
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      u.out.push_back(static_cast<char>(s));
+      ++u.i;
+    } else if (e == 'x') {
+      if (escapes::hex_digits(raw, u.i + 1, 2, 2, v) == 0) {
+        u.fail_at(start, "invalid \\x escape: expected two hex digits (\\xHH).");
+      } else {
+        u.out.push_back(static_cast<char>(v));
+        u.i += 3;
+      }
+    } else if (e == 'u' || e == 'U') {
+      const size_t n = e == 'u' ? 4 : 8;
+      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
+        u.fail_at(start, std::string("invalid \\") + e + " escape: expected " +
+                             (e == 'u' ? "4" : "8") + " hex digits.");
+      } else if (v >= 0xD800 && v <= 0xDFFF) {
+        u.fail_at(start, std::string("invalid \\") + e +
+                             " escape: not a Unicode scalar value (surrogate).");
+      } else if (v > 0x10FFFF) {
+        u.fail_at(start, std::string("invalid \\") + e +
+                             " escape: not a Unicode scalar value.");
+      } else {
+        escapes::append_utf8(u.out, v);
+        u.i += 1 + n;
+      }
+    } else {
+      u.out.push_back('\\');  // an escape culebra has no meaning for stays
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 // culebra's standard library, as this front end reaches it. A free function
@@ -1109,7 +1143,7 @@ struct Binder {
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)));
+        return b.str_literal(std::string(a.token));
       case "istring"_: {
         // "a{x}b" is concatenation, with every hole passed through the
         // display conversion -- culebra's §8, and the one place a Float
@@ -1118,7 +1152,7 @@ struct Binder {
         for (const auto& part : a.nodes) {
           const NodeId piece =
               part->tag == "itext"_
-                  ? b.str_literal(unescape(std::string(part->token)))
+                  ? b.str_literal(unescape(part->token, *part))
                   : rt.call("$disp", {emit_expr(*part->nodes[0], ctx)}, p);
           acc = b.binary(BinOp::Add, acc, piece);
         }
@@ -1257,10 +1291,9 @@ struct Binder {
         // the usual shape, needs not: DropSet answers the object it gave
         // the destructor, so the literal and its `drop` are one
         // expression.
+        // A quoted key is single-quoted, which has no escapes: its token.
         const auto key_of = [](const Ast& c) {
-          const Ast& key = *c.nodes[0];
-          return key.tag == "string"_ ? unescape(std::string(key.token))
-                                      : std::string(key.token);
+          return std::string(c.nodes[0]->token);
         };
         const size_t n = a.nodes.size();
         size_t first = n;

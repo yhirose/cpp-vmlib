@@ -1,0 +1,2 @@
+# A single-quoted string has no escapes, so there is no way to write a quote in it: culebra says "SyntaxError: failed to parse module".
+println('it\'s')

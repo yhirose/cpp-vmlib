@@ -1,0 +1,1 @@
+bad_unicode_escape.cul:2:10: invalid \u escape: expected 4 hex digits.
