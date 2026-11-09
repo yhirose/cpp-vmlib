@@ -1,0 +1,1 @@
+rethrow.js:6:6: uncaught: TypeError: Cannot read properties of undefined (reading 'x')

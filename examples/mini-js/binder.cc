@@ -797,12 +797,15 @@ struct Binder {
     arms.emplace_back(
         r.S("map"),
         r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
-    arms.emplace_back(
-        r.S("nil"),
-        r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
+    // Anything else is undefined, whose store is the VM's trap, or a value
+    // that takes no property.
     r.add(r.b.make_switch(
         r.typ(recv), arms,
-        r.ret(r.call("$throwtype", {r.S("cannot set a property on this")}))));
+        r.blk({r.iff(r.is(r.typ(recv), "nil"),
+                     r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)),
+                            r.ret(r.L(val))})),
+               r.ret(r.call("$throwtype",
+                            {r.S("cannot set a property on this")}))})));
     r.finish("$setidx");
   }
 
@@ -2410,17 +2413,14 @@ Value convert_trap(const Value& trap, const void*) {
   const Value L = trap_fact(trap, TrapFact::Left);
   const Value R = trap_fact(trap, TrapFact::Right);
   const Verb verb = trap_verb(trap);
-  const auto node = [&](Tag t) {
-    return verb.cls == VerbClass::Node && verb.id == static_cast<int>(t);
-  };
   std::string name = "TypeError";
-  std::string msg = trap.as_object()->find("message")->as_str();
+  std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::NotIndexable: {
       const Value key = trap_fact(trap, TrapFact::Name).is_str()
                             ? trap_fact(trap, TrapFact::Name)
                             : R;
-      const bool write = node(Tag::SetIndex) || node(Tag::FieldSet);
+      const bool write = verb.is(Tag::SetIndex) || verb.is(Tag::FieldSet);
       msg = std::string("Cannot ") + (write ? "set" : "read") +
             " properties of " + (L.is_nil() ? "undefined" : to_display(L)) +
             " (" + (write ? "setting" : "reading") + " '" +
@@ -2454,12 +2454,9 @@ Value convert_trap(const Value& trap, const void*) {
 
 // The first line of node's report for an Error: its name, then its message.
 // An Error here is the plain {name, message} object `new Error(...)` builds.
-std::string describe(const Value& trap_or_value) {
+std::string describe(const Value& raised) {
   // An uncaught trap reads as the Error it would have been caught as.
-  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
-                                   ? convert_trap(trap_or_value, nullptr)
-                                   : Value();
-  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
+  const Value v = converted_or_self<&convert_trap>(raised);
   if (v.is_object()) {
     ObjectObj* o = v.as_object();
     const Value* name = o->find("name");
