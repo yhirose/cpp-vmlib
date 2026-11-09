@@ -35,11 +35,12 @@
 // `$truthy` is written here, in IR, and every condition goes through it.
 // The same for `===` (BinOp::Eq refuses two values of different types,
 // which is a trap where JavaScript wants `false`), for `typeof` (TypeOf's
-// vocabulary is the VM's, not JavaScript's), and for `String(n)` (to_display
-// is shortest-round-trip with its own idea of fixed or exponent, which is
-// not ES Number::toString; the host writes that one, double_format.h's kJs). Each of those is a $-named func this binder writes once per module,
-// reached by its Module::funcs slot and never bound in the program's scope,
-// so `$truthy`, a name JavaScript can spell, still cannot reach it.
+// vocabulary is the VM's, not JavaScript's), and for
+// `String(n)` (to_display's fixed-or-exponent is not ES Number::toString;
+// the host writes that one, double_format.h's kJs, as `dstr`). Each of
+// those is a $-named func this binder writes once per module, reached by
+// its Module::funcs slot and never bound in the program's scope, so
+// `$truthy`, a name JavaScript can spell, still cannot reach it.
 
 #include "binder.h"
 
@@ -501,7 +502,7 @@ struct Binder {
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
-        "$truthy", "$seq",     "$typeof",  "$numstr",   "$str",
+        "$truthy", "$seq",     "$typeof",  "$str",
         "$join",   "$add",     "$index",   "$setidx",   "$slice",
         "$push",   "$iter",    "$iternext", "$throwtype", "$minner",
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
@@ -620,18 +621,6 @@ struct Binder {
     r.finish("$typeof");
   }
 
-  // Number::toString, ES2023 6.1.6.1.20: the shortest digits that round trip,
-  // in the layout double_format.h's kJs holds -- plain digits from 1e-6 up
-  // to 1e21, an exponent outside that (`1e+21`, `1e-7`), no ".0", and -0
-  // as "0". The host writes it (dstr), since ToStr's own choice of fixed
-  // or exponent is no language's.
-  void rt_numstr() {
-    RT r(*this);
-    const auto [d] = r.params("d");
-    r.add(r.ret(r.nat("dstr", {r.L(d)})));
-    r.finish("$numstr");
-  }
-
   // What console.log prints for one argument: a number as util.inspect
   // writes it, which differs from String(n) in exactly one value (-0 is
   // "-0", kJsInspect), and anything else as String.
@@ -653,7 +642,10 @@ struct Binder {
     for (const char* t : {"bool", "int"}) {
       arms.emplace_back(r.S(t), r.ret(r.in(IntrinsicId::ToStr, {r.L(v)})));
     }
-    arms.emplace_back(r.S("double"), r.ret(r.call("$numstr", {r.L(v)})));
+    // Number::toString, ES2023 6.1.6.1.20: the shortest round trip in
+    // double_format.h's kJs layout (plain digits from 1e-6 to 1e21, `1e-7`,
+    // `1e+21`, no ".0", -0 as "0"), written by the host (dstr).
+    arms.emplace_back(r.S("double"), r.ret(r.nat("dstr", {r.L(v)})));
     arms.emplace_back(r.S("function"), r.ret(r.S("[Function]")));
     // Array::toString is Array::join with ",", which is why these two are
     // mutually recursive -- and why every $helper's Module::funcs slot is
@@ -1163,7 +1155,6 @@ struct Binder {
     rt_truthy();
     rt_seq();
     rt_typeof();
-    rt_numstr();
     rt_str();
     rt_join();
     rt_add();
@@ -2419,10 +2410,8 @@ std::string describe(const Value& v) {
 
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kJs),
-      double_format::native_def("inspectnum", double_format::dstr_native,
-                                double_format::kJsInspect),
+      double_format::dstr_def(double_format::kJs),
+      double_format::dstr_def(double_format::kJsInspect, "inspectnum"),
   };
   return defs;
 }

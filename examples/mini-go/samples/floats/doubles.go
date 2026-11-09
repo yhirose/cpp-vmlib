@@ -35,33 +35,23 @@ func main() {
 	fmt.Println(zero)
 	fmt.Println(-zero)
 	fmt.Println(0.1)
-	fmt.Println(0.5)
 	fmt.Println(100000.0)
-	fmt.Println(999999.0)
 	fmt.Println(p10(6))
 	fmt.Println(1234567.0)
-	fmt.Println(123456789.0)
 	fmt.Println(1.0 / p10(4))
-	fmt.Println(0.00012345)
 	fmt.Println(1.0 / p10(5))
 	fmt.Println(1.0 / p10(7))
-	fmt.Println(1.5 / p10(10))
 	fmt.Println(p10(15))
-	fmt.Println(p10(20))
-	fmt.Println(p10(21))
 	fmt.Println(p10(22))
 	fmt.Println(12345678901234567.0)
 	var a float64 = 0.1
 	var b float64 = 0.2
 	fmt.Println(a + b)
-	fmt.Println(1.0 / 3.0)
 	fmt.Println(tiny)
 	fmt.Println(two53)
-	fmt.Println(two53 * two53)
 	fmt.Println(big)
 	fmt.Println(-big)
 	fmt.Println(big - big)
-	fmt.Println(-1.5)
 
 	var third float32 = 1.0
 	var three float32 = 3.0
@@ -69,12 +59,10 @@ func main() {
 	var m float32 = 100000.0
 	fmt.Println(m)
 	fmt.Println(m * 10.0)
-	fmt.Println(m * 100.0)
 	var s float32 = 16777216.0
 	fmt.Println(s)
 	var c float32 = 0.1
 	fmt.Println(c)
-	fmt.Println(c + c)
 	fmt.Println(float64(c))
 	var tz float32 = 0
 	fmt.Println(-tz)

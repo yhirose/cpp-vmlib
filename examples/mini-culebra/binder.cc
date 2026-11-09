@@ -418,7 +418,7 @@ struct Binder {
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
-        "$eq",   "$fstr",  "$disp",  "$insp", "$arrstr", "$objstr",
+        "$eq",   "$disp",  "$insp", "$arrstr", "$objstr",
         "$err",  "$idx",   "$setidx", "$mem", "$setmem", "$methodof",
         "$iter", "$iternext", "$div", "$mod",
     };
@@ -518,17 +518,6 @@ struct Binder {
     r.finish("$eq");
   }
 
-  // How culebra prints a Float: the shortest round trip in double_format.h's
-  // kCulebra layout -- 1e+15 from 1e6 up, 1e-05 below 1e-4, and a ".0" on a
-  // whole number in fixed notation (100000.0). The host writes it (dstr),
-  // since ToStr's own choice of fixed or exponent is no language's.
-  void rt_fstr() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.ret(r.nat("dstr", {r.L(v)})));
-    r.finish("$fstr");
-  }
-
   // Display conversion (culebra §8): what `"{x}"` and `println` produce. A
   // string is itself; a container is its inspect form, which quotes the
   // strings *inside* it.
@@ -538,7 +527,9 @@ struct Binder {
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("string"), r.ret(r.L(v)));
     arms.emplace_back(r.S("nil"), r.ret(r.S("nil")));
-    arms.emplace_back(r.S("double"), r.ret(r.call("$fstr", {r.L(v)})));
+    // A Float: the shortest round trip in double_format.h's kCulebra layout
+    // (1e+15, 1e-05, 100000.0), written by the host (dstr).
+    arms.emplace_back(r.S("double"), r.ret(r.nat("dstr", {r.L(v)})));
     arms.emplace_back(r.S("array"), r.ret(r.call("$arrstr", {r.L(v)})));
     arms.emplace_back(r.S("object"), r.ret(r.call("$objstr", {r.L(v)})));
     arms.emplace_back(r.S("function"), r.ret(r.S("[function]")));
@@ -782,7 +773,6 @@ struct Binder {
 
   void emit_runtime() {
     rt_eq();
-    rt_fstr();
     rt_disp();
     rt_insp();
     rt_arrstr();
@@ -1716,8 +1706,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"pop", 1, native_pop, nullptr},
       {"keys", 1, native_keys, nullptr},
       {"map", 2, native_map, nullptr},
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kCulebra),
+      double_format::dstr_def(double_format::kCulebra),
   };
   return defs;
 }

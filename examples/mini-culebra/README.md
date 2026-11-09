@@ -32,8 +32,8 @@ build/examples/mini-culebra/mini-culebra [--dump-ir] [--dump-bc] [--check-effect
 ## What this front end did *not* have to write
 
 The interesting comparison is with [mini-js](../mini-js/), which writes
-`$truthy`, `$seq`, `$add` and `$numstr` in IR because JavaScript disagrees
-with the VM about what is true, what is comparable and how a number prints.
+`$truthy`, `$seq` and `$add` in IR because JavaScript disagrees
+with the VM about what is true and what is comparable.
 culebra mostly does not:
 
 * **`if` takes a Bool, a Long or a Float and nothing else** -- which is
@@ -65,7 +65,7 @@ names this case: *"4.0 is '4' -- whether a whole double should show a
 decimal point is a language's decision."* The language's decision is in
 `examples/common/double_format.h`'s `kCulebra`: the shortest digits, fixed
 from 1e-4 up to 1e6 (a whole number there gets its `.0`: `100000.0`) and an
-exponent outside it (`1e+06`, `1e-05`, never a `.0`). `$fstr` calls the host
+exponent outside it (`1e+06`, `1e-05`, never a `.0`). `$disp` calls the host
 function `dstr` that writes it, and `describe` words an uncaught `throw 0.0001`
 the same way, so print and the report agree.
 

@@ -1590,10 +1590,8 @@ struct Binder {
 
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kGo),
-      double_format::native_def("f32str", double_format::f32str_native,
-                                double_format::kGo),
+      double_format::dstr_def(double_format::kGo),
+      double_format::f32str_def(double_format::kGo),
   };
   return defs;
 }

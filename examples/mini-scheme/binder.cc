@@ -548,7 +548,7 @@ struct Binder {
           }
         }
       }
-      for (const char* extra : {"$true", "$disp", "$listbody", "$fstr",
+      for (const char* extra : {"$true", "$disp", "$listbody",
                                 "$escape", "$arrlist", "$listarr"}) {
         names.push_back(extra);
       }
@@ -701,7 +701,6 @@ struct Binder {
       return r.bin(BinOp::Add, r.L(0), r.L(1));
     }, {"a", "b"});
     one("$strlen", 1, [&](RT& r) { return r.len(r.L(0)); }, {"s"});
-    rt_fstr();
     rt_disp();
     rt_listbody();
     one("$display", 1, [&](RT& r) {
@@ -1020,20 +1019,9 @@ struct Binder {
   void rt_numstr() {
     RT r(*this);
     const auto [n] = r.params("n");
-    r.add(r.iff(r.is(r.typ(n), "double"), r.ret(r.call("$fstr", {r.L(n)}))));
+    r.add(r.iff(r.is(r.typ(n), "double"), r.ret(r.nat("dstr", {r.L(n)}))));
     r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(n)})));
     r.finish("$numstr");
-  }
-
-  // Guile prints an inexact number as the shortest digits that round trip,
-  // in the layout double_format.h's kGuile holds: "1.0e-4" below 1e-3,
-  // "1.0e7" from 1e7 up (and past the digits plus three zeros), a ".0" on a
-  // whole number, "+inf.0" and "+nan.0". The host writes it (dstr).
-  void rt_fstr() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.ret(r.nat("dstr", {r.L(v)})));
-    r.finish("$fstr");
   }
 
   void rt_disp() {
@@ -1044,7 +1032,10 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("#t"), r.S("#f")))));
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
-    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
+    // Guile prints an inexact number as the shortest round trip in
+    // double_format.h's kGuile layout ("1.0e-4", "1.0e7", a ".0" on a whole
+    // one, "+inf.0"), written by the host (dstr).
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.nat("dstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "int"),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(
@@ -1742,8 +1733,7 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kGuile),
+      double_format::dstr_def(double_format::kGuile),
   };
   return defs;
 }

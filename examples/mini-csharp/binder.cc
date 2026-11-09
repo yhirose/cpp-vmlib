@@ -2220,8 +2220,7 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kCSharp),
+      double_format::dstr_def(double_format::kCSharp),
   };
   return defs;
 }

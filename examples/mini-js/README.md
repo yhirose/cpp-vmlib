@@ -56,7 +56,7 @@ reach `$seq`.
 exponent by whichever is shorter, which is no language's rule. ES
 `Number::toString` is plain digits from 1e-6 up to 1e21, an exponent outside
 that (`1e-7`, `1e+21`, no zero padding), no `.0`, and `-0` as `"0"`. That
-layout is `double_format.h`'s `kJs`; `$numstr` calls the host function
+layout is `double_format.h`'s `kJs`; `$str` calls the host function
 `dstr` that writes it. `console.log` of a bare number is `util.inspect`'s,
 which differs in one value (`-0`), so `$logstr` sends a number to a second
 native, `inspectnum` (`kJsInspect`), and everything else to `$str`.

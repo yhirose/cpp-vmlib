@@ -568,7 +568,7 @@ struct Binder {
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
         "$truthy", "$eq",   "$cmp",   "$add",  "$sub",  "$mul", "$div",
-        "$mod",    "$pow",  "$fstr",  "$str",  "$inspect", "$arrstr",
+        "$mod",    "$pow",  "$str",  "$inspect", "$arrstr",
         "$hashstr", "$len", "$idx",   "$setidx", "$range", "$iter",
         "$iternext", "$each", "$map", "$select", "$inject", "$inject1",
         "$eachwi", "$push", "$keys", "$sort", "$include", "$join", "$toa",
@@ -799,15 +799,6 @@ struct Binder {
     r.finish("$pow");
   }
 
-  // Float#to_s: the shortest round trip, in double_format.h's kRuby layout
-  // ("1.0e+16", "1.0e-05", ".0" on a whole one), which the host writes.
-  void rt_fstr() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.ret(r.nat("dstr", {r.L(v)})));
-    r.finish("$fstr");
-  }
-
   // Ruby's to_s: nil is the empty string, and a container is its inspect
   // form. A class instance's own `to_s` wins over the generic `#<Name>`.
   void rt_str() {
@@ -820,7 +811,9 @@ struct Binder {
                 r.ret(r.iff(r.L(v), r.S("true"), r.S("false")))));
     r.add(r.iff(r.is(r.typ(v), "int"),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
-    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
+    // Float#to_s: the shortest round trip in double_format.h's kRuby layout
+    // ("1.0e+16", "1.0e-05", ".0" on a whole one), written by the host.
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.nat("dstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "array"), r.ret(r.call("$arrstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.call("$hashstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("#<Proc>"))));
@@ -1451,7 +1444,7 @@ struct Binder {
 
   void emit_runtime() {
     rt_truthy(); rt_eq(); rt_cmp(); rt_add(); rt_sub(); rt_mul(); rt_div();
-    rt_mod(); rt_pow(); rt_fstr(); rt_str(); rt_inspect(); rt_arrstr();
+    rt_mod(); rt_pow(); rt_str(); rt_inspect(); rt_arrstr();
     rt_hashstr(); rt_len(); rt_idx(); rt_setidx(); rt_range(); rt_iter();
     rt_iternext(); rt_each(); rt_map(); rt_select(); rt_inject();
     rt_inject1(); rt_eachwi(); rt_push(); rt_keys(); rt_sort(); rt_include();
@@ -2791,8 +2784,7 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kRuby),
+      double_format::dstr_def(double_format::kRuby),
   };
   return defs;
 }

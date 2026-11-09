@@ -186,9 +186,9 @@ in tail position, so a tail call through it stays one too.
   vmlib.h's `Tag::Unary`). `+`, `-`, `*`, `<` and the rest of
   the arithmetic are the VM's operators on two numbers the same way, each
   with its helper behind it.
-* **A whole inexact number prints with a point.** `to_display` gives `"1"`
-  for `1.0`, and Guile gives `1.0`; its comment says a front end that cares
-  builds the string, so `$fstr` does.
+* **An inexact number prints as Guile spells it.** `to_display` gives `"1"`
+  for `1.0` and `1e-04` for 0.0001, and Guile gives `1.0` and `1.0e-4`; the
+  layout is `double_format.h`'s `kGuile`, written by the host function `dstr`.
 * **`modulo` follows the divisor's sign** where `BinOp::Mod` (like C's
   `%`, and like `remainder`) follows the dividend's: on two exact
   integers it is `BinOp::FloorMod`. `quotient`, `remainder` and `modulo`

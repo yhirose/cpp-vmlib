@@ -789,7 +789,7 @@ struct Binder {
         "$add", "$sub", "$mul", "$fdiv", "$idiv", "$mod", "$pow", "$cmp",
         "$lt", "$le", "$gt", "$ge", "$eq", "$truthy",
         // Display.
-        "$fstr", "$str", "$strrepr", "$repr", "$liststr", "$dictstr",
+        "$str", "$strrepr", "$repr", "$liststr", "$dictstr",
         // Containers, attributes, iteration, exceptions.
         "$len", "$idx", "$setidx", "$slice", "$in", "$getattr", "$setattr",
         "$iter", "$iternext", "$exc", "$isexc", "$range", "$listadd",
@@ -1572,17 +1572,6 @@ struct Binder {
 
   // -- Display -------------------------------------------------------------
   //
-  // Python's float repr is the shortest round trip, written in the layout
-  // double_format.h's kPython holds: 1e-05 and 1e+16 past the 1e-4..1e16
-  // range, a ".0" on a whole number in it. The host does that (dstr), since
-  // ToStr's own choice of fixed or exponent is no language's.
-  void rt_fstr() {
-    RT r(*this);
-    const auto [v] = r.params("v");
-    r.add(r.ret(r.nat("dstr", {r.L(v)})));
-    r.finish("$fstr");
-  }
-
   void rt_str() {
     RT r(*this);
     const auto [v] = r.params("v");
@@ -1593,7 +1582,10 @@ struct Binder {
                 r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
     r.add(r.iff(r.is(r.typ(v), "int"),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
-    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$fstr", {r.L(v)}))));
+    // A float is Python's repr: the shortest round trip in double_format.h's
+    // kPython layout (1e-05, 1e+16, a ".0" on a whole one), written by the
+    // host (dstr), since ToStr's choice of fixed or exponent is no language's.
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.nat("dstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "array"), r.ret(r.call("$liststr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.call("$dictstr", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "function"), r.ret(r.S("<function>"))));
@@ -3173,7 +3165,7 @@ struct Binder {
     rt_cmp(); rt_eq(); rt_truthy();
     rt_order("$lt", BinOp::Lt); rt_order("$le", BinOp::Le);
     rt_order("$gt", BinOp::Gt); rt_order("$ge", BinOp::Ge);
-    rt_fstr(); rt_str(); rt_strrepr(); rt_repr(); rt_liststr(); rt_dictstr();
+    rt_str(); rt_strrepr(); rt_repr(); rt_liststr(); rt_dictstr();
     rt_len(); rt_idx(); rt_setidx(); rt_slice(); rt_in(); rt_getattr();
     rt_setattr(); rt_iter(); rt_iternext(); rt_exc(); rt_isexc(); rt_range();
     rt_listadd(); rt_strmul(); rt_listmul();
@@ -5119,8 +5111,7 @@ const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"print", 1, nat_print, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
-      double_format::native_def("dstr", double_format::dstr_native,
-                                double_format::kPython),
+      double_format::dstr_def(double_format::kPython),
   };
   return defs;
 }
