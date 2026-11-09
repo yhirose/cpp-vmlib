@@ -1,0 +1,5 @@
+# culebra refuses an integer literal that does not fit an int64, when the
+# module is parsed: "ValueError: integer literal out of range:
+# 9223372036854775808". -9223372036854775808 is refused too, since the
+# digits are read before the minus.
+println(9223372036854775808)

@@ -48,6 +48,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <cstdlib>
 #include <limits>
@@ -1095,9 +1096,15 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
-      case "number"_:
-        return b.literal(
-            std::strtoll(std::string(a.token).c_str(), nullptr, 10));
+      case "number"_: {
+        // culebra reads the digits before any minus in front of them, so
+        // -9223372036854775808 is as out of range as 9223372036854775808.
+        const auto n = literals::parse_int_literal(a.token);
+        if (!n.fits) {
+          fail(a, "integer literal out of range: " + std::string(a.token));
+        }
+        return b.literal(n.value);
+      }
       case "float"_:
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));

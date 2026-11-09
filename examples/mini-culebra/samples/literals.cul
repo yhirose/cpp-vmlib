@@ -1,0 +1,6 @@
+# Integer literals: an Int is an int64, and a literal past it is refused
+# (see errors/). A regression guard for the largest and the smallest.
+println(9223372036854775807)
+println(-9223372036854775807 - 1)
+println(5 - -3)
+println(0)

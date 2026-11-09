@@ -1,0 +1,4 @@
+# The same refusal when the literal is the digits of the smallest int64
+# behind a minus: culebra reads the digits first, so there is no
+# -9223372036854775808 literal (write -9223372036854775807 - 1).
+println(-9223372036854775808)
