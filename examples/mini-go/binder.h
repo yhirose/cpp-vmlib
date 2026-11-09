@@ -13,4 +13,8 @@ namespace mini_go {
 // through the same formatter the runtime uses.
 coreir::Module bind_source(const std::string& source);
 
+// The host functions this front end's programs call: how a float64 and a
+// float32 print (double_format.h's kGo).
+const std::vector<vm::NativeDef>& stdlib();
+
 }  // namespace mini_go

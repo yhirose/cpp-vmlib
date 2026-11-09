@@ -54,6 +54,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -1462,7 +1464,16 @@ struct Binder {
         if (has_second_half(val.type)) {
           fail(a, "cannot print a " + describe_type(val.type, val.second_half));
         }
-        return b.intrinsic(IntrinsicId::Print, {val.node});
+        // A float is Go's to spell (double_format.h's kGo): Println writes
+        // 1e+06 and 100000, where Print's own text for a double would say
+        // 1e+06 and 1e+05. A float32 shows its own shortest digits. Both
+        // are host functions, handed the double and answering the string.
+        NodeId shown = val.node;
+        if (val.type == Type::F64 || val.type == Type::F32) {
+          const char* fn = val.type == Type::F32 ? "f32str" : "dstr";
+          shown = b.call_value(b.native_ref(b.declare_native(fn)), {val.node});
+        }
+        return b.intrinsic(IntrinsicId::Print, {shown});
       }
       // switch subject { case k1, k2: stmts ... [default: stmts] } --
       // README's Switch recipe, concretely: `caseval` has no string form,
@@ -1576,6 +1587,16 @@ struct Binder {
 };
 
 }  // namespace
+
+const std::vector<vm::NativeDef>& stdlib() {
+  static const std::vector<vm::NativeDef> defs = {
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kGo),
+      double_format::native_def("f32str", double_format::f32str_native,
+                                double_format::kGo),
+  };
+  return defs;
+}
 
 Module bind_source(const std::string& source) {
   parser p;

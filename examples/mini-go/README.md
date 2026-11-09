@@ -16,7 +16,10 @@ PL/0's samples have to culebra's own PL/0 interpreter. What is covered:
 top-level `func`s with typed params and an optional return type, `var`
 with an explicit `int32`/`int64`/`uint32`/
 `float32`/`float64`/`bool`/`string` or `[]T` type, assignment, `return`,
-`fmt.Println`, arithmetic (`+ - * / %`), comparison (`== != < <= > >=`) and
+`fmt.Println` (a float64 or float32 spelled as Go does: `1e+06`, `100000`,
+`1e-05`, `+Inf`, `-0`, a float32's own shortest digits -- two host functions,
+`dstr` and `f32str`, over `double_format.h`'s `kGo`; a float inside a struct
+or slice is never printed, `Println` takes one scalar), arithmetic (`+ - * / %`), comparison (`== != < <= > >=`) and
 type-conversion (`int32(x)`, `float64(x)`, ...) expressions, `type ...
 struct` declarations with field access and assignment (`p.X`,
 `p.From.X = v`, any depth), slices of a scalar (`[]int64{}`, `xs[i]`,
