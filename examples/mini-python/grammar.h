@@ -182,8 +182,8 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   fdq        <- fexpr / ftextd
   fsq        <- fexpr / ftexts
   # `\N{name}` is one escape, braces and all, not a replacement field.
-  ftextd     <- < ('{{' / '}}' / '\\N{' [^}"]* '}' / '\\' . / !["{}] .)+ >
-  ftexts     <- < ('{{' / '}}' / '\\N{' [^}']* '}' / '\\' . / !['{}] .)+ >
+  ftextd     <- < ('{{' / '}}' / '\\N{' [^}"]* '}' / '\\' . / ![\n"{}] .)+ >
+  ftexts     <- < ('{{' / '}}' / '\\N{' [^}']* '}' / '\\' . / ![\n'{}] .)+ >
   fexpr      <- '{' _ expr fconv? fspec? '}'                  { no_ast_opt }
   fconv      <- '!' < [rs] >                                 { no_ast_opt }
   fspec      <- ':' < [^}]* >                                { no_ast_opt }
@@ -192,8 +192,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   float      <- < [0-9]+ '.' [0-9]* ([eE] [-+]? [0-9]+)?
                 / [0-9]+ [eE] [-+]? [0-9]+ > _
   number     <- < [0-9]+ ('_' [0-9]+)* > _
-  string     <- ['] < (!['\\] . / '\\' .)* > ['] _
-              / ["] < (!["\\] . / '\\' .)* > ["] _
+  # A line break inside a string must be escaped (`\` before it continues it).
+  string     <- ['] < (![\n'\\] . / '\\' .)* > ['] _
+              / ["] < (![\n"\\] . / '\\' .)* > ["] _
   ident      <- !keyword < [a-zA-Z_] [a-zA-Z0-9_]* > _
   ~keyword   <- ('and' / 'as' / 'break' / 'class' / 'continue' / 'def'
                / 'elif' / 'else' / 'except' / 'False' / 'finally' / 'for'

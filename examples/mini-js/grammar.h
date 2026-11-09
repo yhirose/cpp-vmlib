@@ -155,8 +155,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
                  ![a-zA-Z0-9_] > _
 
   number     <- < [0-9]+ ('.' [0-9]+)? ([eE] [-+]? [0-9]+)? > _
-  string     <- < ['] (!['\\] . / '\\' .)* ['] > _
-              / < ["] (!["\\] . / '\\' .)* ["] > _
+  # A line break inside a string must be escaped: `\` before it continues it.
+  string     <- < ['] (![\n\r'\\] . / '\\' .)* ['] > _
+              / < ["] (![\n\r"\\] . / '\\' .)* ["] > _
   ident      <- < [a-zA-Z_$] [a-zA-Z0-9_$]* > _
 
   ~_         <- ([ \t\r\n] / '//' [^\n]* / '/*' (!'*/' .)* '*/')*

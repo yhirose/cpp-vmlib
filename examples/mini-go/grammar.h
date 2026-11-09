@@ -131,7 +131,7 @@ inline constexpr const char* kGrammar = R"(
   args       <- (expr (',' _ expr)*)?                         { no_ast_opt }
   primary    <- number / strlit / ident / '(' _ expr ')' _
 
-  strlit     <- '"' < ('\\' . / [^"\\])* > '"' _
+  strlit     <- '"' < ('\\' . / [^"\\\n])* > '"' _
   number     <- < [0-9]+ ('.' [0-9]+)? > _
   # A keyword is not an identifier: without this `if <-ch {` reads as a
   # send to a channel named `if`.

@@ -150,7 +150,8 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   literal    <- < ('true' / 'false' / 'null') ![a-zA-Z0-9_] > _
   float      <- < [0-9]+ '.' [0-9]+ ([eE] [-+]? [0-9]+)? > _
   number     <- < [0-9]+ > _
-  string     <- ["] < (!["\\] . / '\\' .)* > ["] _
+  # No line break inside a regular string literal (CS1010).
+  string     <- ["] < (![\n\r"\\] . / '\\' .)* > ["] _
   ident      <- !keyword < [a-zA-Z_] [a-zA-Z0-9_]* > _
   ~keyword   <- ('break' / 'catch' / 'class' / 'continue' / 'else' / 'false'
                / 'finally' / 'for' / 'foreach' / 'if' / 'in' / 'new'

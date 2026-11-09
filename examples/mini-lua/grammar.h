@@ -138,8 +138,11 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   float      <- < [0-9]+ '.' [0-9]* ([eE] [-+]? [0-9]+)?
                 / [0-9]+ [eE] [-+]? [0-9]+ > _
   number     <- < [0-9]+ > _
-  string     <- ['] < (!['\\] . / '\\' .)* > ['] _
-              / ["] < (!["\\] . / '\\' .)* > ["] _
+  # A line break inside a string must be escaped: `\` before it, or `\z`,
+  # which skips the whitespace (line breaks included) after it.
+  string     <- ['] < (![\n\r'\\] . / zskip / '\\' .)* > ['] _
+              / ["] < (![\n\r"\\] . / zskip / '\\' .)* > ["] _
+  zskip      <- '\\z' [ \t\n\r\f\v]*
   ident      <- !keyword < [a-zA-Z_] [a-zA-Z0-9_]* > _
   ~keyword   <- ('and' / 'break' / 'do' / 'elseif' / 'else' / 'end' / 'false'
                / 'for' / 'function' / 'goto' / 'if' / 'in' / 'local' / 'nil'
