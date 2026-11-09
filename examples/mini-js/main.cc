@@ -10,6 +10,7 @@ int main(int argc, char** argv) {
   // comparison is `cat prelude.js sample.js > tmp.js && node tmp.js`; see
   // test/languages.sh.
   fe.concatenate = true;
+  fe.run.natives = mini_js::stdlib();
   fe.run.describe = mini_js::describe;
   return driver::main(argc, argv, fe);
 }

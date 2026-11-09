@@ -52,11 +52,14 @@ JavaScript wants `false`. `$seq` is `===`: different types are unequal,
 than an int are compared by `Eq` itself, which agrees, and only the rest
 reach `$seq`.
 
-**How a number prints.** `ToStr` is shortest-round-trip, which agrees with
-ES `Number::toString` on `0.1 + 0.2` and on `3.5` but has no reason to
-prefer `"3"` over `"3E0"` for a whole double. `$numstr` routes integral
-values within ±2^53 through the integer path, spells `NaN` and `±Infinity`
-itself, and leaves the rest to `ToStr`.
+**How a number prints.** `ToStr` is shortest-round-trip but picks fixed or
+exponent by whichever is shorter, which is no language's rule. ES
+`Number::toString` is plain digits from 1e-6 up to 1e21, an exponent outside
+that (`1e-7`, `1e+21`, no zero padding), no `.0`, and `-0` as `"0"`. That
+layout is `double_format.h`'s `kJs`; `$numstr` calls the host function
+`dstr` that writes it. `console.log` of a bare number is `util.inspect`'s,
+which differs in one value (`-0`), so `$logstr` sends a number to a second
+native, `inspectnum` (`kJsInspect`), and everything else to `$str`.
 
 Each of those is a `$`-named func built once per module, and the `$` keeps
 them out of the source language's reach -- the same convention mini-go's
@@ -359,11 +362,6 @@ Quietly different, and therefore worth knowing:
   under one of those names. They are also not readable as
   properties: `typeof p.then` is
   `"undefined"`.
-* **Numbers outside the samples' range print differently.** `1e21`,
-  `1e-7` and anything else `$numstr` leaves to `ToStr` come out in
-  `to_chars`' exponent form (`1e+21`, `1e-07`) rather than ES
-  `Number::toString`'s (`1e+21`, `1e-7`). Reproducing that spelling is a
-  digit-generation exercise that would prove nothing about the IR.
 * **Arithmetic on non-numbers traps instead of producing `NaN`.** `'a' * 2`
   is a run failure here and `NaN` in JavaScript; the coercion ladder again.
   `+` is the exception, because string concatenation is not coercion so

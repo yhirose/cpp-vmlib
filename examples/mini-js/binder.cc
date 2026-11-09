@@ -36,12 +36,14 @@
 // The same for `===` (BinOp::Eq refuses two values of different types,
 // which is a trap where JavaScript wants `false`), for `typeof` (TypeOf's
 // vocabulary is the VM's, not JavaScript's), and for `String(n)` (to_display
-// is shortest-round-trip, which is *nearly* ES Number::toString but not
-// it). Each of those is a $-named func this binder writes once per module,
+// is shortest-round-trip with its own idea of fixed or exponent, which is
+// not ES Number::toString; the host writes that one, double_format.h's kJs). Each of those is a $-named func this binder writes once per module,
 // reached by its Module::funcs slot and never bound in the program's scope,
 // so `$truthy`, a name JavaScript can spell, still cannot reach it.
 
 #include "binder.h"
+
+#include "double_format.h"
 
 #include <cstdlib>
 #include <limits>
@@ -505,7 +507,7 @@ struct Binder {
         "$mget",   "$mset",    "$mhas",    "$mdel",     "$sadd",
         "$mfill",  "$sfill",   "$newresult", "$method", "$noctor",
         "$then",    "$react",    "$presolve1", "$preject1", "$prejected",
-        "$arrayof", "$pushall", "$logjoin",
+        "$arrayof", "$pushall", "$logjoin", "$logstr",
     };
     return names;
   }
@@ -618,31 +620,27 @@ struct Binder {
     r.finish("$typeof");
   }
 
-  // Number::toString, ES2023 6.1.6.1.20, for the range the samples reach.
-  // ToStr is shortest-round-trip (to_display), which agrees with
-  // JavaScript on 0.1 + 0.2 and on 3.5 but not on a whole number (it has
-  // no reason to prefer "3" over "3E0") nor on the exponent forms at the
-  // ends of the range -- so integral values within +-2^53 are printed
-  // through the integer path instead, and the exponent forms are what
-  // README.md lists as out of range for a sample.
+  // Number::toString, ES2023 6.1.6.1.20: the shortest digits that round trip,
+  // in the layout double_format.h's kJs holds -- plain digits from 1e-6 up
+  // to 1e21, an exponent outside that (`1e+21`, `1e-7`), no ".0", and -0
+  // as "0". The host writes it (dstr), since ToStr's own choice of fixed
+  // or exponent is no language's.
   void rt_numstr() {
-    const double inf = std::numeric_limits<double>::infinity();
     RT r(*this);
     const auto [d] = r.params("d");
-    const auto [i] = r.locals("i");
-    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)), r.ret(r.S("NaN"))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(inf)), r.ret(r.S("Infinity"))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(d), r.D(-inf)), r.ret(r.S("-Infinity"))));
-    const double lim = 9007199254740992.0;  // 2^53
-    r.add(r.iff(
-        r.bin(BinOp::Gt, r.L(d), r.D(-lim)),
-        r.iff(r.bin(BinOp::Lt, r.L(d), r.D(lim)),
-              r.blk({r.set(i, r.in(IntrinsicId::ToInt, {r.L(d)})),
-                     r.iff(r.bin(BinOp::Eq,
-                                 r.in(IntrinsicId::ToDouble, {r.L(i)}), r.L(d)),
-                           r.ret(r.in(IntrinsicId::ToStr, {r.L(i)})))}))));
-    r.add(r.ret(r.in(IntrinsicId::ToStr, {r.L(d)})));
+    r.add(r.ret(r.nat("dstr", {r.L(d)})));
     r.finish("$numstr");
+  }
+
+  // What console.log prints for one argument: a number as util.inspect
+  // writes it, which differs from String(n) in exactly one value (-0 is
+  // "-0", kJsInspect), and anything else as String.
+  void rt_logstr() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.nat("inspectnum", {r.L(v)}))));
+    r.add(r.ret(r.call("$str", {r.L(v)})));
+    r.finish("$logstr");
   }
 
   // String(v), ES2023 22.1.1.1 -- for the values this subset has.
@@ -876,7 +874,7 @@ struct Binder {
   }
 
   // console.log's line, when a spread leaves its argument count to run
-  // time: each argument through $str, a space between -- what the call
+  // time: each argument through $logstr, a space between -- what the call
   // site writes out itself when it knows the count.
   void rt_logjoin() {
     RT r(*this);
@@ -889,7 +887,7 @@ struct Binder {
         r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
                      r.set(out, r.bin(BinOp::Add, r.L(out), r.S(" ")))),
                r.set(out, r.bin(BinOp::Add, r.L(out),
-                                r.call("$str", {r.idx(r.L(vals), r.L(i))}))),
+                                r.call("$logstr", {r.idx(r.L(vals), r.L(i))}))),
                r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.L(out)));
     r.finish("$logjoin");
@@ -1177,6 +1175,7 @@ struct Binder {
     rt_arrayof();
     rt_pushall();
     rt_logjoin();
+    rt_logstr();
     rt_iter();
     rt_iternext();
     rt_minner();
@@ -2040,7 +2039,7 @@ struct Binder {
             if (k > 0) {
               msg = b.binary(BinOp::Add, msg, b.str_literal(" ", p), p);
             }
-            msg = b.binary(BinOp::Add, msg, rt.call("$str", {args[k]}, p), p);
+            msg = b.binary(BinOp::Add, msg, rt.call("$logstr", {args[k]}, p), p);
           }
           return b.intrinsic(IntrinsicId::Print, {msg}, p);
         });
@@ -2415,7 +2414,17 @@ std::string describe(const Value& v) {
                                    : name->as_str() + ": " + msg->as_str();
     }
   }
-  return to_display(v);
+  return double_format::display_with(v, double_format::kJs);
+}
+
+const std::vector<vm::NativeDef>& stdlib() {
+  static const std::vector<vm::NativeDef> defs = {
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kJs),
+      double_format::native_def("inspectnum", double_format::dstr_native,
+                                double_format::kJsInspect),
+  };
+  return defs;
 }
 
 Module bind_source(const std::string& source) {

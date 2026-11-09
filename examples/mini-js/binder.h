@@ -17,4 +17,8 @@ coreir::Module bind_source(const std::string& source);
 // prints for one, rather than the executor's "<object>".
 std::string describe(const coreir::Value& v);
 
+// The host functions this front end's programs call: how a number prints
+// (double_format.h's kJs for String(n), kJsInspect for console.log(n)).
+const std::vector<vm::NativeDef>& stdlib();
+
 }  // namespace mini_js
