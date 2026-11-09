@@ -1,0 +1,1 @@
+surrogate_escape.go:7:14: escape is invalid Unicode code point U+D800

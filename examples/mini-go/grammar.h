@@ -7,7 +7,7 @@
 // `type ... struct` declarations with field access/assignment (`p.X`,
 // `p.X = v`), slices of a scalar (`[]int64{}`, `xs[i]`, `xs[i] = v`,
 // `len(xs)`, and `append` only in the `xs = append(xs, v)` shape binder.cc
-// insists on), string literals with the four escapes `\n \t \\ \"`,
+// insists on), string literals with Go's escapes (`\n`, `\x41`, `\101`, `\u00e9`, ...),
 // `switch` over an int subject, `if`/`else` and the condition-only `for`,
 // and goroutines with unbuffered channels: `go f(args)`, `chan T` as a
 // var/param type, `make(chan T)`, `ch <- v` and `<-ch` (as an expression

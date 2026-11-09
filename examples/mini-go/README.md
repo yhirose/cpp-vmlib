@@ -23,8 +23,8 @@ or slice is never printed, `Println` takes one scalar), arithmetic (`+ - * / %`)
 type-conversion (`int32(x)`, `float64(x)`, ...) expressions, `type ...
 struct` declarations with field access and assignment (`p.X`,
 `p.From.X = v`, any depth), slices of a scalar (`[]int64{}`, `xs[i]`,
-`xs[i] = v`, `xs = append(xs, v)`, `len(xs)`), strings (`"..."` with the
-four escapes `\n \t \\ \"`, `+`, all six comparisons, `len(s)`),
+`xs[i] = v`, `xs = append(xs, v)`, `len(xs)`), strings (`"..."` with
+Go's escapes (`\n`, `\x41`, `\101`, `\u00e9`, ...), `+`, all six comparisons, `len(s)`),
 `switch` over an `int32`/`int64`/`uint32` subject with `case a, b:` and
 `default`, `if`/`else`, the condition-only `for`, and goroutines with
 unbuffered channels (`go f(args)`, `chan T`, `make(chan T)`, `ch <- v`,

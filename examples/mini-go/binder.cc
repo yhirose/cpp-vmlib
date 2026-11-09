@@ -55,10 +55,12 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -134,30 +136,70 @@ int64_t parse_int(const std::string& s, const Ast& at) {
   return n.value;
 }
 
-// A string literal's body as the bytes it stands for. Go's own escape
-// vocabulary is much larger (\u, \x, \007, ...); these four are the ones
-// with no way to write the character otherwise inside a `"..."`, and any
-// other backslash is refused rather than passed through as itself -- a
-// literal that quietly meant something different here than under `go run`
-// is exactly the divergence the golden files exist to catch, so it is a
-// diagnostic instead.
-std::string unescape(const std::string& body, const Ast& at) {
-  std::string out;
-  out.reserve(body.size());
-  for (size_t i = 0; i < body.size(); ++i) {
-    if (body[i] != '\\') { out.push_back(body[i]); continue; }
-    if (++i == body.size()) fail(at, "unterminated escape in string literal");
-    switch (body[i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case '\\': out.push_back('\\'); break;
-      case '"': out.push_back('"'); break;
-      default:
-        fail(at, std::string("unsupported escape '\\") + body[i] +
-                     "' in string literal");
+// An interpreted string literal's body as the bytes it stands for -- Go's
+// rules: `\a \b \f \n \r \t \v \\ \"` (not `\'`), `\xHH` (a byte),
+// `\ooo` (exactly three octal digits, at most 255; a byte), `\uHHHH` and
+// `\UHHHHHHHH` (a Unicode scalar value, in UTF-8). Anything else after a
+// backslash is an error, as is a raw newline.
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'"', '"'},
+  };
+  escapes::Unescaper u(raw);
+  const auto bad_digit = [&](size_t start, size_t at_i, const char* what) {
+    const std::string seen = at_i < raw.size() ? std::string(1, raw[at_i]) : "\"";
+    u.fail_at(start, "invalid character '" + seen + "' in " + what + " escape");
+  };
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\' || u.i == raw.size()) {
+      u.out.push_back(c);
+      continue;
+    }
+    const char e = raw[u.i];
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      u.out.push_back(static_cast<char>(s));
+      ++u.i;
+    } else if (e == 'x' || e == 'u' || e == 'U') {
+      const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 8;
+      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
+        size_t k = 0;  // where the digits stopped is what Go names
+        while (k < n && u.i + 1 + k < raw.size() &&
+               escapes::digit_value(raw[u.i + 1 + k], 16) >= 0) {
+          ++k;
+        }
+        bad_digit(start, u.i + 1 + k, "hexadecimal");
+      } else if (e == 'x') {
+        u.out.push_back(static_cast<char>(v));
+        u.i += 3;
+      } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "U+%04X", static_cast<unsigned>(v));
+        u.fail_at(start, std::string("escape is invalid Unicode code point ") + buf);
+      } else {
+        escapes::append_utf8(u.out, v);
+        u.i += 1 + n;
+      }
+    } else if (e >= '0' && e <= '7') {
+      const size_t n = escapes::digits(raw, u.i, 8, 3, v);
+      if (n < 3) {
+        bad_digit(start, u.i + n, "octal");
+      } else if (v > 255) {
+        u.fail_at(start, "octal escape value " + std::to_string(v) + " > 255");
+      } else {
+        u.out.push_back(static_cast<char>(v));
+        u.i += 3;
+      }
+    } else {
+      u.fail_at(start, "unknown escape");
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 const Ast* find_child(const Ast& a, std::string_view name) {
@@ -968,7 +1010,7 @@ struct Binder {
       // literal, this one has a type of its own already, and the
       // destination's own same_type check is what reports a mismatch.
       case "strlit"_:
-        return {b.str_literal(unescape(std::string(a.token), a)), Type::Str};
+        return {b.str_literal(unescape(a.token, a)), Type::Str};
       case "ident"_: {
         const LocalInfo& li = local_of(a, ctx, a.token);
         return {b.varref(VarKind::Local, li.slot), li.type, li.second_half};

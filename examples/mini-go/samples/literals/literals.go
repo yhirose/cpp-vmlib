@@ -21,4 +21,10 @@ func main() {
 	default:
 		fmt.Println("other")
 	}
+	// String escapes: \xHH and \ooo are bytes, \u and \U code points.
+	fmt.Println("\x41\x4a\x4A\101\060")
+	fmt.Println("\u0041\u00e9\u20AC\U0001F600")
+	fmt.Println("a\tb\"c\\d")
+	fmt.Println(len("\a\b\f\n\r\t\v\\\""))
+	fmt.Println(len("\x00\000\xe9\377\u00e9"))
 }
