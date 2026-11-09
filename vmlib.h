@@ -697,6 +697,17 @@ struct ObjectObj : HeapObj {
   }
 };
 
+// The header's bytes are spent deliberately: the flag bits after `kind` share
+// the last byte before owned_idx, so a field added to them (the trap's kind)
+// must not grow an object. Every heap object pays the header, and an Object
+// is the header, its props and its meta, nothing more.
+static_assert(sizeof(void*) != 8 || sizeof(HeapObj) == 48,
+              "HeapObj grew: a header field must fit the padding");
+static_assert(sizeof(ObjectObj) ==
+                  sizeof(HeapObj) + sizeof(ObjectObj::props) +
+                      sizeof(ObjectObj::meta),
+              "ObjectObj grew beyond its header, props and meta");
+
 struct CellObj : HeapObj {
   CellObj() : HeapObj(ValueTag::Cell) {}
   Value v;
