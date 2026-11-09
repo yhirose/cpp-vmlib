@@ -1,0 +1,1 @@
+rethrow.py:5:11: uncaught: TypeError: unsupported operand type(s) for +: 'int' and 'str'

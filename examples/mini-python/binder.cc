@@ -923,13 +923,25 @@ struct Binder {
     r.finish("$isnum");
   }
 
-  // `if (!(isnum a && isnum b)) return a <op> b`: the trap of the operator.
+  // Two ints or floats, tested inline: a few tag tests, where $isnum is a
+  // call. What an operator's helper is reached with most.
+  NodeId int_or_float_pair(RT& r, FuncWriter::Slot a, FuncWriter::Slot b) {
+    const auto one = [&](FuncWriter::Slot x) {
+      return r.either(r.is(r.typ(x), "int"), r.is(r.typ(x), "double"));
+    };
+    return r.both(one(a), one(b));
+  }
+
+  // Not two numbers at all: `if (!(isnum a && isnum b)) return a <op> b`,
+  // the trap of the operator. The common pair is settled inline; $isnum is
+  // asked only of the rest (a bool, a bignum, a str).
   NodeId unless_numbers(RT& r, BinOp op, FuncWriter::Slot a,
                         FuncWriter::Slot b) {
-    return r.iff(r.b.unary(UnOp::Not,
-                           r.both(r.call("$isnum", {r.L(a)}),
-                                  r.call("$isnum", {r.L(b)}))),
-                 r.ret(r.bin(op, r.L(a), r.L(b))));
+    return r.iff(
+        r.b.unary(UnOp::Not, int_or_float_pair(r, a, b)),
+        r.iff(r.b.unary(UnOp::Not, r.both(r.call("$isnum", {r.L(a)}),
+                                          r.call("$isnum", {r.L(b)}))),
+              r.ret(r.bin(op, r.L(a), r.L(b)))));
   }
 
   // The limbs of an int's magnitude. A negative int gives its lowest limb
@@ -1453,9 +1465,11 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const auto [acc, sq, e, fa, fb] = r.locals("acc", "sq", "e", "fa", "fb");
     const double inf = std::numeric_limits<double>::infinity();
-    r.add(r.iff(r.b.unary(UnOp::Not, r.both(r.call("$isnum", {r.L(a)}),
-                                            r.call("$isnum", {r.L(b)}))),
-                r.ret(r.in(IntrinsicId::Pow, {r.L(a), r.L(b)}))));
+    r.add(r.iff(
+        r.b.unary(UnOp::Not, int_or_float_pair(r, a, b)),
+        r.iff(r.b.unary(UnOp::Not, r.both(r.call("$isnum", {r.L(a)}),
+                                          r.call("$isnum", {r.L(b)}))),
+              r.ret(r.in(IntrinsicId::Pow, {r.L(a), r.L(b)})))));
     // A negative exponent always lands in the double branch, so that is
     // where zero to a negative power -- no value, in either number kind --
     // is refused. Zero to -inf is inf, the way Python and Pow both say.
@@ -1546,13 +1560,14 @@ struct Binder {
       return r.either(r.is(r.typ(x), "array"), r.call("$istup", {r.L(x)}));
     };
     r.add(r.iff(
-        r.b.unary(UnOp::Not,
-                  r.either(r.both(r.call("$isnum", {r.L(a)}),
-                                  r.call("$isnum", {r.L(b)})),
-                           r.either(r.both(r.is(r.typ(a), "string"),
-                                           r.is(r.typ(b), "string")),
-                                    r.both(seq(a), seq(b))))),
-        r.ret(r.bin(op, r.L(a), r.L(b)))));
+        r.b.unary(UnOp::Not, int_or_float_pair(r, a, b)),
+        r.iff(r.b.unary(UnOp::Not,
+                        r.either(r.both(r.call("$isnum", {r.L(a)}),
+                                        r.call("$isnum", {r.L(b)})),
+                                 r.either(r.both(r.is(r.typ(a), "string"),
+                                                 r.is(r.typ(b), "string")),
+                                          r.both(seq(a), seq(b))))),
+              r.ret(r.bin(op, r.L(a), r.L(b))))));
     r.add(r.ret(r.bin(op, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0))));
     r.finish(name);
   }
@@ -5212,15 +5227,14 @@ Value convert_trap(const Value& trap, const void*) {
     return x.is_str() || x.is_array() || kind_record(x, kTupleKind);
   };
   std::string cls = "RuntimeError";
-  std::string msg = trap.as_object()->find("message")->as_str();
+  std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::Operands:
       cls = "TypeError";
       if (verb.cls == VerbClass::Binary) {
         const auto op = static_cast<BinOp>(verb.id);
         const std::string sym = binop_symbol(op);
-        if (op == BinOp::Lt || op == BinOp::Le || op == BinOp::Gt ||
-            op == BinOp::Ge) {
+        if (is_ordering(op)) {
           msg = "'" + sym + "' not supported between instances of '" + l +
                 "' and '" + r + "'";
         } else if (op == BinOp::Add && sequence(L)) {
@@ -5236,12 +5250,10 @@ Value convert_trap(const Value& trap, const void*) {
         msg = "bad operand type for unary " +
               std::string(unop_symbol(static_cast<UnOp>(verb.id))) + ": '" + l +
               "'";
-      } else if (verb.cls == VerbClass::Intrinsic &&
-                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Pow) {
+      } else if (verb.is(IntrinsicId::Pow)) {
         msg = "unsupported operand type(s) for ** or pow(): '" + l +
               "' and '" + r + "'";
-      } else if (verb.cls == VerbClass::Intrinsic &&
-                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Len) {
+      } else if (verb.is(IntrinsicId::Len)) {
         msg = "object of type '" + l + "' has no len()";
       }
       break;
@@ -5250,17 +5262,13 @@ Value convert_trap(const Value& trap, const void*) {
       msg = "'" + l + "' object is not callable";
       break;
     case TrapKind::NotIndexable:
-      if (verb.cls == VerbClass::Node &&
-          (static_cast<Tag>(verb.id) == Tag::FieldGet ||
-           static_cast<Tag>(verb.id) == Tag::FieldSet)) {
+      if (verb.is(Tag::FieldGet) || verb.is(Tag::FieldSet)) {
         cls = "AttributeError";
         msg = "'" + l + "' object has no attribute '" + name() + "'";
       } else {
         cls = "TypeError";
         msg = "'" + l + "' object " +
-              (verb.cls == VerbClass::Node &&
-                       static_cast<Tag>(verb.id) == Tag::SetIndex
-                   ? "does not support item assignment"
+              (verb.is(Tag::SetIndex) ? "does not support item assignment"
                    : "is not subscriptable");
       }
       break;
@@ -5271,10 +5279,8 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::Range:
       cls = "IndexError";
-      msg = verb.cls == VerbClass::Intrinsic &&
-                    static_cast<IntrinsicId>(verb.id) == IntrinsicId::ArrayPop
-                ? "pop from empty list"
-                : l + " index out of range";
+      msg = verb.is(IntrinsicId::ArrayPop) ? "pop from empty list"
+                                           : l + " index out of range";
       if (L.is_str()) msg = "string index out of range";
       break;
     case TrapKind::Immutable:
@@ -5332,13 +5338,9 @@ const std::vector<vm::NativeDef>& stdlib() {
 // python3's last line for an uncaught exception: the class, then the
 // message when there is one -- a builtin's name travels in the object, a
 // program's own class names itself in its table.
-std::string describe(const Value& trap_or_value) {
+std::string describe(const Value& raised) {
   // An uncaught trap reads as the exception python3 raises for it.
-  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
-                                   ? convert_trap(trap_or_value, nullptr)
-                                   : Value();
-  const Value& v =
-      converted_trap.is_nil() ? trap_or_value : converted_trap;
+  const Value v = converted_or_self<&convert_trap>(raised);
   const auto* exc = runtime_parts::exception_record(v);
   if (!exc) return double_format::display_with(v, double_format::kPython);
   const Value& msg = (*exc)[kExcMessage];
