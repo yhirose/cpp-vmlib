@@ -548,7 +548,8 @@ struct Binder {
       default:
         for (const auto& c : a.nodes) {
           if (c->tag == "cmpop"_ || c->tag == "addop"_ ||
-              c->tag == "mulop"_ || c->tag == "assignop"_ ||
+              c->tag == "mulop"_ || c->tag == "powop"_ ||
+              c->tag == "assignop"_ ||
               c->tag == "cmdname"_) {
             continue;
           }
@@ -1969,6 +1970,14 @@ struct Binder {
         return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "negexp"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
+      case "powexp"_:
+        return arith("**", emit_expr(*a.nodes[0], ctx),
+                     emit_expr(*a.nodes[2], ctx), pos_of(*a.nodes[1]));
+      // -2 ** 2: the minus applies to the power, not to the literal.
+      case "litnegpow"_:
+        return b.unary(UnOp::Neg,
+                       arith("**", emit_expr(*a.nodes[0], ctx),
+                             emit_expr(*a.nodes[2], ctx), pos_of(*a.nodes[1])));
       case "rangeexp"_:
         return rt.call("$range",
                        {emit_expr(*a.nodes[0], ctx),
