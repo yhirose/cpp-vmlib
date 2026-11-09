@@ -1288,6 +1288,10 @@ struct Binder {
   void rt_add() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    // Two ints are what the VM's Add declined for overflow: straight to the
+    // limbs, before the sequence and float arms.
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(exact_or(r, BinOp::Add, a, b, "$bigadd"))));
     r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.is(r.typ(b), "string")),
                 r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
     r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.is(r.typ(b), "array")),
@@ -1311,6 +1315,8 @@ struct Binder {
   void rt_sub() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(r.call("$add", {r.L(a), r.call("$neg", {r.L(b)})}))));
     r.add(unless_numbers(r, BinOp::Sub, a, b));
     r.add(r.ret(r.call("$add", {r.L(a), r.call("$neg", {r.L(b)})})));
     r.finish("$sub");
@@ -1319,6 +1325,8 @@ struct Binder {
   void rt_mul() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
+                r.ret(exact_or(r, BinOp::Mul, a, b, "$bigmul"))));
     r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.is(r.typ(b), "int")),
                 r.ret(r.call("$strmul", {r.L(a), r.L(b)}))));
     r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.is(r.typ(b), "int")),
@@ -1498,10 +1506,12 @@ struct Binder {
     r.finish("$pow");
   }
 
-  // -1, 0 or 1 -- what every ordering operator is built from.
+  // -1, 0 or 1 -- what every ordering operator is built from. `op` (0 to 3:
+  // <, <=, >, >=; absent is <) is only for the failure: operands $cmp has no
+  // rule for are the VM's trap of that comparison, on the original operands.
   void rt_cmp() {
     RT r(*this);
-    const auto [a, b] = r.params("a", "b");
+    const auto [a, b, op] = r.params("a", "b", "op");
     const auto [fa, fb, sa, sb, c, xa, xb, i, e] =
         r.locals("fa", "fb", "sa", "sb", "c", "xa", "xb", "i", "e");
     // A list or a tuple compares element by element, which is what makes
@@ -1538,6 +1548,17 @@ struct Binder {
                        r.ret(r.iff(r.bin(BinOp::Lt, r.L(fa), r.L(fb)), r.I(-1),
                                    r.iff(r.bin(BinOp::Gt, r.L(fa), r.L(fb)),
                                          r.I(1), r.I(0))))})));
+    // What is left is a bignum on either side; anything else is no number.
+    r.add(r.iff(
+        r.b.unary(UnOp::Not, r.both(r.call("$isnum", {r.L(a)}),
+                                    r.call("$isnum", {r.L(b)}))),
+        r.iff(r.bin(BinOp::Eq, r.L(op), r.I(1)),
+              r.ret(r.bin(BinOp::Le, r.L(a), r.L(b))),
+              r.iff(r.bin(BinOp::Eq, r.L(op), r.I(2)),
+                    r.ret(r.bin(BinOp::Gt, r.L(a), r.L(b))),
+                    r.iff(r.bin(BinOp::Eq, r.L(op), r.I(3)),
+                          r.ret(r.bin(BinOp::Ge, r.L(a), r.L(b))),
+                          r.ret(r.bin(BinOp::Lt, r.L(a), r.L(b))))))));
     r.add(r.set(sa, r.call("$bigsign", {r.L(a)})));
     r.add(r.set(sb, r.call("$bigsign", {r.L(b)})));
     r.add(r.iff(
@@ -1554,21 +1575,11 @@ struct Binder {
   void rt_order(const char* name, BinOp op) {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
-    // Two numbers, two strings, or two sequences are ordered by $cmp; any
-    // other pair is the VM's trap of the comparison itself.
-    const auto seq = [&](FuncWriter::Slot x) {
-      return r.either(r.is(r.typ(x), "array"), r.call("$istup", {r.L(x)}));
-    };
-    r.add(r.iff(
-        r.b.unary(UnOp::Not, int_or_float_pair(r, a, b)),
-        r.iff(r.b.unary(UnOp::Not,
-                        r.either(r.both(r.call("$isnum", {r.L(a)}),
-                                        r.call("$isnum", {r.L(b)})),
-                                 r.either(r.both(r.is(r.typ(a), "string"),
-                                                 r.is(r.typ(b), "string")),
-                                          r.both(seq(a), seq(b))))),
-              r.ret(r.bin(op, r.L(a), r.L(b))))));
-    r.add(r.ret(r.bin(op, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0))));
+    const int64_t code = op == BinOp::Lt   ? 0
+                         : op == BinOp::Le ? 1
+                         : op == BinOp::Gt ? 2
+                                           : 3;
+    r.add(r.ret(r.bin(op, r.call("$cmp", {r.L(a), r.L(b), r.I(code)}), r.I(0))));
     r.finish(name);
   }
 
