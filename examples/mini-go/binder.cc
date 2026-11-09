@@ -55,6 +55,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <algorithm>
 #include <cctype>
@@ -128,13 +129,9 @@ SrcPos pos_of(const Ast& a) {
 }
 
 int64_t parse_int(const std::string& s, const Ast& at) {
-  errno = 0;
-  char* end = nullptr;
-  const long long v = std::strtoll(s.c_str(), &end, 10);
-  if (errno != 0 || end != s.c_str() + s.size()) {
-    fail(at, "integer literal out of range");
-  }
-  return static_cast<int64_t>(v);
+  const auto n = literals::parse_int_literal(s);
+  if (!n.fits) fail(at, "integer literal out of range");
+  return n.value;
 }
 
 // A string literal's body as the bytes it stands for. Go's own escape
@@ -977,6 +974,11 @@ struct Binder {
         return {b.varref(VarKind::Local, li.slot), li.type, li.second_half};
       }
       case "neg"_: {
+        // -9223372036854775808 is one constant, checked after the minus.
+        if (const auto f = literals::fold_neg_const(*a.nodes[0])) {
+          if (!f->fits) fail(*a.nodes[0], "integer literal out of range");
+          return literal_as(f->value, hint.value_or(Type::I64), a, p);
+        }
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
         return emit_neg(v, a);
       }

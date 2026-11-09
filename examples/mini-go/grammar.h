@@ -45,7 +45,7 @@
 // `caseval`, not `number`, is what a case value parses as: `number` has no
 // sign (a source-level negative goes through `neg` wrapping a `unary`, one
 // layer `intlist` does not reach), but Go's own `case -1:` needs one --
-// parse_int's `strtoll` already accepts the leading '-' `caseval` captures,
+// parse_int already accepts the leading '-' `caseval` captures,
 // so only the grammar was missing it.
 //   * `switchstmt` itself is marked defensively rather than for a shape
 //     that occurs: `switch x {}` (no cases, no default) would be the
