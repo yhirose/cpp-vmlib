@@ -1,0 +1,1 @@
+divide.go:10:18: uncaught: panic: runtime error: integer divide by zero

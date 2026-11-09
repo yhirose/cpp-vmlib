@@ -1596,6 +1596,37 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
+// How an uncaught trap reads (vm::RunOptions::describe): go's first line
+// for the same fault, "panic: runtime error: index out of range [5] with
+// length 3" (go 1.27's words; the goroutine trace and exit status 2 that
+// follow in go are not reproduced). Nothing else is ever raised.
+std::string describe(const Value& v) {
+  std::string msg = "runtime error: ";
+  switch (trap_kind(v)) {
+    case TrapKind::Range: {
+      const int64_t i = trap_fact(v, TrapFact::N).as_int();
+      const int64_t n = trap_fact(v, TrapFact::M).as_int();
+      msg += "index out of range [" + std::to_string(i) + "]";
+      if (i >= 0) msg += " with length " + std::to_string(n);
+      break;
+    }
+    case TrapKind::DivideByZero:
+      msg += "integer divide by zero";
+      break;
+    case TrapKind::NotIndexable:
+      msg += "invalid memory address or nil pointer dereference";
+      break;
+    case TrapKind::Depth:
+      return "fatal error: stack overflow";
+    case TrapKind::None:
+      return to_display(v);
+    default:
+      msg += v.as_object()->find("message")->as_str();
+      break;
+  }
+  return "panic: " + msg;
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,
