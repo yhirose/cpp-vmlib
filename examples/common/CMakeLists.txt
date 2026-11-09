@@ -31,6 +31,11 @@ add_executable(test_literals test_literals.cc)
 target_link_libraries(test_literals PRIVATE vmlib)
 add_test(NAME literals COMMAND test_literals)
 
+# escapes.h's primitives -- digits, UTF-8, the one-letter table. Pure C++.
+add_executable(test_escapes test_escapes.cc)
+target_link_libraries(test_escapes PRIVATE vmlib)
+add_test(NAME escapes COMMAND test_escapes)
+
 # add_front_end(<name> [EXT <ext> LANG <lang> [LEAD <file>]])
 #
 # The front end in the calling directory: the executable <name>, from that
