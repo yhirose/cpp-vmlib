@@ -42,6 +42,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <cstdlib>
@@ -85,22 +86,106 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
-      out.push_back(tok[i]);
+// `\u` has been read; `u.i` is at what follows it: four hex digits, or
+// `{` code points separated by blanks `}`.
+void ruby_unicode_escape(escapes::Unescaper& u, size_t start) {
+  const std::string_view raw = u.raw;
+  const auto put = [&](uint32_t cp) {
+    if (cp > 0x10FFFF) {
+      u.fail_at(start, "invalid Unicode codepoint (too large)");
+    } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+      u.fail_at(start, "invalid Unicode codepoint");
+    } else {
+      escapes::append_utf8(u.out, cp);
+    }
+  };
+  uint32_t v = 0;
+  if (u.i < raw.size() && raw[u.i] == '{') {
+    ++u.i;
+    while (!u.failed()) {
+      while (u.i < raw.size() && (raw[u.i] == ' ' || raw[u.i] == '\t')) ++u.i;
+      if (u.i >= raw.size()) {
+        u.fail_at(start, "unterminated Unicode escape");
+      } else if (raw[u.i] == '}') {
+        ++u.i;
+        return;
+      } else if (const size_t n = escapes::digits(raw, u.i, 16, 8, v); n == 0) {
+        u.fail_at(start, "invalid Unicode escape");
+      } else {
+        u.i += n;
+        put(v);
+      }
+    }
+  } else if (escapes::hex_digits(raw, u.i, 4, 4, v) == 0) {
+    u.fail_at(start, "invalid Unicode escape");
+  } else {
+    u.i += 4;
+    put(v);
+  }
+}
+
+// A double-quoted string's body (or an interpolated string's text between
+// holes) as the bytes it stands for -- Ruby's rules: the one-letter
+// escapes, a backslash before a newline (nothing), `\0`..`\777` (octal,
+// one to three digits, a byte), `\xH`/`\xHH`, `\uHHHH` and `\u{H H ...}`
+// (code points, separated by blanks). `\c`, `\C-` and `\M-` (control and
+// meta characters) are Ruby's but not done here, and say so. A backslash
+// before any other character is that character: `\q` is `q`, `\8` is `8`.
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'e', '\x1b'}, {'f', '\f'}, {'n', '\n'},
+      {'r', '\r'}, {'s', ' '},  {'t', '\t'},   {'v', '\v'}, {'\n', escapes::kDrop},
+  };
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\' || u.i == raw.size()) {
+      u.out.push_back(c);
       continue;
     }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case '\\': out.push_back('\\'); break;
-      case '\'': out.push_back('\''); break;
-      case '"': out.push_back('"'); break;
-      case '#': out.push_back('#'); break;
-      default: out.push_back(tok[i]); break;
+    const char e = raw[u.i];
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
+      ++u.i;
+    } else if (e >= '0' && e <= '7') {
+      u.i += escapes::digits(raw, u.i, 8, 3, v);
+      u.out.push_back(static_cast<char>(v & 0xFF));  // \400 is \0
+    } else if (e == 'x') {
+      const size_t n = escapes::hex_digits(raw, u.i + 1, 1, 2, v);
+      if (n == 0) {
+        u.fail_at(start, "invalid hex escape");
+      } else {
+        u.out.push_back(static_cast<char>(v));
+        u.i += 1 + n;
+      }
+    } else if (e == 'u') {
+      ++u.i;
+      ruby_unicode_escape(u, start);
+    } else if (e == 'c' || e == 'C' || e == 'M') {
+      u.fail_at(start, std::string("the \\") + e +
+                           " escape is not supported here");
+    } else {
+      u.out.push_back(e);  // an escape Ruby has no meaning for is itself
+      ++u.i;
     }
+  }
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
+}
+
+// A single-quoted string's body: only `\\` and `\'` are escapes; any other
+// backslash stays, with the character after it.
+std::string unescape_single(std::string_view raw) {
+  std::string out;
+  for (size_t i = 0; i < raw.size(); ++i) {
+    if (raw[i] == '\\' && i + 1 < raw.size() &&
+        (raw[i + 1] == '\\' || raw[i + 1] == '\'')) {
+      ++i;
+    }
+    out.push_back(raw[i]);
   }
   return out;
 }
@@ -1880,13 +1965,13 @@ struct Binder {
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)));
+        return b.str_literal(unescape_single(a.token));
       case "istring"_: {
         NodeId acc = b.str_literal("");
         for (const auto& part : a.nodes) {
           const NodeId piece =
               part->tag == "itext"_
-                  ? b.str_literal(unescape(std::string(part->token)))
+                  ? b.str_literal(unescape(part->token, *part))
                   : rt.call("$str", {emit_expr(*part->nodes[0], ctx)}, p);
           acc = b.binary(BinOp::Add, acc, piece);
         }

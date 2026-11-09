@@ -25,3 +25,24 @@ puts -b ** 2
 puts (-b) ** 2
 puts 2 * 3 ** 2
 puts 10 - 2 ** 2 ** 2
+
+# String escapes. Only length is shown for the control characters (a NUL or
+# an escape byte would not read in a transcript).
+puts "\x41\x4a\x4A\x4a1"
+puts "\x4g".length
+puts "\101\60\7".length
+puts "\1012"
+puts "\400".length == "\0".length
+puts "\a\b\e\f\v\s\0\r\n\t".length
+puts "\e" == "\x1b"
+puts "\s" == " "
+puts "\u0041\u00e9\u{20AC}\u{1F600}"
+puts "\u{41 42	43}"
+puts "\u{44}\u{ 45 }"
+puts "\q\8\9\ \#\z"
+puts "a\
+b"
+puts 'a\nb\\c\'d\qe'
+puts 'a\\'
+puts "#{1 + 1}\x41#{"\u0042\n".length}"
+puts "\"\\\'"
