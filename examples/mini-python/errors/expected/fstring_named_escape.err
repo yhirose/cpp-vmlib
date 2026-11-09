@@ -1,0 +1,1 @@
+fstring_named_escape.py:2:9: \N{name} escapes are not supported here

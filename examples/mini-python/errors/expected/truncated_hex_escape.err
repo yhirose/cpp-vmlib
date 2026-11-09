@@ -1,0 +1,1 @@
+truncated_hex_escape.py:2:7: (unicode error) 'unicodeescape' codec can't decode bytes: truncated \xXX escape

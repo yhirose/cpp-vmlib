@@ -31,6 +31,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <algorithm>
@@ -112,113 +113,90 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-// One escape sequence, Python's: `tok[i]` is the backslash. Appends what
-// it stands for to `out` and answers the index of its last character. An
-// escape Python does not know keeps its backslash, as Python's does.
-size_t unescape_at(const std::string& tok, size_t i, std::string& out) {
-  const auto hexval = [](char c) -> int {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
+// One escape sequence, Python's, at u.i (the backslash): `\n \t \r \a \b \f
+// \v \\ \' \"`, a backslash before a line break (nothing), `\ooo` (one to
+// three octal digits, a code point up to 0o777), `\xHH`, `\uHHHH` and
+// `\UHHHHHHHH` (code points, in UTF-8; a surrogate is allowed, as in a
+// str). A truncated \x, \u or \U, and a \U past 10FFFF, are SyntaxErrors.
+// `\N{name}` needs the Unicode names and is refused. Any other backslash
+// stays, with its character, as in Python (which only warns).
+void unescape_one(escapes::Unescaper& u) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'\'', '\''}, {'"', '"'},
+      {'\n', escapes::kDrop},
   };
-  // \xhh, \uhhhh and \Uhhhhhhhh: exactly that many hex digits.
-  const auto hex = [&](size_t from, size_t n, uint32_t& cp) {
-    if (from + n > tok.size()) return false;
-    cp = 0;
-    for (size_t k = 0; k < n; ++k) {
-      const int d = hexval(tok[from + k]);
-      if (d < 0) return false;
-      cp = cp * 16 + static_cast<uint32_t>(d);
-    }
-    return true;
-  };
-  const auto utf8 = [&](uint32_t cp) {
-    if (cp < 0x80) {
-      out.push_back(static_cast<char>(cp));
-    } else if (cp < 0x800) {
-      out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-      out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  const std::string_view raw = u.raw;
+  const size_t start = u.i++;
+  if (u.i == raw.size()) {  // a lone backslash ends the text
+    u.out.push_back('\\');
+    return;
+  }
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (const int s = escapes::simple_escape(kSimple, e);
+      s != escapes::kNotSimple) {
+    if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
+    ++u.i;
+  } else if (e == '\r' && u.i + 1 < raw.size() && raw[u.i + 1] == '\n') {
+    u.i += 2;  // CRLF continues the line too
+  } else if (e >= '0' && e <= '7') {
+    u.i += escapes::digits(raw, u.i, 8, 3, v);
+    escapes::append_utf8(u.out, v);
+  } else if (e == 'x' || e == 'u' || e == 'U') {
+    const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 8;
+    if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
+      u.fail_at(start,
+                std::string("(unicode error) 'unicodeescape' codec can't "
+                            "decode bytes: truncated ") +
+                    (e == 'x' ? "\\xXX" : e == 'u' ? "\\uXXXX" : "\\UXXXXXXXX") +
+                    " escape");
+    } else if (v > 0x10FFFF) {
+      u.fail_at(start,
+                "(unicode error) 'unicodeescape' codec can't decode bytes: "
+                "illegal Unicode character");
     } else {
-      out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-      out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+      escapes::append_utf8(u.out, v);
+      u.i += 1 + n;
     }
-  };
-  if (i + 1 >= tok.size()) {
-    out.push_back('\\');
-    return i;
+  } else if (e == 'N') {
+    u.fail_at(start, "\\N{name} escapes are not supported here");
+  } else {
+    u.out.push_back('\\');  // an escape Python has no meaning for stays
   }
-  const char c = tok[i + 1];
-  switch (c) {
-    case 'n': out.push_back('\n'); return i + 1;
-    case 't': out.push_back('\t'); return i + 1;
-    case 'r': out.push_back('\r'); return i + 1;
-    case 'a': out.push_back('\a'); return i + 1;
-    case 'b': out.push_back('\b'); return i + 1;
-    case 'f': out.push_back('\f'); return i + 1;
-    case 'v': out.push_back('\v'); return i + 1;
-    case '\\': out.push_back('\\'); return i + 1;
-    case '\'': out.push_back('\''); return i + 1;
-    case '"': out.push_back('"'); return i + 1;
-    case '\n': return i + 1;  // a backslash-newline continues the line
-    default: break;
-  }
-  if (c >= '0' && c <= '7') {  // up to three octal digits
-    uint32_t cp = 0;
-    size_t k = i + 1;
-    for (; k < tok.size() && k < i + 4 && tok[k] >= '0' && tok[k] <= '7'; ++k) {
-      cp = cp * 8 + static_cast<uint32_t>(tok[k] - '0');
-    }
-    utf8(cp);
-    return k - 1;
-  }
-  const size_t n = c == 'x' ? 2 : c == 'u' ? 4 : c == 'U' ? 8 : 0;
-  uint32_t cp = 0;
-  if (n > 0 && hex(i + 2, n, cp)) {
-    utf8(cp);
-    return i + 1 + n;
-  }
-  out.push_back('\\');
-  out.push_back(c);
-  return i + 1;
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] == '\\') {
-      i = unescape_at(tok, i, out);
+std::string unescape(std::string_view raw, const Ast& at) {
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    if (raw[u.i] == '\\') {
+      unescape_one(u);
     } else {
-      out.push_back(tok[i]);
+      u.out.push_back(raw[u.i++]);
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 // The literal text between an f-string's interpolations: the ordinary
 // escapes, plus `{{` and `}}` for the braces themselves.
-std::string unescape_ftext(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if ((tok[i] == '{' || tok[i] == '}') && i + 1 < tok.size() &&
-        tok[i + 1] == tok[i]) {
-      out.push_back(tok[i]);
-      ++i;
-      continue;
-    }
-    if (tok[i] == '\\') {
-      i = unescape_at(tok, i, out);
+std::string unescape_ftext(std::string_view raw, const Ast& at) {
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    const char c = raw[u.i];
+    if ((c == '{' || c == '}') && u.i + 1 < raw.size() && raw[u.i + 1] == c) {
+      u.out.push_back(c);
+      u.i += 2;
+    } else if (c == '\\') {
+      unescape_one(u);
     } else {
-      out.push_back(tok[i]);
+      u.out.push_back(c);
+      ++u.i;
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 bool is_builtin(const std::string& n) {
@@ -4121,7 +4099,7 @@ struct Binder {
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)));
+        return b.str_literal(unescape(a.token, a));
       case "literal"_: {
         const std::string t(a.token);
         if (t == "True") return b.bool_literal(true);
@@ -4161,7 +4139,7 @@ struct Binder {
             if (as_repr) v = rt.call("$repr", {v}, p);
             piece = rt.call("$fmt", {v, b.str_literal(spec)}, p);
           } else {
-            piece = b.str_literal(unescape_ftext(std::string(c->token)));
+            piece = b.str_literal(unescape_ftext(c->token, *c));
           }
           acc = b.binary(BinOp::Add, acc, piece);
         }

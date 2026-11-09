@@ -181,8 +181,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   fstring    <- 'f' ["] fdq* ["] _ / 'f' ['] fsq* ['] _      { no_ast_opt }
   fdq        <- fexpr / ftextd
   fsq        <- fexpr / ftexts
-  ftextd     <- < ('{{' / '}}' / '\\' . / !["{}] .)+ >
-  ftexts     <- < ('{{' / '}}' / '\\' . / !['{}] .)+ >
+  # `\N{name}` is one escape, braces and all, not a replacement field.
+  ftextd     <- < ('{{' / '}}' / '\\N{' [^}"]* '}' / '\\' . / !["{}] .)+ >
+  ftexts     <- < ('{{' / '}}' / '\\N{' [^}']* '}' / '\\' . / !['{}] .)+ >
   fexpr      <- '{' _ expr fconv? fspec? '}'                  { no_ast_opt }
   fconv      <- '!' < [rs] >                                 { no_ast_opt }
   fspec      <- ':' < [^}]* >                                { no_ast_opt }
