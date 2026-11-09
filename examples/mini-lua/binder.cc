@@ -569,12 +569,9 @@ struct Binder {
     r.add(r.iff(r.both(ok(a), ok(b)),
                 r.ret(r.bin(BinOp::Add, r.call("$str", {r.L(a)}),
                             r.call("$str", {r.L(b)})))));
-    const NodeId bad = r.iff(ok(a), r.L(b), r.L(a));
-    r.add(r.b.make_throw(r.bin(
-        BinOp::Add,
-        r.bin(BinOp::Add, r.S("attempt to concatenate a "),
-              r.nat("type", {bad})),
-        r.S(" value"))));
+    // The VM has no concatenation to trap, so the host function fails it
+    // with the same kind of trap the conversion gives a line.
+    r.add(r.ret(r.nat("concat_fail", {r.L(a), r.L(b)})));
     r.finish("$cat");
   }
 
@@ -588,8 +585,9 @@ struct Binder {
     const auto [key, mt, idx] = r.locals("key", "mt", "idx");
     // A string has no keys of its own here (its methods are another path);
     // anything else that is no table is the VM's trap of the index.
-    r.add(r.iff(r.is(r.typ(t), "string"), r.ret(r.Nil())));
-    r.add(r.iff(r.isnt(r.typ(t), "map"), r.ret(r.idx(r.L(t), r.L(k)))));
+    r.add(r.iff(r.isnt(r.typ(t), "map"),
+                r.iff(r.is(r.typ(t), "string"), r.ret(r.Nil()),
+                      r.ret(r.idx(r.L(t), r.L(k))))));
     r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
     r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
     r.add(r.set(mt, r.meta(r.L(t))));
@@ -646,7 +644,6 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [n] = r.locals("n");
-    r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.len(r.L(v)))));
     r.add(r.iff(r.isnt(r.typ(v), "map"), r.ret(r.len(r.L(v)))));
     r.add(r.set(n, r.I(0)));
     r.add(r.b.make_while(r.has(r.L(v), r.bin(BinOp::Add, r.L(n), r.I(1))),
@@ -2218,6 +2215,31 @@ bool nat_mathtype(NativeCall& c) {
   return true;
 }
 
+// A library function's complaint of an argument, in Lua's words ("bad
+// argument #1 to 'floor' (number expected, got string)"): an Operands trap
+// on that argument, which the conversion gives its chunk and line.
+bool bad_arg(NativeCall& c, int index, const char* fn, const char* expected) {
+  c.error = c.trap(
+      TrapKind::Operands,
+      "bad argument #" + std::to_string(index + 1) + " to '" + fn + "' (" +
+          expected + " expected, got " +
+          (index < c.argc ? lua_typename(c.arg(index)) : "no value") + ")",
+      {.l = &c.arg(index)});
+  return false;
+}
+
+// `..` of a value that is neither a string nor a number: the operand that is
+// neither, the left one first, as Lua's message names it.
+bool nat_concat_fail(NativeCall& c) {
+  const auto ok = [](const Value& v) { return v.is_str() || v.is_number(); };
+  const Value& bad = ok(c.arg(0)) ? c.arg(1) : c.arg(0);
+  c.error = c.trap(TrapKind::Operands,
+                   std::string("attempt to concatenate a ") + lua_typename(bad) +
+                       " value",
+                   {.l = &bad});
+  return false;
+}
+
 bool nat_floor(NativeCall& c) {
   const Value& v = c.arg(0);
   if (v.is_int()) {
@@ -2225,8 +2247,7 @@ bool nat_floor(NativeCall& c) {
     return true;
   }
   if (!v.is_double()) {
-    c.error = c.trap("floor wants a number");
-    return false;
+    return bad_arg(c, 0, "floor", "number");
   }
   const double d = v.as_double();
   double f = static_cast<double>(static_cast<int64_t>(d));
@@ -2244,8 +2265,7 @@ int64_t str_index(int64_t i, int64_t n) {
 
 bool nat_s_sub(NativeCall& c) {
   if (!c.arg(0).is_str()) {
-    c.error = c.trap("sub wants a string");
-    return false;
+    return bad_arg(c, 0, "sub", "string");
   }
   const std::string& s = c.arg(0).as_str();
   const auto n = static_cast<int64_t>(s.size());
@@ -2262,10 +2282,10 @@ bool nat_s_sub(NativeCall& c) {
 
 // string.rep(s, n [, sep]): n copies of s, sep between each two.
 bool nat_s_rep(NativeCall& c) {
-  if (!c.arg(0).is_str() || !c.arg(1).is_int() ||
-      (c.argc > 2 && !c.arg(2).is_nil() && !c.arg(2).is_str())) {
-    c.error = c.trap("rep wants a string, an integer and a string");
-    return false;
+  if (!c.arg(0).is_str()) return bad_arg(c, 0, "rep", "string");
+  if (!c.arg(1).is_int()) return bad_arg(c, 1, "rep", "number");
+  if (c.argc > 2 && !c.arg(2).is_nil() && !c.arg(2).is_str()) {
+    return bad_arg(c, 2, "rep", "string");
   }
   const bool has_sep = c.argc > 2 && c.arg(2).is_str();
   std::string out;
@@ -2315,39 +2335,33 @@ Value convert_trap(const Value& trap, const void*) {
   // The operand an arithmetic or bitwise error blames: the first that is
   // not a number.
   const std::string culprit = type(L.is_number() ? R : L);
-  std::string msg = trap.as_object()->find("message")->as_str();
+  std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::Operands:
       if (verb.cls == VerbClass::Binary) {
         const auto op = static_cast<BinOp>(verb.id);
-        if (op == BinOp::Lt || op == BinOp::Le || op == BinOp::Gt ||
-            op == BinOp::Ge) {
+        if (is_ordering(op)) {
           // `a > b` is `b < a` in Lua, and its error names them that way.
           const bool swapped = op == BinOp::Gt || op == BinOp::Ge;
           const std::string a = type(swapped ? R : L);
           const std::string b = type(swapped ? L : R);
           msg = a == b ? "attempt to compare two " + a + " values"
                        : "attempt to compare " + a + " with " + b;
-        } else if (op == BinOp::BitAnd || op == BinOp::BitOr ||
-                   op == BinOp::BitXor || op == BinOp::Shl ||
-                   op == BinOp::Shr) {
+        } else if (is_bitwise(op)) {
           msg = "attempt to perform bitwise operation on a " + culprit +
                 " value";
         } else {
           msg = "attempt to perform arithmetic on a " + culprit + " value";
         }
       } else if (verb.cls == VerbClass::Unary) {
-        msg = static_cast<UnOp>(verb.id) == UnOp::BitNot
+        msg = verb.is(UnOp::BitNot)
                   ? "attempt to perform bitwise operation on a " + type(L) +
                         " value"
                   : "attempt to perform arithmetic on a " + type(L) + " value";
-      } else if (verb.cls == VerbClass::Intrinsic) {
-        const auto id = static_cast<IntrinsicId>(verb.id);
-        if (id == IntrinsicId::Len) {
-          msg = "attempt to get length of a " + type(L) + " value";
-        } else if (id == IntrinsicId::Pow) {
-          msg = "attempt to perform arithmetic on a " + culprit + " value";
-        }
+      } else if (verb.is(IntrinsicId::Len)) {
+        msg = "attempt to get length of a " + type(L) + " value";
+      } else if (verb.is(IntrinsicId::Pow)) {
+        msg = "attempt to perform arithmetic on a " + culprit + " value";
       }
       break;
     case TrapKind::NotCallable:
@@ -2358,8 +2372,7 @@ Value convert_trap(const Value& trap, const void*) {
       msg = "attempt to index a " + type(L) + " value";
       break;
     case TrapKind::DivideByZero:
-      msg = static_cast<BinOp>(verb.id) == BinOp::FloorMod ||
-                    static_cast<BinOp>(verb.id) == BinOp::Mod
+      msg = verb.is(BinOp::FloorMod) || verb.is(BinOp::Mod)
                 ? "attempt to perform 'n%0'"
                 : "attempt to divide by zero";
       break;
@@ -2389,6 +2402,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_rep", -1, nat_s_rep, nullptr},
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
+      {"concat_fail", 2, nat_concat_fail, nullptr},
       trap_convert_def<&convert_trap>(),
   };
   return defs;
@@ -2396,7 +2410,9 @@ const std::vector<vm::NativeDef>& stdlib() {
 
 // lua.c's own words for an error object that is not a string or a number.
 std::string describe(const Value& v) {
-  if (trap_kind(v) != TrapKind::None) return convert_trap(v, nullptr).as_str();
+  if (trap_kind(v) != TrapKind::None) {
+    return converted_or_self<&convert_trap>(v).as_str();
+  }
   if (v.is_str() || v.is_int() || v.is_double()) return lua_tostring(v);
   return std::string("(error object is a ") + lua_typename(v) + " value)";
 }

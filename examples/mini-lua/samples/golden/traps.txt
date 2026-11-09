@@ -16,3 +16,9 @@ traps.lua:28: attempt to divide by zero
 traps.lua:29: attempt to perform 'n%0'
 true
 false	traps.lua:36: attempt to perform arithmetic on a table value
+traps.lua:41: bad argument #1 to 'floor' (number expected, got table)
+traps.lua:42: bad argument #1 to 'rep' (string expected, got nil)
+traps.lua:43: bad argument #2 to 'rep' (number expected, got table)
+traps.lua:44: bad argument #1 to 'sub' (string expected, got nil)
+traps.lua:45: attempt to concatenate a table value
+traps.lua:46: attempt to concatenate a nil value

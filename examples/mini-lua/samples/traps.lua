@@ -35,3 +35,12 @@ print(select(2, pcall(function() error(t) end)) == t)
 -- The error of a coroutine is the same string.
 local co = coroutine.create(function() return tbl() + 1 end)
 print(coroutine.resume(co))
+
+-- A library function's complaint of an argument, and `..` of a value that
+-- is neither a string nor a number.
+show(function() return math.floor(tbl()) end)
+show(function() return string.rep(nothing(), 2) end)
+show(function() return string.rep("x", tbl()) end)
+show(function() return string.sub(nothing(), 1) end)
+show(function() return "a" .. tbl() end)
+show(function() return nothing() .. "a" end)
