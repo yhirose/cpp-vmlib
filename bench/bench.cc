@@ -301,6 +301,22 @@ Module bench_alloc() {
   });
 }
 
+// A trap raised and caught a million times: the cost of the executor's
+// failure path (building the trap, unwinding to the handler), which every
+// other case leaves unmeasured. Integer division by a zero local.
+Module bench_trap() {
+  return main_only({"i", "e", "z"}, [](Module&, Builder& b) {
+    return b.block(
+        {set_loc(b, 2, lit(b, 0)),
+         counted_loop(
+             b, 1000000,
+             {b.make_try(1, b.binary(BinOp::Div, lit(b, 1), loc(b, 2), P),
+                         b.block({}, P), P)}),
+         print(b, loc(b, 0))},
+        P);
+  });
+}
+
 struct Case {
   const char* name;
   Module (*build)();
@@ -312,6 +328,7 @@ const Case kCases[] = {
     {"loop_arith", bench_loop_arith},     {"var_access", bench_var_access},
     {"str_const", bench_str_const},       {"str_concat", bench_str_concat},
     {"field_access", bench_field_access}, {"alloc", bench_alloc},
+    {"trap", bench_trap},
 };
 
 double run_once(const vm::Program& p) {

@@ -25,7 +25,8 @@ front_end_tests("" pl0 DIR ${PROJECT_SOURCE_DIR}/examples/pl0 EXT pas
 foreach(t throw_safety deep_calls values closures lifetimes containers
         control_flow exceptions defers gc generators arity drops jobs names
         ints fields switch natives tailcalls coroutines bigint_recipe
-        singleton binding verify default_rt alloc_failure profile meta let)
+        singleton binding verify default_rt alloc_failure profile meta let
+        trap_kinds)
   add_executable(test_${t} test_${t}.cc)
   target_link_libraries(test_${t} PRIVATE vmlib)
   add_test(NAME ${t} COMMAND test_${t})

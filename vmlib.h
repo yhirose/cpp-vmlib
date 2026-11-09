@@ -341,6 +341,10 @@ struct HeapObj {
   // (-1: not on it).
   bool dropped : 1 = false;
   bool trap : 1 = false;
+  // What kind of failure a trap is (coreir::TrapKind; 0 is none): a trap's
+  // own, in the byte's spare bits, so naming the kind costs the header
+  // nothing. See make_trap.
+  uint8_t trap_kind : 4 = 0;
   bool has_drop : 1 = false;
   int32_t owned_idx = -1;
   // Intrusive links: enumerating the heap costs no side table, and allocating
@@ -1616,7 +1620,7 @@ enum class IntrinsicId : uint8_t {
   IntegralKey,  // (k) -> k
   // The string and array primitives a front end cannot write over Index
   // alone at a reasonable cost. A slice is the half-open range [i, j),
-  // bounds-checked the way Index is (semantics.h's slice_error) and always
+  // bounds-checked the way Index is (slice_fault) and always
   // a fresh value; a front end that wants Python's clamping or negative
   // indices normalizes first. StrByte reads one byte as its 0..255 value
   // (Index on a string yields a one-byte string, which nothing can turn
@@ -3964,6 +3968,9 @@ enum class Fault : uint8_t {
   IntKey, StrKey, Range,
   // A write into a string: a value, not a container of cells.
   Immutable,
+  // An index into something that is not a container at all. After the
+  // others, so the values the tests name keep theirs.
+  NotIndexable,
 };
 
 // Whether a truncated division's remainder `m` -- C's % on ints, fmod's
@@ -4269,7 +4276,7 @@ VMLIB_INLINE Fault index_fault(const Value& recv, const Value& key,
   // for. Uninit is the one exception, and an unassigned local traps at its
   // read before it could get here, so nothing needs saying about it.
   if (recv.is_map()) return Fault::None;
-  return Fault::Operands;
+  return Fault::NotIndexable;
 }
 
 // Its diagnostic, from the fault and the receiver and key it was found in.
@@ -4350,9 +4357,9 @@ inline void index_set(const Value& recv, const Value& key, const Value& v) {
   recv.as_object()->set(key.as_str(), v);
 }
 
-inline std::string len_error(const Value& v) {
-  if (v.is_array() || v.is_str() || v.is_object() || v.is_map()) return {};
-  return std::string("cannot take the length of ") + type_name(v.tag());
+// Whether Len has an answer for `v`: anything with a length.
+inline bool is_measurable(const Value& v) {
+  return v.is_array() || v.is_str() || v.is_object() || v.is_map();
 }
 
 inline Value length_of(const Value& v) {
@@ -4370,21 +4377,6 @@ inline Value length_of(const Value& v) {
 // than clamping -- a language that clamps (Python) or counts from the end
 // (negative indices) normalizes in its own lowering first, the same way it
 // does for Index. A slice is a fresh value either way; nothing aliases.
-inline std::string slice_error(const Value& recv, const Value& i,
-                               const Value& j, int64_t len) {
-  if (!i.is_int() || !j.is_int()) {
-    return std::string("slice bounds must be ints, not ") +
-           type_name(i.tag()) + " and " + type_name(j.tag());
-  }
-  const int64_t a = i.as_int();
-  const int64_t b = j.as_int();
-  if (a < 0 || b < a || b > len) {
-    return "slice [" + std::to_string(a) + ", " + std::to_string(b) +
-           ") out of range for " + type_name(recv.tag()) + " of length " +
-           std::to_string(len);
-  }
-  return {};
-}
 
 // How a non-string scalar prints, when a front end has not formatted it
 // itself. Shortest round-trip for a double, so 3.5 is "3.5" and not
@@ -4418,6 +4410,276 @@ inline std::string to_display(const Value& v) {
 inline std::string format_uninit_var(const std::string& name) {
   return "uninitialized variable '" + name + "'";
 }
+
+// ---- Traps: what failed, as data -------------------------------------------
+//
+// A trap is the executor's own failure, and its message is the executor's
+// own words. A front end for a language with words of its own (a class and a
+// message that name what Python or Ruby would) needs what the message was
+// built from, not the message: the kind of failure, the operation, the
+// operands, a name, a few ints. The trap carries those (make_trap), so that
+// the front end's conversion at its catch, and its `describe` for an
+// uncaught one, reproduce the language's wording from facts rather than by
+// parsing ours.
+//
+// Fault, above, is the cheap answer of the fast paths -- an enum a
+// fallback's guard compares and nothing more. TrapKind is the superset a
+// trap names: every failure the executor raises, in the closed set below.
+// Which sub-case of a kind it is (push or pop, Add or Lt) is the verb.
+enum class TrapKind : uint8_t {
+  None,
+  // An operand of the wrong type: an operator's, or a builtin's argument
+  // (the verb says which builtin).
+  Operands,
+  // A call, or an enqueue, defer or coroutine, of something that is not
+  // a function.
+  NotCallable,
+  // An index, a field access or a byte read on something that has no
+  // elements or fields.
+  NotIndexable,
+  // A key of the wrong type: an int index wanted, a string key wanted.
+  KeyType,
+  // An index or a slice outside the container, or a pop of an empty array.
+  Range,
+  // A write into a string.
+  Immutable,
+  DivideByZero,
+  // A call with the wrong number of arguments.
+  Arity,
+  // A local read before it was assigned.
+  Uninit,
+  // The call depth bound.
+  Depth,
+  // A right-typed value outside what the operation takes: an array size,
+  // a byte, a double that is no int.
+  BadValue,
+  // A generator or coroutine in a state the operation cannot use.
+  State,
+  // A host function's own failure (NativeCall::trap).
+  Host,
+  // What verify() precludes, reached anyway.
+  Internal,
+};
+static_assert(static_cast<unsigned>(TrapKind::Internal) < 16,
+              "HeapObj::trap_kind has four bits");
+
+// The one place Fault becomes a TrapKind. Operands on an index is a
+// receiver that is no container, and has its own Fault (NotIndexable), so
+// the mapping needs no operation to tell the two apart.
+constexpr TrapKind kind_of(Fault e) {
+  switch (e) {
+    case Fault::None:         return TrapKind::None;
+    case Fault::Operands:     return TrapKind::Operands;
+    case Fault::DivideByZero: return TrapKind::DivideByZero;
+    case Fault::IntKey:
+    case Fault::StrKey:       return TrapKind::KeyType;
+    case Fault::Range:        return TrapKind::Range;
+    case Fault::Immutable:    return TrapKind::Immutable;
+    case Fault::NotIndexable: return TrapKind::NotIndexable;
+  }
+  return TrapKind::None;
+}
+
+// The operation a trap came from, as one small int made of the existing
+// enums -- no taxonomy of its own: the BinOp or UnOp of an operator, the
+// IntrinsicId of a builtin, the Tag of a construct (a call, an index, a
+// field access, a switch). 0 is none.
+enum class VerbClass : uint8_t { None, Binary, Unary, Intrinsic, Node };
+struct Verb {
+  VerbClass cls = VerbClass::None;
+  int id = 0;
+  bool operator==(const Verb&) const = default;
+};
+constexpr int64_t verb_of(BinOp op) {
+  return (static_cast<int64_t>(VerbClass::Binary) << 8) | static_cast<int>(op);
+}
+constexpr int64_t verb_of(UnOp op) {
+  return (static_cast<int64_t>(VerbClass::Unary) << 8) | static_cast<int>(op);
+}
+constexpr int64_t verb_of(IntrinsicId id) {
+  return (static_cast<int64_t>(VerbClass::Intrinsic) << 8) |
+         static_cast<int>(id);
+}
+constexpr int64_t verb_of(Tag t) {
+  return (static_cast<int64_t>(VerbClass::Node) << 8) | static_cast<int>(t);
+}
+constexpr Verb verb_decode(int64_t v) {
+  return {static_cast<VerbClass>(v >> 8), static_cast<int>(v & 0xff)};
+}
+
+// What a trap is built from, as the cold path that raises it is handed it:
+// borrowed from the registers, copied into the trap's record by make_trap.
+//   verb   verb_of(...), or 0
+//   l, r   the operands, or the receiver and key, or the callee; null if
+//          the operation has fewer
+//   name   a field, a function, a variable
+//   n, m   ints: given and expected arguments, an index and its bound, the
+//          bounds of a slice, the count asked of an array
+struct TrapFacts {
+  int64_t verb = 0;
+  const Value* l = nullptr;
+  const Value* r = nullptr;
+  const std::string* name = nullptr;
+  int64_t n = 0;
+  int64_t m = 0;
+};
+
+// The executor's message for a trap: the one place the words are, so that a
+// front end's conversion can read the same facts and a test can pin both.
+inline std::string trap_text(TrapKind kind, const TrapFacts& t) {
+  static const Value kNil;
+  const Value& l = t.l ? *t.l : kNil;
+  const Value& r = t.r ? *t.r : kNil;
+  const Verb v = verb_decode(t.verb);
+  // The verb is one of three enums' values, so every test names its class.
+  const auto is = [&](IntrinsicId x) {
+    return v.cls == VerbClass::Intrinsic && v.id == static_cast<int>(x);
+  };
+  const auto at = [&](Tag x) {
+    return v.cls == VerbClass::Node && v.id == static_cast<int>(x);
+  };
+  const auto ty = [](const Value& x) { return std::string(type_name(x.tag())); };
+  switch (kind) {
+    case TrapKind::DivideByZero:
+      return "divide by zero";
+    case TrapKind::Depth:
+      return "recursion limit exceeded";
+    case TrapKind::Uninit:
+      return format_uninit_var(*t.name);
+    case TrapKind::Immutable:
+      return fault_text(Fault::Immutable, l, r);
+    case TrapKind::KeyType:
+      if (is(IntrinsicId::StrSlice) || is(IntrinsicId::ArraySlice)) {
+        return "slice bounds must be ints, not " + ty(l) + " and " + ty(r);
+      }
+      return fault_text(l.is_str() || l.is_array() ? Fault::IntKey
+                                                    : Fault::StrKey,
+                        l, r);
+    case TrapKind::NotIndexable:
+      if (at(Tag::FieldGet) || at(Tag::FieldSet)) {
+        return std::string("cannot ") + (at(Tag::FieldGet) ? "get" : "set") +
+               " field '" + *t.name + "' of " + ty(l);
+      }
+      if (is(IntrinsicId::StrByte)) return "cannot read a byte of " + ty(l);
+      return fault_text(Fault::NotIndexable, l, r);
+    case TrapKind::Range:
+      if (is(IntrinsicId::ArrayPop)) return "pop from an empty array";
+      if (is(IntrinsicId::StrSlice) || is(IntrinsicId::ArraySlice)) {
+        return "slice [" + std::to_string(t.n) + ", " + std::to_string(t.m) +
+               ") out of range for " + ty(l) + " of length " +
+               std::to_string(index_bound(l));
+      }
+      return fault_text(Fault::Range, l, r);
+    case TrapKind::NotCallable:
+      if (at(Tag::CallValue)) return "cannot call " + ty(l);
+      return std::string(is(IntrinsicId::Enqueue)      ? "enqueue"
+                         : is(IntrinsicId::CoroCreate) ? "coroutine"
+                                                       : "defer") +
+             " needs a function, not " + ty(l);
+    case TrapKind::Arity:
+      if (at(Tag::CallSpread)) return "too many arguments to spread";
+      return *t.name + " takes " +
+             (r.is_bool() && r.as_bool() ? "at least " : "") +
+             std::to_string(t.m) + " argument(s), given " + std::to_string(t.n);
+    case TrapKind::BadValue:
+      if (is(IntrinsicId::StrFromByte)) {
+        return "byte value must be an int in 0..255, not " +
+               (l.is_int() ? std::to_string(l.as_int()) : ty(l));
+      }
+      if (is(IntrinsicId::ToInt)) return "double value out of int range";
+      return t.n < 0 ? "cannot make an array of fewer than 0"
+                     : "array too large";
+    case TrapKind::State:
+      if (is(IntrinsicId::CoroYield)) {
+        return t.n == 0 ? "yield outside a coroutine"
+                        : "cannot yield across a host boundary";
+      }
+      if (is(IntrinsicId::CoroClose)) return "cannot close a running coroutine";
+      if (is(IntrinsicId::CoroResume)) return "coroutine already running";
+      return "generator already running";
+    case TrapKind::Internal:
+      if (at(Tag::Yield)) return "yield outside a generator";
+      return "field '" + *t.name + "' out of range";
+    case TrapKind::Host:
+    case TrapKind::None:
+      return {};
+    case TrapKind::Operands:
+      break;
+  }
+  switch (v.cls) {
+    case VerbClass::Binary:
+      return fault_text(Fault::Operands, static_cast<BinOp>(v.id), l, r);
+    case VerbClass::Unary:
+      return fault_text(Fault::Operands, static_cast<UnOp>(v.id), l);
+    case VerbClass::Node:
+      if (at(Tag::Switch)) {
+        return "switch subject is " + ty(l) +
+               (t.n == 0 ? ", not int" : ", not str");
+      }
+      if (at(Tag::CallSpread)) return "cannot spread " + ty(l);
+      break;
+    case VerbClass::Intrinsic:
+      switch (static_cast<IntrinsicId>(v.id)) {
+        case IntrinsicId::GenResume:  return "cannot resume " + ty(l);
+        case IntrinsicId::GenReturn:  return "cannot close " + ty(l);
+        case IntrinsicId::GenThrow:   return "cannot throw into " + ty(l);
+        case IntrinsicId::CoroResume: return "cannot resume " + ty(l);
+        case IntrinsicId::CoroClose:  return "cannot close " + ty(l);
+        case IntrinsicId::CoroStatus:
+          return "cannot ask the status of " + ty(l);
+        case IntrinsicId::FnArity:
+          return "cannot take the arity of " + ty(l);
+        case IntrinsicId::Len:
+          return "cannot take the length of " + ty(l);
+        case IntrinsicId::ArrayPush:  return "cannot push into " + ty(l);
+        case IntrinsicId::ArrayPop:   return "cannot pop from " + ty(l);
+        case IntrinsicId::ArrayConcat:
+          return "cannot join " + ty(r) + " onto " + ty(l);
+        case IntrinsicId::ArrayFill:
+          return "cannot make an array of " + ty(l) + " elements";
+        case IntrinsicId::ObjectHas:
+          return "cannot ask " + ty(l) + " for a " + ty(r) + " key";
+        case IntrinsicId::ObjectKeys: return "cannot list keys of " + ty(l);
+        case IntrinsicId::ObjectRemove:
+          return "cannot remove a " + ty(r) + " key from " + ty(l);
+        case IntrinsicId::StrSlice:
+          return "cannot slice " + ty(l) + " as a string";
+        case IntrinsicId::ArraySlice:
+          return "cannot slice " + ty(l) + " as an array";
+        case IntrinsicId::StrUpper:
+        case IntrinsicId::StrLower:
+          return "cannot change the case of " + ty(l);
+        case IntrinsicId::ToInt:   return "cannot convert " + ty(l) + " to int";
+        case IntrinsicId::ToDouble:
+          return "cannot convert " + ty(l) + " to double";
+        case IntrinsicId::ToFloat32:
+          return "cannot convert " + ty(l) + " to float";
+        case IntrinsicId::Pow:
+          return "cannot pow " + ty(l) + " and " + ty(r);
+        case IntrinsicId::MetaSet:
+          return "cannot set the meta of " + ty(l);
+        case IntrinsicId::DropSet:
+          return "cannot give a destructor to " + ty(l);
+        default:
+          break;
+      }
+      break;
+    case VerbClass::None:
+      break;
+  }
+  return "cannot operate on " + ty(l);
+}
+
+// The slice [i, j) of a container `len` long: which trap its bounds make, if
+// any (KeyType for a bound that is no int, Range for one outside 0 <= i <= j
+// <= len), None when they are legal.
+inline TrapKind slice_fault(const Value& i, const Value& j, int64_t len) {
+  if (!i.is_int() || !j.is_int()) return TrapKind::KeyType;
+  const int64_t a = i.as_int();
+  const int64_t b = j.as_int();
+  return a < 0 || b < a || b > len ? TrapKind::Range : TrapKind::None;
+}
+
 
 }  // namespace coreir
 
@@ -4987,27 +5249,76 @@ struct NativeCall {
   // (Exec::attributed), for a native that wants to fail the way a divide
   // by zero does (`call.error = call.trap("...")`): catchable as the same
   // {message, line, col} object, and reported uncaught with the same
-  // wording.
+  // wording. Its kind is Host, or the one given when the failure is one the
+  // executor's own would be (a front end's conversion maps it as it does
+  // those); a native has no verb or operands to record.
   Value trap(const std::string& msg) const;
+  Value trap(TrapKind kind, const std::string& msg) const;
 
   NativeExec* exec = nullptr;  // set by the executor
 };
 
+// The facts a trap carries, in the order of its record: what it was doing,
+// to what, and the few names and counts the message is built from.
+enum class TrapFact : uint8_t { Verb, Left, Right, Name, N, M };
+
 // The value a trap carries: a fresh {message, line, col} object, marked as
-// a trap. Built here for the executor's own failures and NativeCall::trap's
-// alike, rather than each front end inventing its own materialization.
-inline Value make_trap(const std::string& msg, SrcPos pos) {
+// a trap and of a kind, with its facts in the object's meta -- the slot no
+// key names, so nothing a program does with keys reaches them. Built here
+// for the executor's own failures and NativeCall::trap's alike, rather
+// than each front end inventing its own materialization.
+//
+// The meta is the record ["trap", verb, l, r, name, n, m]: headed by a
+// string no front end's own record (runtime_parts.h's exception, "exc")
+// shares, so none mistakes it for one.
+inline Value make_trap(TrapKind kind, const std::string& msg, SrcPos pos,
+                       const TrapFacts& t = {}) {
   Value e = Value::make_object();
   ObjectObj* o = e.as_object();
   o->set("message", Value::make_str(msg));
   o->set("line", Value::make_int(pos.line));
   o->set("col", Value::make_int(pos.col));
   o->trap = true;
+  o->trap_kind = static_cast<uint8_t>(kind);
+  o->meta = Value::make_array(
+      {Value::make_str("trap"), Value::make_int(t.verb),
+       t.l ? *t.l : Value(), t.r ? *t.r : Value(),
+       t.name ? Value::make_str(*t.name) : Value(), Value::make_int(t.n),
+       Value::make_int(t.m)});
   return e;
+}
+inline Value make_trap(const std::string& msg, SrcPos pos) {
+  return make_trap(TrapKind::Host, msg, pos);
 }
 
 inline Value NativeCall::trap(const std::string& msg) const {
-  return make_trap(msg, exec->attributed(pos));
+  return trap(TrapKind::Host, msg);
+}
+inline Value NativeCall::trap(TrapKind kind, const std::string& msg) const {
+  return make_trap(kind, msg, exec->attributed(pos));
+}
+
+// A trap's kind, None for any other value: what a front end's conversion
+// switches on.
+inline TrapKind trap_kind(const Value& v) {
+  if (!v.is_object() || !v.as_object()->trap) return TrapKind::None;
+  return static_cast<TrapKind>(v.as_object()->trap_kind);
+}
+
+// One of a trap's facts, nil for any other value, and for a trap that
+// carries none (a host's). The two operands are the Values themselves, so
+// a front end names their types as its language does -- a class, not a tag.
+inline Value trap_fact(const Value& v, TrapFact i) {
+  if (trap_kind(v) == TrapKind::None) return Value();
+  const Value& rec = v.as_object()->meta;
+  if (!rec.is_array()) return Value();
+  const auto& items = rec.as_array()->items;
+  const auto k = static_cast<size_t>(i) + 1;
+  return k < items.size() ? items[k] : Value();
+}
+inline Verb trap_verb(const Value& v) {
+  const Value f = trap_fact(v, TrapFact::Verb);
+  return f.is_int() ? verb_decode(f.as_int()) : Verb{};
 }
 
 // What an uncaught raise of `v` reports when `v` is a trap: its message and
@@ -5081,6 +5392,15 @@ struct RunOptions {
   // would print ("IndexError: list index out of range") rather than
   // "<object>"; one that raises plain strings needs nothing.
   std::string (*describe)(const coreir::Value&) = nullptr;
+  // Whether `describe` words an executor's trap too (a raised value that
+  // is coreir::trap_kind != None), as the counterpart of the conversion a
+  // front end applies at its catch: an uncaught trap then reports as
+  // "uncaught: " and what describe says, at the position the trap holds,
+  // like any other raised value. Off, a trap reports its own message and
+  // position, byte for byte, which is what a front end with no words of
+  // its own for one (PL/0) wants. describe is handed the trap itself and
+  // reads its kind and facts (coreir::trap_kind, trap_fact).
+  bool describe_traps = false;
 };
 
 // Run the bytecode, on a heap the caller owns. Use this to inspect what a
@@ -8914,6 +9234,8 @@ struct Exec {
   size_t max_frames;  // live at once, the bottom frame included
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
+  bool describe_traps;     // RunOptions::describe_traps; beside the other
+                           // bool, in padding, so no member moves
   std::string (*describe)(const Value&);  // RunOptions::describe
   // max_frames as configured: an ExitHeadroom raises max_frames from it.
   const size_t depth_bound = max_frames;
@@ -9039,10 +9361,22 @@ struct Exec {
     throw Raise{std::move(v), attributed(pos)};
   }
   // A trap: the executor's own failure, catchable like any Throw. The
-  // value a handler sees is make_trap's {message, line, col} object.
-  [[noreturn]] void raise_trap(const std::string& msg, SrcPos pos) {
+  // value a handler sees is make_trap's {message, line, col} object, of the
+  // kind and with the facts the failing arm passed -- which the message is
+  // built from here, in the cold path, and not at the arm: a failing
+  // operation costs its dispatch arm a few register moves and a call.
+  [[noreturn]] [[gnu::cold]] [[gnu::noinline]] void raise_trap(
+      TrapKind kind, const TrapFacts& facts, SrcPos pos) {
     pos = attributed(pos);
-    throw Raise{coreir::make_trap(msg, pos), pos};
+    TrapFacts t = facts;
+    // The index and its bound, for a Range the message words from the
+    // operands: the facts are the ints, so a front end need not recompute.
+    if (kind == TrapKind::Range && t.l && t.r && t.r->is_int() &&
+        (t.l->is_str() || t.l->is_array())) {
+      t.n = t.r->as_int();
+      t.m = index_bound(*t.l);
+    }
+    throw Raise{coreir::make_trap(kind, trap_text(kind, facts), pos, t), pos};
   }
 
   // May `n` more frames go on? A call adds one; a suspended coroutine's
@@ -9074,7 +9408,7 @@ struct Exec {
     ExitHeadroom& operator=(const ExitHeadroom&) = delete;
   };
   [[noreturn]] void depth_exceeded(SrcPos pos) {
-    raise_trap("recursion limit exceeded", pos);
+    raise_trap(TrapKind::Depth, {}, pos);
   }
 
   // Shared by both call forms: the depth bound and the interrupt point.
@@ -9099,13 +9433,13 @@ struct Exec {
   // What GenResume, GenReturn and GenThrow all establish before they
   // diverge: the operand is a generator, and it is not the activation
   // already running. The verb naming the attempt is the only difference.
-  GeneratorObj* gen_operand(Frame& f, const Value& gv, const char* verb) {
+  GeneratorObj* gen_operand(Frame& f, const Value& gv, IntrinsicId op) {
     if (!gv.is_generator()) {
-      fail(f, std::string("cannot ") + verb + " " + type_name(gv.tag()));
+      fail(f, TrapKind::Operands, {.verb = verb_of(op), .l = &gv});
     }
     GeneratorObj* go = gv.as_generator();
     if (go->state == GeneratorObj::State::Running) {
-      fail(f, "generator already running");
+      fail(f, TrapKind::State, {.verb = verb_of(op), .l = &gv});
     }
     return go;
   }
@@ -9174,9 +9508,9 @@ struct Exec {
     return frames.size();
   }
 
-  CoroObj* coro_operand(Frame& f, const Value& cv, const char* verb) {
+  CoroObj* coro_operand(Frame& f, const Value& cv, IntrinsicId op) {
     if (!cv.is_coroutine()) {
-      fail(f, std::string("cannot ") + verb + " " + type_name(cv.tag()));
+      fail(f, TrapKind::Operands, {.verb = verb_of(op), .l = &cv});
     }
     return cv.as_coroutine();
   }
@@ -9301,14 +9635,31 @@ struct Exec {
     return t;
   }
 
+  // The two failures of a call that the call paths would otherwise carry
+  // the code to build: a callee that is no function, and a host function
+  // given the wrong number of arguments. Out of line, with the trap's
+  // facts built here, so the call paths stay what they were.
+  [[noreturn]] VMLIB_NOINLINE void not_callable(const Value& callee,
+                                                SrcPos pos) {
+    raise_trap(TrapKind::NotCallable,
+               {.verb = verb_of(Tag::CallValue), .l = &callee}, pos);
+  }
+  [[noreturn]] VMLIB_NOINLINE void native_arity_mismatch(const NativeObj* n,
+                                                         int32_t argc,
+                                                         SrcPos pos) {
+    raise_trap(TrapKind::Arity, {.name = &n->name, .n = argc, .m = n->arity},
+               pos);
+  }
+
   // take_args' two slow paths, kept out of it: inlined, their code would
   // make take_args too big to inline into the call sites, and every call
   // would pay for a function call and a returned TakenArgs it does not need.
   [[noreturn]] VMLIB_NOINLINE void arity_mismatch(const Chunk& ch,
                                                   int32_t argc, SrcPos pos) {
-    raise_trap(ch.name + " takes " + (ch.rest_param ? "at least " : "") +
-                   std::to_string(ch.fixed_params()) +
-                   " argument(s), given " + std::to_string(argc),
+    const Value rest = Value::make_bool(ch.rest_param);
+    raise_trap(TrapKind::Arity,
+               {.r = &rest, .name = &ch.name, .n = argc,
+                .m = ch.fixed_params()},
                pos);
   }
   template <class Arg>
@@ -9405,7 +9756,7 @@ struct Exec {
       return;
     }
     if (!callee.is_func()) {
-      raise_trap(std::string("cannot call ") + type_name(callee.tag()), pos);
+      not_callable(callee, pos);
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
@@ -9446,8 +9797,9 @@ struct Exec {
     return p.positions[ch.code_pos[pc]];
   }
 
-  [[noreturn]] void fail(const Frame& f, const std::string& msg) {
-    raise_trap(msg, pos_at(*f.chunk, f.pc));
+  [[noreturn]] [[gnu::noinline]] void fail(
+      const Frame& f, TrapKind kind, const TrapFacts& facts) {
+    raise_trap(kind, facts, pos_at(*f.chunk, f.pc));
   }
 
   // Where the running frame is: what a call made from C++ rather than from
@@ -9465,16 +9817,16 @@ struct Exec {
   // makes an access invalid, so the checking is written once here and the
   // verb ("get"/"set") is all the caller supplies.
   ObjectObj* field_target(const Frame& f, const Value& recv, int32_t slot,
-                          int32_t name_const, const char* verb) {
+                          int32_t name_const, Tag access) {
     if (!recv.is_object()) {
-      fail(f, std::string("cannot ") + verb + " field '" +
-                  p.str_const_at(name_const) + "' of " +
-                  type_name(recv.tag()));
+      fail(f, TrapKind::NotIndexable,
+           {.verb = verb_of(access), .l = &recv,
+            .name = &p.str_const_at(name_const)});
     }
     ObjectObj* o = recv.as_object();
     if (slot < 0 || static_cast<size_t>(slot) >= o->props.size()) {
-      fail(f, std::string("field '") + p.str_const_at(name_const) +
-                  "' out of range");
+      fail(f, TrapKind::Internal,
+           {.verb = verb_of(access), .name = &p.str_const_at(name_const)});
     }
     return o;
   }
@@ -9512,7 +9864,8 @@ struct Exec {
   Value& local_ref(Frame& f, int32_t index, const Chunk& ch) {
     Value& v = f.locals[static_cast<size_t>(index)];
     if (v.is_uninit()) {
-      fail(f, format_uninit_var(ch.local_names[static_cast<size_t>(index)]));
+      fail(f, TrapKind::Uninit,
+           {.name = &ch.local_names[static_cast<size_t>(index)]});
     }
     return v;
   }
@@ -9600,7 +9953,10 @@ struct Exec {
 
   void report_uncaught(const Raise& r) {
     if (const auto d = coreir::trap_diagnostic(r.value)) {
-      coreir_rt::fail(d->message, d->pos.line, d->pos.col);
+      if (!describe_traps) {
+        coreir_rt::fail(d->message, d->pos.line, d->pos.col);
+      }
+      coreir_rt::fail("uncaught: " + worded(r.value), d->pos.line, d->pos.col);
     }
     coreir_rt::fail("uncaught: " + worded(r.value), r.pos.line, r.pos.col);
   }
@@ -9730,7 +10086,8 @@ struct Exec {
         self->run_nested(floor);
       } catch (Raise& r) {
         const auto d = coreir::trap_diagnostic(r.value);
-        const std::string what = d ? d->message : self->worded(r.value);
+        const std::string what =
+            d && !self->describe_traps ? d->message : self->worded(r.value);
         std::fprintf(stderr, "drop: %s\n", what.c_str());
       }
     } catch (const std::bad_alloc&) {
@@ -9852,9 +10209,7 @@ struct Exec {
   void call_native(const NativeObj* n, const Value* args, int32_t argc,
                    int32_t ret_reg, SrcPos pos) {
     if (n->arity >= 0 && argc != n->arity) {
-      raise_trap(n->name + " takes " + std::to_string(n->arity) +
-                     " argument(s), given " + std::to_string(argc),
-                 pos);
+      native_arity_mismatch(n, argc, pos);
     }
     if constexpr (Prof::kOn) frames.prof.call(*n);
     coreir_rt_poll();
@@ -9882,12 +10237,13 @@ struct Exec {
   std::vector<Value> spread_args(Frame& f, const Insn& in) {
     const Value& s = f.regs[static_cast<size_t>(in.c + in.d)];
     if (!s.is_array()) {
-      fail(f, std::string("cannot spread ") + type_name(s.tag()));
+      fail(f, TrapKind::Operands, {.verb = verb_of(Tag::CallSpread), .l = &s});
     }
     const std::vector<Value>& items = s.as_array()->items;
     // An argument count is an int32_t from here on.
     if (items.size() > static_cast<size_t>(INT32_MAX - in.d)) {
-      fail(f, "too many arguments to spread");
+      // mutation-exempt: an array of 2^31 elements
+      fail(f, TrapKind::Arity, {.verb = verb_of(Tag::CallSpread)});
     }
     std::vector<Value> args;
     args.reserve(static_cast<size_t>(in.d) + items.size());
@@ -10002,7 +10358,7 @@ struct Exec {
   void gen_return(Frame& f, const Insn& in) {
     const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value gv = f.regs[in.b];
-    GeneratorObj* go = gen_operand(f, gv, "close");
+    GeneratorObj* go = gen_operand(f, gv, IntrinsicId::GenReturn);
     using St = GeneratorObj::State;
     Value out = f.regs[in.c];
     if (go->state == St::Suspended) {
@@ -10038,7 +10394,7 @@ struct Exec {
   [[noreturn]] void gen_throw(Frame& f, const Insn& in) {
     const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value gv = f.regs[in.b];
-    GeneratorObj* go = gen_operand(f, gv, "throw into");
+    GeneratorObj* go = gen_operand(f, gv, IntrinsicId::GenThrow);
     using St = GeneratorObj::State;
     Value v = f.regs[in.c];
     if (go->state != St::Suspended) {
@@ -10067,9 +10423,11 @@ struct Exec {
   void coro_resume(Frame& f, const Insn& in) {
     const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value cv = f.regs[in.b];
-    CoroObj* co = coro_operand(f, cv, "resume");
+    CoroObj* co = coro_operand(f, cv, IntrinsicId::CoroResume);
     using St = CoroObj::State;
-    if (co->state == St::Running) fail(f, "coroutine already running");
+    if (co->state == St::Running) {
+      fail(f, TrapKind::State, {.verb = verb_of(IntrinsicId::CoroResume), .l = &cv});
+    }
     if (co->state == St::Done) {
       f.regs[in.a] = gen_result(Value(), true);
       ++f.pc;
@@ -10098,10 +10456,10 @@ struct Exec {
   void coro_close(Frame& f, const Insn& in) {
     const SrcPos pos = pos_at(*f.chunk, f.pc);
     const Value cv = f.regs[in.a];
-    CoroObj* co = coro_operand(f, cv, "close");
+    CoroObj* co = coro_operand(f, cv, IntrinsicId::CoroClose);
     using St = CoroObj::State;
     if (co->state == St::Running) {
-      fail(f, "cannot close a running coroutine");
+      fail(f, TrapKind::State, {.verb = verb_of(IntrinsicId::CoroClose), .l = &cv});
     }
     if (co->state == St::Done) {
       ++f.pc;
@@ -10262,7 +10620,7 @@ struct Exec {
           const UnOp uop = unop_of(in.op);
           const Value& v = f.regs[in.b];
           if (const Fault e = unop_fault(uop, v); e != Fault::None) {
-            fail(f, fault_text(e, uop, v));
+            fail(f, TrapKind::Operands, {.verb = verb_of(uop), .l = &v});
           }
           f.regs[in.a] = apply_unop(uop, v);
           break;
@@ -10284,7 +10642,7 @@ struct Exec {
           const Value& r = f.regs[in.c];
           if (const Fault e = binop_fault(op, l, r, f.regs[in.a]);
               e != Fault::None) {
-            fail(f, fault_text(e, op, l, r));
+            fail(f, kind_of(e), {.verb = verb_of(op), .l = &l, .r = &r});
           }
           break;
         }
@@ -10341,8 +10699,8 @@ struct Exec {
             const Value& subj = f.regs[in.a];
             if (t.key_kind == coreir::ConstKind::Int) {
               if (!subj.is_int()) {
-                fail(f, std::string("switch subject is ") +
-                            type_name(subj.tag()) + ", not int");
+                fail(f, TrapKind::Operands,
+                     {.verb = verb_of(Tag::Switch), .l = &subj});
               }
               const int64_t key = subj.as_int();
               if (t.dense) {
@@ -10362,8 +10720,8 @@ struct Exec {
               }
             } else {
               if (!subj.is_str()) {
-                fail(f, std::string("switch subject is ") +
-                            type_name(subj.tag()) + ", not str");
+                fail(f, TrapKind::Operands,
+                     {.verb = verb_of(Tag::Switch), .l = &subj, .n = 1});
               }
               target = sparse_arm_pc(t.str_keys, t.arm_pcs, subj.as_str());
             }
@@ -10419,8 +10777,7 @@ struct Exec {
             break;
           }
           if (!v.is_func()) {
-            fail(f, std::string("cannot take the arity of ") +
-                        type_name(v.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::FnArity), .l = &v});
           }
           const Chunk& fch =
               p.chunks[static_cast<size_t>(v.as_closure()->func)];
@@ -10498,7 +10855,8 @@ struct Exec {
           const Value& recv = f.regs[in.b];
           const Value& key = f.regs[in.c];
           if (const Fault e = index_fault(recv, key); e != Fault::None) {
-            fail(f, fault_text(e, recv, key));
+            fail(f, kind_of(e),
+                 {.verb = verb_of(Tag::Index), .l = &recv, .r = &key});
           }
           f.regs[in.a] = index_get(recv, key);
           break;
@@ -10508,13 +10866,14 @@ struct Exec {
           const Value& key = f.regs[in.b];
           if (const Fault e = index_fault(recv, key, true);
               e != Fault::None) {
-            fail(f, fault_text(e, recv, key));
+            fail(f, kind_of(e),
+                 {.verb = verb_of(Tag::SetIndex), .l = &recv, .r = &key});
           }
           index_set(recv, key, f.regs[in.c]);
           break;
         }
         case Op::FieldGet: {
-          ObjectObj* o = field_target(f, f.regs[in.b], in.c, in.d, "get");
+          ObjectObj* o = field_target(f, f.regs[in.b], in.c, in.d, Tag::FieldGet);
           // Direct slot access, not ObjectObj::find: the whole point of
           // FieldGet is that the front end already knows the offset, so
           // this pays no key comparison at all, let alone find()'s linear
@@ -10529,7 +10888,7 @@ struct Exec {
           break;
         }
         case Op::FieldSet: {
-          ObjectObj* o = field_target(f, f.regs[in.a], in.b, in.d, "set");
+          ObjectObj* o = field_target(f, f.regs[in.a], in.b, in.d, Tag::FieldSet);
           // A plain overwrite of an existing slot, never a new key. See the
           // FieldGet/FieldSet Tag comment for why front ends must build
           // every field through ObjectLit before any FieldSet reaches it.
@@ -10538,7 +10897,9 @@ struct Exec {
         }
         case Op::Len: {
           const Value& v = f.regs[in.b];
-          if (auto err = len_error(v); !err.empty()) fail(f, err);
+          if (!is_measurable(v)) {
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::Len), .l = &v});
+          }
           f.regs[in.a] = length_of(v);
           break;
         }
@@ -10559,7 +10920,7 @@ struct Exec {
         case Op::ArrayPush: {
           const Value& a = f.regs[in.a];
           if (!a.is_array()) {
-            fail(f, std::string("cannot push into ") + type_name(a.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ArrayPush), .l = &a});
           }
           a.as_array()->items.push_back(f.regs[in.b]);
           break;
@@ -10567,10 +10928,12 @@ struct Exec {
         case Op::ArrayPop: {
           const Value& a = f.regs[in.b];
           if (!a.is_array()) {
-            fail(f, std::string("cannot pop from ") + type_name(a.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ArrayPop), .l = &a});
           }
           auto& items = a.as_array()->items;
-          if (items.empty()) fail(f, "pop from an empty array");
+          if (items.empty()) {
+            fail(f, TrapKind::Range, {.verb = verb_of(IntrinsicId::ArrayPop), .l = &a});
+          }
           // Move out before shrinking: dst may alias the array register.
           Value out = std::move(items.back());
           items.pop_back();
@@ -10581,8 +10944,7 @@ struct Exec {
           const Value& a = f.regs[in.a];
           const Value& b = f.regs[in.b];
           if (!a.is_array() || !b.is_array()) {
-            fail(f, std::string("cannot join ") + type_name(b.tag()) +
-                        " onto " + type_name(a.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ArrayConcat), .l = &a, .r = &b});
           }
           auto& dst = a.as_array()->items;
           // The source read by index rather than by iterator: appending to
@@ -10597,19 +10959,25 @@ struct Exec {
         case Op::ArrayFill: {
           const Value& n = f.regs[in.b];
           if (!n.is_int()) {
-            fail(f, std::string("cannot make an array of ") +
-                        type_name(n.tag()) + " elements");
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n});
           }
-          if (n.as_int() < 0) fail(f, "cannot make an array of fewer than 0");
+          if (n.as_int() < 0) {
+            fail(f, TrapKind::BadValue,
+                 {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n, .n = n.as_int()});
+          }
           // A length the allocator refuses is a trap like any other, not a
           // C++ exception out of vm::run past every handler in the program.
           std::vector<Value> items;
           try {
             items.assign(static_cast<size_t>(n.as_int()), f.regs[in.c]);
           } catch (const std::length_error&) {
-            fail(f, "array too large");
+            fail(f, TrapKind::BadValue,
+               {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n, .n = n.as_int()});
           } catch (const std::bad_alloc&) {
-            fail(f, "array too large");
+            // mutation-exempt: the allocator refusing, which
+            // test_alloc_failure injects
+            fail(f, TrapKind::BadValue,
+               {.verb = verb_of(IntrinsicId::ArrayFill), .l = &n, .n = n.as_int()});
           }
           f.regs[in.a] = Value::make_array(std::move(items));
           break;
@@ -10622,8 +10990,7 @@ struct Exec {
             break;
           }
           if (!o.is_object() || !k.is_str()) {
-            fail(f, std::string("cannot ask ") + type_name(o.tag()) +
-                        " for a " + type_name(k.tag()) + " key");
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ObjectHas), .l = &o, .r = &k});
           }
           f.regs[in.a] = Value::make_bool(o.as_object()->find(k.as_str()) !=
                                           nullptr);
@@ -10642,7 +11009,7 @@ struct Exec {
             }
           } else {
             if (!o.is_object()) {
-              fail(f, std::string("cannot list keys of ") + type_name(o.tag()));
+              fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ObjectKeys), .l = &o});
             }
             keys.reserve(o.as_object()->props.size());
             for (const auto& kv : o.as_object()->props) {
@@ -10660,8 +11027,7 @@ struct Exec {
             break;
           }
           if (!o.is_object() || !k.is_str()) {
-            fail(f, std::string("cannot remove a ") + type_name(k.tag()) +
-                        " key from " + type_name(o.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ObjectRemove), .l = &o, .r = &k});
           }
           o.as_object()->remove(k.as_str());
           break;
@@ -10674,16 +11040,21 @@ struct Exec {
           const Value& recv = f.regs[in.b];
           const bool want_str = in.op == Op::StrSlice;
           if (want_str ? !recv.is_str() : !recv.is_array()) {
-            fail(f, std::string("cannot slice ") + type_name(recv.tag()) +
-                        (want_str ? " as a string" : " as an array"));
+            fail(f, TrapKind::Operands,
+                 {.verb = want_str ? verb_of(IntrinsicId::StrSlice) : verb_of(IntrinsicId::ArraySlice), .l = &recv});
           }
           const int64_t len =
               want_str ? static_cast<int64_t>(recv.as_str().size())
                        : static_cast<int64_t>(recv.as_array()->items.size());
           const Value& i = f.regs[in.c];
           const Value& j = f.regs[in.d];
-          if (auto err = slice_error(recv, i, j, len); !err.empty()) {
-            fail(f, err);
+          if (const TrapKind e = slice_fault(i, j, len); e != TrapKind::None) {
+            const int64_t slice = want_str ? verb_of(IntrinsicId::StrSlice)
+                                           : verb_of(IntrinsicId::ArraySlice);
+            if (e == TrapKind::KeyType) {
+              fail(f, e, {.verb = slice, .l = &i, .r = &j});
+            }
+            fail(f, e, {.verb = slice, .l = &recv, .n = i.as_int(), .m = j.as_int()});
           }
           const auto from = static_cast<size_t>(i.as_int());
           const auto to = static_cast<size_t>(j.as_int());
@@ -10704,10 +11075,10 @@ struct Exec {
           const Value& s = f.regs[in.b];
           const Value& k = f.regs[in.c];
           if (!s.is_str()) {
-            fail(f, std::string("cannot read a byte of ") + type_name(s.tag()));
+            fail(f, TrapKind::NotIndexable, {.verb = verb_of(IntrinsicId::StrByte), .l = &s});
           }
           if (const Fault e = index_fault(s, k); e != Fault::None) {
-            fail(f, fault_text(e, s, k));
+            fail(f, kind_of(e), {.verb = verb_of(IntrinsicId::StrByte), .l = &s, .r = &k});
           }
           const auto byte = static_cast<unsigned char>(
               s.as_str()[static_cast<size_t>(k.as_int())]);
@@ -10717,9 +11088,7 @@ struct Exec {
         case Op::StrFromByte: {
           const Value& v = f.regs[in.b];
           if (!v.is_int() || v.as_int() < 0 || v.as_int() > 255) {
-            fail(f, "byte value must be an int in 0..255, not " +
-                        (v.is_int() ? std::to_string(v.as_int())
-                                    : std::string(type_name(v.tag()))));
+            fail(f, TrapKind::BadValue, {.verb = verb_of(IntrinsicId::StrFromByte), .l = &v});
           }
           f.regs[in.a] = Value::make_str(
               std::string(1, static_cast<char>(v.as_int())));
@@ -10729,8 +11098,11 @@ struct Exec {
         case Op::StrLower: {
           const Value& v = f.regs[in.b];
           if (!v.is_str()) {
-            fail(f, std::string("cannot change the case of ") +
-                        type_name(v.tag()));
+            fail(f, TrapKind::Operands,
+                 {.verb = in.op == Op::StrUpper
+                              ? verb_of(IntrinsicId::StrUpper)
+                              : verb_of(IntrinsicId::StrLower),
+                  .l = &v});
           }
           // ASCII only, and byte by byte: a UTF-8 continuation byte is
           // outside A-Z and a-z, so a multi-byte character passes through
@@ -10751,14 +11123,13 @@ struct Exec {
             break;
           }
           if (!v.is_number()) {
-            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
-                        " to int");
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ToInt), .l = &v});
           }
           const double d = v.as_double();
           // The comparison is in double, where int64's max rounds up to
           // 2^63 -- so >= on the top edge, > on the bottom.
           if (std::isnan(d) || d >= kTwo63 || d < -kTwo63) {
-            fail(f, "double value out of int range");
+            fail(f, TrapKind::BadValue, {.verb = verb_of(IntrinsicId::ToInt), .l = &v});
           }
           f.regs[in.a] = Value::make_int(static_cast<int64_t>(d));
           break;
@@ -10766,8 +11137,7 @@ struct Exec {
         case Op::ToDouble: {
           const Value& v = f.regs[in.b];
           if (!v.is_number()) {
-            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
-                        " to double");
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ToDouble), .l = &v});
           }
           f.regs[in.a] = Value::make_double(v.as_number());
           break;
@@ -10778,8 +11148,7 @@ struct Exec {
         case Op::ToFloat32: {
           const Value& v = f.regs[in.b];
           if (!v.is_number()) {
-            fail(f, std::string("cannot convert ") + type_name(v.tag()) +
-                        " to float");
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::ToFloat32), .l = &v});
           }
           f.regs[in.a] = Value::make_double(to_float32(v.as_number()));
           break;
@@ -10788,8 +11157,7 @@ struct Exec {
           const Value& l = f.regs[in.b];
           const Value& r = f.regs[in.c];
           if (!l.is_number() || !r.is_number()) {
-            fail(f, std::string("cannot pow ") + type_name(l.tag()) +
-                        " and " + type_name(r.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::Pow), .l = &l, .r = &r});
           }
           f.regs[in.a] =
               Value::make_double(std::pow(l.as_number(), r.as_number()));
@@ -10849,7 +11217,8 @@ struct Exec {
           // frame pops, and the resumer gets {value, done: false} -- the
           // same delivery shape as Ret, one level up.
           if (!f.gen_self.is_generator()) {
-            fail(f, "yield outside a generator");  // verify() precludes this
+            // mutation-exempt: verify() precludes it
+            fail(f, TrapKind::Internal, {.verb = verb_of(Tag::Yield)});
           }
           Value self = std::move(f.gen_self);
           GeneratorObj* go = self.as_generator();
@@ -10867,7 +11236,7 @@ struct Exec {
         case Op::GenResume: {
           const SrcPos pos = pos_at(ch, f.pc);
           const Value gv = f.regs[in.b];
-          GeneratorObj* go = gen_operand(f, gv, "resume");
+          GeneratorObj* go = gen_operand(f, gv, IntrinsicId::GenResume);
           using St = GeneratorObj::State;
           if (go->state == St::Done) {
             f.regs[in.a] = gen_result(Value(), true);
@@ -10902,8 +11271,7 @@ struct Exec {
               scheduled.emplace(co, v);
             }
           } else if (!v.is_callable()) {
-            fail(f, std::string("enqueue needs a function, not ") +
-                        type_name(v.tag()));
+            fail(f, TrapKind::NotCallable, {.verb = verb_of(IntrinsicId::Enqueue), .l = &v});
           }
           jobs.push_back(v);
           break;
@@ -10911,8 +11279,7 @@ struct Exec {
         case Op::DeferPush: {
           const Value& v = f.regs[in.a];
           if (!v.is_callable()) {
-            fail(f, std::string("defer needs a function, not ") +
-                        type_name(v.tag()));
+            fail(f, TrapKind::NotCallable, {.verb = verb_of(Tag::Defer), .l = &v});
           }
           f.defers.push_back(v);
           break;
@@ -10957,8 +11324,7 @@ struct Exec {
         case Op::CoroCreate: {
           const Value& fn = f.regs[in.b];
           if (!fn.is_callable()) {
-            fail(f, std::string("coroutine needs a function, not ") +
-                        type_name(fn.tag()));
+            fail(f, TrapKind::NotCallable, {.verb = verb_of(IntrinsicId::CoroCreate), .l = &fn});
           }
           Value co = Value::make_coroutine();
           co.as_coroutine()->fn = fn;
@@ -10978,8 +11344,12 @@ struct Exec {
           // no frame stack can hold -- so that yield cannot happen: Lua's
           // "attempt to yield across a C-call boundary".
           const size_t bottom = coro_bottom();
-          if (bottom == frames.size()) fail(f, "yield outside a coroutine");
-          if (bottom < floor) fail(f, "cannot yield across a host boundary");
+          if (bottom == frames.size()) {
+            fail(f, TrapKind::State, {.verb = verb_of(IntrinsicId::CoroYield)});
+          }
+          if (bottom < floor) {
+            fail(f, TrapKind::State, {.verb = verb_of(IntrinsicId::CoroYield), .n = 1});
+          }
           const Value self = frames[bottom]->coro_self;
           Value out = f.regs[in.b];
           const int32_t ret_reg = frames[bottom]->ret_reg;
@@ -11000,7 +11370,7 @@ struct Exec {
         }
         case Op::CoroStatus: {
           const Value& cv = f.regs[in.b];
-          CoroObj* co = coro_operand(f, cv, "ask the status of");
+          CoroObj* co = coro_operand(f, cv, IntrinsicId::CoroStatus);
           const char* s = "?";
           switch (co->state) {
             case CoroObj::State::Start:     s = "start"; break;
@@ -11027,8 +11397,8 @@ struct Exec {
         case Op::MetaSet: {
           Value* slot = meta_slot(f.regs[in.b]);
           if (!slot) {
-            fail(f, std::string("cannot set the meta of ") +
-                        type_name(f.regs[in.b].tag()));
+            fail(f, TrapKind::Operands,
+                 {.verb = verb_of(IntrinsicId::MetaSet), .l = &f.regs[in.b]});
           }
           *slot = f.regs[in.c];
           f.regs[in.a] = f.regs[in.b];
@@ -11037,8 +11407,7 @@ struct Exec {
         case Op::DropSet: {
           const Value& o = f.regs[in.b];
           if (!o.is_object()) {
-            fail(f, std::string("cannot give a destructor to ") +
-                        type_name(o.tag()));
+            fail(f, TrapKind::Operands, {.verb = verb_of(IntrinsicId::DropSet), .l = &o});
           }
           o.as_object()->set_drop(f.regs[in.c]);
           f.regs[in.a] = f.regs[in.b];
@@ -11074,6 +11443,7 @@ void run_with(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
       .max_frames = max_frames,
       .rt = rt,
       .entry_frame_drops = opts.entry_frame_drops,
+      .describe_traps = opts.describe_traps,
       .describe = opts.describe,
       .frames = FrameStack<Prof>(std::forward<ProfArgs>(prof_args)...)};
   // Link the program's declared host functions before anything runs: a
