@@ -5,6 +5,7 @@ int main(int argc, char** argv) {
   driver::FrontEnd fe("mini-culebra", "PROGRAM.cul",
                       mini_culebra::bind_source);
   fe.run.natives = mini_culebra::stdlib();
+  fe.run.describe = mini_culebra::describe;
   // culebra's rule for a top-level binding: it lives to the end of the
   // program and is released without its destructor running -- only a
   // top-level `defer` runs at exit. RunOptions names this exact case, and

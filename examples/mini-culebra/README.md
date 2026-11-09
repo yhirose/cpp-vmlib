@@ -62,11 +62,12 @@ an `Eq` (vmlib.h's `Tag::Unary`).
 
 **Float display.** `to_display` is shortest round-trip, and its comment
 names this case: *"4.0 is '4' -- whether a whole double should show a
-decimal point is a language's decision, and a front end that cares builds
-the string."* `$fstr` is that front end caring: an integral value within
-±2^53 gets its `.0`, `-0.0` is special-cased because its integer form has
-lost the sign, and everything else -- `1e+21`, `2.5e-07`,
-`0.30000000000000004` -- is `to_chars`' spelling, which is culebra's too.
+decimal point is a language's decision."* The language's decision is in
+`examples/common/double_format.h`'s `kCulebra`: the shortest digits, fixed
+from 1e-4 up to 1e6 (a whole number there gets its `.0`: `100000.0`) and an
+exponent outside it (`1e+06`, `1e-05`, never a `.0`). `$fstr` calls the host
+function `dstr` that writes it, and `describe` words an uncaught `throw 0.0001`
+the same way, so print and the report agree.
 
 ## A worked example: the release order
 
@@ -213,11 +214,9 @@ callback lets out travels through the native's frame to the caller's
 handler. It walks the array by index rather than by iterator, because the
 callback may push onto the very array being walked.
 
-Note what is deliberately *not* a native. Display conversion -- `"4.0"` for
-a whole Float -- is in the binder's own IR, because it is a rule of the
-language rather than a service of the host; `println` is handed a string
-the program already built. That is the same split mini-go draws between
-vmlib's scheduler primitives and Go's channel rules.
+`println` is handed a string the program already built. A Float's text
+is the one display rule that is a native (`dstr`), since producing digits
+from a number is a service of the host.
 
 ## The custom iterator protocol, and the one piece of it left out
 

@@ -20,4 +20,8 @@ coreir::Module bind_source(const std::string& source);
 // does not supply fails the run before its first instruction.
 const std::vector<vm::NativeDef>& stdlib();
 
+// How an uncaught `throw` reads (vm::RunOptions::describe): culebra's own
+// text for the value, a Float in culebra's spelling.
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_culebra

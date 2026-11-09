@@ -42,10 +42,12 @@
 // two are exact (vmlib.h's kExact) with a helper for that. Beside it,
 // equality needed writing (`==` across two types is `false` in culebra
 // and a trap in the VM, and arrays and objects compare structurally), and
-// display did (culebra prints a whole Float as "4.0", which to_display's
-// comment names as the reason it does not grow a mode).
+// display did (culebra prints a whole Float as "4.0" and 1e15 as "1e+15",
+// which is double_format.h's, called as a host function).
 
 #include "binder.h"
+
+#include "double_format.h"
 
 #include <cstdlib>
 #include <limits>
@@ -516,17 +518,14 @@ struct Binder {
     r.finish("$eq");
   }
 
-  // How culebra prints a Float. to_display is shortest-round-trip, and its
-  // comment names this exact case: "4.0 is '4' -- whether a whole double
-  // should show a decimal point is a language's decision, and a front end
-  // that cares builds the string". This is that front end caring, the way
-  // Python, Ruby and Guile do too (runtime_parts.h's float_str). Past the
-  // whole numbers, a double already carries a '.' or an exponent, and
-  // culebra's own spelling of those is to_chars' -- 1e+21, 2.5e-07 -- so
-  // ToStr is the answer verbatim.
+  // How culebra prints a Float: the shortest round trip in double_format.h's
+  // kCulebra layout -- 1e+15 from 1e6 up, 1e-05 below 1e-4, and a ".0" on a
+  // whole number in fixed notation (100000.0). The host writes it (dstr),
+  // since ToStr's own choice of fixed or exponent is no language's.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, {"nan", "inf", "-inf"});
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.nat("dstr", {r.L(v)})));
     r.finish("$fstr");
   }
 
@@ -1717,8 +1716,16 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"pop", 1, native_pop, nullptr},
       {"keys", 1, native_keys, nullptr},
       {"map", 2, native_map, nullptr},
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kCulebra),
   };
   return defs;
+}
+
+// What an uncaught `throw` words its value with: to_display, but a Float
+// spelled as culebra prints it (`throw 0.0001` ends with "0.0001").
+std::string describe(const Value& v) {
+  return double_format::display_with(v, double_format::kCulebra);
 }
 
 Module bind_source(const std::string& source) {
