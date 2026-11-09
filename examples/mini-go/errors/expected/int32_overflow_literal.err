@@ -1,0 +1,1 @@
+int32_overflow_literal.go:7:16: constant 2147483648 overflows int32

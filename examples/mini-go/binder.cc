@@ -786,9 +786,23 @@ struct Binder {
   // (README's own point: a literal goes through the same Wrap a variable
   // holding that value would, so `square(50000)` sees exactly what `x * x`
   // would compute from a local holding 50000), so this delegates to it
-  // rather than restating it. Only the two refusals stay local, since a
+  // rather than restating it -- after check_const_fits, since Go refuses a
+  // constant that does not fit where a variable would wrap. Only the
+  // refusals stay local, since a
   // literal can say why better than a conversion can ("cannot use an
   // integer literal as bool" rather than "cannot convert int64 to bool").
+  // An untyped constant must fit the type it lands in: go refuses
+  // `var x int32 = 2147483648` ("overflows") rather than wrapping it, as an
+  // int32 *variable* wraps at run time. int64 is the literal's own width.
+  void check_const_fits(int64_t v, Type ty, const Ast& at) {
+    const bool fits = ty == Type::I32   ? v >= INT32_MIN && v <= INT32_MAX
+                      : ty == Type::U32 ? v >= 0 && v <= UINT32_MAX
+                                        : true;
+    if (!fits) {
+      fail(at, "constant " + std::to_string(v) + " overflows " + type_name(ty));
+    }
+  }
+
   TypedExpr literal_as(int64_t v, Type ty, const Ast& at, SrcPos p) {
     auto b = Builder(m).at(p);
     if (ty == Type::Bool) fail_at(p, "cannot use an integer literal as bool");
@@ -798,6 +812,7 @@ struct Binder {
     if (ty == Type::Struct) {
       fail_at(p, "cannot use an integer literal as a struct");
     }
+    check_const_fits(v, ty, at);
     return emit_convert(ty, {b.literal(v), Type::I64}, at);
   }
 
@@ -1559,6 +1574,7 @@ struct Binder {
           }
           for (const auto& numAst : find_child(c, "intlist")->nodes) {
             const int64_t key = parse_int(std::string(numAst->token), *numAst);
+            check_const_fits(key, subj.type, *numAst);
             if (!seen_keys.insert(key).second) {
               fail(*numAst, "duplicate case value " + std::to_string(key));
             }

@@ -1,0 +1,1 @@
+case_overflow_literal.go:9:7: constant 4294967296 overflows uint32

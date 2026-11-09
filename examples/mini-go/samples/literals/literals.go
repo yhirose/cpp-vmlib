@@ -27,4 +27,17 @@ func main() {
 	fmt.Println("a\tb\"c\\d")
 	fmt.Println(len("\a\b\f\n\r\t\v\\\""))
 	fmt.Println(len("\x00\000\xe9\377\u00e9"))
+	// A constant must fit its type, at its edges (see errors/ for past them).
+	var i32min int32 = -2147483648
+	var i32max int32 = 2147483647
+	var u32max uint32 = 4294967295
+	fmt.Println(i32min)
+	fmt.Println(i32max)
+	fmt.Println(u32max)
+	var seven int32 = 7
+	fmt.Println(seven - -2147483648 + 2147483647)
+	switch i32min {
+	case -2147483648:
+		fmt.Println("int32 lowest")
+	}
 }
