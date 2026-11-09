@@ -1,0 +1,10 @@
+Attempted to divide by zero.
+Attempted to divide by zero.
+Index was out of range. Must be non-negative and less than the size of the collection. (Parameter 'index')
+Index was out of range. Must be non-negative and less than the size of the collection. (Parameter 'index')
+Index was outside the bounds of the array.
+Object reference not set to an instance of an object.
+Object reference not set to an instance of an object.
+Object reference not set to an instance of an object.
+The given key 'missing' was not present in the dictionary.
+2

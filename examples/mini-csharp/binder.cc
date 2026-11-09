@@ -789,7 +789,7 @@ struct Binder {
     static const std::vector<std::string> names = {
         "$str",  "$add",  "$eq",   "$mlookup", "$mfind", "$nullcall", "$getf", "$setf",
         "$idx", "$setidx", "$dictadd", "$len", "$iter", "$iternext",
-        "$join", "$exc", "$mkexc", "$newlist", "$newdict", "$mainwrap",
+        "$join", "$exc", "$excn", "$mkexc", "$newlist", "$newdict", "$mainwrap",
     };
     return names;
   }
@@ -931,15 +931,16 @@ struct Binder {
     RT r(*this);
     r.rest_param = true;
     r.params("args");
-    r.add(r.ret(r.call("$exc", {r.S("null reference")})));
+    // A call through null: the VM's trap of a dereference, which an Index
+    // of nil is.
+    r.add(r.ret(r.idx(r.Nil(), r.S(""))));
     r.finish("$nullcall");
   }
 
   void rt_getf() {
     RT r(*this);
     const auto [o, name] = r.params("o", "name");
-    r.add(r.iff(r.isnt(r.typ(o), "object"),
-                r.ret(r.call("$exc", {r.S("null reference")}))));
+    r.add(r.iff(r.isnt(r.typ(o), "object"), r.ret(r.idx(r.L(o), r.L(name)))));
     r.add(r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))));
     r.add(r.ret(r.Nil()));
     r.finish("$getf");
@@ -949,7 +950,7 @@ struct Binder {
     RT r(*this);
     const auto [o, name, val] = r.params("o", "name", "val");
     r.add(r.iff(r.isnt(r.typ(o), "object"),
-                r.ret(r.call("$exc", {r.S("null reference")}))));
+                r.ret(r.sidx(r.L(o), r.L(name), r.L(val)))));
     r.add(r.sidx(r.L(o), r.L(name), r.L(val)));
     r.add(r.ret(r.L(val)));
     r.finish("$setf");
@@ -961,10 +962,15 @@ struct Binder {
     r.add(
         r.iff(r.is(r.typ(v), "map"),
               r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
-                     r.ret(r.call("$exc", {r.S("key not found")}))})));
-    r.add(r.iff(r.either(r.bin(BinOp::Lt, r.L(k), r.I(0)),
-                         r.bin(BinOp::Ge, r.L(k), r.len(r.L(v)))),
-                r.ret(r.call("$exc", {r.S("index out of range")}))));
+                     r.ret(r.call(
+                         "$excn",
+                         {r.S("System.Collections.Generic.KeyNotFoundException"),
+                          r.bin(BinOp::Add,
+                                r.bin(BinOp::Add, r.S("The given key '"),
+                                      r.call("$str", {r.L(k)})),
+                                r.S("' was not present in the dictionary."))}))})));
+    // An index out of range, or a receiver that is no container (null), is
+    // the VM's trap of the Index, which the catch words as .NET does.
     r.add(r.ret(r.idx(r.L(v), r.L(k))));
     r.finish("$idx");
   }
@@ -974,9 +980,6 @@ struct Binder {
     const auto [v, k, val] = r.params("v", "k", "val");
     r.add(r.iff(r.is(r.typ(v), "map"),
                 r.blk({r.sidx(r.L(v), r.L(k), r.L(val)), r.ret(r.L(val))})));
-    r.add(r.iff(r.either(r.bin(BinOp::Lt, r.L(k), r.I(0)),
-                         r.bin(BinOp::Ge, r.L(k), r.len(r.L(v)))),
-                r.ret(r.call("$exc", {r.S("index out of range")}))));
     r.add(r.sidx(r.L(v), r.L(k), r.L(val)));
     r.add(r.ret(r.L(val)));
     r.finish("$setidx");
@@ -987,8 +990,7 @@ struct Binder {
   void rt_dictadd() {
     RT r(*this);
     const auto [d, k, v] = r.params("d", "k", "v");
-    r.add(r.iff(r.is(r.typ(d), "nil"),
-                r.ret(r.call("$exc", {r.S("null reference")}))));
+    r.add(r.iff(r.is(r.typ(d), "nil"), r.ret(r.idx(r.L(d), r.L(k)))));
     r.add(r.iff(r.isnt(r.typ(d), "map"),
                 r.ret(r.call("$exc", {r.S("no such method: Add")}))));
     r.add(r.iff(r.has(r.L(d), r.L(k)),
@@ -1090,6 +1092,16 @@ struct Binder {
     r.finish("$exc");
   }
 
+  // `throw` of a .NET exception of the named class, for the few a helper
+  // raises with a class of their own (KeyNotFoundException,
+  // ArgumentException): the rest are the VM's traps, converted at the catch.
+  void rt_excn() {
+    RT r(*this);
+    const auto [name, msg] = r.params("name", "msg");
+    r.add(r.b.make_throw(exception(r, r.S(kExcKind), r.L(name), r.L(msg))));
+    r.finish("$excn");
+  }
+
   // -- Task, async and await ----------------------------------------------
   //
   // A Task is runtime_parts.h's promise, the one examples/mini-js's Promise
@@ -1111,7 +1123,7 @@ struct Binder {
   void emit_runtime() {
     rt_str(); rt_add(); rt_eq(); rt_mlookup(); rt_mfind(); rt_nullcall(); rt_getf();
     rt_setf(); rt_idx(); rt_setidx(); rt_dictadd(); rt_len(); rt_iter();
-    rt_iternext(); rt_join(); rt_exc();
+    rt_iternext(); rt_join(); rt_exc(); rt_excn();
     rt_mkexc(); rt_newlist(); rt_newdict(); write_promise_helpers(rt);
     rt_mainwrap();
   }
@@ -1382,6 +1394,10 @@ struct Binder {
         }
       }
       hs.push_back(emit_block(*cat->nodes.back(), ctx));
+      // An executor's trap is {message, line, col}; `catch (Exception e)`
+      // reads a message, which the conversion gives it. A `finally` with no
+      // `catch` just re-raises, and the trap goes on as it is.
+      hs.insert(hs.begin(), b.assign(VarKind::Local, exc, converted(b, E)));
       handler = b.block(hs);
     }
     out.push_back(b.make_try(exc, body, handler));
@@ -2217,9 +2233,66 @@ bool nat_write(NativeCall& c) {
 
 }  // namespace
 
+// An executor's trap as the exception .NET throws for the same fault
+// (.NET 8's words). Types are erased here, so a fault is told by what
+// failed: an index out of range, an arithmetic divisor, a dereference of
+// null (an index, a field or a call of nil). A List's index is
+// ArgumentOutOfRangeException and a string's IndexOutOfRangeException, as
+// in .NET. The recursion limit is not catchable in .NET (the process
+// ends); here it is a trap, named for the nearest class that exists,
+// InsufficientExecutionStackException.
+Value convert_trap(const Value& trap, const void*) {
+  const Value L = trap_fact(trap, TrapFact::Left);
+  std::string cls = "System.InvalidOperationException";
+  std::string msg = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::DivideByZero:
+      cls = "System.DivideByZeroException";
+      msg = "Attempted to divide by zero.";
+      break;
+    case TrapKind::Range:
+      if (L.is_array()) {
+        cls = "System.ArgumentOutOfRangeException";
+        msg = "Index was out of range. Must be non-negative and less than the "
+              "size of the collection. (Parameter 'index')";
+      } else {
+        cls = "System.IndexOutOfRangeException";
+        msg = "Index was outside the bounds of the array.";
+      }
+      break;
+    case TrapKind::NotIndexable:
+    case TrapKind::NotCallable:
+      cls = "System.NullReferenceException";
+      msg = "Object reference not set to an instance of an object.";
+      break;
+    case TrapKind::Operands:
+    case TrapKind::KeyType:
+      if (L.is_nil() || trap_fact(trap, TrapFact::Right).is_nil()) {
+        // null on either side of an operation (s.Length, null + 1)
+        cls = "System.NullReferenceException";
+        msg = "Object reference not set to an instance of an object.";
+      } else {
+        cls = "System.InvalidCastException";
+        msg = "Specified cast is not valid.";
+      }
+      break;
+    case TrapKind::Depth:
+      cls = "System.InsufficientExecutionStackException";
+      msg =
+          "Insufficient stack to continue executing the program safely. This "
+          "can happen from having too many functions on the call stack or "
+          "function on the stack using too much stack space.";
+      break;
+    default:
+      break;
+  }
+  return make_exception(cls, Value::make_str(msg));
+}
+
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
+      trap_convert_def<&convert_trap>(),
       double_format::dstr_def(double_format::kCSharp),
   };
   return defs;
@@ -2227,7 +2300,12 @@ const std::vector<vm::NativeDef>& stdlib() {
 
 // What .NET prints after "Unhandled exception.": the exception's name,
 // then its message.
-std::string describe(const Value& v) {
+std::string describe(const Value& trap_or_value) {
+  // An uncaught trap reads as the exception .NET throws for it.
+  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
+                                   ? convert_trap(trap_or_value, nullptr)
+                                   : Value();
+  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
   if (const auto* exc = runtime_parts::exception_record(v)) {
     return double_format::display_with((*exc)[kExcName], double_format::kCSharp) +
            ": " +

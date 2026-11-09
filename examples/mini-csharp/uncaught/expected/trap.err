@@ -1,0 +1,1 @@
+trap.cs:9:27: uncaught: System.DivideByZeroException: Attempted to divide by zero.
