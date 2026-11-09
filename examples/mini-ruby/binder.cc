@@ -708,8 +708,13 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [out, i] = r.locals("out", "i");
+    // A String takes only a String (the VM refuses another operand), and an
+    // Array only an Array: any other is the trap of the +, converted to
+    // Ruby's TypeError.
     r.add(r.iff(r.is(r.typ(a), "string"),
-                r.ret(r.bin(BinOp::Add, r.L(a), r.call("$str", {r.L(b)})))));
+                r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
+    r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.isnt(r.typ(b), "array")),
+                r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
     r.add(
         r.iff(r.is(r.typ(a), "array"),
               r.blk({r.set(out, r.arr({})), r.set(i, r.I(0)),
@@ -734,6 +739,8 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [out, i] = r.locals("out", "i");
+    r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.isnt(r.typ(b), "int")),
+                r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b)))));
     r.add(r.iff(
         r.is(r.typ(a), "string"),
         r.blk({r.set(out, r.S("")), r.set(i, r.I(0)),
@@ -786,6 +793,9 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [acc, i] = r.locals("acc", "i");
+    r.add(r.iff(r.b.unary(UnOp::Not, r.both(is_number(r, r.L(a)),
+                                            is_number(r, r.L(b)))),
+                r.ret(r.in(IntrinsicId::Pow, {r.L(a), r.L(b)}))));
     r.add(r.iff(r.either(r.is(r.typ(a), "double"),
                          r.either(r.is(r.typ(b), "double"),
                                   r.bin(BinOp::Lt, r.L(b), r.I(0)))),
@@ -925,7 +935,8 @@ struct Binder {
     const auto [i] = r.locals("i");
     r.add(
         r.iff(r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "string")),
-              r.blk({r.set(i, r.L(k)),
+              r.blk({r.iff(r.isnt(r.typ(k), "int"), r.ret(r.idx(r.L(v), r.L(k)))),
+                     r.set(i, r.L(k)),
                      r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
                            r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
                      r.iff(r.either(r.bin(BinOp::Lt, r.L(i), r.I(0)),
@@ -933,9 +944,8 @@ struct Binder {
                            r.ret(r.Nil())),
                      r.ret(r.idx(r.L(v), r.L(i)))})));
     r.add(r.iff(r.is(r.typ(v), "map"), r.ret(r.idx(r.L(v), r.L(k)))));
-    r.add(r.ret(r.call("$exc", {r.S("TypeError"),
-                                r.S("no implicit conversion into an "
-                                    "index")})));
+    // Anything else has no [] : the VM's trap of the index.
+    r.add(r.ret(r.idx(r.L(v), r.L(k))));
     r.finish("$idx");
   }
 
@@ -1744,6 +1754,10 @@ struct Binder {
         }
       }
       hs.push_back(emit_body(*bodypart, ctx));
+      // An executor's trap is {message, line, col}; the rescue reads a
+      // class and a message, which the conversion gives it. An `ensure`
+      // with no `rescue` just re-raises, and the trap goes on as it is.
+      hs.insert(hs.begin(), b.assign(VarKind::Local, slot, converted(b, E)));
       handler = b.block(hs);
     }
     out.push_back(b.make_try(slot, body, handler));
@@ -2781,9 +2795,147 @@ bool nat_write(NativeCall& c) {
 
 }  // namespace
 
+// Ruby's class name for a value, from C++ -- the twin of $clsname.
+std::string class_name_of(const Value& v) {
+  if (const std::string* n = instance_class_name(v)) return *n;
+  if (const auto* exc = exception_record(v); exc && (*exc)[kExcName].is_str()) {
+    return (*exc)[kExcName].as_str();
+  }
+  if (kind_record(v, kRangeKind)) return "Range";
+  switch (v.tag()) {
+    case ValueTag::Nil: return "NilClass";
+    case ValueTag::Bool: return v.as_bool() ? "TrueClass" : "FalseClass";
+    case ValueTag::Int: return "Integer";
+    case ValueTag::Double: return "Float";
+    case ValueTag::Str: return "String";
+    case ValueTag::Array: return "Array";
+    case ValueTag::Map: return "Hash";
+    case ValueTag::Func:
+    case ValueTag::Native: return "Proc";
+    default: return "Object";
+  }
+}
+
+// How Ruby's messages name an operand that was refused: nil, true and false
+// by their literal, anything else by class ("String can't be coerced into
+// Integer", "nil can't be coerced into Integer").
+std::string operand_name(const Value& v) {
+  if (v.is_nil()) return "nil";
+  if (v.is_bool()) return v.as_bool() ? "true" : "false";
+  return class_name_of(v);
+}
+
+// Where Ruby 3.3 puts a receiver in "undefined method 'x' for ...": nil,
+// true and false as themselves, any other as "an instance of C".
+std::string receiver_name(const Value& v) {
+  if (v.is_nil() || v.is_bool()) return operand_name(v);
+  return "an instance of " + class_name_of(v);
+}
+
+// An executor's trap as the exception Ruby raises for the same fault
+// (Ruby 3.3's words, pinned by test/languages.sh; probed against 3.0, whose
+// "undefined method `x' for nil:NilClass" differs). What reaches here is
+// what a helper had no rule for: its last step is the VM's own operation.
+Value convert_trap(const Value& trap, const void*) {
+  const Value L = trap_fact(trap, TrapFact::Left);
+  const Value R = trap_fact(trap, TrapFact::Right);
+  const Verb verb = trap_verb(trap);
+  const std::string l = class_name_of(L);
+  const auto no_method = [&](const std::string& name) {
+    return "undefined method '" + name + "' for " + receiver_name(L);
+  };
+  std::string cls = "StandardError";
+  std::string msg = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::Operands:
+      if (verb.cls == VerbClass::Binary) {
+        const auto op = static_cast<BinOp>(verb.id);
+        // Integer#/ is the VM's FloorDiv here.
+        const std::string sym =
+            op == BinOp::FloorDiv ? "/" : binop_symbol(op);
+        const bool compare = op == BinOp::Lt || op == BinOp::Le ||
+                             op == BinOp::Gt || op == BinOp::Ge;
+        if (!L.is_number() && !L.is_str() && !L.is_array()) {
+          cls = "NoMethodError";
+          msg = no_method(sym);
+        } else if (compare) {
+          cls = "ArgumentError";
+          // Ruby shows an Integer, nil, true and false by value.
+          msg = "comparison of " + l + " with " +
+                (R.is_nil() || R.is_bool() || R.is_int()
+                     ? double_format::display_with(R, double_format::kRuby)
+                     : class_name_of(R)) +
+                " failed";
+          if (R.is_nil()) msg = "comparison of " + l + " with nil failed";
+        } else if (L.is_number()) {
+          cls = "TypeError";
+          msg = operand_name(R) + " can't be coerced into " + l;
+        } else {
+          cls = "TypeError";
+          msg = "no implicit conversion of " + operand_name(R) + " into " +
+                (op == BinOp::Mul ? "Integer" : l);
+        }
+      } else if (verb.cls == VerbClass::Unary) {
+        cls = "NoMethodError";
+        msg = no_method(static_cast<UnOp>(verb.id) == UnOp::Neg ? "-@" : "~");
+      } else if (verb.cls == VerbClass::Intrinsic &&
+                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Pow) {
+        cls = L.is_number() ? "TypeError" : "NoMethodError";
+        msg = L.is_number() ? operand_name(R) + " can't be coerced into " + l
+                            : no_method("**");
+      }
+      break;
+    case TrapKind::NotCallable:
+      cls = "NoMethodError";
+      msg = no_method("call");
+      break;
+    case TrapKind::NotIndexable:
+      cls = "NoMethodError";
+      msg = no_method(verb.cls == VerbClass::Node &&
+                              static_cast<Tag>(verb.id) == Tag::SetIndex
+                          ? "[]="
+                          : "[]");
+      break;
+    case TrapKind::KeyType:
+      cls = "TypeError";
+      msg = "no implicit conversion of " + operand_name(R) + " into Integer";
+      break;
+    case TrapKind::Immutable:
+      cls = "FrozenError";
+      msg = "can't modify frozen " + l + ": \"" +
+            (L.is_str() ? L.as_str() : std::string()) + "\"";
+      break;
+    case TrapKind::DivideByZero:
+      cls = "ZeroDivisionError";
+      msg = "divided by 0";
+      break;
+    case TrapKind::Arity: {
+      cls = "ArgumentError";
+      const int64_t want = trap_fact(trap, TrapFact::M).as_int();
+      msg = "wrong number of arguments (given " +
+            std::to_string(trap_fact(trap, TrapFact::N).as_int()) +
+            ", expected " + std::to_string(want) + ")";
+      break;
+    }
+    case TrapKind::Uninit:
+      cls = "NameError";
+      msg = "undefined local variable or method '" +
+            trap_fact(trap, TrapFact::Name).as_str() + "' for main:Object";
+      break;
+    case TrapKind::Depth:
+      cls = "SystemStackError";
+      msg = "stack level too deep";
+      break;
+    default:
+      break;
+  }
+  return make_exception(cls, Value::make_str(msg));
+}
+
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
+      trap_convert_def<&convert_trap>(),
       double_format::dstr_def(double_format::kRuby),
   };
   return defs;
@@ -2791,7 +2943,12 @@ const std::vector<vm::NativeDef>& stdlib() {
 
 // ruby's own wording after the position: the message, then the class in
 // parentheses.
-std::string describe(const Value& v) {
+std::string describe(const Value& trap_or_value) {
+  // An uncaught trap reads as the exception ruby raises for it.
+  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
+                                   ? convert_trap(trap_or_value, nullptr)
+                                   : Value();
+  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
   if (const auto* exc = runtime_parts::exception_record(v)) {
     const Value& kind = (*exc)[kExcName];
     if (kind.is_str()) {

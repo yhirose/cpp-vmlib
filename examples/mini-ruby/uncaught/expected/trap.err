@@ -1,0 +1,1 @@
+trap.rb:4:7: uncaught: String can't be coerced into Integer (TypeError)

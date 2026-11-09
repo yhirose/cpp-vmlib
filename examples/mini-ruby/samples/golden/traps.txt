@@ -1,0 +1,15 @@
+int + string: TypeError: String can't be coerced into Integer
+string + int: TypeError: no implicit conversion of Integer into String
+int - string: TypeError: String can't be coerced into Integer
+array + int: TypeError: no implicit conversion of Integer into Array
+string * string: TypeError: no implicit conversion of String into Integer
+int ** string: TypeError: String can't be coerced into Integer
+int < string: ArgumentError: comparison of Integer with String failed
+array index: TypeError: no implicit conversion of String into Integer
+int / 0: ZeroDivisionError: divided by 0
+int % 0: ZeroDivisionError: divided by 0
+arity: ArgumentError: wrong number of arguments (given 1, expected 2)
+nil + int: NoMethodError
+nil index: NoMethodError
+call: NoMethodError
+unary: NoMethodError
