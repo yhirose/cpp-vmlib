@@ -2244,7 +2244,7 @@ bool nat_write(NativeCall& c) {
 Value convert_trap(const Value& trap, const void*) {
   const Value L = trap_fact(trap, TrapFact::Left);
   std::string cls = "System.InvalidOperationException";
-  std::string msg = trap.as_object()->find("message")->as_str();
+  std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::DivideByZero:
       cls = "System.DivideByZeroException";
@@ -2300,12 +2300,9 @@ const std::vector<vm::NativeDef>& stdlib() {
 
 // What .NET prints after "Unhandled exception.": the exception's name,
 // then its message.
-std::string describe(const Value& trap_or_value) {
+std::string describe(const Value& raised) {
   // An uncaught trap reads as the exception .NET throws for it.
-  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
-                                   ? convert_trap(trap_or_value, nullptr)
-                                   : Value();
-  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
+  const Value v = converted_or_self<&convert_trap>(raised);
   if (const auto* exc = runtime_parts::exception_record(v)) {
     return double_format::display_with((*exc)[kExcName], double_format::kCSharp) +
            ": " +

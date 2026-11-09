@@ -1,0 +1,1 @@
+rethrow.cs:9:29: uncaught: System.DivideByZeroException: Attempted to divide by zero.
