@@ -2916,23 +2916,28 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::Arity: {
       cls = "ArgumentError";
-      const int64_t want = trap_fact(trap, TrapFact::M).as_int();
+      const int64_t want = trap_int(trap, TrapFact::M);
       msg = "wrong number of arguments (given " +
-            std::to_string(trap_fact(trap, TrapFact::N).as_int()) +
+            std::to_string(trap_int(trap, TrapFact::N)) +
             ", expected " + std::to_string(want) + ")";
       break;
     }
     case TrapKind::Uninit:
       cls = "NameError";
       msg = "undefined local variable or method '" +
-            trap_fact(trap, TrapFact::Name).as_str() + "' for main:Object";
+            trap_name(trap) + "' for main:Object";
       break;
     case TrapKind::Depth:
       cls = "SystemStackError";
       msg = "stack level too deep";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::Range:
+    case TrapKind::BadValue:
+    case TrapKind::State:
+    case TrapKind::Host:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   return make_exception(cls, Value::make_str(msg));
 }

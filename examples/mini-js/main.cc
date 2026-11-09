@@ -12,5 +12,6 @@ int main(int argc, char** argv) {
   fe.concatenate = true;
   fe.run.natives = mini_js::stdlib();
   fe.run.describe = mini_js::describe;
+  fe.convert_trap = mini_js::convert_trap;
   return driver::main(argc, argv, fe);
 }

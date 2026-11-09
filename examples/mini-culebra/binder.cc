@@ -1761,12 +1761,12 @@ Value convert_trap(const Value& trap, const void*) {
     case TrapKind::Arity:
       kind = "DispatchError";
       message = "no matching method for `" +
-                trap_fact(trap, TrapFact::Name).as_str() + "`";
+                trap_name(trap) + "`";
       break;
     case TrapKind::Uninit:
       kind = "NameError";
       message = "undefined variable '" +
-                trap_fact(trap, TrapFact::Name).as_str() + "'";
+                trap_name(trap) + "'";
       break;
     case TrapKind::Depth:
       kind = "RecursionError";
@@ -1776,8 +1776,11 @@ Value convert_trap(const Value& trap, const void*) {
       // What no kind fits: its words, as a TypeError.
       kind = "TypeError";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::BadValue:
+    case TrapKind::State:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   Value e = Value::make_object();
   e.as_object()->set("kind", Value::make_str(kind));

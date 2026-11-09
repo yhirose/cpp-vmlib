@@ -23,4 +23,8 @@ const std::vector<vm::NativeDef>& stdlib();
 // executor's "<map>".
 std::string describe(const coreir::Value& v);
 
+// An executor's trap as the exception this language raises for the same
+// fault (runtime_parts.h's converted_or_self applies it).
+coreir::Value convert_trap(const coreir::Value& trap, const void* ctx);
+
 }  // namespace mini_lua

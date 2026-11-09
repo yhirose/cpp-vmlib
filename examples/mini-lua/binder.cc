@@ -799,8 +799,8 @@ struct Binder {
     r.add(r.iff(
         r.either(r.bin(BinOp::Lt, r.L(pos), r.I(1)),
                  r.bin(BinOp::Gt, r.L(pos), r.bin(BinOp::Add, r.L(k), r.I(1)))),
-        r.b.make_throw(
-            r.S("bad argument #2 to 'insert' (position out of bounds)"))));
+        r.nat("arg_fail", {r.S("bad argument #2 to 'insert' (position out of "
+                               "bounds)")})));
     r.add(r.wh(r.bin(BinOp::Ge, r.L(k), r.L(pos)),
                r.blk({r.call("$set", {r.L(t), r.bin(BinOp::Add, r.L(k), r.I(1)),
                                       r.call("$get", {r.L(t), r.L(k)})}),
@@ -858,8 +858,8 @@ struct Binder {
     const auto [all] = r.params("all");
     const auto [n, k, len] = r.locals("n", "k", "len");
     r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(all)), r.I(0)),
-                r.b.make_throw(r.S("bad argument #1 to 'select' (number "
-                                   "expected, got no value)"))));
+                r.nat("arg_fail", {r.S("bad argument #1 to 'select' (number "
+                                      "expected, got no value)")})));
     r.add(r.set(n, r.idx(r.L(all), r.I(0))));
     r.add(r.set(len, r.bin(BinOp::Sub, r.len(r.L(all)), r.I(1))));
     r.add(r.iff(r.both(r.is(r.typ(n), "string"),
@@ -870,8 +870,8 @@ struct Binder {
                 r.set(k, r.bin(BinOp::Add, r.L(len),
                                r.bin(BinOp::Add, r.L(k), r.I(1))))));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(1)),
-                r.b.make_throw(
-                    r.S("bad argument #1 to 'select' (index out of range)"))));
+                r.nat("arg_fail", {r.S("bad argument #1 to 'select' (index out "
+                                      "of range)")})));
     r.add(r.iff(r.bin(BinOp::Gt, r.L(k), r.L(len)), r.ret(r.arr({}))));
     // The kth value is all[k], n being all[0].
     r.add(r.ret(r.in(IntrinsicId::ArraySlice,
@@ -2240,6 +2240,14 @@ bool nat_concat_fail(NativeCall& c) {
   return false;
 }
 
+// A library function's complaint of an argument that the IR has already
+// worded ("bad argument #1 to 'select' (index out of range)"): a BadValue
+// trap, which the conversion gives its chunk and line.
+bool nat_arg_fail(NativeCall& c) {
+  c.error = c.trap(TrapKind::BadValue, c.arg(0).as_str());
+  return false;
+}
+
 bool nat_floor(NativeCall& c) {
   const Value& v = c.arg(0);
   if (v.is_int()) {
@@ -2379,8 +2387,16 @@ Value convert_trap(const Value& trap, const void*) {
     case TrapKind::Depth:
       msg = "stack overflow";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::KeyType:
+    case TrapKind::Range:
+    case TrapKind::Arity:
+    case TrapKind::Uninit:
+    case TrapKind::BadValue:
+    case TrapKind::State:
+    case TrapKind::Host:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   return Value::make_str(
       chunk_name() + ":" +
@@ -2403,6 +2419,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
       {"concat_fail", 2, nat_concat_fail, nullptr},
+      {"arg_fail", 1, nat_arg_fail, nullptr},
       trap_convert_def<&convert_trap>(),
   };
   return defs;

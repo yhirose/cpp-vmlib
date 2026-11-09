@@ -1604,8 +1604,8 @@ std::string describe(const Value& v) {
   std::string msg = "runtime error: ";
   switch (trap_kind(v)) {
     case TrapKind::Range: {
-      const int64_t i = trap_fact(v, TrapFact::N).as_int();
-      const int64_t n = trap_fact(v, TrapFact::M).as_int();
+      const int64_t i = trap_int(v, TrapFact::N);
+      const int64_t n = trap_int(v, TrapFact::M);
       msg += "index out of range [" + std::to_string(i) + "]";
       if (i >= 0) msg += " with length " + std::to_string(n);
       break;

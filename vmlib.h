@@ -2735,6 +2735,21 @@ std::vector<SharedEffect> shared_effects(const Module& m);
 // "line:col: callvalue runs twice in block@line:col".
 std::string to_string(const Module& m, const SharedEffect& e);
 
+// A Throw of a string the front end wrote -- a string literal, or one joined
+// from a literal and something else -- in a helper of its runtime (a function
+// named `$...`; a program's own `throw "x"` is the program's). A front end that
+// fails a program for a fault the VM has an operation for ends the helper
+// in that operation on the original operands, so the executor's trap names
+// it and the front end's conversion words it; a Throw of its own text
+// words it a second time, without the trap's position, kind or operands.
+// (A front end's own `error`-style Throw of a value it was handed is not
+// this.) thrown_strings lists those Throws.
+struct ThrownString {
+  std::string helper;  // the function's name
+  NodeId node;
+};
+std::vector<ThrownString> thrown_strings(const Module& m);
+
 // The mirror image: a node of that kind that no function body reaches, and
 // so never runs at all. verify() looks only at what a body reaches, and a
 // node built and then left unused costs nothing but its space; this kind
@@ -5334,6 +5349,17 @@ inline Verb trap_verb(const Value& v) {
   return f.is_int() ? verb_decode(f.as_int()) : Verb{};
 }
 
+// The name fact as text, and an int fact as a number; empty and 0 when the
+// trap carries none.
+inline std::string trap_name(const Value& v) {
+  const Value n = trap_fact(v, TrapFact::Name);
+  return n.is_str() ? n.as_str() : std::string();
+}
+inline int64_t trap_int(const Value& v, TrapFact i) {
+  const Value n = trap_fact(v, i);
+  return n.is_int() ? n.as_int() : 0;
+}
+
 // The executor's own words for a trap, whatever its kind.
 inline std::string trap_message(const Value& trap) {
   const Value* m = trap.is_object() ? trap.as_object()->find("message") : nullptr;
@@ -7238,6 +7264,37 @@ inline std::string line_col(const Module& m, NodeId id) {
 }
 
 }  // namespace detail
+
+inline std::vector<ThrownString> thrown_strings(const Module& m) {
+  const auto has_literal = [&](auto&& self, NodeId id) -> bool {
+    const Node& n = m.at(id);
+    if (n.tag == Tag::Literal) {
+      return m.consts[static_cast<size_t>(n.a)].kind == ConstKind::Str;
+    }
+    if (n.tag != Tag::Binary) return false;
+    for (uint32_t i = 0; i < n.num_children; ++i) {
+      if (self(self, m.child(id, i))) return true;
+    }
+    return false;
+  };
+  std::vector<ThrownString> out;
+  const Func* in = nullptr;
+  const auto walk = [&](auto&& self, NodeId id) -> void {
+    const Node& n = m.at(id);
+    if (n.tag == Tag::Throw && n.num_children == 1 &&
+        has_literal(has_literal, m.child(id, 0))) {
+      out.push_back({in->name, id});
+    }
+    for (uint32_t i = 0; i < n.num_children; ++i) self(self, m.child(id, i));
+  };
+  // The runtime a front end writes in IR: its helpers, named `$...`.
+  for (const Func& f : m.funcs) {
+    if (f.name.empty() || f.name[0] != '$') continue;
+    in = &f;
+    walk(walk, f.body);
+  }
+  return out;
+}
 
 inline std::vector<SharedEffect> shared_effects(const Module& m) {
   detail::SharingScan scan(m);

@@ -312,7 +312,7 @@ so that neither meets the other.
 
 **Where binders go wrong.** Auditing the eight `mini-*` front ends against
 their real languages turned up the same few mistakes in nearly every one.
-The first two have a check that runs over a new front end's programs; the
+The first three have a check that runs over a new front end's programs; the
 rest are caught by a sample written against the real language, its output
 kept as the golden (see [Testing](#testing)).
 
@@ -325,6 +325,14 @@ kept as the golden (see [Testing](#testing)).
 - *Each operand runs once.* A `NodeId` used twice -- a receiver for its
   lookup and again for its call, the target of a desugared `x op= y` --
   runs twice, and `--check-effects`, above, reports it.
+- *A failure the VM has an operation for is the VM's trap.* A helper's last
+  step before it fails is the plain operation on the original operands --
+  `a + b`, `xs[i]`, a call -- never a re-worded check or a `Throw` of a
+  string of its own: the executor then raises a trap that names the kind,
+  the operation and the operands, and the front end words it once, in its
+  conversion ([Traps](#traps)). A helper that throws its own text words
+  the failure a second time, without the trap's position or operands.
+  `--check-effects` reports a `$helper` that throws a string literal.
 - *Evaluation order is the language's, not the tree's.* lua5.4 evaluates a
   multiple assignment's targets left to right, then its values, then
   stores right to left; Python's `t[k] = v` evaluates `v` before `t` and
@@ -716,6 +724,34 @@ is belongs to the language. `StrUpper` and `StrLower` follow the same line
 for case: ASCII only, byte by byte, so a multi-byte character passes
 through whole -- the ASCII half is the same everywhere, and what case means
 above it is the language's own table.
+
+## Traps
+
+When the executor itself fails -- an operand of the wrong type, a call of a
+non-function, an index out of range, a division by zero, a recursion past
+the bound -- the value a handler sees is a `{message, line, col}` object
+marked as a trap, with the executor's words in `message`. It also says
+what failed, as data a front end can word in its language's terms:
+`coreir::trap_kind(v)` is a `TrapKind` (`Operands`, `NotCallable`,
+`NotIndexable`, `KeyType`, `Range`, `Immutable`, `DivideByZero`, `Arity`,
+`Uninit`, `Depth`, `BadValue`, `State`, `Host`, `Internal`), and
+`trap_verb` (the `BinOp`, `UnOp`, `IntrinsicId` or `Tag` it was doing),
+`trap_fact` (the operands, as the Values; a name; two ints) and
+`trap_message` say the rest. The facts are in the trap's meta, which no key
+reaches, so the object keeps its three keys and a front end that does
+nothing with them reports as before.
+
+A front end with words of its own converts at its catch: a native call
+(`runtime_parts::converted`) that answers the caught value unchanged unless
+it is a trap, and then the language's exception for it -- a plain C++
+`switch` on the kind, with the operands named as the language names them.
+`describe` runs a raised value through the same conversion
+(`converted_or_self`), so an uncaught trap reads the same. The converted
+exception carries the trap's place (`stamp_origin`), so raising it again
+reports where it first failed. A native fails with `NativeCall::trap(kind,
+message, facts)`; `Host` is for what has no kind. Each front end's
+`traps` sample and `uncaught/` cases show the wording against the real
+language.
 
 ## Host functions
 

@@ -2432,7 +2432,7 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::Uninit:
       name = "ReferenceError";
-      msg = "Cannot access '" + trap_fact(trap, TrapFact::Name).as_str() +
+      msg = "Cannot access '" + trap_name(trap) +
             "' before initialization";
       break;
     case TrapKind::Depth:
@@ -2443,8 +2443,17 @@ Value convert_trap(const Value& trap, const void*) {
       name = "RangeError";
       msg = "Division by zero";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::Operands:
+    case TrapKind::KeyType:
+    case TrapKind::Range:
+    case TrapKind::Immutable:
+    case TrapKind::Arity:
+    case TrapKind::BadValue:
+    case TrapKind::State:
+    case TrapKind::Host:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   Value e = Value::make_object();
   e.as_object()->set("name", Value::make_str(name));

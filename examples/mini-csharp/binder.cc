@@ -2283,8 +2283,15 @@ Value convert_trap(const Value& trap, const void*) {
           "can happen from having too many functions on the call stack or "
           "function on the stack using too much stack space.";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::Immutable:
+    case TrapKind::Arity:
+    case TrapKind::Uninit:
+    case TrapKind::BadValue:
+    case TrapKind::State:
+    case TrapKind::Host:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   return make_exception(cls, Value::make_str(msg));
 }

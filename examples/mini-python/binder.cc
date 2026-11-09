@@ -5220,9 +5220,7 @@ Value convert_trap(const Value& trap, const void*) {
   const std::string l = type_name_of(L);
   const std::string r = type_name_of(R);
   const Verb verb = trap_verb(trap);
-  const auto name = [&] { return trap_fact(trap, TrapFact::Name).as_str(); };
-  const auto n = trap_fact(trap, TrapFact::N);
-  const auto m = trap_fact(trap, TrapFact::M);
+  const auto name = [&] { return trap_name(trap); };
   const auto sequence = [](const Value& x) {
     return x.is_str() || x.is_array() || kind_record(x, kTupleKind);
   };
@@ -5293,8 +5291,8 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::Arity: {
       cls = "TypeError";
-      const int64_t given = n.as_int();
-      const int64_t want = m.as_int();
+      const int64_t given = trap_int(trap, TrapFact::N);
+      const int64_t want = trap_int(trap, TrapFact::M);
       if (given > want) {
         msg = name() + "() takes " + std::to_string(want) +
               " positional argument" + (want == 1 ? "" : "s") + " but " +
@@ -5319,8 +5317,11 @@ Value convert_trap(const Value& trap, const void*) {
       cls = "ValueError";
       msg = "generator already executing";
       break;
-    default:
-      break;
+    case TrapKind::None:
+    case TrapKind::BadValue:
+    case TrapKind::Host:
+    case TrapKind::Internal:
+      break;  // no words of its own: the executor's message stands
   }
   return make_exception(cls, Value::make_str(msg));
 }

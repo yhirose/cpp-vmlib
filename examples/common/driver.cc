@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include "vmlib.h"
 
 #include "driver.h"
+#include "runtime_parts.h"
 
 namespace driver {
 
@@ -28,6 +30,48 @@ void usage(const FrontEnd& fe) {
             << fe.program;
   if (fe.concatenate) std::cerr << " [" << fe.program << " ...]";
   std::cerr << "\n";
+}
+
+// Every kind of trap, with no facts and with a binary operation's, through
+// the front end's conversion: each must answer something with words in it,
+// so a kind added to TrapKind that a conversion forgot is found here (and by
+// the compiler, where the conversion's switch is exhaustive).
+size_t check_conversions(const FrontEnd& fe) {
+  if (!fe.convert_trap) return 0;
+  const coreir::Value left = coreir::Value::make_int(1);
+  const coreir::Value right = coreir::Value::make_str("a");
+  const std::string name = "f";
+  size_t bad = 0;
+  for (int k = 1; k <= static_cast<int>(coreir::TrapKind::Internal); ++k) {
+    for (const bool facts : {false, true}) {
+      coreir::TrapFacts t;
+      if (facts) {
+        t = {.verb = coreir::verb_of(coreir::BinOp::Add), .l = &left,
+             .r = &right, .name = &name, .n = 1, .m = 2};
+      }
+      const coreir::Value trap = coreir::make_trap(
+          static_cast<coreir::TrapKind>(k), "the VM's words", {1, 1}, t);
+      const coreir::Value e = fe.convert_trap(trap, nullptr);
+      std::string words;
+      if (e.is_str()) {
+        words = e.as_str();
+      } else if (const auto* exc = runtime_parts::exception_record(e)) {
+        words = (*exc)[runtime_parts::kExcMessage].is_str()
+                    ? (*exc)[runtime_parts::kExcMessage].as_str()
+                    : "";
+      } else if (e.is_object() && e.as_object()->find("message")) {
+        words = e.as_object()->find("message")->is_str()
+                    ? e.as_object()->find("message")->as_str()
+                    : "";
+      }
+      if (words.empty()) {
+        std::cerr << fe.name << ": trap kind " << k << (facts ? " (with facts)" : "")
+                  << " converts to nothing\n";
+        ++bad;
+      }
+    }
+  }
+  return bad;
 }
 
 }  // namespace
@@ -100,6 +144,19 @@ int main(int argc, char** argv, const FrontEnd& fe) {
     };
     report(coreir::shared_effects(m));
     report(coreir::dropped_effects(m));
+    for (const auto& t : coreir::thrown_strings(m)) {
+      const auto& ok = fe.string_throwers;
+      if (std::find(ok.begin(), ok.end(), "*") != ok.end() ||
+          std::find(ok.begin(), ok.end(), t.helper) != ok.end()) {
+        continue;
+      }
+      const coreir::SrcPos at = m.positions[m.at(t.node).pos];
+      std::cerr << path << ": " << t.helper << " (" << at.line << ":" << at.col
+                << ") throws a string of its own; end the helper in the VM's "
+                   "operation instead\n";
+      ++found;
+    }
+    found += check_conversions(fe);
     return found == 0 ? 0 : 1;
   }
 

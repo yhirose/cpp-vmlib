@@ -7,7 +7,9 @@
 // It reads the program, binds it, compiles it and runs it -- or stops at
 // the bound module (--dump-ir), at the compiled program (--dump-bc), or at
 // the list of what one run would evaluate twice and what was built and
-// dropped (--check-effects). With --profile the run is counted (vm::run's
+// dropped, and of the Throws of a string the front end wrote
+// (--check-effects; coreir::thrown_strings has why), after running every
+// kind of trap through the front end's conversion. With --profile the run is counted (vm::run's
 // Profile overload), and once the program has finished, where its
 // instructions went -- function by function, helpers included -- is
 // printed to stderr as vm::to_string's table; a program that fails prints
@@ -21,6 +23,7 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "vmlib.h"
 
@@ -62,6 +65,16 @@ struct FrontEnd {
   // program. Without it a program is one file, and a second is a usage
   // error.
   bool concatenate = false;
+  // How the front end turns an executor's trap into its language's
+  // exception (runtime_parts.h's converted_or_self), if it does. Null: it
+  // has no words for traps (PL/0), or only for an uncaught one. --check-effects
+  // runs every TrapKind through it.
+  coreir::Value (*convert_trap)(const coreir::Value& trap,
+                                const void* ctx) = nullptr;
+  // The helpers of its runtime that may throw a string of their own (the
+  // language's `error`, whose message is the program's): by name, or "*" for
+  // a language whose runtime errors are plain strings it words itself.
+  std::vector<std::string> string_throwers;
 };
 
 // The whole of a front end's main, once the front end has said what is its
