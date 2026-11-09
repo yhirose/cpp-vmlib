@@ -41,6 +41,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -797,10 +799,12 @@ struct Binder {
     r.finish("$pow");
   }
 
-  // Float#to_s: shortest round trip, ".0" on a whole one.
+  // Float#to_s: the shortest round trip, in double_format.h's kRuby layout
+  // ("1.0e+16", "1.0e-05", ".0" on a whole one), which the host writes.
   void rt_fstr() {
     RT r(*this);
-    float_str(r, {"NaN", "Infinity", "-Infinity"});
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.nat("dstr", {r.L(v)})));
     r.finish("$fstr");
   }
 
@@ -2787,6 +2791,8 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kRuby),
   };
   return defs;
 }
@@ -2797,10 +2803,11 @@ std::string describe(const Value& v) {
   if (const auto* exc = runtime_parts::exception_record(v)) {
     const Value& kind = (*exc)[kExcName];
     if (kind.is_str()) {
-      return to_display((*exc)[kExcMessage]) + " (" + kind.as_str() + ")";
+      return double_format::display_with((*exc)[kExcMessage], double_format::kRuby) +
+             " (" + kind.as_str() + ")";
     }
   }
-  return to_display(v);
+  return double_format::display_with(v, double_format::kRuby);
 }
 
 Module bind_source(const std::string& source) {
