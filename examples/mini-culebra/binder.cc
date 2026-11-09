@@ -107,6 +107,39 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
+// The escapes culebra's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode).
+void culebra_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e == 'x') {
+    if (escapes::hex_digits(raw, u.i + 1, 2, v) != 2) {
+      u.fail_at("invalid \\x escape: expected two hex digits (\\xHH).");
+    } else {
+      u.out.push_back(static_cast<char>(v));
+      u.i += 3;
+    }
+  } else if (e == 'u' || e == 'U') {
+    const size_t want = e == 'u' ? 4 : 8;
+    if (escapes::hex_digits(raw, u.i + 1, want, v) != want) {
+      u.fail_at(std::string("invalid \\") + e + " escape: expected " +
+                std::to_string(want) + " hex digits.");
+    } else if (v >= 0xD800 && v <= 0xDFFF) {
+      u.fail_at(std::string("invalid \\") + e +
+                " escape: not a Unicode scalar value (surrogate).");
+    } else if (v > 0x10FFFF) {
+      u.fail_at(std::string("invalid \\") + e +
+                " escape: not a Unicode scalar value.");
+    } else {
+      escapes::append_utf8(u.out, v);
+      u.i += 1 + want;
+    }
+  } else {  // an escape culebra has no meaning for stays, with its character
+    u.out.push_back('\\');
+  }
+}
+
 // The text of a double-quoted string between its holes, as the bytes it
 // stands for -- culebra's rules: `\n \t \r \\ \"`, `\{` (a brace that does
 // not open a hole), `\xHH` (one byte), `\uHHHH` and `\UHHHHHHHH` (a Unicode
@@ -118,48 +151,7 @@ std::string unescape(std::string_view raw, const Ast& at) {
       {'n', '\n'}, {'t', '\t'}, {'r', '\r'}, {'\\', '\\'}, {'"', '"'},
       {'{', '{'},
   };
-  escapes::Unescaper u(raw);
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e == 'x') {
-      if (escapes::hex_digits(raw, u.i + 1, 2, 2, v) == 0) {
-        u.fail_at(start, "invalid \\x escape: expected two hex digits (\\xHH).");
-      } else {
-        u.out.push_back(static_cast<char>(v));
-        u.i += 3;
-      }
-    } else if (e == 'u' || e == 'U') {
-      const size_t n = e == 'u' ? 4 : 8;
-      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
-        u.fail_at(start, std::string("invalid \\") + e + " escape: expected " +
-                             (e == 'u' ? "4" : "8") + " hex digits.");
-      } else if (v >= 0xD800 && v <= 0xDFFF) {
-        u.fail_at(start, std::string("invalid \\") + e +
-                             " escape: not a Unicode scalar value (surrogate).");
-      } else if (v > 0x10FFFF) {
-        u.fail_at(start, std::string("invalid \\") + e +
-                             " escape: not a Unicode scalar value.");
-      } else {
-        escapes::append_utf8(u.out, v);
-        u.i += 1 + n;
-      }
-    } else {
-      u.out.push_back('\\');  // an escape culebra has no meaning for stays
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, culebra_escape);
 }
 
 // culebra's standard library, as this front end reaches it. A free function
@@ -1133,15 +1125,13 @@ struct Binder {
       case "number"_: {
         // culebra reads the digits before any minus in front of them, so
         // -9223372036854775808 is as out of range as 9223372036854775808.
-        const auto n = literals::parse_int_literal(a.token);
-        if (!n.fits) {
-          fail(a, "integer literal out of range: " + std::string(a.token));
-        }
-        return b.literal(n.value);
+        return b.literal(literals::check_int(
+            a, a.token,
+            "integer literal out of range: " + std::string(a.token)));
       }
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(std::string(a.token));
       case "istring"_: {
@@ -1291,21 +1281,18 @@ struct Binder {
         // the usual shape, needs not: DropSet answers the object it gave
         // the destructor, so the literal and its `drop` are one
         // expression.
-        // A quoted key is single-quoted, which has no escapes: its token.
-        const auto key_of = [](const Ast& c) {
-          return std::string(c.nodes[0]->token);
-        };
         const size_t n = a.nodes.size();
         size_t first = n;
         for (size_t i = 0; i < n; ++i) {
-          if (key_of(*a.nodes[i]) == kDropField) {
+          if (std::string(a.nodes[i]->nodes[0]->token) == kDropField) {
             first = i;
             break;
           }
         }
         std::vector<std::pair<NodeId, NodeId>> kvs;
         for (size_t i = 0; i < first; ++i) {
-          kvs.emplace_back(b.str_literal(key_of(*a.nodes[i])),
+          kvs.emplace_back(
+              b.str_literal(std::string(a.nodes[i]->nodes[0]->token)),
                            emit_expr(*a.nodes[i]->nodes[1], ctx));
         }
         const NodeId obj = b.object_lit(kvs);
@@ -1317,7 +1304,7 @@ struct Binder {
         return b.let(obj, [&](auto o) {
           std::vector<NodeId> steps;
           for (size_t i = first; i < n; ++i) {
-            const std::string k = key_of(*a.nodes[i]);
+            const std::string k = std::string(a.nodes[i]->nodes[0]->token);
             const NodeId v = emit_expr(*a.nodes[i]->nodes[1], ctx);
             steps.push_back(k == kDropField
                                 ? b.intrinsic(IntrinsicId::DropSet, {o(), v})

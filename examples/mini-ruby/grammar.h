@@ -138,11 +138,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   mulop      <- < '*' ![*=] / '/' ![=] / '%' ![=] > _
   # `**` binds tighter than a unary minus and groups to the right:
   # -x ** 2 is -(x ** 2) and 2 ** 3 ** 2 is 2 ** 9. A numeric literal's own
-  # minus is no exception (-2 ** 2 is -4), so `litnegpow` takes it back off
-  # a bare literal that `**` follows; any other use of the literal's sign
-  # (-2.abs) is the token's, in `powexp`'s postfix.
-  unary      <- litnegpow / powexp / negexp
-  litnegpow  <- '-' (float / number) powop unary             { no_ast_opt }
+  # minus is part of the token, so `-2 ** 2` reaches powexp as (-2) ** 2; the
+  # binder takes that case back to -(2 ** 2). `-2.abs` is the token's too.
+  unary      <- powexp / negexp
   powexp     <- postfix (powop unary)?
   powop      <- < '**' > _
   negexp     <- '-' ![=] _ unary                             { no_ast_opt }

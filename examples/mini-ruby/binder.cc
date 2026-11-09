@@ -86,15 +86,15 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-// `\u` has been read; `u.i` is at what follows it: four hex digits, or
-// `{` code points separated by blanks `}`.
-void ruby_unicode_escape(escapes::Unescaper& u, size_t start) {
+// `\u` has been read, u.i at what follows it: four hex digits, or `{` code
+// points separated by blanks, `}`.
+void ruby_unicode(escapes::Unescaper& u) {
   const std::string_view raw = u.raw;
   const auto put = [&](uint32_t cp) {
     if (cp > 0x10FFFF) {
-      u.fail_at(start, "invalid Unicode codepoint (too large)");
+      u.fail_at("invalid Unicode codepoint (too large)");
     } else if (cp >= 0xD800 && cp <= 0xDFFF) {
-      u.fail_at(start, "invalid Unicode codepoint");
+      u.fail_at("invalid Unicode codepoint");
     } else {
       escapes::append_utf8(u.out, cp);
     }
@@ -105,22 +105,51 @@ void ruby_unicode_escape(escapes::Unescaper& u, size_t start) {
     while (!u.failed()) {
       while (u.i < raw.size() && (raw[u.i] == ' ' || raw[u.i] == '\t')) ++u.i;
       if (u.i >= raw.size()) {
-        u.fail_at(start, "unterminated Unicode escape");
+        u.fail_at("unterminated Unicode escape");
       } else if (raw[u.i] == '}') {
         ++u.i;
         return;
-      } else if (const size_t n = escapes::digits(raw, u.i, 16, 8, v); n == 0) {
-        u.fail_at(start, "invalid Unicode escape");
+      } else if (const size_t n = escapes::digits(raw, u.i, 16, 8, v);
+                 n == 0) {
+        u.fail_at("invalid Unicode escape");
       } else {
         u.i += n;
         put(v);
       }
     }
-  } else if (escapes::hex_digits(raw, u.i, 4, 4, v) == 0) {
-    u.fail_at(start, "invalid Unicode escape");
+  } else if (escapes::hex_digits(raw, u.i, 4, v) != 4) {
+    u.fail_at("invalid Unicode escape");
   } else {
     u.i += 4;
     put(v);
+  }
+}
+
+// The escapes Ruby's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode).
+void ruby_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e >= '0' && e <= '7') {  // \0 to \777: a byte, mod 256
+    u.i += escapes::digits(raw, u.i, 8, 3, v);
+    u.out.push_back(static_cast<char>(v & 0xFF));
+  } else if (e == 'x') {
+    const size_t n = escapes::hex_digits(raw, u.i + 1, 2, v);
+    if (n == 0) {
+      u.fail_at("invalid hex escape");
+    } else {
+      u.out.push_back(static_cast<char>(v));
+      u.i += 1 + n;
+    }
+  } else if (e == 'u') {
+    ++u.i;
+    ruby_unicode(u);
+  } else if (e == 'c' || e == 'C' || e == 'M') {
+    u.fail_at(std::string("the \\") + e + " escape is not supported here");
+  } else {  // an escape Ruby has no meaning for is itself
+    u.out.push_back(e);
+    ++u.i;
   }
 }
 
@@ -134,46 +163,10 @@ void ruby_unicode_escape(escapes::Unescaper& u, size_t start) {
 std::string unescape(std::string_view raw, const Ast& at) {
   static constexpr escapes::Simple kSimple[] = {
       {'a', '\a'}, {'b', '\b'}, {'e', '\x1b'}, {'f', '\f'}, {'n', '\n'},
-      {'r', '\r'}, {'s', ' '},  {'t', '\t'},   {'v', '\v'}, {'\n', escapes::kDrop},
+      {'r', '\r'}, {'s', ' '},  {'t', '\t'},   {'v', '\v'},
+      {'\n', escapes::kDrop},
   };
-  escapes::Unescaper u(raw);
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e >= '0' && e <= '7') {
-      u.i += escapes::digits(raw, u.i, 8, 3, v);
-      u.out.push_back(static_cast<char>(v & 0xFF));  // \400 is \0
-    } else if (e == 'x') {
-      const size_t n = escapes::hex_digits(raw, u.i + 1, 1, 2, v);
-      if (n == 0) {
-        u.fail_at(start, "invalid hex escape");
-      } else {
-        u.out.push_back(static_cast<char>(v));
-        u.i += 1 + n;
-      }
-    } else if (e == 'u') {
-      ++u.i;
-      ruby_unicode_escape(u, start);
-    } else if (e == 'c' || e == 'C' || e == 'M') {
-      u.fail_at(start, std::string("the \\") + e +
-                           " escape is not supported here");
-    } else {
-      u.out.push_back(e);  // an escape Ruby has no meaning for is itself
-      ++u.i;
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, ruby_escape);
 }
 
 // A single-quoted string's body: only `\\` and `\'` are escapes; any other
@@ -1954,19 +1947,14 @@ struct Binder {
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_: {
-        if (literals::has_leading_zero(a.token)) {
-          fail(a, "octal literals are not supported here");
-        }
-        const auto n = literals::parse_int_literal(a.token);
-        if (!n.fits) {
-          fail(a, "integer literal " + std::string(a.token) +
-                      " is not supported here (no Bignum)");
-        }
-        return b.literal(n.value);
+        literals::check_no_leading_zero(
+            a, a.token, "octal literals are not supported here");
+        return b.literal(literals::check_int(
+            a, a.token, literals::no_bignum_message(a.token)));
       }
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(unescape_single(a.token));
       case "istring"_: {
@@ -2058,14 +2046,27 @@ struct Binder {
         return b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p));
       case "negexp"_:
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
-      case "powexp"_:
-        return arith("**", emit_expr(*a.nodes[0], ctx),
-                     emit_expr(*a.nodes[2], ctx), pos_of(*a.nodes[1]));
-      // -2 ** 2: the minus applies to the power, not to the literal.
-      case "litnegpow"_:
-        return b.unary(UnOp::Neg,
-                       arith("**", emit_expr(*a.nodes[0], ctx),
-                             emit_expr(*a.nodes[2], ctx), pos_of(*a.nodes[1])));
+      case "powexp"_: {
+        const Ast& base = *a.nodes[0];
+        const SrcPos op_p = pos_of(*a.nodes[1]);
+        const bool literal = base.name == "number" || base.name == "float";
+        if (a.nodes.size() == 3 && literal && !base.token.empty() &&
+            base.token.front() == '-') {
+          // -2 ** 2 is -(2 ** 2): the power binds tighter than the literal's
+          // own minus, which is taken back off here.
+          const std::string_view mag = base.token.substr(1);
+          const NodeId m =
+              base.name == "float"
+                  ? b.double_literal(literals::parse_float_literal(mag))
+                  : b.literal(literals::check_int(
+                        base, mag, literals::no_bignum_message(mag)));
+          const NodeId pow =
+              arith("**", m, emit_expr(*a.nodes[2], ctx), op_p);
+          return b.unary(UnOp::Neg, pow);
+        }
+        return arith("**", emit_expr(base, ctx), emit_expr(*a.nodes[2], ctx),
+                     op_p);
+      }
       case "rangeexp"_:
         return rt.call("$range",
                        {emit_expr(*a.nodes[0], ctx),

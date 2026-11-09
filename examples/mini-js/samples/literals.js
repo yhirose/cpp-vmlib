@@ -10,3 +10,5 @@ console.log("\q\a\e\s\$\z\-");
 console.log('it\'s', "say \"hi\"", '\\');
 console.log("a\
 b");
+// A leading zero with no other digit is 0, in sloppy JavaScript too.
+console.log(00, 000);

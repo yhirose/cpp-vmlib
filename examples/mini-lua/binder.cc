@@ -79,6 +79,52 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
+// The escapes Lua's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode). A line break is a newline.
+void lua_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e == '\n' || e == '\r') {
+    u.out.push_back('\n');
+    u.i = escapes::skip_line_break(raw, u.i);
+  } else if (e == 'z') {  // skips the whitespace after it, line breaks too
+    ++u.i;
+    while (u.i < raw.size() &&
+           std::isspace(static_cast<unsigned char>(raw[u.i]))) {
+      ++u.i;
+    }
+  } else if (e == 'x') {
+    if (escapes::hex_digits(raw, u.i + 1, 2, v) != 2) {
+      u.fail_at("hexadecimal digit expected");
+    } else {
+      u.out.push_back(static_cast<char>(v));
+      u.i += 3;
+    }
+  } else if (e >= '0' && e <= '9') {
+    u.i += escapes::digits(raw, u.i, 10, 3, v);
+    if (v > 255) {
+      u.fail_at("decimal escape too large");
+    } else {
+      u.out.push_back(static_cast<char>(v));
+    }
+  } else if (e == 'u') {
+    if (u.i + 1 >= raw.size() || raw[u.i + 1] != '{') {
+      u.fail_at("missing '{'");
+    } else if (const size_t n = escapes::braced_hex(raw, u.i + 1, 64, v);
+               n == 0) {
+      u.fail_at("hexadecimal digit expected, or missing '}'");
+    } else if (v > 0x7FFFFFFFu) {
+      u.fail_at("UTF-8 value too large");
+    } else {
+      escapes::append_utf8(u.out, v);
+      u.i += 3 + n;
+    }
+  } else {
+    u.fail_at(std::string("invalid escape sequence '\\") + e + "'");
+  }
+}
+
 // A string literal's body as the bytes it stands for -- Lua 5.4's rules
 // (manual 3.1): the one-letter escapes, a backslash before a line break (a
 // newline), `\z` (skips the whitespace after it), `\xXX` (two hex digits,
@@ -89,66 +135,8 @@ std::string unescape(std::string_view raw, const Ast& at) {
   static constexpr escapes::Simple kSimple[] = {
       {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
       {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'"', '"'}, {'\'', '\''},
-      {'\n', '\n'}, {'\r', '\n'},  // a line break itself, either one
   };
-  escapes::Unescaper u(raw);
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\') {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];  // the grammar gives every backslash a character
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      u.out.push_back(static_cast<char>(s));
-      ++u.i;
-      // "\r\n" and "\n\r" are one line break.
-      if ((e == '\n' || e == '\r') && u.i < raw.size() &&
-          (raw[u.i] == '\n' || raw[u.i] == '\r') && raw[u.i] != e) {
-        ++u.i;
-      }
-    } else if (e == 'z') {
-      ++u.i;
-      while (u.i < raw.size() && std::isspace(static_cast<unsigned char>(raw[u.i]))) {
-        ++u.i;
-      }
-    } else if (e == 'x') {
-      if (escapes::hex_digits(raw, u.i + 1, 2, 2, v) == 0) {
-        u.fail_at(start, "hexadecimal digit expected");
-      } else {
-        u.out.push_back(static_cast<char>(v));
-        u.i += 3;
-      }
-    } else if (e >= '0' && e <= '9') {
-      u.i += escapes::digits(raw, u.i, 10, 3, v);
-      if (v > 255) {
-        u.fail_at(start, "decimal escape too large");
-      } else {
-        u.out.push_back(static_cast<char>(v));
-      }
-    } else if (e == 'u') {
-      if (u.i + 1 >= raw.size() || raw[u.i + 1] != '{') {
-        u.fail_at(start, "missing '{'");
-      } else if (const size_t n = escapes::digits(raw, u.i + 2, 16, 64, v);
-                 n == 0) {
-        u.fail_at(start, "hexadecimal digit expected");
-      } else if (v > 0x7FFFFFFFu) {
-        u.fail_at(start, "UTF-8 value too large");
-      } else if (u.i + 2 + n >= raw.size() || raw[u.i + 2 + n] != '}') {
-        u.fail_at(start, "missing '}'");
-      } else {
-        escapes::append_utf8(u.out, v);
-        u.i += 3 + n;
-      }
-    } else {
-      u.fail_at(start, std::string("invalid escape sequence '\\") + e + "'");
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, lua_escape);
 }
 
 // The library names a program may use without declaring them. Each is
@@ -1146,12 +1134,12 @@ struct Binder {
         // read from the same digits: 9223372036854775808 is 2^63.
         const std::string digits(a.token);
         const auto n = literals::parse_int_literal(digits);
-        return {n.fits ? b.literal(n.value)
-                       : b.double_literal(std::strtod(digits.c_str(), nullptr))};
+        return {n.fits
+                    ? b.literal(n.value)
+                    : b.double_literal(literals::parse_float_literal(digits))};
       }
       case "float"_:
-        return {b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr))};
+        return {b.double_literal(literals::parse_float_literal(a.token))};
       case "string"_:
         return {b.str_literal(unescape(a.token, a))};
       case "literal"_: {

@@ -46,3 +46,6 @@ puts 'a\nb\\c\'d\qe'
 puts 'a\\'
 puts "#{1 + 1}\x41#{"\u0042\n".length}"
 puts "\"\\\'"
+# A leading zero with no other digit is 0 (in octal too), not an octal literal.
+puts 00
+puts 000

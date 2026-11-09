@@ -1,9 +1,9 @@
 // literals.h's parse_int_literal: where an integer literal stops fitting an
 // int64, and how the sign moves that edge. The languages agree on the edge
-// (Lua 5.4 turns 9223372036854775808 into a float, Ruby/Scheme make it a
-// bignum, C#/Go/culebra refuse it; checked with each); they differ in what
-// they do past it, which is the caller's business and is covered by each
-// front end's literals sample and errors/ cases.
+// (Lua 5.4 turns 9223372036854775808 into a float, Ruby and Scheme make a
+// bignum of it, C#, Go and culebra refuse it; checked with each). They
+// differ in what they do past it, which is the caller's business and is
+// covered by each front end's literals sample and errors/ cases.
 //
 // No VM: a pure function of the text, so this runs in milliseconds.
 
@@ -20,13 +20,19 @@ namespace {
 
 int g_failed = 0;
 
-void check(const char* text, int base, bool negative, bool fits, int64_t value) {
-  const auto r = parse_int_literal(text, base, negative);
+void check(const char* text, bool fits, int64_t value) {
+  const auto r = parse_int_literal(text);
   if (r.fits == fits && (!fits || r.value == value)) return;
-  std::fprintf(stderr, "FAIL: \"%s\" base %d negative %d: want %s %lld, got %s %lld\n",
-               text, base, negative, fits ? "fits" : "no fit",
-               static_cast<long long>(value), r.fits ? "fits" : "no fit",
-               static_cast<long long>(r.value));
+  std::fprintf(stderr, "FAIL: \"%s\": want %s %lld, got %s %lld\n", text,
+               fits ? "fits" : "no fit", static_cast<long long>(value),
+               r.fits ? "fits" : "no fit", static_cast<long long>(r.value));
+  ++g_failed;
+}
+
+void zero(const char* text, bool want) {
+  if (has_leading_zero(text) == want) return;
+  std::fprintf(stderr, "FAIL: has_leading_zero(\"%s\"): want %d\n", text,
+               want);
   ++g_failed;
 }
 
@@ -36,47 +42,38 @@ constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
 }  // namespace
 
 int main() {
-  check("0", 10, false, true, 0);
-  check("42", 10, false, true, 42);
-  check("9223372036854775807", 10, false, true, kMax);
+  check("0", true, 0);
+  check("42", true, 42);
+  check("9223372036854775807", true, kMax);
   // One past: strtoll clamped this to kMax; no longer.
-  check("9223372036854775808", 10, false, false, 0);
-  check("18446744073709551615", 10, false, false, 0);  // C#'s ulong max
-  check("18446744073709551616", 10, false, false, 0);  // overflows uint64
-  check("99999999999999999999999", 10, false, false, 0);
+  check("9223372036854775808", false, 0);
+  check("18446744073709551615", false, 0);  // C#'s ulong max
+  check("18446744073709551616", false, 0);  // overflows uint64
+  check("99999999999999999999999", false, 0);
   // The sign is part of the range: -2^63 fits, -2^63-1 does not.
-  check("9223372036854775808", 10, true, true, kMin);
-  check("9223372036854775809", 10, true, false, 0);
-  check("-9223372036854775808", 10, false, true, kMin);  // a signed token
-  check("-9223372036854775809", 10, false, false, 0);
-  check("-0", 10, false, true, 0);
-  check("-5", 10, false, true, -5);
-  check("5", 10, true, true, -5);
+  check("-9223372036854775808", true, kMin);
+  check("-9223372036854775809", false, 0);
+  check("-0", true, 0);
+  check("-5", true, -5);
   // Not digits.
-  check("", 10, false, false, 0);
-  check("-", 10, false, false, 0);
-  check("12a", 10, false, false, 0);
-  check("--1", 10, false, false, 0);
-  check("+1", 10, false, false, 0);
-  // Other bases.
-  check("7fffffffffffffff", 16, false, true, kMax);
-  check("8000000000000000", 16, false, false, 0);
-  check("8000000000000000", 16, true, true, kMin);
-  check("777", 8, false, true, 511);
-  check("101", 2, false, true, 5);
+  check("", false, 0);
+  check("-", false, 0);
+  check("12a", false, 0);
+  check("--1", false, 0);
+  check("+1", false, 0);
+  check("1.5", false, 0);
 
-  // A leading zero before more digits is octal in Ruby, Go and sloppy JS.
-  const auto zero = [](const char* text, bool want) {
-    if (has_leading_zero(text) == want) return;
-    std::fprintf(stderr, "FAIL: has_leading_zero(\"%s\"): want %d\n", text, want);
-    ++g_failed;
-  };
+  // A leading zero before more digits is octal in Ruby, Go and sloppy JS;
+  // "00" is 0 in all of them, and so is "0".
   zero("0", false);
-  zero("00", true);
+  zero("00", false);
+  zero("000", false);
   zero("010", true);
   zero("-07", true);
-  zero("10", false);
+  zero("08", true);
+  zero("00.5", true);
   zero("0.5", false);
+  zero("10", false);
   zero("0e1", false);
   zero("", false);
 

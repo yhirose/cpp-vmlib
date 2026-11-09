@@ -60,7 +60,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -131,12 +130,53 @@ SrcPos pos_of(const Ast& a) {
 }
 
 int64_t parse_int(const std::string& s, const Ast& at) {
-  if (literals::has_leading_zero(s)) {
-    fail(at, "octal literals are not supported here");
+  literals::check_no_leading_zero(at, s,
+                                  "octal literals are not supported here");
+  return literals::check_int(at, s, "integer literal out of range");
+}
+
+// The escapes Go's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode).
+void go_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e == 'x' || e == 'u' || e == 'U') {
+    const size_t want = e == 'x' ? 2 : e == 'u' ? 4 : 8;
+    const size_t n = escapes::hex_digits(raw, u.i + 1, want, v);
+    if (n != want) {  // named: the character where the digits stopped
+      const size_t at_i = u.i + 1 + n;
+      u.fail_at(std::string("invalid character '") +
+                (at_i < raw.size() ? raw[at_i] : '"') +
+                "' in hexadecimal escape");
+    } else if (e == 'x') {  // a byte
+      u.out.push_back(static_cast<char>(v));
+      u.i += 3;
+    } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
+      std::string hex;  // U+ and at least four hex digits, as %04X prints
+      for (uint32_t x = v; x != 0 || hex.size() < 4; x >>= 4) {
+        hex.insert(hex.begin(), "0123456789ABCDEF"[x & 0xF]);
+      }
+      u.fail_at("escape is invalid Unicode code point U+" + hex);
+    } else {
+      escapes::append_utf8(u.out, v);
+      u.i += 1 + want;
+    }
+  } else if (e >= '0' && e <= '7') {  // exactly three octal digits, a byte
+    const size_t n = escapes::digits(raw, u.i, 8, 3, v);
+    if (n < 3) {
+      const size_t at_i = u.i + n;
+      u.fail_at(std::string("invalid character '") +
+                (at_i < raw.size() ? raw[at_i] : '"') + "' in octal escape");
+    } else if (v > 255) {
+      u.fail_at("octal escape value " + std::to_string(v) + " > 255");
+    } else {
+      u.out.push_back(static_cast<char>(v));
+      u.i += 3;
+    }
+  } else {
+    u.fail_at("unknown escape");
   }
-  const auto n = literals::parse_int_literal(s);
-  if (!n.fits) fail(at, "integer literal out of range");
-  return n.value;
 }
 
 // An interpreted string literal's body as the bytes it stands for -- Go's
@@ -149,60 +189,7 @@ std::string unescape(std::string_view raw, const Ast& at) {
       {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
       {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'"', '"'},
   };
-  escapes::Unescaper u(raw);
-  const auto bad_digit = [&](size_t start, size_t at_i, const char* what) {
-    const std::string seen = at_i < raw.size() ? std::string(1, raw[at_i]) : "\"";
-    u.fail_at(start, "invalid character '" + seen + "' in " + what + " escape");
-  };
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e == 'x' || e == 'u' || e == 'U') {
-      const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 8;
-      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
-        size_t k = 0;  // where the digits stopped is what Go names
-        while (k < n && u.i + 1 + k < raw.size() &&
-               escapes::digit_value(raw[u.i + 1 + k], 16) >= 0) {
-          ++k;
-        }
-        bad_digit(start, u.i + 1 + k, "hexadecimal");
-      } else if (e == 'x') {
-        u.out.push_back(static_cast<char>(v));
-        u.i += 3;
-      } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
-        char buf[32];
-        std::snprintf(buf, sizeof buf, "U+%04X", static_cast<unsigned>(v));
-        u.fail_at(start, std::string("escape is invalid Unicode code point ") + buf);
-      } else {
-        escapes::append_utf8(u.out, v);
-        u.i += 1 + n;
-      }
-    } else if (e >= '0' && e <= '7') {
-      const size_t n = escapes::digits(raw, u.i, 8, 3, v);
-      if (n < 3) {
-        bad_digit(start, u.i + n, "octal");
-      } else if (v > 255) {
-        u.fail_at(start, "octal escape value " + std::to_string(v) + " > 255");
-      } else {
-        u.out.push_back(static_cast<char>(v));
-        u.i += 3;
-      }
-    } else {
-      u.fail_at(start, "unknown escape");
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, go_escape);
 }
 
 const Ast* find_child(const Ast& a, std::string_view name) {
@@ -781,16 +768,6 @@ struct Binder {
 
   // -- Literals -----------------------------------------------------------
   //
-  // An int literal starts out as I64 and is only reinterpreted as `ty`
-  // here -- narrowing one into i32/u32/f32 is emit_convert's I64 row
-  // (README's own point: a literal goes through the same Wrap a variable
-  // holding that value would, so `square(50000)` sees exactly what `x * x`
-  // would compute from a local holding 50000), so this delegates to it
-  // rather than restating it -- after check_const_fits, since Go refuses a
-  // constant that does not fit where a variable would wrap. Only the
-  // refusals stay local, since a
-  // literal can say why better than a conversion can ("cannot use an
-  // integer literal as bool" rather than "cannot convert int64 to bool").
   // An untyped constant must fit the type it lands in: go refuses
   // `var x int32 = 2147483648` ("overflows") rather than wrapping it, as an
   // int32 *variable* wraps at run time. int64 is the literal's own width.
@@ -803,6 +780,15 @@ struct Binder {
     }
   }
 
+  // An int literal starts out as I64 and is only reinterpreted as `ty`
+  // here. Narrowing one into i32/u32/f32 is emit_convert's I64 row (README's
+  // own point: a literal goes through the same Wrap a variable holding that
+  // value would, so `square(50000)` sees exactly what `x * x` would compute
+  // from a local holding 50000), so this delegates to it rather than
+  // restating it, after check_const_fits: Go refuses a constant that does
+  // not fit where a variable would wrap. The refusals that stay local are
+  // the ones a literal can explain better than a conversion can ("cannot use
+  // an integer literal as bool" rather than "cannot convert int64 to bool").
   TypedExpr literal_as(int64_t v, Type ty, const Ast& at, SrcPos p) {
     auto b = Builder(m).at(p);
     if (ty == Type::Bool) fail_at(p, "cannot use an integer literal as bool");
@@ -1016,7 +1002,7 @@ struct Binder {
           // A float literal is already a double; only F32 needs the extra
           // rounding, and only int syntax has a width to be narrowed into.
           const NodeId lit =
-              b.double_literal(std::strtod(tok.c_str(), nullptr));
+              b.double_literal(literals::parse_float_literal(tok));
           if (hint == Type::F32) {
             return {b.intrinsic(IntrinsicId::ToFloat32, {lit}), Type::F32};
           }
@@ -1035,9 +1021,9 @@ struct Binder {
       }
       case "neg"_: {
         // -9223372036854775808 is one constant, checked after the minus.
-        if (const auto f = literals::fold_neg_const(*a.nodes[0])) {
-          if (!f->fits) fail(*a.nodes[0], "integer literal out of range");
-          return literal_as(f->value, hint.value_or(Type::I64), a, p);
+        if (const auto f = literals::fold_neg_const(
+                *a.nodes[0], "integer literal out of range")) {
+          return literal_as(*f, hint.value_or(Type::I64), a, p);
         }
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
         return emit_neg(v, a);

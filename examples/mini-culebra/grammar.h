@@ -133,8 +133,9 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   float      <- < [0-9]+ '.' [0-9]+ ([eE] [-+]? [0-9]+)?
                 / [0-9]+ [eE] [-+]? [0-9]+ > _
   number     <- < [0-9]+ > _
-  # A single-quoted string is raw: no escapes, and no way to write a quote in
-  # it ('it\'s' is a parse error in culebra), no holes.
+  # A single-quoted string is raw: no escapes, no way to write a quote in it
+  # ('it\'s' is a parse error in culebra), no holes. It may span lines: real
+  # culebra's single quotes do too, and so do its double quotes here.
   string     <- ['] < [^']* > ['] _
   istring    <- ["] ipart* ["] _                             { no_ast_opt }
   ipart      <- ihole / itext

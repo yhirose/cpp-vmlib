@@ -90,9 +90,7 @@ struct Binder {
   }
 
   static int64_t parse_number(const Ast& a) {
-    const auto n = literals::parse_int_literal(a.token);
-    if (!n.fits) fail(a, "integer literal out of range");
-    return n.value;
+    return literals::check_int(a, a.token, "integer literal out of range");
   }
 
   int32_t collect(const Ast& block, int32_t parent, const std::string& name) {

@@ -65,7 +65,8 @@ int main() {
   uint32_t v = 0;
   expect(digits("123x", 0, 10, 3, v) == 3 && v == 123, "decimal, three");
   expect(digits("1234", 0, 10, 3, v) == 3 && v == 123, "decimal stops at max");
-  expect(digits("12a", 0, 10, 3, v) == 2 && v == 12, "decimal stops at a letter");
+  expect(digits("12a", 0, 10, 3, v) == 2 && v == 12,
+         "decimal stops at a letter");
   expect(digits("x", 0, 10, 3, v) == 0 && v == 0, "no digit");
   expect(digits("ab", 0, 10, 3, v) == 0, "decimal does not read hex");
   expect(digits("777", 0, 8, 3, v) == 3 && v == 511, "octal");
@@ -79,10 +80,25 @@ int main() {
   expect(digits("7fffffff", 0, 16, 64, v) == 8 && v == 0x7FFFFFFFu,
          "the largest Lua code point is exact");
 
-  expect(hex_digits("4", 0, 2, 2, v) == 0, "hex_digits: too few is none");
-  expect(hex_digits("41", 0, 2, 2, v) == 2 && v == 0x41, "hex_digits: two");
-  expect(hex_digits("4g", 0, 2, 2, v) == 0, "hex_digits: a bad digit");
-  expect(hex_digits("414", 0, 1, 2, v) == 2 && v == 0x41, "hex_digits: max");
+  expect(hex_digits("4", 0, 2, v) == 1 && v == 4, "hex_digits: one, short");
+  expect(hex_digits("41", 0, 2, v) == 2 && v == 0x41, "hex_digits: two");
+  expect(hex_digits("4g", 0, 2, v) == 1, "hex_digits: stops at a bad digit");
+  expect(hex_digits("414", 0, 2, v) == 2 && v == 0x41, "hex_digits: max");
+  expect(hex_digits("x", 0, 2, v) == 0, "hex_digits: none");
+
+  // braced_hex: the brace at raw[i], its digit count, or 0 if the brace is
+  // missing, there are no digits, or no closing brace.
+  expect(braced_hex("{43}", 0, 16, v) == 2 && v == 0x43, "braced: a value");
+  expect(braced_hex("{}", 0, 16, v) == 0, "braced: no digits");
+  expect(braced_hex("43}", 0, 16, v) == 0, "braced: no opening brace");
+  expect(braced_hex("{43", 0, 16, v) == 0, "braced: no closing brace");
+  expect(braced_hex("{4444}", 0, 2, v) == 0, "braced: past max is no brace");
+
+  // skip_line_break: a CR LF or LF CR pair is one break, anything else one.
+  expect(skip_line_break("\r\n", 0) == 2, "break: CR LF");
+  expect(skip_line_break("\n\r", 0) == 2, "break: LF CR");
+  expect(skip_line_break("\n\n", 0) == 1, "break: LF LF");
+  expect(skip_line_break("\n", 0) == 1, "break: LF at the end");
 
 
   // UTF-16 units: a pair is one code point, a lone half is U+FFFD (what
@@ -109,9 +125,9 @@ int main() {
 
   Unescaper u("ab");
   expect(!u.done() && !u.failed(), "unescaper: fresh");
-  u.fail_at(1, "first");
-  u.fail_at(0, "second");
-  expect(u.failed() && u.error == "first" && u.error_at == 1 && u.done(),
+  u.fail_at("first");
+  u.fail_at("second");
+  expect(u.failed() && u.error == "first" && u.done(),
          "unescaper: the first error stays");
 
   if (g_failed != 0) {

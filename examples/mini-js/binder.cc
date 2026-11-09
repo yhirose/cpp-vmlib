@@ -100,78 +100,66 @@ const Ast* find_child(const Ast& a, std::string_view name) {
   return nullptr;
 }
 
+// The escapes JavaScript's `simple` table does not name, with u.i at the
+// letter after the backslash (see escapes::decode).
+void js_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e == '\n' || e == '\r') {  // a line continuation: no character
+    u.i = escapes::skip_line_break(raw, u.i);
+  } else if (e == '0' && !(u.i + 1 < raw.size() && raw[u.i + 1] >= '0' &&
+                           raw[u.i + 1] <= '9')) {
+    u.out.push_back('\0');
+    ++u.i;
+  } else if (e >= '0' && e <= '9') {  // legacy octal, \8, \9: sloppy only
+    u.fail_at("octal escape sequences are not supported here");
+  } else if (e == 'x') {
+    if (escapes::hex_digits(raw, u.i + 1, 2, v) != 2) {
+      u.fail_at("Invalid hexadecimal escape sequence");
+    } else {
+      escapes::append_utf8(u.out, v);
+      u.i += 3;
+    }
+  } else if (e == 'u' && u.i + 1 < raw.size() && raw[u.i + 1] == '{') {
+    const size_t n = escapes::braced_hex(raw, u.i + 1, 16, v);
+    if (n == 0) {
+      u.fail_at("Invalid Unicode escape sequence");
+    } else if (v > 0x10FFFF) {
+      u.fail_at("Undefined Unicode code-point");
+    } else {
+      escapes::append_utf8(u.out, v >= 0xD800 && v <= 0xDFFF ? 0xFFFD : v);
+      u.i += 3 + n;
+    }
+  } else if (e == 'u') {
+    if (escapes::hex_digits(raw, u.i + 1, 4, v) != 4) {
+      u.fail_at("Invalid Unicode escape sequence");
+    } else {
+      u.i += 5;
+      escapes::append_utf16_unit(u.out, v, raw, u.i);
+    }
+  } else {  // any other escaped character is itself
+    u.out.push_back(e);
+    ++u.i;
+  }
+}
+
 // The source spelling of a string literal, quotes and all, as the bytes it
 // stands for -- JavaScript's rules: the one-letter escapes, a backslash
-// before a line break (nothing), `\0` (NUL, when no digit follows),
-// `\xHH`, `\uHHHH` and `\u{H...}`. A string is UTF-16 there, so a pair of
-// surrogate escapes is one code point and a lone one is U+FFFD (what
-// printing it writes). The legacy octal escapes (`\1`, `\01`, `\101`) and
-// `\8`, `\9` are sloppy-mode only -- a SyntaxError in a class or a module
-// -- and are refused. Any other escaped character is itself: `\q` is `q`.
+// before a line break (nothing), `\0` (NUL, when no digit follows), `\xHH`,
+// `\uHHHH` and `\u{H...}`. A string is UTF-16 there, so a pair of surrogate
+// escapes is one code point and a lone one is U+FFFD (what printing it
+// writes). The legacy octal escapes (`\1`, `\01`, `\101`) and `\8`, `\9` are
+// sloppy-mode only -- a SyntaxError in a class or a module -- and are
+// refused. Any other escaped character is itself: `\q` is `q`.
 std::string unescape(const std::string& tok, const Ast& at) {
   static constexpr escapes::Simple kSimple[] = {
       {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'}, {'t', '\t'},
-      {'v', '\v'}, {'\n', escapes::kDrop},
+      {'v', '\v'},
   };
-  escapes::Unescaper u(std::string_view(tok).substr(1, tok.size() - 2));
-  const std::string_view raw = u.raw;
-  const auto put = [&](uint32_t cp) {  // \u{...}: a lone surrogate too
-    escapes::append_utf8(u.out, cp >= 0xD800 && cp <= 0xDFFF ? 0xFFFD : cp);
-  };
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e == '\r') {  // a CRLF line break is one
-      u.i += (u.i + 1 < raw.size() && raw[u.i + 1] == '\n') ? 2 : 1;
-    } else if (e >= '0' && e <= '9') {
-      if (e == '0' && !(u.i + 1 < raw.size() && raw[u.i + 1] >= '0' &&
-                        raw[u.i + 1] <= '9')) {
-        u.out.push_back('\0');
-        ++u.i;
-      } else {
-        u.fail_at(start, "octal escape sequences are not supported here");
-      }
-    } else if (e == 'x') {
-      if (escapes::hex_digits(raw, u.i + 1, 2, 2, v) == 0) {
-        u.fail_at(start, "Invalid hexadecimal escape sequence");
-      } else {
-        escapes::append_utf8(u.out, v);
-        u.i += 3;
-      }
-    } else if (e == 'u') {
-      if (u.i + 1 < raw.size() && raw[u.i + 1] == '{') {
-        const size_t n = escapes::digits(raw, u.i + 2, 16, 16, v);
-        if (n == 0 || u.i + 2 + n >= raw.size() || raw[u.i + 2 + n] != '}') {
-          u.fail_at(start, "Invalid Unicode escape sequence");
-        } else if (v > 0x10FFFF) {
-          u.fail_at(start, "Undefined Unicode code-point");
-        } else {
-          put(v);
-          u.i += 3 + n;
-        }
-      } else if (escapes::hex_digits(raw, u.i + 1, 4, 4, v) == 0) {
-        u.fail_at(start, "Invalid Unicode escape sequence");
-      } else {
-        u.i += 5;
-        escapes::append_utf16_unit(u.out, v, raw, u.i);
-      }
-    } else {
-      u.out.push_back(e);
-      ++u.i;
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  // The token is the quotes too.
+  return escapes::decode(std::string_view(tok).substr(1, tok.size() - 2), at,
+                         kSimple, js_escape);
 }
 
 // The names a program may use without declaring. Resolution does not fail
@@ -1688,14 +1676,13 @@ struct Binder {
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
-        if (literals::has_leading_zero(a.token)) {
-          fail(a, "octal literals are not supported here");
-        }
+        literals::check_no_leading_zero(
+            a, a.token, "octal literals are not supported here");
         // Every number is a double: JavaScript has one numeric type, and
         // keeping ints out of the frame is what makes `1 === 1.0` and
         // `String(3)` need no special case.
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(unescape(std::string(a.token), a));
       case "literal"_: {

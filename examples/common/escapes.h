@@ -20,25 +20,28 @@
 #include <string>
 #include <string_view>
 
+#include "vmlib.h"
+
 namespace escapes {
 
 // One-letter escapes: `\n` is a newline, `\\` a backslash. A language lists
 // its own; `kDrop` is for a letter that stands for nothing (a line
-// continuation).
+// continuation). A line break after a backslash is not in a table: it is
+// skip_line_break's, in the language's handler.
 struct Simple {
   char letter;
   int value;  // a byte, or kDrop
 };
 inline constexpr int kDrop = -1;
+inline constexpr int kNotSimple = -2;
 
 template <size_t N>
 inline int simple_escape(const Simple (&table)[N], char letter) {
   for (const Simple& s : table) {
     if (s.letter == letter) return s.value;
   }
-  return -2;  // not one of this language's
+  return kNotSimple;
 }
-inline constexpr int kNotSimple = -2;
 
 inline int digit_value(char c, int radix) {
   int d = -1;
@@ -71,10 +74,31 @@ inline size_t digits(std::string_view raw, size_t i, int radix, size_t max,
   return n;
 }
 
-inline size_t hex_digits(std::string_view raw, size_t i, size_t min,
-                         size_t max, uint32_t& val) {
-  const size_t n = digits(raw, i, 16, max, val);
-  return n < min ? 0 : n;
+inline size_t hex_digits(std::string_view raw, size_t i, size_t max,
+                         uint32_t& val) {
+  return digits(raw, i, 16, max, val);
+}
+
+// `{hex}` at raw[brace] (the brace after a `\u`): the digit count of the
+// braces' contents, which must be one to `max` hex digits and then a `}`.
+// 0 when the brace is missing, there are no digits, or no closing brace.
+inline size_t braced_hex(std::string_view raw, size_t brace, size_t max,
+                         uint32_t& val) {
+  if (brace >= raw.size() || raw[brace] != '{') return 0;
+  const size_t n = hex_digits(raw, brace + 1, max, val);
+  if (n == 0 || brace + 1 + n >= raw.size() || raw[brace + 1 + n] != '}') {
+    return 0;
+  }
+  return n;
+}
+
+// The index after the line break at raw[i]: a CR LF or LF CR pair is one.
+inline size_t skip_line_break(std::string_view raw, size_t i) {
+  if (i + 1 < raw.size() && (raw[i] == '\r' || raw[i] == '\n') &&
+      (raw[i + 1] == '\r' || raw[i + 1] == '\n') && raw[i + 1] != raw[i]) {
+    return i + 2;
+  }
+  return i + 1;
 }
 
 // A code point as UTF-8, any value up to 0x7FFFFFFF the way Lua writes it
@@ -120,7 +144,7 @@ inline void append_utf16_unit(std::string& out, uint32_t unit,
   uint32_t low = 0;
   if (unit >= 0xD800 && unit <= 0xDBFF && i + 6 <= raw.size() &&
       raw[i] == '\\' && raw[i + 1] == 'u' &&
-      hex_digits(raw, i + 2, 4, 4, low) == 4 && low >= 0xDC00 &&
+      hex_digits(raw, i + 2, 4, low) == 4 && low >= 0xDC00 &&
       low <= 0xDFFF) {
     unit = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
     i += 6;
@@ -131,24 +155,69 @@ inline void append_utf16_unit(std::string& out, uint32_t unit,
 }
 
 // A literal being decoded: the raw text between the quotes, a cursor, the
-// bytes so far and the first error. `fail_at` records it once; the decoder
-// stops when `failed()`.
+// bytes so far and the first error. The decoder stops once `failed()`.
 struct Unescaper {
   std::string_view raw;
   size_t i = 0;
   std::string out;
   std::string error;
-  size_t error_at = 0;
 
   explicit Unescaper(std::string_view r) : raw(r) {}
 
   bool failed() const { return !error.empty(); }
   bool done() const { return i >= raw.size() || failed(); }
-  void fail_at(size_t offset, std::string msg) {
-    if (failed()) return;
-    error = std::move(msg);
-    error_at = offset;
+  // Records the first error; the binder positions it at the literal.
+  void fail_at(std::string msg) {
+    if (!failed()) error = std::move(msg);
   }
 };
+
+// One escape at u.i, which is its backslash: a simple one is done here;
+// anything else goes to `escape(u)` with u.i at the letter after the
+// backslash, for the language's own switch to advance past. A backslash
+// last in the text stands for itself.
+template <size_t N, class Escape>
+void escape_at(Unescaper& u, const Simple (&simple)[N], Escape&& escape) {
+  ++u.i;
+  if (u.i == u.raw.size()) {
+    u.out.push_back('\\');
+    return;
+  }
+  const int s = simple_escape(simple, u.raw[u.i]);
+  if (s == kNotSimple) {
+    escape(u);
+    return;
+  }
+  if (s != kDrop) u.out.push_back(static_cast<char>(s));
+  ++u.i;
+}
+
+// The end of a decode: the first error, thrown at the literal, else the
+// bytes. Every binder's decoder ends here.
+template <class Ast>
+std::string finish(Unescaper& u, const Ast& at) {
+  if (u.failed()) {
+    coreir_rt::fail(u.error, static_cast<uint32_t>(at.line),
+                    static_cast<uint32_t>(at.column));
+  }
+  return std::move(u.out);
+}
+
+// A string body decoded: plain bytes as they are, each backslash by
+// escape_at. `escape` is the language's switch for the escapes `simple`
+// does not name.
+template <class Ast, size_t N, class Escape>
+std::string decode(std::string_view raw, const Ast& at,
+                   const Simple (&simple)[N], Escape&& escape) {
+  Unescaper u(raw);
+  while (!u.done()) {
+    if (raw[u.i] == '\\') {
+      escape_at(u, simple, escape);
+    } else {
+      u.out.push_back(raw[u.i++]);
+    }
+  }
+  return finish(u, at);
+}
 
 }  // namespace escapes

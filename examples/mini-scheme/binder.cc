@@ -84,6 +84,32 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
+// The escapes Guile's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode).
+void guile_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  const auto bad = [&](size_t at_i) {
+    const char seen = at_i < raw.size() ? raw[at_i] : '"';
+    u.fail_at(std::string("invalid character in escape sequence: #\\") + seen);
+  };
+  if (e != 'x' && e != 'u' && e != 'U') {
+    bad(u.i);
+    return;
+  }
+  const size_t want = e == 'x' ? 2 : e == 'u' ? 4 : 6;
+  uint32_t v = 0;
+  const size_t n = escapes::hex_digits(raw, u.i + 1, want, v);
+  if (n != want) {  // named: the character where the digits stopped
+    bad(u.i + 1 + n);
+  } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
+    bad(u.i + want);  // named: the last digit, as Guile does
+  } else {
+    escapes::append_utf8(u.out, v);
+    u.i += 1 + want;
+  }
+}
+
 // A string literal's body as the bytes it stands for -- Guile 3.0's
 // reader: `\a \b \f \n \r \t \v \0 \\ \" \|`, a backslash before a newline
 // (nothing), `\xHH` (exactly two hex digits), `\uHHHH` (four) and `\UHHHHHH`
@@ -96,48 +122,7 @@ std::string unescape(std::string_view raw, const Ast& at) {
       {'t', '\t'}, {'v', '\v'}, {'0', '\0'}, {'\\', '\\'}, {'"', '"'},
       {'|', '|'},  {'\n', escapes::kDrop},
   };
-  escapes::Unescaper u(raw);
-  const auto bad = [&](size_t start, size_t at_i) {
-    const std::string seen =
-        at_i < raw.size() ? std::string(1, raw[at_i]) : std::string("\"");
-    u.fail_at(start, "invalid character in escape sequence: #\\" + seen);
-  };
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e == 'x' || e == 'u' || e == 'U') {
-      const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 6;
-      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
-        // Where the digits stopped is what Guile names.
-        size_t k = 0;
-        while (k < n && escapes::digit_value(
-                            u.i + 1 + k < raw.size() ? raw[u.i + 1 + k] : '\0',
-                            16) >= 0) {
-          ++k;
-        }
-        bad(start, u.i + 1 + k);
-      } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
-        bad(start, u.i + n);
-      } else {
-        escapes::append_utf8(u.out, v);
-        u.i += 1 + n;
-      }
-    } else {
-      bad(start, u.i);
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, guile_escape);
 }
 
 // A special form always wins over a binding of the same name -- a program
@@ -1202,16 +1187,12 @@ struct Binder {
     switch (a.tag) {
       case "number"_: {
         // The token carries its sign, so -9223372036854775808 is one literal.
-        const auto n = literals::parse_int_literal(a.token);
-        if (!n.fits) {
-          fail(a, "integer literal " + std::string(a.token) +
-                      " is not supported here (no Bignum)");
-        }
-        return b.literal(n.value);
+        return b.literal(literals::check_int(
+            a, a.token, literals::no_bignum_message(a.token)));
       }
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(unescape(a.token, a));
       case "charlit"_:

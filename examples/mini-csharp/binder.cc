@@ -92,52 +92,52 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
+// The escapes C#'s `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode).
+void csharp_escape(escapes::Unescaper& u) {
+  const std::string_view raw = u.raw;
+  const char e = raw[u.i];
+  uint32_t v = 0;
+  if (e == 'x') {  // one to four hex digits, as many as follow
+    const size_t n = escapes::hex_digits(raw, u.i + 1, 4, v);
+    if (n == 0) {
+      u.fail_at("Unrecognized escape sequence");
+    } else {
+      u.i += 1 + n;
+      escapes::append_utf16_unit(u.out, v, raw, u.i);
+    }
+  } else if (e == 'u') {
+    if (escapes::hex_digits(raw, u.i + 1, 4, v) != 4) {
+      u.fail_at("Unrecognized escape sequence");
+    } else {
+      u.i += 5;
+      escapes::append_utf16_unit(u.out, v, raw, u.i);
+    }
+  } else if (e == 'U') {  // a code point itself; a surrogate prints as U+FFFD
+    if (escapes::hex_digits(raw, u.i + 1, 8, v) != 8 || v > 0x10FFFF) {
+      u.fail_at("Unrecognized escape sequence");
+    } else {
+      escapes::append_utf8(u.out, v >= 0xD800 && v <= 0xDFFF ? 0xFFFD : v);
+      u.i += 9;
+    }
+  } else {
+    u.fail_at("Unrecognized escape sequence");
+  }
+}
+
 // A regular string literal's body as the bytes it stands for -- C#'s rules:
 // `\a \b \f \n \r \t \v \0 \\ \" \'`, `\xH` to `\xHHHH` (one to four hex
-// digits, as many as follow), `\uHHHH` and `\UHHHHHHHH` (exactly that many).
-// A string is UTF-16, so a pair of surrogate escapes is one code point and a
-// lone one prints as U+FFFD. No octal escapes, and any other backslash is
-// CS1009, "Unrecognized escape sequence".
+// digits, as many as follow), `\uHHHH` and `\UHHHHHHHH` (exactly that
+// many). A string is UTF-16, so a pair of surrogate escapes is one code
+// point and a lone one prints as U+FFFD. No octal escapes, and any other
+// backslash is CS1009, "Unrecognized escape sequence".
 std::string unescape(std::string_view raw, const Ast& at) {
   static constexpr escapes::Simple kSimple[] = {
       {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
       {'t', '\t'}, {'v', '\v'}, {'0', '\0'}, {'\\', '\\'}, {'"', '"'},
       {'\'', '\''},
   };
-  escapes::Unescaper u(raw);
-  while (!u.done()) {
-    const size_t start = u.i;
-    const char c = raw[u.i++];
-    if (c != '\\' || u.i == raw.size()) {
-      u.out.push_back(c);
-      continue;
-    }
-    const char e = raw[u.i];
-    uint32_t v = 0;
-    if (const int s = escapes::simple_escape(kSimple, e);
-        s != escapes::kNotSimple) {
-      u.out.push_back(static_cast<char>(s));
-      ++u.i;
-    } else if (e == 'x' || e == 'u' || e == 'U') {
-      const size_t want = e == 'U' ? 8 : 4;
-      const size_t n = escapes::hex_digits(raw, u.i + 1, e == 'x' ? 1 : want,
-                                           want, v);
-      if (n == 0 || (e == 'U' && v > 0x10FFFF)) {
-        u.fail_at(start, "Unrecognized escape sequence");
-      } else if (e == 'U') {
-        // A code point itself; a surrogate in it prints as U+FFFD.
-        escapes::append_utf8(u.out, v >= 0xD800 && v <= 0xDFFF ? 0xFFFD : v);
-        u.i += 1 + n;
-      } else {
-        u.i += 1 + n;
-        escapes::append_utf16_unit(u.out, v, raw, u.i);
-      }
-    } else {
-      u.fail_at(start, "Unrecognized escape sequence");
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::decode(raw, at, kSimple, csharp_escape);
 }
 
 // The library names a program may use without declaring them.
@@ -1437,27 +1437,18 @@ struct Binder {
     return b.scope(mark, end, b.block(out));
   }
 
-  // An integer literal. .NET types one past int64 as a ulong (and refuses
-  // one past that); this front end has no unsigned 64-bit integer.
-  template <class B>
-  NodeId int_literal(const literals::IntLiteral& n, const Ast& at, B& b) {
-    if (!n.fits) {
-      fail(at, "integer literal " + std::string(at.token) +
-                   " is not supported here (no Bignum)");
-    }
-    return b.literal(n.value);
-  }
-
   // -- Expressions --------------------------------------------------------
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
-        return int_literal(literals::parse_int_literal(a.token), a, b);
+        // .NET types one past long as a ulong; this front end has none.
+        return b.literal(literals::check_int(
+            a, a.token, literals::no_bignum_message(a.token)));
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(unescape(a.token, a));
       case "literal"_: {
@@ -1508,8 +1499,10 @@ struct Binder {
         return b.unary(UnOp::Not, emit_expr(*a.nodes[0], ctx));
       case "negexp"_:
         // -9223372036854775808 is one constant: the minus is folded in.
-        if (const auto f = literals::fold_neg_const(*a.nodes[0])) {
-          return int_literal(*f, *a.nodes[0], b);
+        if (const auto f = literals::fold_neg_const(
+                *a.nodes[0],
+                literals::no_bignum_message(a.nodes[0]->token))) {
+          return b.literal(*f);
         }
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "awaitexp"_: {

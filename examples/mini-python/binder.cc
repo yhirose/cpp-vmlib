@@ -113,75 +113,63 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-// One escape sequence, Python's, at u.i (the backslash): `\n \t \r \a \b \f
-// \v \\ \' \"`, a backslash before a line break (nothing), `\ooo` (one to
-// three octal digits, a code point up to 0o777), `\xHH`, `\uHHHH` and
-// `\UHHHHHHHH` (code points, in UTF-8; a surrogate is allowed, as in a
-// str). A truncated \x, \u or \U, and a \U past 10FFFF, are SyntaxErrors.
-// `\N{name}` needs the Unicode names and is refused. Any other backslash
-// stays, with its character, as in Python (which only warns).
-void unescape_one(escapes::Unescaper& u) {
-  static constexpr escapes::Simple kSimple[] = {
-      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
-      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'\'', '\''}, {'"', '"'},
-      {'\n', escapes::kDrop},
-  };
+// The escapes Python's `simple` table does not name, with u.i at the letter
+// after the backslash (see escapes::decode). A line break after a backslash
+// continues the string; `\ooo` is one to three octal digits, a code point
+// up to 0o777; `\xHH`, `\uHHHH` and `\UHHHHHHHH` are code points, and a
+// truncated one or a `\U` past 10FFFF is a SyntaxError. `\N{name}` needs the
+// Unicode names and is refused. Any other backslash stays, with its
+// character, as in Python (which only warns).
+void python_escape(escapes::Unescaper& u) {
   const std::string_view raw = u.raw;
-  const size_t start = u.i++;
-  if (u.i == raw.size()) {  // a lone backslash ends the text
-    u.out.push_back('\\');
-    return;
-  }
   const char e = raw[u.i];
   uint32_t v = 0;
-  if (const int s = escapes::simple_escape(kSimple, e);
-      s != escapes::kNotSimple) {
-    if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
-    ++u.i;
-  } else if (e == '\r' && u.i + 1 < raw.size() && raw[u.i + 1] == '\n') {
-    u.i += 2;  // CRLF continues the line too
+  if (e == '\n' || e == '\r') {
+    u.i = escapes::skip_line_break(raw, u.i);
   } else if (e >= '0' && e <= '7') {
     u.i += escapes::digits(raw, u.i, 8, 3, v);
     escapes::append_utf8(u.out, v);
   } else if (e == 'x' || e == 'u' || e == 'U') {
-    const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 8;
-    if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
-      u.fail_at(start,
-                std::string("(unicode error) 'unicodeescape' codec can't "
+    const size_t want = e == 'x' ? 2 : e == 'u' ? 4 : 8;
+    if (escapes::hex_digits(raw, u.i + 1, want, v) != want) {
+      u.fail_at(std::string("(unicode error) 'unicodeescape' codec can't "
                             "decode bytes: truncated ") +
-                    (e == 'x' ? "\\xXX" : e == 'u' ? "\\uXXXX" : "\\UXXXXXXXX") +
-                    " escape");
+                (e == 'x' ? "\\xXX" : e == 'u' ? "\\uXXXX" : "\\UXXXXXXXX") +
+                " escape");
     } else if (v > 0x10FFFF) {
-      u.fail_at(start,
-                "(unicode error) 'unicodeescape' codec can't decode bytes: "
+      u.fail_at("(unicode error) 'unicodeescape' codec can't decode bytes: "
                 "illegal Unicode character");
     } else {
       escapes::append_utf8(u.out, v);
-      u.i += 1 + n;
+      u.i += 1 + want;
     }
   } else if (e == 'N') {
-    u.fail_at(start, "\\N{name} escapes are not supported here");
-  } else {
-    u.out.push_back('\\');  // an escape Python has no meaning for stays
+    u.fail_at("\\N{name} escapes are not supported here");
+  } else {  // an escape Python has no meaning for keeps its backslash
+    u.out.push_back('\\');
+    u.out.push_back(e);
+    ++u.i;
   }
 }
 
+// A string literal's body as the bytes it stands for: Python's escapes (see
+// python_escape), with `\n \t \r \a \b \f \v \\ \' \"` as one-letter ones.
 std::string unescape(std::string_view raw, const Ast& at) {
-  escapes::Unescaper u(raw);
-  while (!u.done()) {
-    if (raw[u.i] == '\\') {
-      unescape_one(u);
-    } else {
-      u.out.push_back(raw[u.i++]);
-    }
-  }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'\'', '\''}, {'"', '"'},
+  };
+  return escapes::decode(raw, at, kSimple, python_escape);
 }
 
-// The literal text between an f-string's interpolations: the ordinary
-// escapes, plus `{{` and `}}` for the braces themselves.
+// The literal text between an f-string's interpolations: the escapes above,
+// plus `{{` and `}}` for the braces themselves (a `\N{name}` is an escape,
+// its braces not a field: the grammar keeps it in the text).
 std::string unescape_ftext(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'\'', '\''}, {'"', '"'},
+  };
   escapes::Unescaper u(raw);
   while (!u.done()) {
     const char c = raw[u.i];
@@ -189,14 +177,13 @@ std::string unescape_ftext(std::string_view raw, const Ast& at) {
       u.out.push_back(c);
       u.i += 2;
     } else if (c == '\\') {
-      unescape_one(u);
+      escapes::escape_at(u, kSimple, python_escape);
     } else {
       u.out.push_back(c);
       ++u.i;
     }
   }
-  if (u.failed()) fail(at, u.error);
-  return std::move(u.out);
+  return escapes::finish(u, at);
 }
 
 bool is_builtin(const std::string& n) {
@@ -4093,16 +4080,15 @@ struct Binder {
         for (const char c : t) {
           if (c != '_') digits.push_back(c);
         }
-        if (literals::has_leading_zero(digits) &&
-            digits.find_first_not_of('0') != std::string::npos) {
-          fail(a, "leading zeros in decimal integer literals are not "
-                  "permitted; use an 0o prefix for octal integers");
-        }
+        literals::check_no_leading_zero(
+            a, digits,
+            "leading zeros in decimal integer literals are not permitted; "
+            "use an 0o prefix for octal integers");
         return int_literal(digits, p);
       }
       case "float"_:
         return b.double_literal(
-            std::strtod(std::string(a.token).c_str(), nullptr));
+            literals::parse_float_literal(a.token));
       case "string"_:
         return b.str_literal(unescape(a.token, a));
       case "literal"_: {

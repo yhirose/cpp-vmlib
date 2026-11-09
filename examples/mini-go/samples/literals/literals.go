@@ -40,4 +40,7 @@ func main() {
 	case -2147483648:
 		fmt.Println("int32 lowest")
 	}
+	// A leading zero with no other digit is 0 (not an octal literal).
+	fmt.Println(00)
+	fmt.Println(000)
 }
