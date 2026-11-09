@@ -38,6 +38,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -1160,9 +1161,15 @@ struct Binder {
   NodeId atom(const Ast& a, SrcPos p) {
     auto b = Builder(m).at(p);
     switch (a.tag) {
-      case "number"_:
-        return b.literal(
-            std::strtoll(std::string(a.token).c_str(), nullptr, 10));
+      case "number"_: {
+        // The token carries its sign, so -9223372036854775808 is one literal.
+        const auto n = literals::parse_int_literal(a.token);
+        if (!n.fits) {
+          fail(a, "integer literal " + std::string(a.token) +
+                      " is not supported here (no Bignum)");
+        }
+        return b.literal(n.value);
+      }
       case "float"_:
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));

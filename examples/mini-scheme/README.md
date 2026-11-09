@@ -231,7 +231,8 @@ same list bound to a name instead, which every implementation agrees on.
 ## What is absent, and what quietly differs
 
 Absent: exact rationals (`(/ 1 2)` is `1/2` in Scheme and `0.5` here),
-bignums (`examples/mini-python` is where that recipe lives), `define-syntax`
+bignums (`examples/mini-python` is where that recipe lives; an integer
+literal past int64 is refused where it is read, not clamped), `define-syntax`
 and macros, `do`, vectors, characters, ports, `dynamic-wind`, `values` and
 `call-with-values`, and `case-lambda`.
 
