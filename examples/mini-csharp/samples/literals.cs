@@ -16,5 +16,17 @@ class Program {
     Console.WriteLine(2147483648);
     Console.WriteLine(5 - -3);
     Console.WriteLine(-(-7));
+
+    // String escapes. \x takes up to four hex digits, greedily: "\x41B" is
+    // one character (U+041B). Only lengths are shown for the control
+    // characters.
+    Console.WriteLine("\x41\x4a\x4A\x0041B\x41g");
+    Console.WriteLine("\x41" + "B");
+    Console.WriteLine("\x4g".Length);
+    Console.WriteLine("\u0041\u00e9\u20AC\U0001F600\uD83D\uDE00");
+    Console.WriteLine("\uD83D\uDE00" == "\U0001F600");
+    Console.WriteLine("\a\b\f\n\r\t\v\0\\\"\'".Length);
+    Console.WriteLine("\0123".Length);
+    Console.WriteLine("it\'s \"quoted\"");
   }
 }

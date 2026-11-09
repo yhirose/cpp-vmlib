@@ -35,6 +35,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <cctype>
@@ -91,22 +92,52 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
-      out.push_back(tok[i]);
+// A regular string literal's body as the bytes it stands for -- C#'s rules:
+// `\a \b \f \n \r \t \v \0 \\ \" \'`, `\xH` to `\xHHHH` (one to four hex
+// digits, as many as follow), `\uHHHH` and `\UHHHHHHHH` (exactly that many).
+// A string is UTF-16, so a pair of surrogate escapes is one code point and a
+// lone one prints as U+FFFD. No octal escapes, and any other backslash is
+// CS1009, "Unrecognized escape sequence".
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'0', '\0'}, {'\\', '\\'}, {'"', '"'},
+      {'\'', '\''},
+  };
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\' || u.i == raw.size()) {
+      u.out.push_back(c);
       continue;
     }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case '\\': out.push_back('\\'); break;
-      case '"': out.push_back('"'); break;
-      default: out.push_back(tok[i]); break;
+    const char e = raw[u.i];
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      u.out.push_back(static_cast<char>(s));
+      ++u.i;
+    } else if (e == 'x' || e == 'u' || e == 'U') {
+      const size_t want = e == 'U' ? 8 : 4;
+      const size_t n = escapes::hex_digits(raw, u.i + 1, e == 'x' ? 1 : want,
+                                           want, v);
+      if (n == 0 || (e == 'U' && v > 0x10FFFF)) {
+        u.fail_at(start, "Unrecognized escape sequence");
+      } else if (e == 'U') {
+        // A code point itself; a surrogate in it prints as U+FFFD.
+        escapes::append_utf8(u.out, v >= 0xD800 && v <= 0xDFFF ? 0xFFFD : v);
+        u.i += 1 + n;
+      } else {
+        u.i += 1 + n;
+        escapes::append_utf16_unit(u.out, v, raw, u.i);
+      }
+    } else {
+      u.fail_at(start, "Unrecognized escape sequence");
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 // The library names a program may use without declaring them.
@@ -1428,7 +1459,7 @@ struct Binder {
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)));
+        return b.str_literal(unescape(a.token, a));
       case "literal"_: {
         const std::string t(a.token);
         if (t == "true") return b.bool_literal(true);

@@ -5,3 +5,11 @@
 2147483648
 8
 7
+AJJABAg
+AB
+2
+Aé€😀😀
+True
+11
+4
+it's "quoted"

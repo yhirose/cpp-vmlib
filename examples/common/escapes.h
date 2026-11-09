@@ -110,6 +110,26 @@ inline void append_utf8(std::string& out, uint32_t cp) {
   }
 }
 
+// A UTF-16 code unit read from a `\uHHHH` escape, for the languages whose
+// strings are UTF-16 (JavaScript, C#): a high surrogate followed at raw[i]
+// by a `\uHHHH` low surrogate is the one code point they make, and a lone
+// surrogate is U+FFFD, what printing it writes. Advances `i` past the low
+// half when it used it.
+inline void append_utf16_unit(std::string& out, uint32_t unit,
+                              std::string_view raw, size_t& i) {
+  uint32_t low = 0;
+  if (unit >= 0xD800 && unit <= 0xDBFF && i + 6 <= raw.size() &&
+      raw[i] == '\\' && raw[i + 1] == 'u' &&
+      hex_digits(raw, i + 2, 4, 4, low) == 4 && low >= 0xDC00 &&
+      low <= 0xDFFF) {
+    unit = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+    i += 6;
+  } else if (unit >= 0xD800 && unit <= 0xDFFF) {
+    unit = 0xFFFD;
+  }
+  append_utf8(out, unit);
+}
+
 // A literal being decoded: the raw text between the quotes, a cursor, the
 // bytes so far and the first error. `fail_at` records it once; the decoder
 // stops when `failed()`.

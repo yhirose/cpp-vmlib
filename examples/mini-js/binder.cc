@@ -114,13 +114,8 @@ std::string unescape(const std::string& tok, const Ast& at) {
   };
   escapes::Unescaper u(std::string_view(tok).substr(1, tok.size() - 2));
   const std::string_view raw = u.raw;
-  const auto is_hex4 = [&](size_t i, uint32_t& cp) {
-    return i + 6 <= raw.size() && raw[i] == '\\' && raw[i + 1] == 'u' &&
-           escapes::hex_digits(raw, i + 2, 4, 4, cp) == 4;
-  };
-  const auto put = [&](uint32_t cp) {
-    const bool surrogate = cp >= 0xD800 && cp <= 0xDFFF;
-    escapes::append_utf8(u.out, surrogate ? 0xFFFD : cp);
+  const auto put = [&](uint32_t cp) {  // \u{...}: a lone surrogate too
+    escapes::append_utf8(u.out, cp >= 0xD800 && cp <= 0xDFFF ? 0xFFFD : cp);
   };
   while (!u.done()) {
     const size_t start = u.i;
@@ -163,17 +158,11 @@ std::string unescape(const std::string& tok, const Ast& at) {
           put(v);
           u.i += 3 + n;
         }
-      } else if (!is_hex4(start, v)) {
+      } else if (escapes::hex_digits(raw, u.i + 1, 4, 4, v) == 0) {
         u.fail_at(start, "Invalid Unicode escape sequence");
       } else {
-        u.i = start + 6;
-        uint32_t low = 0;
-        if (v >= 0xD800 && v <= 0xDBFF && is_hex4(u.i, low) &&
-            low >= 0xDC00 && low <= 0xDFFF) {
-          v = 0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00);
-          u.i += 6;
-        }
-        put(v);
+        u.i += 5;
+        escapes::append_utf16_unit(u.out, v, raw, u.i);
       }
     } else {
       u.out.push_back(e);

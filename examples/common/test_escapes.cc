@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 #include "escapes.h"
 
@@ -82,6 +83,24 @@ int main() {
   expect(hex_digits("41", 0, 2, 2, v) == 2 && v == 0x41, "hex_digits: two");
   expect(hex_digits("4g", 0, 2, 2, v) == 0, "hex_digits: a bad digit");
   expect(hex_digits("414", 0, 1, 2, v) == 2 && v == 0x41, "hex_digits: max");
+
+
+  // UTF-16 units: a pair is one code point, a lone half is U+FFFD (what
+  // node and .NET print for it).
+  const auto utf16 = [&](uint32_t unit, std::string_view rest, const char* want,
+                         size_t used, const char* what) {
+    std::string out;
+    size_t i = 0;
+    append_utf16_unit(out, unit, rest, i);
+    expect(hex_of(out) == want && i == used, what);
+  };
+  utf16(0x41, "", "41", 0, "utf16: a plain unit");
+  utf16(0xD83D, "\\uDE00", "f09f9880", 6, "utf16: a pair");
+  utf16(0xD83D, "\\uDE00x", "f09f9880", 6, "utf16: a pair, then more");
+  utf16(0xD83D, "", "efbfbd", 0, "utf16: a lone high half");
+  utf16(0xD83D, "\\u0041", "efbfbd", 0, "utf16: a high half, then a letter");
+  utf16(0xDE00, "\\uDE00", "efbfbd", 0, "utf16: a lone low half");
+  utf16(0xD83D, "\\uDE0", "efbfbd", 0, "utf16: a short second half");
 
   static constexpr Simple kT[] = {{'n', '\n'}, {'\n', kDrop}, {'q', 'Q'}};
   expect(simple_escape(kT, 'n') == '\n', "simple: n");
