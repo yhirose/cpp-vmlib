@@ -1738,6 +1738,47 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
+// How an uncaught trap reads (vm::RunOptions::describe): guile's own words
+// for the same fault (3.0's: "In procedure +: Wrong type: \"a\"", "Wrong
+// type to apply: 5", "In procedure quotient: Numerical overflow"). Guile
+// names the procedure the program wrote; the VM knows the operator, which
+// is the same name for the arithmetic and comparison procedures and, for
+// the three integer divisions, the operation each one lowers to. Guile's
+// backtrace and its text for the argument position are not reproduced.
+std::string describe(const Value& v) {
+  using namespace runtime_parts;
+  const auto written = [](const Value& x) {
+    return x.is_str() ? "\"" + x.as_str() + "\""
+                      : double_format::display_with(x, double_format::kGuile);
+  };
+  const Value L = trap_fact(v, TrapFact::Left);
+  const Value R = trap_fact(v, TrapFact::Right);
+  const Verb verb = trap_verb(v);
+  switch (trap_kind(v)) {
+    case TrapKind::None:
+      return double_format::display_with(v, double_format::kGuile);
+    case TrapKind::Operands:
+      if (verb.cls == VerbClass::Binary) {
+        const auto op = static_cast<BinOp>(verb.id);
+        return std::string("In procedure ") + binop_symbol(op) +
+               ": Wrong type: " + written(L.is_number() ? R : L);
+      }
+      break;
+    case TrapKind::NotCallable:
+      return "Wrong type to apply: " + written(L);
+    case TrapKind::DivideByZero: {
+      const auto op = static_cast<BinOp>(verb.id);
+      return std::string("In procedure ") +
+             (op == BinOp::Div ? "quotient"
+                               : op == BinOp::Mod ? "remainder" : "modulo") +
+             ": Numerical overflow";
+    }
+    default:
+      break;
+  }
+  return v.as_object()->find("message")->as_str();
+}
+
 Module bind_source(const std::string& source) {
   parser p;
   p.set_logger([](size_t line, size_t col, const std::string& msg,

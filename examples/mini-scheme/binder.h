@@ -16,4 +16,8 @@ coreir::Module bind_source(const std::string& source);
 // end needs is IR it writes itself.
 const std::vector<vm::NativeDef>& stdlib();
 
+// How an uncaught trap reads (vm::RunOptions::describe, with
+// describe_traps): guile's words for the same fault.
+std::string describe(const coreir::Value& v);
+
 }  // namespace mini_scheme
