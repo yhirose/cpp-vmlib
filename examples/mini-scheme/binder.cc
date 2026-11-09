@@ -37,6 +37,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -1023,13 +1025,14 @@ struct Binder {
     r.finish("$numstr");
   }
 
-  // Guile prints an inexact number as to_display does, with a ".0" forced
-  // onto a whole one -- to_display's own comment says a front end that
-  // cares builds that string, and this one cares, as runtime_parts.h's
-  // float_str does for Python, Ruby and culebra.
+  // Guile prints an inexact number as the shortest digits that round trip,
+  // in the layout double_format.h's kGuile holds: "1.0e-4" below 1e-3,
+  // "1.0e7" from 1e7 up (and past the digits plus three zeros), a ".0" on a
+  // whole number, "+inf.0" and "+nan.0". The host writes it (dstr).
   void rt_fstr() {
     RT r(*this);
-    float_str(r, {"+nan.0", "+inf.0", "-inf.0"});
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.nat("dstr", {r.L(v)})));
     r.finish("$fstr");
   }
 
@@ -1739,6 +1742,8 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kGuile),
   };
   return defs;
 }
