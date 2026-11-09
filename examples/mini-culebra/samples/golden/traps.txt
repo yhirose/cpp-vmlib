@@ -1,0 +1,15 @@
+TypeError: type error: cannot apply '+' to Long and String
+TypeError: type error: cannot apply '*' to String and Long
+TypeError: type error: cannot apply '+' to Array and Long
+TypeError: type error: cannot compare Long and Nil
+TypeError: type error: cannot compare Long and String
+TypeError: type error: expected Long or Float, got String
+TypeError: type error: expected Function, got Long
+ZeroDivisionError: divide by 0 error
+ZeroDivisionError: divide by 0 error
+ZeroDivisionError: divide by 0 error
+IndexError: index out of range
+TypeError: type error: expected Long, got String
+TypeError: type error: expected Array, got String
+RecursionError
+TypeError

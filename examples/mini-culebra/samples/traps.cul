@@ -1,0 +1,27 @@
+# What the VM itself traps on reaches `catch` as culebra's own error: a
+# kind and a message in culebra's words. The kinds are culebra's; the
+# messages are culebra 0.8.0's.
+fn kind(f) { try { "{f()}" } catch e { "{e.kind}: {e.message}" } }
+
+println(kind(|| 1 + "a"))
+println(kind(|| "a" * 2))
+println(kind(|| [1] + 1))
+println(kind(|| 1 <= nil))
+println(kind(|| 1 < "a"))
+println(kind(|| -"a"))
+println(kind(|| 1(2)))
+println(kind(|| 1 / 0))
+println(kind(|| 5 % 0))
+println(kind(|| 1.5 / 0))
+println(kind(|| [1][5]))
+println(kind(|| [1]["a"]))
+println(kind(|| { let s = "abc"; s[0] = "x" }))
+
+# The recursion limit is culebra's own number, so only the kind is shown.
+fn forever() { forever() + 1 }
+fn recursion() { try { forever() } catch e { e.kind } }
+println(recursion())
+
+# A trap caught and thrown again is still the error it was converted to.
+fn again() { try { try { 1 + "a" } catch e { throw e } } catch e { "{e.kind}" } }
+println(again())

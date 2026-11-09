@@ -457,23 +457,10 @@ struct Binder {
     };
   }
 
-  // One helper of the runtime above, with the front end's own addition to
-  // coreir::HelperWriter.
+  // One helper of the runtime above: coreir::HelperWriter over this binder's
+  // runtime.
   struct RT : HelperWriter {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
-
-    // The three checks `xs[i]` owes before the Index itself, shared by the
-    // read and the write helper.
-    std::vector<NodeId> array_index_checks(NodeId arr, NodeId ix) {
-      return {
-          iff(isnt(typ(ix), "int"),
-              ret(call("$err",
-                       {S("TypeError"), S("array index must be a Long")}))),
-          iff(bin(BinOp::Lt, ix, I(0)),
-              ret(call("$err", {S("IndexError"), S("index out of range")}))),
-          iff(bin(BinOp::Ge, ix, len(arr)),
-              ret(call("$err", {S("IndexError"), S("index out of range")})))};
-    }
   };
 
   // culebra's `==`. Two numbers compare numerically whatever their widths
@@ -639,9 +626,9 @@ struct Binder {
     RT r(*this);
     const auto [recv, key] = r.params("recv", "key");
     std::vector<std::pair<NodeId, NodeId>> arms;
-    auto arr_checks = r.array_index_checks(r.L(recv), r.L(key));
-    arr_checks.push_back(r.ret(r.idx(r.L(recv), r.L(key))));
-    arms.emplace_back(r.S("array"), r.blk(arr_checks));
+    // An array's index, out of range or no int, is the VM's trap, which
+    // the catch converts to culebra's IndexError and TypeError.
+    arms.emplace_back(r.S("array"), r.ret(r.idx(r.L(recv), r.L(key))));
     arms.emplace_back(
         r.S("object"),
         r.blk(
@@ -653,10 +640,13 @@ struct Binder {
                    r.ret(r.call("$err",
                                 {r.S("KeyError"), r.S("key not present")}))),
              r.ret(r.idx(r.L(recv), r.L(key)))}));
-    r.add(r.b.make_switch(
-        r.typ(recv), arms,
-        r.ret(r.call("$err",
-                     {r.S("TypeError"), r.S("value is not indexable")}))));
+    // culebra does not index a String, which the VM would.
+    arms.emplace_back(
+        r.S("string"),
+        r.ret(r.call("$err", {r.S("TypeError"),
+                              r.S("type error: expected Array, got String")})));
+    r.add(r.b.make_switch(r.typ(recv), arms,
+                          r.ret(r.idx(r.L(recv), r.L(key)))));
     r.finish("$idx");
   }
 
@@ -664,17 +654,16 @@ struct Binder {
     RT r(*this);
     const auto [recv, key, val] = r.params("recv", "key", "val");
     std::vector<std::pair<NodeId, NodeId>> arms;
-    auto arr_checks = r.array_index_checks(r.L(recv), r.L(key));
-    arr_checks.push_back(r.b.set_index(r.L(recv), r.L(key), r.L(val)));
-    arr_checks.push_back(r.ret(r.L(val)));
-    arms.emplace_back(r.S("array"), r.blk(arr_checks));
+    arms.emplace_back(
+        r.S("array"),
+        r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
     arms.emplace_back(
         r.S("object"),
         r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
     r.add(r.b.make_switch(
         r.typ(recv), arms,
-        r.ret(r.call("$err",
-                     {r.S("TypeError"), r.S("value is not indexable")}))));
+        r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)),
+               r.ret(r.L(val))})));
     r.finish("$setidx");
   }
 
@@ -1176,7 +1165,11 @@ struct Binder {
         const int32_t v = decl_of.at(a.nodes[1].get());
         const int32_t hmark = ctx.mark();
         const auto& cells = rs.fns[static_cast<size_t>(ctx.fn)].cell_index;
-        std::vector<NodeId> hs;
+        // An executor's trap is {message, line, col}; `catch e` reads a
+        // kind and a message, which the conversion gives it.
+        std::vector<NodeId> hs{
+            b.assign(VarKind::Local, exc,
+                     converted(b, b.varref(VarKind::Local, exc)))};
         const auto c = cells.find(v);
         if (c != cells.end()) hs.push_back(b.cell_fresh(c->second));
         hs.push_back(
@@ -1592,30 +1585,27 @@ bool native_print(NativeCall& c) {
 // `name` field a program could write), a class -- the object carrying that
 // record -- as a Class, anything else -- a literal, however class-like its
 // fields -- as an Object.
-bool native_type_of(NativeCall& c) {
-  if (c.arg(0).is_object()) {
-    if (const std::string* n = instance_class_name(c.arg(0))) {
-      c.result = Value::make_str(*n);
-    } else {
-      c.result = Value::make_str(kind_record(c.arg(0), kClassKind) ? "Class"
-                                                                   : "Object");
-    }
-    return true;
+std::string type_name_of(const Value& v) {
+  if (v.is_object()) {
+    if (const std::string* n = instance_class_name(v)) return *n;
+    return kind_record(v, kClassKind) ? "Class" : "Object";
   }
-  const char* n = "Object";
-  switch (c.arg(0).tag()) {
-    case ValueTag::Nil: n = "Nil"; break;
-    case ValueTag::Bool: n = "Bool"; break;
-    case ValueTag::Int: n = "Long"; break;
-    case ValueTag::Double: n = "Float"; break;
-    case ValueTag::Str: n = "String"; break;
-    case ValueTag::Array: n = "Array"; break;
+  switch (v.tag()) {
+    case ValueTag::Nil: return "Nil";
+    case ValueTag::Bool: return "Bool";
+    case ValueTag::Int: return "Long";
+    case ValueTag::Double: return "Float";
+    case ValueTag::Str: return "String";
+    case ValueTag::Array: return "Array";
     case ValueTag::Func:
-    case ValueTag::Native: n = "Function"; break;
-    case ValueTag::Generator: n = "Generator"; break;
-    default: break;
+    case ValueTag::Native: return "Function";
+    case ValueTag::Generator: return "Generator";
+    default: return "Object";
   }
-  c.result = Value::make_str(n);
+}
+
+bool native_type_of(NativeCall& c) {
+  c.result = Value::make_str(type_name_of(c.arg(0)));
   return true;
 }
 
@@ -1696,6 +1686,100 @@ bool native_map(NativeCall& c) {
 
 }  // namespace
 
+// The executor's trap as culebra's error: {kind, message}, in the words of
+// culebra's own runtime (probed against culebra 0.8.0). What the VM
+// traps on is what the front end did not check for itself: an operator on
+// the wrong types, a call of a non-function, a field of a non-object.
+// `type error: ...` is culebra's prefix on every TypeError.
+Value convert_trap(const Value& trap, const void*) {
+  const auto ty = [&](TrapFact f) { return type_name_of(trap_fact(trap, f)); };
+  const std::string l = ty(TrapFact::Left);
+  const std::string r = ty(TrapFact::Right);
+  const Verb verb = trap_verb(trap);
+  std::string kind = "RuntimeError";
+  std::string message = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::Operands:
+      kind = "TypeError";
+      if (verb.cls == VerbClass::Binary) {
+        const auto op = static_cast<BinOp>(verb.id);
+        const bool compare = op == BinOp::Lt || op == BinOp::Le ||
+                             op == BinOp::Gt || op == BinOp::Ge;
+        const bool bits = op == BinOp::BitAnd || op == BinOp::BitOr ||
+                          op == BinOp::BitXor || op == BinOp::Shl ||
+                          op == BinOp::Shr;
+        if (compare) {
+          message = "type error: cannot compare " + l + " and " + r;
+        } else if (bits) {
+          message = "type error: expected Long, got " +
+                    (trap_fact(trap, TrapFact::Left).is_int() ? r : l);
+        } else {
+          message = "type error: cannot apply '" +
+                    std::string(binop_symbol(op)) + "' to " + l + " and " + r;
+        }
+      } else if (verb.cls == VerbClass::Unary) {
+        message = static_cast<UnOp>(verb.id) == UnOp::Neg
+                      ? "type error: expected Long or Float, got " + l
+                      : "type error: expected Long, got " + l;
+      } else {
+        message = "type error: " + message;
+      }
+      break;
+    case TrapKind::NotCallable:
+      kind = "TypeError";
+      message = "type error: expected Function, got " + l;
+      break;
+    case TrapKind::NotIndexable:
+      kind = "TypeError";
+      message = "type error: expected Object, Array, or Tensor, got " + l;
+      break;
+    case TrapKind::KeyType:
+      kind = "TypeError";
+      message = std::string("type error: expected ") +
+                (trap_fact(trap, TrapFact::Left).is_object() ? "String"
+                                                             : "Long") +
+                ", got " + r;
+      break;
+    case TrapKind::Immutable:
+      kind = "TypeError";
+      message = "type error: expected Array, got " + l;
+      break;
+    case TrapKind::Range:
+      kind = "IndexError";
+      message = "index out of range";
+      break;
+    case TrapKind::DivideByZero:
+      kind = "ZeroDivisionError";
+      message = "divide by 0 error";
+      break;
+    case TrapKind::Arity:
+      kind = "DispatchError";
+      message = "no matching method for `" +
+                trap_fact(trap, TrapFact::Name).as_str() + "`";
+      break;
+    case TrapKind::Uninit:
+      kind = "NameError";
+      message = "undefined variable '" +
+                trap_fact(trap, TrapFact::Name).as_str() + "'";
+      break;
+    case TrapKind::Depth:
+      kind = "RecursionError";
+      message = "maximum recursion depth exceeded (1000)";
+      break;
+    case TrapKind::Host:
+      // The front end's own natives: size(), push() and the rest, each
+      // complaining of a type.
+      kind = "TypeError";
+      break;
+    default:
+      break;
+  }
+  Value e = Value::make_object();
+  e.as_object()->set("kind", Value::make_str(kind));
+  e.as_object()->set("message", Value::make_str(message));
+  return e;
+}
+
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"println", 1, native_println, nullptr},
@@ -1707,13 +1791,21 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"keys", 1, native_keys, nullptr},
       {"map", 2, native_map, nullptr},
       double_format::dstr_def(double_format::kCulebra),
+      trap_convert_def<&convert_trap>(),
   };
   return defs;
 }
 
 // What an uncaught `throw` words its value with: to_display, but a Float
-// spelled as culebra prints it (`throw 0.0001` ends with "0.0001").
+// spelled as culebra prints it (`throw 0.0001` ends with "0.0001"). An
+// executor's trap reads as culebra's own error does, "TypeError: type
+// error: ..." (the position the report adds is culebra's `at 1:9`).
 std::string describe(const Value& v) {
+  if (trap_kind(v) != TrapKind::None) {
+    const Value e = convert_trap(v, nullptr);
+    return e.as_object()->find("kind")->as_str() + ": " +
+           e.as_object()->find("message")->as_str();
+  }
   return double_format::display_with(v, double_format::kCulebra);
 }
 

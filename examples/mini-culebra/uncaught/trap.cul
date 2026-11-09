@@ -1,0 +1,5 @@
+# A trap the program does not catch ends it with culebra's own error:
+# the kind, then "type error: ..." and the position, as culebra reports a
+# runtime TypeError ("TypeError: type error: cannot apply '+' to Long and
+# String at 1:9.").
+let x = 1 + "a"
