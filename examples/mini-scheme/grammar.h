@@ -32,12 +32,15 @@ inline constexpr const char* kGrammar = R"GRAMMAR(
   form     <- list / quoted / atom
   list     <- '(' _ form* ')' _                            { no_ast_opt }
   quoted   <- ['] _ form                                   { no_ast_opt }
-  atom     <- boolean / float / number / string / symbol
+  atom     <- boolean / float / number / string / charlit / symbol
 
   boolean  <- < '#' [tf] > ![a-zA-Z0-9] _
   float    <- < '-'? [0-9]+ '.' [0-9]* ([eE] [-+]? [0-9]+)? > _
   number   <- < '-'? [0-9]+ > ![a-zA-Z0-9.!?*/+<>=-] _
   string   <- ["] < (!["\\] . / '\\' .)* > ["] _
+  # `#\a`, `#\space`, `#\x41`: a character, which this front end has not.
+  # Without its own rule it would read as a symbol named "#\a".
+  charlit  <- < '#\\' . [^ \t\r\n()';"]* > _
   symbol   <- < [^ \t\r\n()';"]+ > _
 
   ~_       <- ([ \t\r\n] / ';' [^\n]*)*

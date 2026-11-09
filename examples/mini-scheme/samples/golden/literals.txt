@@ -3,3 +3,8 @@
 -9223372036854775808
 0
 8
+tab	here "q" back\slash |bar|
+8
+AbC
+linecontinued
+1

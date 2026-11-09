@@ -38,6 +38,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
 #include <algorithm>
@@ -83,22 +84,60 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
-      out.push_back(tok[i]);
+// A string literal's body as the bytes it stands for -- Guile 3.0's
+// reader: `\a \b \f \n \r \t \v \0 \\ \" \|`, a backslash before a newline
+// (nothing), `\xHH` (exactly two hex digits), `\uHHHH` (four) and `\UHHHHHH`
+// (six), each a code point. Anything else after a backslash is an error
+// ("invalid character in escape sequence"): no `\q`, no octal `\101`, no
+// `\e`, and no R7RS `\x41;` -- the `;` is then just a character.
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'0', '\0'}, {'\\', '\\'}, {'"', '"'},
+      {'|', '|'},  {'\n', escapes::kDrop},
+  };
+  escapes::Unescaper u(raw);
+  const auto bad = [&](size_t start, size_t at_i) {
+    const std::string seen =
+        at_i < raw.size() ? std::string(1, raw[at_i]) : std::string("\"");
+    u.fail_at(start, "invalid character in escape sequence: #\\" + seen);
+  };
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\' || u.i == raw.size()) {
+      u.out.push_back(c);
       continue;
     }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case '\\': out.push_back('\\'); break;
-      case '"': out.push_back('"'); break;
-      default: out.push_back(tok[i]); break;
+    const char e = raw[u.i];
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      if (s != escapes::kDrop) u.out.push_back(static_cast<char>(s));
+      ++u.i;
+    } else if (e == 'x' || e == 'u' || e == 'U') {
+      const size_t n = e == 'x' ? 2 : e == 'u' ? 4 : 6;
+      if (escapes::hex_digits(raw, u.i + 1, n, n, v) == 0) {
+        // Where the digits stopped is what Guile names.
+        size_t k = 0;
+        while (k < n && escapes::digit_value(
+                            u.i + 1 + k < raw.size() ? raw[u.i + 1 + k] : '\0',
+                            16) >= 0) {
+          ++k;
+        }
+        bad(start, u.i + 1 + k);
+      } else if ((v >= 0xD800 && v <= 0xDFFF) || v > 0x10FFFF) {
+        bad(start, u.i + n);
+      } else {
+        escapes::append_utf8(u.out, v);
+        u.i += 1 + n;
+      }
+    } else {
+      bad(start, u.i);
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 // A special form always wins over a binding of the same name -- a program
@@ -1174,7 +1213,9 @@ struct Binder {
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
       case "string"_:
-        return b.str_literal(unescape(std::string(a.token)));
+        return b.str_literal(unescape(a.token, a));
+      case "charlit"_:
+        fail(a, "character literals are not supported here");
       case "boolean"_:
         return b.bool_literal(a.token == "#t");
       default:
