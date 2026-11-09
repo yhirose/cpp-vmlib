@@ -43,8 +43,10 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "escapes.h"
 #include "literals.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,24 +79,76 @@ SrcPos pos_of(const Ast& a) {
                   static_cast<uint32_t>(a.column));
 }
 
-std::string unescape(const std::string& tok) {
-  std::string out;
-  for (size_t i = 0; i < tok.size(); ++i) {
-    if (tok[i] != '\\' || i + 1 == tok.size()) {
-      out.push_back(tok[i]);
+// A string literal's body as the bytes it stands for -- Lua 5.4's rules
+// (manual 3.1): the one-letter escapes, a backslash before a line break (a
+// newline), `\z` (skips the whitespace after it), `\xXX` (two hex digits,
+// a byte), `\ddd` (one to three decimal digits, at most 255), `\u{X...}`
+// (a code point up to 2^31 - 1, in UTF-8). Anything else after a backslash
+// is an error, as in Lua, which has no pass-through.
+std::string unescape(std::string_view raw, const Ast& at) {
+  static constexpr escapes::Simple kSimple[] = {
+      {'a', '\a'}, {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'},
+      {'t', '\t'}, {'v', '\v'}, {'\\', '\\'}, {'"', '"'}, {'\'', '\''},
+      {'\n', '\n'}, {'\r', '\n'},  // a line break itself, either one
+  };
+  escapes::Unescaper u(raw);
+  while (!u.done()) {
+    const size_t start = u.i;
+    const char c = raw[u.i++];
+    if (c != '\\') {
+      u.out.push_back(c);
       continue;
     }
-    switch (tok[++i]) {
-      case 'n': out.push_back('\n'); break;
-      case 't': out.push_back('\t'); break;
-      case 'r': out.push_back('\r'); break;
-      case '\\': out.push_back('\\'); break;
-      case '\'': out.push_back('\''); break;
-      case '"': out.push_back('"'); break;
-      default: out.push_back(tok[i]); break;
+    const char e = raw[u.i];  // the grammar gives every backslash a character
+    uint32_t v = 0;
+    if (const int s = escapes::simple_escape(kSimple, e);
+        s != escapes::kNotSimple) {
+      u.out.push_back(static_cast<char>(s));
+      ++u.i;
+      // "\r\n" and "\n\r" are one line break.
+      if ((e == '\n' || e == '\r') && u.i < raw.size() &&
+          (raw[u.i] == '\n' || raw[u.i] == '\r') && raw[u.i] != e) {
+        ++u.i;
+      }
+    } else if (e == 'z') {
+      ++u.i;
+      while (u.i < raw.size() && std::isspace(static_cast<unsigned char>(raw[u.i]))) {
+        ++u.i;
+      }
+    } else if (e == 'x') {
+      if (escapes::hex_digits(raw, u.i + 1, 2, 2, v) == 0) {
+        u.fail_at(start, "hexadecimal digit expected");
+      } else {
+        u.out.push_back(static_cast<char>(v));
+        u.i += 3;
+      }
+    } else if (e >= '0' && e <= '9') {
+      u.i += escapes::digits(raw, u.i, 10, 3, v);
+      if (v > 255) {
+        u.fail_at(start, "decimal escape too large");
+      } else {
+        u.out.push_back(static_cast<char>(v));
+      }
+    } else if (e == 'u') {
+      if (u.i + 1 >= raw.size() || raw[u.i + 1] != '{') {
+        u.fail_at(start, "missing '{'");
+      } else if (const size_t n = escapes::digits(raw, u.i + 2, 16, 64, v);
+                 n == 0) {
+        u.fail_at(start, "hexadecimal digit expected");
+      } else if (v > 0x7FFFFFFFu) {
+        u.fail_at(start, "UTF-8 value too large");
+      } else if (u.i + 2 + n >= raw.size() || raw[u.i + 2 + n] != '}') {
+        u.fail_at(start, "missing '}'");
+      } else {
+        escapes::append_utf8(u.out, v);
+        u.i += 3 + n;
+      }
+    } else {
+      u.fail_at(start, std::string("invalid escape sequence '\\") + e + "'");
     }
   }
-  return out;
+  if (u.failed()) fail(at, u.error);
+  return std::move(u.out);
 }
 
 // The library names a program may use without declaring them. Each is
@@ -1099,7 +1153,7 @@ struct Binder {
         return {b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr))};
       case "string"_:
-        return {b.str_literal(unescape(std::string(a.token)))};
+        return {b.str_literal(unescape(a.token, a))};
       case "literal"_: {
         const std::string t(a.token);
         if (t == "true") return {b.bool_literal(true)};

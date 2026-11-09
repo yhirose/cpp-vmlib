@@ -62,7 +62,10 @@ inline size_t digits(std::string_view raw, size_t i, int radix, size_t max,
   while (n < max && i + n < raw.size()) {
     const int d = digit_value(raw[i + n], radix);
     if (d < 0) break;
-    if (val < 0x10000000u) val = val * static_cast<uint32_t>(radix) + d;
+    // Saturates at 0xFFFFFFFF, past any value a decoder accepts, so a long
+    // run of digits cannot wrap around into a small one.
+    val = val > 0x0FFFFFFFu ? 0xFFFFFFFFu
+                            : val * static_cast<uint32_t>(radix) + d;
     ++n;
   }
   return n;
