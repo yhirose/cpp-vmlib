@@ -1,0 +1,1 @@
+rethrow.rb:4:5: uncaught: String can't be coerced into Integer (TypeError)

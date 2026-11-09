@@ -572,7 +572,7 @@ struct Binder {
         "$hashstr", "$len", "$idx",   "$setidx", "$range", "$iter",
         "$iternext", "$each", "$map", "$select", "$inject", "$inject1",
         "$eachwi", "$push", "$keys", "$sort", "$include", "$join", "$toa",
-        "$first",  "$last", "$exc",  "$mkexc", "$puts", "$putsone",
+        "$first",  "$last", "$exc",  "$raise", "$mkexc", "$puts", "$putsone",
         "$arity",  "$times", "$reverse", "$argerr", "$splat", "$pushall",
         // Classes: a table of ordinary objects, walked.
         "$classof", "$mfind", "$clsname", "$isa", "$isexact", "$nometh",
@@ -713,11 +713,11 @@ struct Binder {
     // Ruby's TypeError.
     r.add(r.iff(r.is(r.typ(a), "string"),
                 r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
-    r.add(r.iff(r.both(r.is(r.typ(a), "array"), r.isnt(r.typ(b), "array")),
-                r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))));
     r.add(
         r.iff(r.is(r.typ(a), "array"),
-              r.blk({r.set(out, r.arr({})), r.set(i, r.I(0)),
+              r.blk({r.iff(r.isnt(r.typ(b), "array"),
+                           r.ret(r.bin(BinOp::Add, r.L(a), r.L(b)))),
+                     r.set(out, r.arr({})), r.set(i, r.I(0)),
                      r.wh(r.bin(BinOp::Lt, r.L(i), r.len(r.L(a))),
                           r.blk({r.push(r.L(out), r.idx(r.L(a), r.L(i))),
                                  r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
@@ -739,11 +739,11 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [out, i] = r.locals("out", "i");
-    r.add(r.iff(r.both(r.is(r.typ(a), "string"), r.isnt(r.typ(b), "int")),
-                r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b)))));
     r.add(r.iff(
         r.is(r.typ(a), "string"),
-        r.blk({r.set(out, r.S("")), r.set(i, r.I(0)),
+        r.blk({r.iff(r.isnt(r.typ(b), "int"),
+                     r.ret(r.bin(BinOp::Mul, r.L(a), r.L(b)))),
+               r.set(out, r.S("")), r.set(i, r.I(0)),
                r.wh(r.bin(BinOp::Lt, r.L(i), r.L(b)),
                     r.blk({r.set(out, r.bin(BinOp::Add, r.L(out), r.L(a))),
                            r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
@@ -1258,6 +1258,17 @@ struct Binder {
     r.finish("$exc");
   }
 
+  // `raise x`: an exception object is raised as it is (a rescued exception
+  // raised again, with the place it first failed), anything else is the
+  // message of a RuntimeError.
+  void rt_raise() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.iff(is_kind(r, v, kExcKind), r.b.make_throw(r.L(v))));
+    r.add(r.call("$exc", {r.S("RuntimeError"), r.L(v)}));
+    r.finish("$raise");
+  }
+
   // Ruby's own words for an argument count a method or lambda refuses:
   // how many it was given, and what it takes -- "1", "1..2", or "1+" with
   // a `*rest` (see arity_spelling).
@@ -1458,7 +1469,7 @@ struct Binder {
     rt_hashstr(); rt_len(); rt_idx(); rt_setidx(); rt_range(); rt_iter();
     rt_iternext(); rt_each(); rt_map(); rt_select(); rt_inject();
     rt_inject1(); rt_eachwi(); rt_push(); rt_keys(); rt_sort(); rt_include();
-    rt_join(); rt_toa(); rt_first(); rt_last(); rt_exc(); rt_mkexc();
+    rt_join(); rt_toa(); rt_first(); rt_last(); rt_exc(); rt_raise(); rt_mkexc();
     rt_puts(); rt_putsone(); rt_arity(); rt_times(); rt_reverse();
     rt_argerr(); rt_splat(); rt_pushall();
     rt_classof(); rt_mfind(); rt_clsname(); rt_isa(); rt_isexact();
@@ -2261,7 +2272,7 @@ struct Binder {
           {b.str_literal("RuntimeError"), b.str_literal("unhandled exception")},
           p);
     }
-    return rt.call("$exc", {b.str_literal("RuntimeError"), args[0]}, p);
+    return rt.call("$raise", {args[0]}, p);
   }
 
   // `f(args)` / `f(args) { }` / `f { }`, and the three library names that
@@ -2845,7 +2856,7 @@ Value convert_trap(const Value& trap, const void*) {
     return "undefined method '" + name + "' for " + receiver_name(L);
   };
   std::string cls = "StandardError";
-  std::string msg = trap.as_object()->find("message")->as_str();
+  std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::Operands:
       if (verb.cls == VerbClass::Binary) {
@@ -2853,12 +2864,10 @@ Value convert_trap(const Value& trap, const void*) {
         // Integer#/ is the VM's FloorDiv here.
         const std::string sym =
             op == BinOp::FloorDiv ? "/" : binop_symbol(op);
-        const bool compare = op == BinOp::Lt || op == BinOp::Le ||
-                             op == BinOp::Gt || op == BinOp::Ge;
         if (!L.is_number() && !L.is_str() && !L.is_array()) {
           cls = "NoMethodError";
           msg = no_method(sym);
-        } else if (compare) {
+        } else if (is_ordering(op)) {
           cls = "ArgumentError";
           // Ruby shows an Integer, nil, true and false by value.
           msg = "comparison of " + l + " with " +
@@ -2878,8 +2887,7 @@ Value convert_trap(const Value& trap, const void*) {
       } else if (verb.cls == VerbClass::Unary) {
         cls = "NoMethodError";
         msg = no_method(static_cast<UnOp>(verb.id) == UnOp::Neg ? "-@" : "~");
-      } else if (verb.cls == VerbClass::Intrinsic &&
-                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Pow) {
+      } else if (verb.is(IntrinsicId::Pow)) {
         cls = L.is_number() ? "TypeError" : "NoMethodError";
         msg = L.is_number() ? operand_name(R) + " can't be coerced into " + l
                             : no_method("**");
@@ -2891,10 +2899,7 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::NotIndexable:
       cls = "NoMethodError";
-      msg = no_method(verb.cls == VerbClass::Node &&
-                              static_cast<Tag>(verb.id) == Tag::SetIndex
-                          ? "[]="
-                          : "[]");
+      msg = no_method(verb.is(Tag::SetIndex) ? "[]=" : "[]");
       break;
     case TrapKind::KeyType:
       cls = "TypeError";
@@ -2943,12 +2948,9 @@ const std::vector<vm::NativeDef>& stdlib() {
 
 // ruby's own wording after the position: the message, then the class in
 // parentheses.
-std::string describe(const Value& trap_or_value) {
+std::string describe(const Value& raised) {
   // An uncaught trap reads as the exception ruby raises for it.
-  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
-                                   ? convert_trap(trap_or_value, nullptr)
-                                   : Value();
-  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
+  const Value v = converted_or_self<&convert_trap>(raised);
   if (const auto* exc = runtime_parts::exception_record(v)) {
     const Value& kind = (*exc)[kExcName];
     if (kind.is_str()) {
