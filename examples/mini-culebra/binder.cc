@@ -1622,7 +1622,9 @@ bool native_size(NativeCall& c) {
     c.result =
         Value::make_int(static_cast<int64_t>(v.as_object()->props.size()));
   } else {
-    c.error = c.trap("size() wants a String, an Array or an Object");
+    c.error = c.trap(TrapKind::Operands,
+                     "size() wants a String, an Array or an Object",
+                     {.verb = verb_of(IntrinsicId::Len), .l = &v});
     return false;
   }
   return true;
@@ -1630,7 +1632,8 @@ bool native_size(NativeCall& c) {
 
 bool native_push(NativeCall& c) {
   if (!c.arg(0).is_array()) {
-    c.error = c.trap("push() wants an Array");
+    c.error = c.trap(TrapKind::Operands, "push() wants an Array",
+                     {.verb = verb_of(IntrinsicId::ArrayPush), .l = &c.arg(0)});
     return false;
   }
   c.arg(0).as_array()->items.push_back(c.arg(1));
@@ -1639,8 +1642,14 @@ bool native_push(NativeCall& c) {
 }
 
 bool native_pop(NativeCall& c) {
-  if (!c.arg(0).is_array() || c.arg(0).as_array()->items.empty()) {
-    c.error = c.trap("pop() wants a non-empty Array");
+  if (!c.arg(0).is_array()) {
+    c.error = c.trap(TrapKind::Operands, "pop() wants a non-empty Array",
+                     {.verb = verb_of(IntrinsicId::ArrayPop), .l = &c.arg(0)});
+    return false;
+  }
+  if (c.arg(0).as_array()->items.empty()) {
+    c.error = c.trap(TrapKind::Range, "pop() wants a non-empty Array",
+                     {.verb = verb_of(IntrinsicId::ArrayPop), .l = &c.arg(0)});
     return false;
   }
   auto& items = c.arg(0).as_array()->items;
@@ -1651,7 +1660,8 @@ bool native_pop(NativeCall& c) {
 
 bool native_keys(NativeCall& c) {
   if (!c.arg(0).is_object()) {
-    c.error = c.trap("keys() wants an Object");
+    c.error = c.trap(TrapKind::Operands, "keys() wants an Object",
+                     {.verb = verb_of(IntrinsicId::ObjectKeys), .l = &c.arg(0)});
     return false;
   }
   std::vector<Value> out;
@@ -1669,7 +1679,8 @@ bool native_keys(NativeCall& c) {
 // subset takes as its parameter 0 -- see resolve_fn.
 bool native_map(NativeCall& c) {
   if (!c.arg(0).is_array()) {
-    c.error = c.trap("map() wants an Array");
+    c.error = c.trap(TrapKind::Operands, "map() wants an Array",
+                     {.l = &c.arg(0)});
     return false;
   }
   const Value f = c.arg(1);
@@ -1697,20 +1708,15 @@ Value convert_trap(const Value& trap, const void*) {
   const std::string r = ty(TrapFact::Right);
   const Verb verb = trap_verb(trap);
   std::string kind = "RuntimeError";
-  std::string message = trap.as_object()->find("message")->as_str();
+  std::string message = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::Operands:
       kind = "TypeError";
       if (verb.cls == VerbClass::Binary) {
         const auto op = static_cast<BinOp>(verb.id);
-        const bool compare = op == BinOp::Lt || op == BinOp::Le ||
-                             op == BinOp::Gt || op == BinOp::Ge;
-        const bool bits = op == BinOp::BitAnd || op == BinOp::BitOr ||
-                          op == BinOp::BitXor || op == BinOp::Shl ||
-                          op == BinOp::Shr;
-        if (compare) {
+        if (is_ordering(op)) {
           message = "type error: cannot compare " + l + " and " + r;
-        } else if (bits) {
+        } else if (is_bitwise(op)) {
           message = "type error: expected Long, got " +
                     (trap_fact(trap, TrapFact::Left).is_int() ? r : l);
         } else {
@@ -1767,8 +1773,7 @@ Value convert_trap(const Value& trap, const void*) {
       message = "maximum recursion depth exceeded (1000)";
       break;
     case TrapKind::Host:
-      // The front end's own natives: size(), push() and the rest, each
-      // complaining of a type.
+      // What no kind fits: its words, as a TypeError.
       kind = "TypeError";
       break;
     default:
@@ -1800,11 +1805,13 @@ const std::vector<vm::NativeDef>& stdlib() {
 // spelled as culebra prints it (`throw 0.0001` ends with "0.0001"). An
 // executor's trap reads as culebra's own error does, "TypeError: type
 // error: ..." (the position the report adds is culebra's `at 1:9`).
-std::string describe(const Value& v) {
-  if (trap_kind(v) != TrapKind::None) {
-    const Value e = convert_trap(v, nullptr);
-    return e.as_object()->find("kind")->as_str() + ": " +
-           e.as_object()->find("message")->as_str();
+std::string describe(const Value& raised) {
+  const Value v = converted_or_self<&convert_trap>(raised);
+  // A trap, or the error it was converted to and thrown again (which carries
+  // the place it first failed), reads as culebra reports a runtime error.
+  if (origin_of(v)) {
+    return v.as_object()->find("kind")->as_str() + ": " +
+           v.as_object()->find("message")->as_str();
   }
   return double_format::display_with(v, double_format::kCulebra);
 }

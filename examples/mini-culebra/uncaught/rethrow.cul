@@ -1,0 +1,10 @@
+# A trap caught and thrown again is reported where it first failed (line 5),
+# not at the `throw e`.
+fn f() {
+  try {
+    1 + "a"
+  } catch e {
+    throw e
+  }
+}
+f()
