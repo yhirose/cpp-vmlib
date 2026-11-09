@@ -109,17 +109,25 @@ would answer `3.9` where C# answers `3`.
 
 This is the interesting half, and it is short. Every dynamic front end
 here writes helper funcs for things `vmlib.h` explicitly refuses to pick:
-`truthy`'s comment names JavaScript and Lua disagreeing as its reason, and
-`to_display`'s leaves whole-float formatting to the front end. C# needs
-neither:
+`truthy`'s comment names JavaScript and Lua disagreeing as its reason.
+C# needs no such helper for a condition or for arithmetic:
 
 | The VM's rule | C# | So this front end |
 |---|---|---|
 | `Value::truthy()` calls `0`, `null` and `false` false, `""` and NaN true | only `bool` is a condition | passes the condition through |
-| `to_display` prints `4.0` as `4` | `Console.WriteLine(4.0)` prints `4` | prints what `ToStr` gives |
 | `BinOp::Div` and `Mod` truncate toward zero, C-style | `/` and `%` on two `int`s do the same, including `-7 / 2 == -3` | emits the `BinOp` |
 | `BinOp::Mod` on a double is fmod | `%` on a `double` is too: `-7.5 % 2 == -1.5` | emits the `BinOp` |
 | two ints stay int, a double widens the pair | the same | emits the `BinOp` |
+
+A double is the exception, and the host's: `Console.WriteLine(4.0)` prints
+`4`, which `ToStr` agrees with, but `ToStr` picks fixed or exponent by
+whichever is shorter and C# does not (`100000`, not `1e+05`; `1E+17`,
+`1E-05`). `$str` calls the host function `dstr` with `double_format.h`'s
+`kCSharp` for a double, and `describe` words an uncaught one the same.
+Types are erased here, so a C# `float` is a double that was rounded and
+prints as one: `1f / 3f` is `0.3333333432674408` where C# says `0.33333334`.
+That is not handled; a `float` that is not exactly representable as a short
+double prints wrong.
 
 `samples/basics.cs` is that table, run against `dotnet`.
 

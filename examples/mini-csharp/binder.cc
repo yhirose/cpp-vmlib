@@ -34,6 +34,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <cctype>
 #include <cstdlib>
 #include <functional>
@@ -779,9 +781,9 @@ struct Binder {
   // saying: C# agrees with the VM about almost everything the others had
   // to override. A condition is a `bool` and nothing else, so there is no
   // `$truthy`. `/` and `%` truncate toward zero, which is BinOp's rule
-  // already. And `Console.WriteLine(2.0)` prints "2" -- to_display's
-  // output verbatim, so this is the only front end here that needed no
-  // float-formatting rule at all.
+  // already. A whole double prints without a ".0" ("2"), as to_display does,
+  // but past that C# has its own layout (100000, 1E+17, 1E-05), which the
+  // host writes (dstr, double_format.h's kCSharp).
 
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
@@ -829,8 +831,9 @@ struct Binder {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
   };
 
-  // Object.ToString, for the values this subset has. Note the double: no
-  // rule at all, because to_display already is what C# prints. A class's
+  // Object.ToString, for the values this subset has. A double is the host's
+  // to spell (dstr, double_format.h's kCSharp): 100000, 1E+17, 1E-05, where
+  // ToStr's shortest-digits text would say 1e+05. A class's
   // own ToString overrides it, as in C# -- so Console.WriteLine and string
   // concatenation, which come here, honor it too.
   void rt_str() {
@@ -841,6 +844,7 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "nil"), r.ret(r.S(""))));
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("True"), r.S("False")))));
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.nat("dstr", {r.L(v)}))));
     r.add(r.iff(is_number(r, r.L(v)),
                 r.ret(r.in(IntrinsicId::ToStr, {r.L(v)}))));
     r.add(r.iff(r.isnt(r.typ(v), "object"), r.ret(r.S("<value>"))));
@@ -2216,6 +2220,8 @@ bool nat_write(NativeCall& c) {
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"write", 1, nat_write, nullptr},
+      double_format::native_def("dstr", double_format::dstr_native,
+                                double_format::kCSharp),
   };
   return defs;
 }
@@ -2224,10 +2230,12 @@ const std::vector<vm::NativeDef>& stdlib() {
 // then its message.
 std::string describe(const Value& v) {
   if (const auto* exc = runtime_parts::exception_record(v)) {
-    return to_display((*exc)[kExcName]) + ": " +
-           to_display((*exc)[kExcMessage]);
+    return double_format::display_with((*exc)[kExcName], double_format::kCSharp) +
+           ": " +
+           double_format::display_with((*exc)[kExcMessage],
+                                       double_format::kCSharp);
   }
-  return to_display(v);
+  return double_format::display_with(v, double_format::kCSharp);
 }
 
 Module bind_source(const std::string& source) {
