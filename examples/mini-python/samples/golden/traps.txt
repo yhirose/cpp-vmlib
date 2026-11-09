@@ -1,0 +1,22 @@
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+TypeError: can only concatenate str (not "int") to str
+TypeError: unsupported operand type(s) for -: 'int' and 'str'
+TypeError: can't multiply sequence by non-int of type 'list'
+TypeError: unsupported operand type(s) for /: 'int' and 'str'
+TypeError: unsupported operand type(s) for ** or pow(): 'int' and 'str'
+TypeError: '<' not supported between instances of 'int' and 'str'
+TypeError: '>=' not supported between instances of 'NoneType' and 'int'
+TypeError: bad operand type for unary -: 'str'
+TypeError: 'int' object is not callable
+TypeError: 'NoneType' object is not callable
+TypeError: 'int' object is not subscriptable
+TypeError: list indices must be integers or slices, not str
+TypeError: 'str' object does not support item assignment
+TypeError: object of type 'int' has no len()
+AttributeError: 'NoneType' object has no attribute 'name'
+ZeroDivisionError: division by zero
+ZeroDivisionError
+ZeroDivisionError
+RecursionError
+UnboundLocalError
+outer: unsupported operand type(s) for +: 'int' and 'str'

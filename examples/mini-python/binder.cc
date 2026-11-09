@@ -782,7 +782,7 @@ struct Binder {
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
         // The bignum recipe, and the promotion rule around it.
-        "$isbig", "$tolimbs", "$mkbig", "$biglimbs", "$bigsign",
+        "$isbig", "$isnum", "$tolimbs", "$mkbig", "$biglimbs", "$bigsign",
         "$ucmp", "$uadd", "$usub", "$umul", "$bigadd", "$bigmul", "$bstr",
         "$tofloat", "$neg", "$pyabs",
         // Arithmetic and comparison, dispatching on what the operands are.
@@ -905,6 +905,31 @@ struct Binder {
     const auto [v] = r.params("v");
     r.add(r.ret(is_kind(r, v, kBigKind)));
     r.finish("$isbig");
+  }
+
+  // Whether `v` is a number the arithmetic below has rules for: an int, a
+  // float, a bool or a bignum. What is not, in an operator's helper, is the
+  // VM's trap on the operator itself, so that the TypeError says what
+  // python3's says ("unsupported operand type(s) for +: 'int' and 'str'")
+  // from the operator and its operands, not from whichever helper tripped.
+  void rt_isnum() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.ret(r.either(
+        r.is(r.typ(v), "int"),
+        r.either(r.is(r.typ(v), "double"),
+                 r.either(r.is(r.typ(v), "bool"),
+                          r.call("$isbig", {r.L(v)}))))));
+    r.finish("$isnum");
+  }
+
+  // `if (!(isnum a && isnum b)) return a <op> b`: the trap of the operator.
+  NodeId unless_numbers(RT& r, BinOp op, FuncWriter::Slot a,
+                        FuncWriter::Slot b) {
+    return r.iff(r.b.unary(UnOp::Not,
+                           r.both(r.call("$isnum", {r.L(a)}),
+                                  r.call("$isnum", {r.L(b)}))),
+                 r.ret(r.bin(op, r.L(a), r.L(b))));
   }
 
   // The limbs of an int's magnitude. A negative int gives its lowest limb
@@ -1264,6 +1289,7 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Add, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
+    r.add(unless_numbers(r, BinOp::Add, a, b));
     // Two ints the exact Add answers; anything else, and an int sum past
     // int64, is the limbs'.
     r.add(r.ret(exact_or(r, BinOp::Add, a, b, "$bigadd")));
@@ -1273,6 +1299,7 @@ struct Binder {
   void rt_sub() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    r.add(unless_numbers(r, BinOp::Sub, a, b));
     r.add(r.ret(r.call("$add", {r.L(a), r.call("$neg", {r.L(b)})})));
     r.finish("$sub");
   }
@@ -1287,6 +1314,7 @@ struct Binder {
     r.add(r.iff(r.either(r.is(r.typ(a), "double"), r.is(r.typ(b), "double")),
                 r.ret(r.bin(BinOp::Mul, r.call("$tofloat", {r.L(a)}),
                             r.call("$tofloat", {r.L(b)})))));
+    r.add(unless_numbers(r, BinOp::Mul, a, b));
     r.add(r.ret(exact_or(r, BinOp::Mul, a, b, "$bigmul")));
     r.finish("$mul");
   }
@@ -1350,6 +1378,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [d] = r.locals("d");
+    r.add(unless_numbers(r, BinOp::Div, a, b));
     r.add(r.set(d, r.call("$tofloat", {r.L(b)})));
     r.add(raise_on_zero(r, r.L(d)));
     r.add(r.ret(r.bin(BinOp::Div, r.call("$tofloat", {r.L(a)}), r.L(d))));
@@ -1368,6 +1397,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [t, q, f] = r.locals("t", "q", "f");
+    r.add(unless_numbers(r, BinOp::FloorDiv, a, b));
     r.add(raise_on_zero(r, r.L(b)));
     // a // -1 is -a, which grows past int64 for the least int, where
     // FloorDiv wraps.
@@ -1402,6 +1432,7 @@ struct Binder {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     const auto [m] = r.locals("m");
+    r.add(unless_numbers(r, BinOp::FloorMod, a, b));
     r.add(raise_on_zero(r, r.L(b)));
     r.add(r.iff(int_pair(r, r.typ(a), r.typ(b)),
                 r.ret(r.bin(BinOp::FloorMod, r.L(a), r.L(b)))));
@@ -1422,6 +1453,9 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     const auto [acc, sq, e, fa, fb] = r.locals("acc", "sq", "e", "fa", "fb");
     const double inf = std::numeric_limits<double>::infinity();
+    r.add(r.iff(r.b.unary(UnOp::Not, r.both(r.call("$isnum", {r.L(a)}),
+                                            r.call("$isnum", {r.L(b)}))),
+                r.ret(r.in(IntrinsicId::Pow, {r.L(a), r.L(b)}))));
     // A negative exponent always lands in the double branch, so that is
     // where zero to a negative power -- no value, in either number kind --
     // is refused. Zero to -inf is inf, the way Python and Pow both say.
@@ -1506,6 +1540,19 @@ struct Binder {
   void rt_order(const char* name, BinOp op) {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
+    // Two numbers, two strings, or two sequences are ordered by $cmp; any
+    // other pair is the VM's trap of the comparison itself.
+    const auto seq = [&](FuncWriter::Slot x) {
+      return r.either(r.is(r.typ(x), "array"), r.call("$istup", {r.L(x)}));
+    };
+    r.add(r.iff(
+        r.b.unary(UnOp::Not,
+                  r.either(r.both(r.call("$isnum", {r.L(a)}),
+                                  r.call("$isnum", {r.L(b)})),
+                           r.either(r.both(r.is(r.typ(a), "string"),
+                                           r.is(r.typ(b), "string")),
+                                    r.both(seq(a), seq(b))))),
+        r.ret(r.bin(op, r.L(a), r.L(b)))));
     r.add(r.ret(r.bin(op, r.call("$cmp", {r.L(a), r.L(b)}), r.I(0))));
     r.finish(name);
   }
@@ -1757,8 +1804,7 @@ struct Binder {
         r.either(r.is(r.typ(v), "string"),
                  r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "map"))),
         r.ret(r.len(r.L(v)))));
-    r.add(r.ret(r.call("$exc", {r.S("TypeError"),
-                                r.S("object has no len()")})));
+    r.add(r.ret(r.in(IntrinsicId::Len, {r.L(v)})));
     r.finish("$len");
   }
 
@@ -1772,7 +1818,8 @@ struct Binder {
     r.add(r.set(v, r.call("$untup", {r.L(v)})));
     r.add(r.iff(
         r.either(r.is(r.typ(v), "array"), r.is(r.typ(v), "string")),
-        r.blk({r.set(i, r.L(k)),
+        r.blk({r.iff(r.isnt(r.typ(k), "int"), r.ret(r.idx(r.L(v), r.L(k)))),
+               r.set(i, r.L(k)),
                r.iff(r.bin(BinOp::Lt, r.L(i), r.I(0)),
                      r.set(i, r.bin(BinOp::Add, r.L(i), r.len(r.L(v))))),
                r.iff(r.either(r.bin(BinOp::Lt, r.L(i), r.I(0)),
@@ -1788,8 +1835,7 @@ struct Binder {
         r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
                r.ret(r.call("$exc",
                             {r.S("KeyError"), r.call("$repr", {r.L(k)})}))})));
-    r.add(r.ret(r.call("$exc", {r.S("TypeError"),
-                                r.S("object is not subscriptable")})));
+    r.add(r.ret(r.idx(r.L(v), r.L(k))));
     r.finish("$idx");
   }
 
@@ -1810,9 +1856,14 @@ struct Binder {
                r.sidx(r.L(v), r.L(i), r.L(val)), r.ret(r.L(val))})));
     r.add(r.iff(r.is(r.typ(v), "map"),
                 r.blk({r.sidx(r.L(v), r.L(k), r.L(val)), r.ret(r.L(val))})));
-    r.add(r.ret(r.call("$exc", {r.S("TypeError"),
-                                r.S("object does not support item "
-                                    "assignment")})));
+    // A tuple is an object here, which the VM would take for one that
+    // stores; anything else that does not is the VM's trap.
+    r.add(r.iff(r.call("$istup", {r.L(v)}),
+                r.ret(r.call("$exc", {r.S("TypeError"),
+                                      r.S("'tuple' object does not support "
+                                          "item assignment")}))));
+    r.add(r.sidx(r.L(v), r.L(k), r.L(val)));
+    r.add(r.ret(r.L(val)));
     r.finish("$setidx");
   }
 
@@ -1898,9 +1949,15 @@ struct Binder {
              r.set(found,
                    r.call("$clsfind", {instance_class(r, o), r.L(name)})),
              r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found)))})));
-    r.add(r.ret(
-        r.call("$exc", {r.S("AttributeError"),
-                        r.bin(BinOp::Add, r.S("no attribute "), r.L(name))})));
+    r.add(r.ret(r.call(
+        "$exc",
+        {r.S("AttributeError"),
+         r.bin(BinOp::Add,
+               r.bin(BinOp::Add,
+                     r.bin(BinOp::Add, r.S("'"),
+                           r.call("$typename", {r.L(o)})),
+                     r.S("' object has no attribute '")),
+               r.bin(BinOp::Add, r.L(name), r.S("'")))})));
     r.finish("$getattr");
   }
 
@@ -3158,7 +3215,7 @@ struct Binder {
   void emit_runtime() {
     rt_typename(); rt_type(); rt_join(); rt_dget(); rt_tolist(); rt_toint();
     rt_intfail();
-    rt_isbig(); rt_tolimbs(); rt_mkbig(); rt_biglimbs();
+    rt_isbig(); rt_isnum(); rt_tolimbs(); rt_mkbig(); rt_biglimbs();
     rt_bigsign(); rt_ucmp(); rt_uadd(); rt_usub(); rt_umul(); rt_bigadd();
     rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
     rt_add(); rt_sub(); rt_mul(); rt_fdiv(); rt_idiv(); rt_mod(); rt_pow();
@@ -3696,6 +3753,7 @@ struct Binder {
       return b.block(hs);
     };
     size_t k = excs.size();
+    const size_t k_all_clauses = k;
     NodeId handler = k > 0 && is_bare(*excs[k - 1]) ? clause(*excs[--k])
                                                     : b.make_throw(E);
     while (k-- > 0) {
@@ -3709,6 +3767,13 @@ struct Binder {
                              ? read_var(ref_of.at(&caught), ctx, p)
                              : b.str_literal(std::string(caught.token));
       handler = b.make_if(rt.call("$isexc", {E, cls}, p), then, handler);
+    }
+    // An executor's trap is converted where a clause can observe it; a
+    // `finally` with no `except` just re-raises, and the trap goes on as it
+    // is.
+    if (k_all_clauses > 0) {
+      handler = b.block({b.assign(VarKind::Local, slot, converted(b, E)),
+                         handler});
     }
     out.push_back(b.make_try(slot, body, handler));
     const int32_t n = ctx.mark();
@@ -5107,8 +5172,156 @@ bool nat_ffmt(NativeCall& c) {
 
 }  // namespace
 
+// What `type(v).__name__` says, from C++ -- the twin of $typename.
+std::string type_name_of(const Value& v) {
+  switch (v.tag()) {
+    case ValueTag::Nil: return "NoneType";
+    case ValueTag::Bool: return "bool";
+    case ValueTag::Int: return "int";
+    case ValueTag::Double: return "float";
+    case ValueTag::Str: return "str";
+    case ValueTag::Array: return "list";
+    case ValueTag::Map: return "dict";
+    case ValueTag::Func:
+    case ValueTag::Native: return "function";
+    case ValueTag::Generator: return "generator";
+    default: break;
+  }
+  if (kind_record(v, kBigKind)) return "int";
+  if (kind_record(v, kTupleKind)) return "tuple";
+  if (const auto* exc = exception_record(v); exc && (*exc)[kExcName].is_str()) {
+    return (*exc)[kExcName].as_str();
+  }
+  if (const std::string* n = instance_class_name(v)) return *n;
+  return "object";
+}
+
+// An executor's trap as the exception python3 raises for the same fault:
+// its class and its message (python 3.14's words, pinned by test/languages.sh).
+// Probed against 3.11 too; the rows that moved between the two are marked.
+Value convert_trap(const Value& trap, const void*) {
+  const Value L = trap_fact(trap, TrapFact::Left);
+  const Value R = trap_fact(trap, TrapFact::Right);
+  const std::string l = type_name_of(L);
+  const std::string r = type_name_of(R);
+  const Verb verb = trap_verb(trap);
+  const auto name = [&] { return trap_fact(trap, TrapFact::Name).as_str(); };
+  const auto n = trap_fact(trap, TrapFact::N);
+  const auto m = trap_fact(trap, TrapFact::M);
+  const auto sequence = [](const Value& x) {
+    return x.is_str() || x.is_array() || kind_record(x, kTupleKind);
+  };
+  std::string cls = "RuntimeError";
+  std::string msg = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::Operands:
+      cls = "TypeError";
+      if (verb.cls == VerbClass::Binary) {
+        const auto op = static_cast<BinOp>(verb.id);
+        const std::string sym = binop_symbol(op);
+        if (op == BinOp::Lt || op == BinOp::Le || op == BinOp::Gt ||
+            op == BinOp::Ge) {
+          msg = "'" + sym + "' not supported between instances of '" + l +
+                "' and '" + r + "'";
+        } else if (op == BinOp::Add && sequence(L)) {
+          msg = "can only concatenate " + l + " (not \"" + r + "\") to " + l;
+        } else if (op == BinOp::Mul && (sequence(L) || sequence(R))) {
+          msg = "can't multiply sequence by non-int of type '" +
+                (sequence(L) ? r : l) + "'";
+        } else {
+          msg = "unsupported operand type(s) for " + sym + ": '" + l +
+                "' and '" + r + "'";
+        }
+      } else if (verb.cls == VerbClass::Unary) {
+        msg = "bad operand type for unary " +
+              std::string(unop_symbol(static_cast<UnOp>(verb.id))) + ": '" + l +
+              "'";
+      } else if (verb.cls == VerbClass::Intrinsic &&
+                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Pow) {
+        msg = "unsupported operand type(s) for ** or pow(): '" + l +
+              "' and '" + r + "'";
+      } else if (verb.cls == VerbClass::Intrinsic &&
+                 static_cast<IntrinsicId>(verb.id) == IntrinsicId::Len) {
+        msg = "object of type '" + l + "' has no len()";
+      }
+      break;
+    case TrapKind::NotCallable:
+      cls = "TypeError";
+      msg = "'" + l + "' object is not callable";
+      break;
+    case TrapKind::NotIndexable:
+      if (verb.cls == VerbClass::Node &&
+          (static_cast<Tag>(verb.id) == Tag::FieldGet ||
+           static_cast<Tag>(verb.id) == Tag::FieldSet)) {
+        cls = "AttributeError";
+        msg = "'" + l + "' object has no attribute '" + name() + "'";
+      } else {
+        cls = "TypeError";
+        msg = "'" + l + "' object " +
+              (verb.cls == VerbClass::Node &&
+                       static_cast<Tag>(verb.id) == Tag::SetIndex
+                   ? "does not support item assignment"
+                   : "is not subscriptable");
+      }
+      break;
+    case TrapKind::KeyType:
+      cls = "TypeError";
+      msg = L.is_str() ? "string indices must be integers, not '" + r + "'"
+                       : l + " indices must be integers or slices, not " + r;
+      break;
+    case TrapKind::Range:
+      cls = "IndexError";
+      msg = verb.cls == VerbClass::Intrinsic &&
+                    static_cast<IntrinsicId>(verb.id) == IntrinsicId::ArrayPop
+                ? "pop from empty list"
+                : l + " index out of range";
+      if (L.is_str()) msg = "string index out of range";
+      break;
+    case TrapKind::Immutable:
+      cls = "TypeError";
+      msg = "'" + l + "' object does not support item assignment";
+      break;
+    case TrapKind::DivideByZero:
+      cls = "ZeroDivisionError";
+      msg = "division by zero";
+      break;
+    case TrapKind::Arity: {
+      cls = "TypeError";
+      const int64_t given = n.as_int();
+      const int64_t want = m.as_int();
+      if (given > want) {
+        msg = name() + "() takes " + std::to_string(want) +
+              " positional argument" + (want == 1 ? "" : "s") + " but " +
+              std::to_string(given) + (given == 1 ? " was" : " were") +
+              " given";
+      } else {
+        msg = name() + "() missing " + std::to_string(want - given) +
+              " required positional argument" + (want - given == 1 ? "" : "s");
+      }
+      break;
+    }
+    case TrapKind::Uninit:
+      cls = "UnboundLocalError";
+      msg = "cannot access local variable '" + name() +
+            "' where it is not associated with a value";
+      break;
+    case TrapKind::Depth:
+      cls = "RecursionError";
+      msg = "maximum recursion depth exceeded";
+      break;
+    case TrapKind::State:
+      cls = "ValueError";
+      msg = "generator already executing";
+      break;
+    default:
+      break;
+  }
+  return make_exception(cls, Value::make_str(msg));
+}
+
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
+      trap_convert_def<&convert_trap>(),
       {"print", 1, nat_print, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
       double_format::dstr_def(double_format::kPython),
@@ -5119,7 +5332,13 @@ const std::vector<vm::NativeDef>& stdlib() {
 // python3's last line for an uncaught exception: the class, then the
 // message when there is one -- a builtin's name travels in the object, a
 // program's own class names itself in its table.
-std::string describe(const Value& v) {
+std::string describe(const Value& trap_or_value) {
+  // An uncaught trap reads as the exception python3 raises for it.
+  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
+                                   ? convert_trap(trap_or_value, nullptr)
+                                   : Value();
+  const Value& v =
+      converted_trap.is_nil() ? trap_or_value : converted_trap;
   const auto* exc = runtime_parts::exception_record(v);
   if (!exc) return double_format::display_with(v, double_format::kPython);
   const Value& msg = (*exc)[kExcMessage];

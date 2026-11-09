@@ -1,0 +1,1 @@
+trap.py:4:9: uncaught: TypeError: unsupported operand type(s) for +: 'int' and 'str'
