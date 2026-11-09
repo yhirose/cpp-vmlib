@@ -31,6 +31,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -4322,11 +4323,8 @@ struct Binder {
   // built here, at bind time, in the same limb form the runtime uses.
   NodeId int_literal(const std::string& digits, SrcPos p) {
     auto b = Builder(m).at(p);
-    errno = 0;
-    char* end = nullptr;
-    const long long v = std::strtoll(digits.c_str(), &end, 10);
-    if (errno == 0 && end == digits.c_str() + digits.size()) {
-      return b.literal(static_cast<int64_t>(v));
+    if (const auto n = literals::parse_int_literal(digits); n.fits) {
+      return b.literal(n.value);
     }
     // Long division of the decimal string by 10^9, one pass per limb --
     // the same base the runtime works in, so the constant is already in

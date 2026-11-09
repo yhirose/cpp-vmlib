@@ -1,6 +1,5 @@
 #include "binder.h"
 
-#include <cerrno>
 #include <cstdlib>
 #include <map>
 #include <set>
@@ -11,6 +10,7 @@
 #include <peglib.h>
 
 #include "grammar.h"
+#include "literals.h"
 #include "vmlib.h"
 
 using namespace peg;
@@ -90,14 +90,9 @@ struct Binder {
   }
 
   static int64_t parse_number(const Ast& a) {
-    errno = 0;
-    char* end = nullptr;
-    const std::string s(a.token);
-    const long long v = std::strtoll(s.c_str(), &end, 10);
-    if (errno != 0 || end != s.c_str() + s.size()) {
-      fail(a, "integer literal out of range");
-    }
-    return static_cast<int64_t>(v);
+    const auto n = literals::parse_int_literal(a.token);
+    if (!n.fits) fail(a, "integer literal out of range");
+    return n.value;
   }
 
   int32_t collect(const Ast& block, int32_t parent, const std::string& name) {
