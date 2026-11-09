@@ -43,6 +43,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -1086,9 +1087,14 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
-      case "number"_:
-        return {
-            b.literal(std::strtoll(std::string(a.token).c_str(), nullptr, 10))};
+      case "number"_: {
+        // A decimal integer that does not fit an int64 is a float in Lua,
+        // read from the same digits: 9223372036854775808 is 2^63.
+        const std::string digits(a.token);
+        const auto n = literals::parse_int_literal(digits);
+        return {n.fits ? b.literal(n.value)
+                       : b.double_literal(std::strtod(digits.c_str(), nullptr))};
+      }
       case "float"_:
         return {b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr))};

@@ -25,6 +25,12 @@ add_executable(test_double_format test_double_format.cc)
 target_link_libraries(test_double_format PRIVATE vmlib)
 add_test(NAME double_format COMMAND test_double_format)
 
+# literals.h's int64 range check, at the edge each language draws it. Pure
+# C++, so it is quick.
+add_executable(test_literals test_literals.cc)
+target_link_libraries(test_literals PRIVATE vmlib)
+add_test(NAME literals COMMAND test_literals)
+
 # add_front_end(<name> [EXT <ext> LANG <lang> [LEAD <file>]])
 #
 # The front end in the calling directory: the executable <name>, from that
