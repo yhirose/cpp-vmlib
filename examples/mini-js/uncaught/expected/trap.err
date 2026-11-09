@@ -1,0 +1,1 @@
+trap.js:5:2: uncaught: TypeError: Cannot read properties of undefined (reading 'x')

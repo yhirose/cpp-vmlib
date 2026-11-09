@@ -1,0 +1,9 @@
+TypeError: Cannot read properties of undefined (reading 'x')
+TypeError: Cannot read properties of undefined (reading 'b')
+TypeError: Cannot read properties of undefined (reading '0')
+TypeError: Cannot set properties of undefined (setting 'y')
+TypeError: Cannot set properties of undefined (setting '2')
+TypeError
+TypeError
+TypeError
+RangeError: Maximum call stack size exceeded

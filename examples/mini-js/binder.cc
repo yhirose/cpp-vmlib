@@ -758,10 +758,9 @@ struct Binder {
             find_in_chain(r, cls, k),
             r.ret(r.Nil()),
         }));
-    arms.emplace_back(
-        r.S("nil"),
-        r.ret(r.call("$throwtype",
-                     {r.S("cannot read a property of undefined")})));
+    // undefined has no properties: the VM's trap of the read, which the
+    // catch words as V8 does.
+    arms.emplace_back(r.S("nil"), r.ret(r.idx(r.L(recv), r.L(key))));
     r.add(r.b.make_switch(r.typ(recv), arms, r.ret(r.Nil())));
     r.finish("$index");
   }
@@ -797,6 +796,9 @@ struct Binder {
                r.b.set_index(r.L(recv), r.L(k), r.L(val)), r.ret(r.L(val))}));
     arms.emplace_back(
         r.S("map"),
+        r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
+    arms.emplace_back(
+        r.S("nil"),
         r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)), r.ret(r.L(val))}));
     r.add(r.b.make_switch(
         r.typ(recv), arms,
@@ -1112,7 +1114,8 @@ struct Binder {
           r.call("$presolve",
                  {r.P(1),
                   r.b.call_value(r.P(h), {promise_value(r, r.P(0))})}),
-          r.call("$psettle", {r.P(1), r.I(kRejected), r.L(e)}));
+          r.call("$psettle",
+                 {r.P(1), r.I(kRejected), converted(r.b, r.L(e))}));
       const NodeId pass =
           fulfilled ? r.call("$presolve", {r.P(1), promise_value(r, r.P(0))})
                     : r.call("$psettle", {r.P(1), r.I(kRejected),
@@ -1606,6 +1609,10 @@ struct Binder {
     if (cat != nullptr) {
       const int32_t hmark = ctx.mark();
       std::vector<NodeId> hs;
+      // An executor's trap is {message, line, col}; `catch (e)` reads a
+      // name and a message, which the conversion gives it.
+      hs.push_back(b.assign(VarKind::Local, exc,
+                            converted(b, b.varref(VarKind::Local, exc))));
       hs.push_back(bind_decl(decl_of.at(cat->nodes[0].get()),
                              b.varref(VarKind::Local, exc), ctx, p));
       hs.push_back(emit_block(*cat->nodes[1], ctx));
@@ -2393,9 +2400,66 @@ struct Binder {
 
 }  // namespace
 
+// An executor's trap as the Error V8 throws for the same fault: {name,
+// message}, the shape `new Error(...)` builds here. JavaScript coerces
+// where the VM refuses, so what traps is what has no JavaScript value to
+// coerce to: a property of undefined, a call of a non-function, a
+// binding read before its declaration, the stack. The null/undefined
+// distinction is not kept here (both are nil), so the words say undefined.
+Value convert_trap(const Value& trap, const void*) {
+  const Value L = trap_fact(trap, TrapFact::Left);
+  const Value R = trap_fact(trap, TrapFact::Right);
+  const Verb verb = trap_verb(trap);
+  const auto node = [&](Tag t) {
+    return verb.cls == VerbClass::Node && verb.id == static_cast<int>(t);
+  };
+  std::string name = "TypeError";
+  std::string msg = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::NotIndexable: {
+      const Value key = trap_fact(trap, TrapFact::Name).is_str()
+                            ? trap_fact(trap, TrapFact::Name)
+                            : R;
+      const bool write = node(Tag::SetIndex) || node(Tag::FieldSet);
+      msg = std::string("Cannot ") + (write ? "set" : "read") +
+            " properties of " + (L.is_nil() ? "undefined" : to_display(L)) +
+            " (" + (write ? "setting" : "reading") + " '" +
+            double_format::display_with(key, double_format::kJs) + "')";
+      break;
+    }
+    case TrapKind::NotCallable:
+      msg = "(intermediate value) is not a function";
+      break;
+    case TrapKind::Uninit:
+      name = "ReferenceError";
+      msg = "Cannot access '" + trap_fact(trap, TrapFact::Name).as_str() +
+            "' before initialization";
+      break;
+    case TrapKind::Depth:
+      name = "RangeError";
+      msg = "Maximum call stack size exceeded";
+      break;
+    case TrapKind::DivideByZero:
+      name = "RangeError";
+      msg = "Division by zero";
+      break;
+    default:
+      break;
+  }
+  Value e = Value::make_object();
+  e.as_object()->set("name", Value::make_str(name));
+  e.as_object()->set("message", Value::make_str(msg));
+  return e;
+}
+
 // The first line of node's report for an Error: its name, then its message.
 // An Error here is the plain {name, message} object `new Error(...)` builds.
-std::string describe(const Value& v) {
+std::string describe(const Value& trap_or_value) {
+  // An uncaught trap reads as the Error it would have been caught as.
+  const Value converted_trap = trap_kind(trap_or_value) != TrapKind::None
+                                   ? convert_trap(trap_or_value, nullptr)
+                                   : Value();
+  const Value& v = converted_trap.is_nil() ? trap_or_value : converted_trap;
   if (v.is_object()) {
     ObjectObj* o = v.as_object();
     const Value* name = o->find("name");
@@ -2410,6 +2474,7 @@ std::string describe(const Value& v) {
 
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
+      trap_convert_def<&convert_trap>(),
       double_format::dstr_def(double_format::kJs),
       double_format::dstr_def(double_format::kJsInspect, "inspectnum"),
   };
