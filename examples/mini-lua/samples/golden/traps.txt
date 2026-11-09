@@ -1,0 +1,18 @@
+traps.lua:14: attempt to perform arithmetic on a table value
+traps.lua:15: attempt to perform arithmetic on a table value
+traps.lua:16: attempt to perform arithmetic on a nil value
+traps.lua:17: attempt to perform arithmetic on a table value
+traps.lua:18: attempt to compare table with number
+traps.lua:19: attempt to compare number with table
+traps.lua:20: attempt to compare nil with table
+traps.lua:21: attempt to compare two table values
+traps.lua:22: attempt to call a table value
+traps.lua:23: attempt to call a boolean value
+traps.lua:24: attempt to get length of a number value
+traps.lua:25: attempt to index a nil value
+traps.lua:26: attempt to index a boolean value
+traps.lua:27: attempt to index a nil value
+traps.lua:28: attempt to divide by zero
+traps.lua:29: attempt to perform 'n%0'
+true
+false	traps.lua:36: attempt to perform arithmetic on a table value

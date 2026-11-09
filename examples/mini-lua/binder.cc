@@ -549,14 +549,10 @@ struct Binder {
     };
     for (const NodeId n : try_mm(a)) r.add(n);
     for (const NodeId n : try_mm(b)) r.add(n);
-    // Named by the operand that is not a number, the left one first -- the
-    // one Lua's own message names.
-    const NodeId bad = r.iff(is_number(r, r.L(a)), r.L(b), r.L(a));
-    r.add(r.b.make_throw(r.bin(
-        BinOp::Add,
-        r.bin(BinOp::Add, r.S("attempt to perform arithmetic on a "),
-              r.nat("type", {bad})),
-        r.S(" value"))));
+    // Neither a number nor a metamethod's: the VM's trap of the operator,
+    // whose conversion names the operand that is not a number, the left one
+    // first, as Lua's own message does (convert_trap).
+    r.add(r.ret(r.bin(op, r.L(a), r.L(b))));
     r.finish(name);
   }
 
@@ -590,8 +586,10 @@ struct Binder {
     RT r(*this);
     const auto [t, k] = r.params("t", "k");
     const auto [key, mt, idx] = r.locals("key", "mt", "idx");
-    r.add(r.iff(r.isnt(r.typ(t), "map"),
-                r.b.make_throw(r.S("attempt to index a non-table value"))));
+    // A string has no keys of its own here (its methods are another path);
+    // anything else that is no table is the VM's trap of the index.
+    r.add(r.iff(r.is(r.typ(t), "string"), r.ret(r.Nil())));
+    r.add(r.iff(r.isnt(r.typ(t), "map"), r.ret(r.idx(r.L(t), r.L(k)))));
     r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
     r.add(r.iff(r.has(r.L(t), r.L(key)), r.ret(r.idx(r.L(t), r.L(key)))));
     r.add(r.set(mt, r.meta(r.L(t))));
@@ -617,7 +615,7 @@ struct Binder {
     const auto [t, k, v] = r.params("t", "k", "v");
     const auto [key, m] = r.locals("key", "m");
     r.add(r.iff(r.isnt(r.typ(t), "map"),
-                r.b.make_throw(r.S("attempt to index a non-table value"))));
+                r.blk({r.b.set_index(r.L(t), r.L(k), r.L(v)), r.ret(r.L(v))})));
     r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
     r.add(r.iff(r.is(r.typ(v), "nil"),
                 r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(t), r.L(key)}),
@@ -649,8 +647,7 @@ struct Binder {
     const auto [v] = r.params("v");
     const auto [n] = r.locals("n");
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.len(r.L(v)))));
-    r.add(r.iff(r.isnt(r.typ(v), "map"),
-                r.b.make_throw(r.S("attempt to get length of a non-table"))));
+    r.add(r.iff(r.isnt(r.typ(v), "map"), r.ret(r.len(r.L(v)))));
     r.add(r.set(n, r.I(0)));
     r.add(r.b.make_while(r.has(r.L(v), r.bin(BinOp::Add, r.L(n), r.I(1))),
                          r.set(n, r.bin(BinOp::Add, r.L(n), r.I(1)))));
@@ -712,7 +709,7 @@ struct Binder {
     // propagating gets written.
     r.add(r.b.make_try(
         3, r.set(r_, r.in(IntrinsicId::CoroResume, {r.L(co), r.L(v)})),
-        r.ret(r.arr({r.Bo(false), r.L(exc)}))));
+        r.ret(r.arr({r.Bo(false), converted(r.b, r.L(exc))}))));
     r.add(r.iff(r.idx(r.L(r_), "done"),
                 r.ret(r.call("$append",
                              {r.arr({r.Bo(true)}), r.idx(r.L(r_), "value")}))));
@@ -1560,24 +1557,12 @@ struct Binder {
     };
     const int32_t exc = ctx.alloc_local("$exc");
     const NodeId E = b.varref(VarKind::Local, exc);
-    // A trap the executor raised arrives as its {message, line, col}
-    // object (a table is a Map here, so an object is one of those); pcall
-    // answers what Lua's would, a string with the chunk and line in front.
-    // The words after them are the executor's.
-    const NodeId trap = b.make_if(
-        b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {E}),
-                 b.str_literal("object")),
-        b.intrinsic(IntrinsicId::ObjectHas, {E, b.str_literal("message")}),
-        b.bool_literal(false));
-    const NodeId worded = b.binary(
-        BinOp::Add,
-        b.binary(BinOp::Add, b.str_literal(chunk + ":"),
-                 b.intrinsic(IntrinsicId::ToStr,
-                             {b.index(E, b.str_literal("line"))})),
-        b.binary(BinOp::Add, b.str_literal(": "),
-                 b.index(E, b.str_literal("message"))));
+    // A trap the executor raised is converted to what Lua's pcall answers
+    // for the same fault: a string with the chunk and line in front
+    // (runtime_parts.h converted(); the words are convert_trap's). Any
+    // other error value is answered as it is.
     const NodeId handler =
-        b.array_lit({b.bool_literal(false), b.make_if(trap, worded, E)});
+        b.array_lit({b.bool_literal(false), converted(b, E)});
     const NodeId call = held([&](NodeId f, NodeId a) {
       return b.make_try(exc,
                         rt.call("$append",
@@ -2311,6 +2296,84 @@ bool nat_s_byte(NativeCall& c) {
 
 }  // namespace
 
+// The chunk name of the program being run, which the conversion of a trap
+// puts in front of its line the way Lua does for any error: set by
+// bind_source, one program to a run.
+std::string& chunk_name() {
+  static std::string name;
+  return name;
+}
+
+// An executor's trap as the error Lua raises for the same fault: a string,
+// "chunk:line: attempt to ..." (Lua 5.4's words). The `(local 'x')` Lua adds
+// when it knows the variable is not here: the VM does not know its name.
+Value convert_trap(const Value& trap, const void*) {
+  const Value L = trap_fact(trap, TrapFact::Left);
+  const Value R = trap_fact(trap, TrapFact::Right);
+  const Verb verb = trap_verb(trap);
+  const auto type = [](const Value& v) { return std::string(lua_typename(v)); };
+  // The operand an arithmetic or bitwise error blames: the first that is
+  // not a number.
+  const std::string culprit = type(L.is_number() ? R : L);
+  std::string msg = trap.as_object()->find("message")->as_str();
+  switch (trap_kind(trap)) {
+    case TrapKind::Operands:
+      if (verb.cls == VerbClass::Binary) {
+        const auto op = static_cast<BinOp>(verb.id);
+        if (op == BinOp::Lt || op == BinOp::Le || op == BinOp::Gt ||
+            op == BinOp::Ge) {
+          // `a > b` is `b < a` in Lua, and its error names them that way.
+          const bool swapped = op == BinOp::Gt || op == BinOp::Ge;
+          const std::string a = type(swapped ? R : L);
+          const std::string b = type(swapped ? L : R);
+          msg = a == b ? "attempt to compare two " + a + " values"
+                       : "attempt to compare " + a + " with " + b;
+        } else if (op == BinOp::BitAnd || op == BinOp::BitOr ||
+                   op == BinOp::BitXor || op == BinOp::Shl ||
+                   op == BinOp::Shr) {
+          msg = "attempt to perform bitwise operation on a " + culprit +
+                " value";
+        } else {
+          msg = "attempt to perform arithmetic on a " + culprit + " value";
+        }
+      } else if (verb.cls == VerbClass::Unary) {
+        msg = static_cast<UnOp>(verb.id) == UnOp::BitNot
+                  ? "attempt to perform bitwise operation on a " + type(L) +
+                        " value"
+                  : "attempt to perform arithmetic on a " + type(L) + " value";
+      } else if (verb.cls == VerbClass::Intrinsic) {
+        const auto id = static_cast<IntrinsicId>(verb.id);
+        if (id == IntrinsicId::Len) {
+          msg = "attempt to get length of a " + type(L) + " value";
+        } else if (id == IntrinsicId::Pow) {
+          msg = "attempt to perform arithmetic on a " + culprit + " value";
+        }
+      }
+      break;
+    case TrapKind::NotCallable:
+      msg = "attempt to call a " + type(L) + " value";
+      break;
+    case TrapKind::NotIndexable:
+    case TrapKind::Immutable:
+      msg = "attempt to index a " + type(L) + " value";
+      break;
+    case TrapKind::DivideByZero:
+      msg = static_cast<BinOp>(verb.id) == BinOp::FloorMod ||
+                    static_cast<BinOp>(verb.id) == BinOp::Mod
+                ? "attempt to perform 'n%0'"
+                : "attempt to divide by zero";
+      break;
+    case TrapKind::Depth:
+      msg = "stack overflow";
+      break;
+    default:
+      break;
+  }
+  return Value::make_str(
+      chunk_name() + ":" +
+      std::to_string(trap.as_object()->find("line")->as_int()) + ": " + msg);
+}
+
 const std::vector<vm::NativeDef>& stdlib() {
   static const std::vector<vm::NativeDef> defs = {
       {"print", 1, nat_print, nullptr},
@@ -2326,12 +2389,14 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_rep", -1, nat_s_rep, nullptr},
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
+      trap_convert_def<&convert_trap>(),
   };
   return defs;
 }
 
 // lua.c's own words for an error object that is not a string or a number.
 std::string describe(const Value& v) {
+  if (trap_kind(v) != TrapKind::None) return convert_trap(v, nullptr).as_str();
   if (v.is_str() || v.is_int() || v.is_double()) return lua_tostring(v);
   return std::string("(error object is a ") + lua_typename(v) + " value)";
 }
@@ -2352,6 +2417,7 @@ Module bind_source(const std::string& source, const std::string& chunkname) {
 
   Binder b;
   b.chunk = chunkname;
+  chunk_name() = chunkname;
   Module m = b.build(*ast);
 
   if (auto err = verify(m)) {
