@@ -42,6 +42,8 @@
 
 #include "binder.h"
 
+#include "double_format.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2104,7 +2106,7 @@ struct Binder {
 // an IR-level helper cannot do. Note in particular `tostring`: Lua formats
 // a float with "%.14g" and then makes sure the result still looks like a
 // float, which is neither to_display's shortest round trip nor anything
-// this IR could compute. Table operations are *not* here (see $concat and
+// this IR could compute (the host does it: double_format.h's kLua). Table operations are *not* here (see $concat and
 // $insert): a table is a Map, and walking one from C++ would tie this front
 // end to MapObj's layout. The one table read is `__tostring`'s, two key
 // lookups, which `print` has to make from C++ the way Lua's own does.
@@ -2114,14 +2116,10 @@ std::string lua_tostring(const Value& v) {
     case ValueTag::Nil: return "nil";
     case ValueTag::Bool: return v.as_bool() ? "true" : "false";
     case ValueTag::Int: return std::to_string(v.as_int());
-    case ValueTag::Double: {
-      char buf[64];
-      std::snprintf(buf, sizeof(buf), "%.14g", v.as_double());
-      std::string s(buf);
-      // "%.14g" of 4.0 is "4"; Lua then makes it look like a float again.
-      if (s.find_first_of(".eEni") == std::string::npos) s += ".0";
-      return s;
-    }
+    // "%.14g", and Lua then makes 4 look like a float again: 4.0
+    // (double_format.h's kLua).
+    case ValueTag::Double:
+      return double_format::format_double(v.as_double(), double_format::kLua);
     case ValueTag::Str: return v.as_str();
     case ValueTag::Map: return "table";
     case ValueTag::Coroutine: return "thread";
