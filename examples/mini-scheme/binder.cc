@@ -1776,7 +1776,7 @@ std::string describe(const Value& v) {
     default:
       break;
   }
-  return v.as_object()->find("message")->as_str();
+  return trap_message(v);
 }
 
 Module bind_source(const std::string& source) {

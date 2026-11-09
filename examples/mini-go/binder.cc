@@ -1621,7 +1621,7 @@ std::string describe(const Value& v) {
     case TrapKind::None:
       return to_display(v);
     default:
-      msg += v.as_object()->find("message")->as_str();
+      msg += trap_message(v);
       break;
   }
   return "panic: " + msg;
