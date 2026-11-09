@@ -35,6 +35,7 @@
 #include "binder.h"
 
 #include "double_format.h"
+#include "literals.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -1405,14 +1406,24 @@ struct Binder {
     return b.scope(mark, end, b.block(out));
   }
 
+  // An integer literal. .NET types one past int64 as a ulong (and refuses
+  // one past that); this front end has no unsigned 64-bit integer.
+  template <class B>
+  NodeId int_literal(const literals::IntLiteral& n, const Ast& at, B& b) {
+    if (!n.fits) {
+      fail(at, "integer literal " + std::string(at.token) +
+                   " is not supported here (no Bignum)");
+    }
+    return b.literal(n.value);
+  }
+
   // -- Expressions --------------------------------------------------------
   NodeId emit_expr(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
       case "number"_:
-        return b.literal(
-            std::strtoll(std::string(a.token).c_str(), nullptr, 10));
+        return int_literal(literals::parse_int_literal(a.token), a, b);
       case "float"_:
         return b.double_literal(
             std::strtod(std::string(a.token).c_str(), nullptr));
@@ -1465,6 +1476,10 @@ struct Binder {
       case "notexp"_:
         return b.unary(UnOp::Not, emit_expr(*a.nodes[0], ctx));
       case "negexp"_:
+        // -9223372036854775808 is one constant: the minus is folded in.
+        if (const auto f = literals::fold_neg_const(*a.nodes[0])) {
+          return int_literal(*f, *a.nodes[0], b);
+        }
         return b.unary(UnOp::Neg, emit_expr(*a.nodes[0], ctx));
       case "awaitexp"_: {
         if (!fns[static_cast<size_t>(ctx.fn)].is_async) {

@@ -19,6 +19,8 @@
 #include <charconv>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
 #include <string_view>
 
 #include "vmlib.h"
@@ -50,6 +52,22 @@ inline IntLiteral parse_int_literal(std::string_view text, int base = 10,
   // Two's complement negation, so that 2^63 becomes INT64_MIN.
   const uint64_t bits = negative ? ~mag + 1 : mag;
   return {true, static_cast<int64_t>(bits)};
+}
+
+// A unary minus over a bare integer literal, folded into the literal: C# and
+// Go read -9223372036854775808 that way (the constant is checked after the
+// minus, not before). Answers nullopt when `operand` is not a bare integer
+// literal, so there is nothing to fold; otherwise the literal read as
+// negative, which `fits` or not like any other. `Ast` is the front end's
+// peglib node.
+template <class Ast>
+std::optional<IntLiteral> fold_neg_const(const Ast& operand) {
+  const std::string_view t = operand.token;
+  if (operand.name != "number" || t.empty() ||
+      t.find_first_not_of("0123456789") != std::string_view::npos) {
+    return std::nullopt;
+  }
+  return parse_int_literal(t, 10, true);
 }
 
 }  // namespace literals
