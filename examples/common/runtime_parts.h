@@ -409,6 +409,44 @@ inline coreir::Value make_exception(const std::string& name,
   return e;
 }
 
+// ---- Executor traps at a catch ---------------------------------------------
+//
+// A trap the executor raised is {message, line, col} with a kind and facts
+// (coreir::trap_kind, trap_fact): its own words, not a front end's. A
+// front end that has words for it converts it where a handler can observe
+// it -- the head of a catch that reads the exception -- by `converted()`,
+// one native call whose answer is the caught value unchanged unless it is a
+// trap, and then the front end's exception for it. One conversion per
+// trap: what comes back is not a trap, so a second catch passes it by.
+//
+// A handler that only re-raises (a `finally`, a `rescue` that matched
+// nothing) does not convert, and the raw trap goes on, keeping its
+// position; one that converts re-raises the converted exception, which
+// reports where it is re-raised, as a helper's exception does.
+
+inline constexpr char kTrapConvert[] = "trapcvt";
+
+inline coreir::NodeId converted(coreir::Builder::At& b, coreir::NodeId caught) {
+  return b.call_value(b.native_ref(b.declare_native(kTrapConvert)), {caught});
+}
+
+// `Convert(trap, ctx)` makes the front end's exception for a trap; ctx is the
+// native's own (a style, a chunk name), as double_format's styles are. The
+// def is registered with the run's natives.
+template <coreir::Value (*Convert)(const coreir::Value& trap, const void* ctx)>
+bool trap_convert_native(coreir::NativeCall& c) {
+  const coreir::Value& v = c.arg(0);
+  c.result = coreir::trap_kind(v) == coreir::TrapKind::None
+                 ? v
+                 : Convert(v, c.ctx);
+  return true;
+}
+template <coreir::Value (*Convert)(const coreir::Value& trap, const void* ctx)>
+vm::NativeDef trap_convert_def(const void* ctx = nullptr) {
+  return {kTrapConvert, 1, &trap_convert_native<Convert>,
+          const_cast<void*>(ctx)};
+}
+
 // ---- Operators -------------------------------------------------------------
 
 // The spelling of an operator in the C family's notation, which Python,

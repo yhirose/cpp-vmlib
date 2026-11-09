@@ -83,6 +83,45 @@ void run_body(NodeId body, Module& m, int32_t locals, const std::string& what) {
   }
 }
 
+// A converter for the test: the exception named by ctx, carrying the trap's
+// message.
+Value convert_trap(const Value& trap, const void* ctx) {
+  return make_exception(static_cast<const char*>(ctx),
+                        *trap.as_object()->find("message"));
+}
+
+// report(v): the exception's name and message, or the value as it is.
+bool report_native(NativeCall& c) {
+  const auto* exc = exception_record(c.arg(0));
+  g_out.push_back(exc ? (*exc)[kExcName].as_str() + ":" +
+                            (*exc)[kExcMessage].as_str()
+                      : to_display(c.arg(0)));
+  return true;
+}
+
+// run_body with the run's natives.
+void run_with_natives(NodeId body, Module& m,
+                      std::vector<vm::NativeDef> natives,
+                      const std::string& what) {
+  m.funcs.push_back({"main", 1, 0, body, {"x"}, {}});
+  g_out.clear();
+  if (auto err = verify(m)) {
+    std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", what.c_str(),
+                 err->c_str());
+    ++g_failures;
+    return;
+  }
+  vm::RunOptions o;
+  o.natives = std::move(natives);
+  Runtime heap;
+  try {
+    vm::run(vm::compile(m), heap, o);
+  } catch (const Failure& e) {
+    std::fprintf(stderr, "FAIL: %s: %s\n", what.c_str(), e.what());
+    ++g_failures;
+  }
+}
+
 int g_compared = 0;
 int g_positive[kParts] = {};
 
@@ -355,6 +394,34 @@ int main() {
              "make_exception: headed by kExcKind");
     check_eq(exception_record(Value::make_object()) ? "yes" : "no", "no",
              "make_exception: a plain object is none");
+  }
+
+  // The conversion at a catch: a trap becomes the front end's exception, and
+  // what is not a trap passes through, so a second catch (or a catch of a
+  // thrown string) leaves it alone.
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    const auto caught = [&](NodeId body) {
+      return b.make_try(
+          0, body,
+          b.call_value(b.native_ref(b.declare_native("report")),
+                       {converted(b, b.varref(VarKind::Local, 0))}));
+    };
+    run_with_natives(
+        b.block({caught(b.binary(BinOp::Div, b.literal(1), b.literal(0))),
+                 caught(b.make_throw(b.str_literal("plain"))),
+                 // converted once: a second catch of what the first made
+                 caught(b.make_throw(b.make_try(
+                     0, b.binary(BinOp::Div, b.literal(1), b.literal(0)),
+                     converted(b, b.varref(VarKind::Local, 0)))))}),
+        m,
+        {trap_convert_def<&convert_trap>("Conv"),
+         {"report", 1, &report_native, nullptr}},
+        "converted");
+    check_eq(joined(), "Conv:divide by zero|plain|Conv:divide by zero|",
+             "converted: a trap, a string, and a converted one");
   }
 
   // The operator spellings, and the fallback for one nobody spells.
