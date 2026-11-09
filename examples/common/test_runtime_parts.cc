@@ -342,6 +342,33 @@ int main() {
     check_eq(joined(), "15|15|", "read_modify_write: as a value");
   }
 
+  // make_exception is the IR exception()'s twin: the same record, so that
+  // the readers (is_exception, exception_record) accept both alike.
+  {
+    const Value e = make_exception("TypeError", Value::make_str("bad"));
+    const auto* rec = exception_record(e);
+    check_eq(rec ? (*rec)[kExcName].as_str() + "/" +
+                       (*rec)[kExcMessage].as_str()
+                 : "(none)",
+             "TypeError/bad", "make_exception: read back");
+    check_eq(rec && (*rec)[0].is_str() ? (*rec)[0].as_str() : "?", kExcKind,
+             "make_exception: headed by kExcKind");
+    check_eq(exception_record(Value::make_object()) ? "yes" : "no", "no",
+             "make_exception: a plain object is none");
+  }
+
+  // The operator spellings, and the fallback for one nobody spells.
+  {
+    check_eq(binop_symbol(BinOp::Add), "+", "binop_symbol: add");
+    check_eq(binop_symbol(BinOp::FloorDiv), "//", "binop_symbol: floordiv");
+    check_eq(binop_symbol(BinOp::FloorMod), "%", "binop_symbol: floormod");
+    check_eq(binop_symbol(BinOp::Le), "<=", "binop_symbol: le");
+    check_eq(binop_symbol(BinOp::UShr), name_of(BinOp::UShr),
+             "binop_symbol: unsigned falls back to its name");
+    check_eq(unop_symbol(UnOp::Neg), "-", "unop_symbol: neg");
+    check_eq(unop_symbol(UnOp::BitNot), "~", "unop_symbol: bitnot");
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "runtime_parts: %d failure(s)\n", g_failures);
     return 1;

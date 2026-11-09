@@ -395,6 +395,62 @@ inline const std::vector<coreir::Value>* exception_record(
              : nullptr;
 }
 
+// A fresh builtin exception, built by a host function: the object
+// `exception()` builds in IR, for a front end that makes one outside a
+// helper -- the conversion of an executor's trap at a catch
+// (coreir::trap_kind), which has no IR to run. exception_record reads
+// it back, and test_runtime_parts holds the two builders to one shape.
+inline coreir::Value make_exception(const std::string& name,
+                                    const coreir::Value& message) {
+  coreir::Value e = coreir::Value::make_object();
+  e.as_object()->meta = coreir::Value::make_array(
+      {coreir::Value::make_str(kExcKind), coreir::Value::make_str(name),
+       message});
+  return e;
+}
+
+// ---- Operators -------------------------------------------------------------
+
+// The spelling of an operator in the C family's notation, which Python,
+// Ruby and culebra share for every one of these: a diagnostic that names
+// the operator ("unsupported operand type(s) for +") gets it here. FloorDiv
+// is `//` (Python's, and the only language here that spells it), and Mod
+// and FloorMod are both `%`. An operator no language here spells, the
+// unsigned ones, gets its name.
+inline const char* binop_symbol(coreir::BinOp op) {
+  using B = coreir::BinOp;
+  switch (op) {
+    case B::Add:      return "+";
+    case B::Sub:      return "-";
+    case B::Mul:      return "*";
+    case B::Div:      return "/";
+    case B::Mod:
+    case B::FloorMod: return "%";
+    case B::FloorDiv: return "//";
+    case B::Eq:       return "==";
+    case B::Ne:       return "!=";
+    case B::Lt:       return "<";
+    case B::Le:       return "<=";
+    case B::Gt:       return ">";
+    case B::Ge:       return ">=";
+    case B::BitAnd:   return "&";
+    case B::BitOr:    return "|";
+    case B::BitXor:   return "^";
+    case B::Shl:      return "<<";
+    case B::Shr:      return ">>";
+    default:          return coreir::name_of(op);
+  }
+}
+inline const char* unop_symbol(coreir::UnOp op) {
+  using U = coreir::UnOp;
+  switch (op) {
+    case U::Neg:    return "-";
+    case U::BitNot: return "~";
+    case U::Not:    return "not";
+    default:        return coreir::name_of(op);
+  }
+}
+
 // ---- Iteration -------------------------------------------------------------
 //
 // A for-each loop drives a cursor: the front end's `$iter(v)` builds one --
