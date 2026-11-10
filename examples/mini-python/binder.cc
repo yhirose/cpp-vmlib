@@ -35,9 +35,9 @@
 #include "literals.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -769,7 +769,7 @@ struct Binder {
         "$kwcheck", "$kwmerge", "$missing", "$toomany",
         // Inheritance: a chain of ordinary objects, walked.
         "$clsfind", "$isname", "$isinstv", "$isinst", "$supercall",
-        "$excinit", "$excset", "$excnew", "$excrepr", "$noinit", "$dunder",
+        "$excset", "$excnew", "$excrepr", "$noinit", "$dunder",
         // Tuples, and the sequence builtins that hand them back.
         "$tuple", "$untup", "$istup", "$tupstr", "$unpack", "$items",
         "$values", "$enumerate", "$zip", "$sorted", "$sum", "$minmax",
@@ -1767,7 +1767,7 @@ struct Binder {
   void rt_exc() {
     RT r(*this);
     const auto [name, msg] = r.params("name", "msg");
-    r.add(r.b.make_throw(r.call("$excnew", {r.L(name), r.arr({r.L(msg)})})));
+    r.add(raise_new(r, r.L(name), {r.L(msg)}));
     r.finish("$exc");
   }
 
@@ -1822,8 +1822,7 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "map"),
         r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
-               r.b.make_throw(
-                   r.call("$excnew", {r.S("KeyError"), r.arr({r.L(k)})}))})));
+               raise_new(r, r.S("KeyError"), {r.L(k)})})));
     r.add(r.ret(r.idx(r.L(v), r.L(k))));
     r.finish("$idx");
   }
@@ -2077,7 +2076,14 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [s, i, neg, acc, c] = r.locals("s", "i", "neg", "acc", "c");
-    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$dtoint", {r.L(v)}))));
+    // ToInt is the executor's and stops at an int64; NaN fails both tests.
+    r.add(r.iff(
+        r.is(r.typ(v), "double"),
+        r.ret(r.iff(
+            r.both(r.bin(BinOp::Ge, r.L(v), r.D(-9223372036854775808.0)),
+                   r.bin(BinOp::Lt, r.L(v), r.D(9223372036854775808.0))),
+            r.in(IntrinsicId::ToInt, {r.L(v)}),
+            r.call("$dtoint", {r.L(v)})))));
     r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.iff(r.L(v), r.I(1), r.I(0)))));
     // `int("...")` accumulates through $mul and $add, so a literal too big
     // for an int64 becomes a bignum with nothing further to say about it.
@@ -2130,11 +2136,10 @@ struct Binder {
     r.finish("$toint");
   }
 
-  // int(float): the truncation, exact. ToInt is the executor's and stops at
-  // an int64, so from 2^63 on (-2^63 itself is an int64) the double is its
-  // own mantissa times a power of two, which is the one thing a bignum
-  // multiplies exactly: `m * 2 ** k`, with the sign in `m`. Infinity and NaN
-  // are Python's two errors.
+  // int(float) for the doubles ToInt stops at, which are no int64: the
+  // double is its own mantissa times a power of two, the one thing a bignum
+  // multiplies exactly -- `m * 2 ** k`, with the sign in `m` -- or it is
+  // Python's two errors, NaN and infinity.
   void rt_dtoint() {
     RT r(*this);
     const auto [d] = r.params("d");
@@ -2146,14 +2151,10 @@ struct Binder {
                 r.call("$exc",
                        {r.S("OverflowError"),
                         r.S("cannot convert float infinity to integer")})));
-    r.add(r.iff(
-        r.either(r.bin(BinOp::Ge, r.L(d), r.D(9223372036854775808.0)),
-                 r.bin(BinOp::Lt, r.L(d), r.D(-9223372036854775808.0))),
-        r.blk({r.set(parts, r.nat("dparts", {r.L(d)})),
-               r.ret(r.call("$mul",
-                            {r.idx(r.L(parts), r.I(0)),
-                             r.call("$pow", {r.I(2), r.idx(r.L(parts), r.I(1))})}))})));
-    r.add(r.ret(r.in(IntrinsicId::ToInt, {r.L(d)})));
+    r.add(r.set(parts, r.nat("dparts", {r.L(d)})));
+    r.add(r.ret(r.call(
+        "$mul", {r.idx(r.L(parts), r.I(0)),
+                 r.call("$pow", {r.I(2), r.idx(r.L(parts), r.I(1))})})));
     r.finish("$dtoint");
   }
 
@@ -2163,6 +2164,9 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [f] = r.locals("f");
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.L(v))));
+    r.add(r.iff(r.is(r.typ(v), "int"),
+                r.ret(r.in(IntrinsicId::ToDouble, {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "string"),
                 r.blk({r.set(f, r.nat("pyfloat", {r.L(v)})),
                        r.iff(r.is(r.typ(f), "nil"),
@@ -2504,8 +2508,13 @@ struct Binder {
                              r.ret(r.b.call_value(
                                  r.L(f), {r.call("$acons", {r.L(self), r.L(a)}),
                                           r.L(k)})))})));
-    r.add(r.iff(r.bin(BinOp::Eq, r.L(key), r.S("__init__")),
-                r.ret(r.call("$excinit", {r.L(self), r.L(a)}))));
+    // Only an exception has arguments to keep: `super().__init__()` from a
+    // class with no base reaches here too.
+    r.add(r.iff(
+        r.bin(BinOp::Eq, r.L(key), r.S("__init__")),
+        r.blk({r.iff(is_exception(r, self),
+                     r.call("$excset", {r.L(self), r.L(a)})),
+               r.ret(r.Nil())})));
     r.add(r.ret(r.call(
         "$exc", {r.S("AttributeError"),
                  r.bin(BinOp::Add, r.S("'super' object has no attribute "),
@@ -2518,41 +2527,49 @@ struct Binder {
   // the text str() says (BaseException.__str__): nothing for none, the one
   // argument's str, the tuple's for several -- and for a KeyError with one
   // argument, that argument's repr. The text is made now, not when it is
-  // asked for (README.md). A receiver that is no exception is left alone:
-  // `super().__init__()` from a class with no base reaches here too.
+  // asked for (README.md). `e` is an exception: a caller that cannot say so
+  // asks first.
   void rt_excset() {
     RT r(*this);
     const auto [e, a] = r.params("e", "a");
     const auto [t, text, n] = r.locals("t", "text", "n");
+    const auto first = [&] { return r.idx(r.L(a), r.I(0)); };
+    r.add(r.set(t, r.call("$tuple", {r.L(a)})));
+    r.add(r.set(n, r.len(r.L(a))));
     r.add(r.iff(
-        is_exception(r, e),
-        r.blk(
-            {r.set(t, r.call("$tuple", {r.L(a)})),
-             r.set(n, r.len(r.L(a))),
-             r.set(text, r.call("$str", {r.L(t)})),
-             r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)), r.set(text, r.S(""))),
-             r.iff(r.bin(BinOp::Eq, r.L(n), r.I(1)),
-                   r.set(text,
-                         r.iff(r.call("$isname", {r.L(e), r.S("KeyError")}),
-                               r.call("$repr", {r.idx(r.L(a), r.I(0))}),
-                               r.call("$str", {r.idx(r.L(a), r.I(0))})))),
-             set_kind_field(r, r.L(e), kExcMessage, r.L(text)),
-             set_kind_field(r, r.L(e), kExcArgs, r.L(t))})));
+        r.bin(BinOp::Eq, r.L(n), r.I(0)), r.set(text, r.S("")),
+        r.iff(r.bin(BinOp::Eq, r.L(n), r.I(1)),
+              r.set(text,
+                    r.iff(r.call("$isname", {r.L(e), r.S("KeyError")}),
+                          r.call("$repr", {first()}),
+                          r.iff(r.is(r.typ(first()), "string"), first(),
+                                r.call("$str", {first()})))),
+              r.set(text, r.call("$str", {r.L(t)})))));
+    r.add(set_kind_field(r, r.L(e), kExcMessage, r.L(text)));
+    r.add(set_kind_field(r, r.L(e), kExcArgs, r.L(t)));
     r.add(r.ret(r.Nil()));
     r.finish("$excset");
   }
 
-  // A builtin exception made with `a`, which is what `ValueError(...)` and
-  // every raise of the runtime's own do.
+  // An exception made with `a`: a builtin's, when `type` is its name (what
+  // `ValueError(...)` and every raise of the runtime's own do), or an
+  // instance of the class of the program's that `type` is the table of.
   void rt_excnew() {
     RT r(*this);
-    const auto [name, a] = r.params("name", "a");
+    const auto [type, a] = r.params("type", "a");
     const auto [e] = r.locals("e");
-    r.add(r.set(e, exception(r, r.S(kExcKind), r.L(name), r.S(""),
-                             {r.Nil()})));
+    r.add(r.set(
+        e, r.iff(r.is(r.typ(type), "string"),
+                 exception(r, r.S(kExcKind), r.L(type), r.S(""), {r.Nil()}),
+                 exception(r, r.L(type), r.Nil(), r.S(""), {r.Nil()}))));
     r.add(r.call("$excset", {r.L(e), r.L(a)}));
     r.add(r.ret(r.L(e)));
     r.finish("$excnew");
+  }
+
+  // `throw` of a new exception of `type` made with `args`.
+  NodeId raise_new(RT& r, NodeId type, const std::vector<NodeId>& args) {
+    return r.b.make_throw(r.call("$excnew", {type, r.arr(args)}));
   }
 
   // repr(e): `Name(arg, arg)`, its class's name for a program's own.
@@ -2563,8 +2580,9 @@ struct Binder {
     r.add(r.set(name, kind_field(r, r.L(e), kExcName)));
     r.add(r.iff(r.isnt(r.typ(name), "string"),
                 r.set(name, class_name(r, instance_class(r, e)))));
-    r.add(r.set(s, r.call("$liststr",
-                          {r.call("$untup", {kind_field(r, r.L(e), kExcArgs)})})));
+    r.add(r.set(s, r.call("$liststr", {r.call("$untup",
+                                             {kind_field(r, r.L(e),
+                                                         kExcArgs)})})));
     r.add(r.ret(r.bin(
         BinOp::Add,
         r.bin(BinOp::Add, r.L(name),
@@ -2574,14 +2592,6 @@ struct Binder {
                           r.bin(BinOp::Sub, r.len(r.L(s)), r.I(1))}))),
         r.S(")"))));
     r.finish("$excrepr");
-  }
-
-  void rt_excinit() {
-    RT r(*this);
-    const auto [self, a] = r.params("self", "a");
-    r.add(r.call("$excset", {r.L(self), r.L(a)}));
-    r.add(r.ret(r.Nil()));
-    r.finish("$excinit");
   }
 
   void rt_noinit() {
@@ -3183,8 +3193,7 @@ struct Binder {
     const auto [c, k] = r.params("c", "k");
     r.add(r.iff(r.is(r.typ(c), "map"),
                 r.blk({r.iff(r.b.unary(UnOp::Not, r.has(r.L(c), r.L(k))),
-                             r.b.make_throw(r.call(
-                                 "$excnew", {r.S("KeyError"), r.arr({r.L(k)})}))),
+                             raise_new(r, r.S("KeyError"), {r.L(k)})),
                        r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
                        r.ret(r.Nil())})));
     r.add(r.iff(r.is(r.typ(c), "array"),
@@ -3205,8 +3214,7 @@ struct Binder {
                        r.in(IntrinsicId::ObjectRemove, {r.L(d), r.L(k)}),
                        r.ret(r.L(v))})));
     r.add(r.iff(r.L(hasdflt), r.ret(r.L(dflt))));
-    r.add(r.b.make_throw(
-        r.call("$excnew", {r.S("KeyError"), r.arr({r.L(k)})})));
+    r.add(raise_new(r, r.S("KeyError"), {r.L(k)}));
     r.add(r.ret(r.Nil()));
     r.finish("$dpop");
   }
@@ -3347,7 +3355,8 @@ struct Binder {
     rt_acons(); rt_aext(); rt_rest(); rt_kwhas(); rt_hasname(); rt_kwrest();
     rt_kwcheck(); rt_kwmerge(); rt_missing(); rt_toomany();
     rt_clsfind(); rt_isname(); rt_isinstv(); rt_isinst(); rt_supercall();
-    rt_excset(); rt_excnew(); rt_excrepr(); rt_excinit(); rt_noinit(); rt_dunder();
+    rt_excset(); rt_excnew(); rt_excrepr(); rt_noinit();
+    rt_dunder();
     rt_tuple(); rt_untup(); rt_istup(); rt_tupstr(); rt_unpack(); rt_items();
     rt_values(); rt_enumerate(); rt_zip(); rt_sorted(); rt_sum();
     rt_minmax(); rt_next();
@@ -4155,22 +4164,20 @@ struct Binder {
     auto bp = b.at(p);
     std::vector<NodeId> body{
         b.assign(VarKind::Local, 2,
-                 is_exc ? exception(bp, C, bp.nil_literal(), bp.str_literal(""),
-                                    {bp.nil_literal()})
-                        : new_instance(bp, C),
+                 // BaseException.__new__ keeps the arguments before any
+                 // __init__ runs, so a class whose own __init__ never says
+                 // super() has them.
+                 is_exc ? rt.call("$excnew", {C, A}, p) : new_instance(bp, C),
                  p),
         b.assign(VarKind::Local, 3,
                  rt.call("$clsfind", {C, b.str_literal("__init__", p)}, p),
                  p),
-        // BaseException.__new__ keeps the arguments before any __init__
-        // runs, so a class whose own __init__ never says super() has them.
-        is_exc ? rt.call("$excset", {O, A}, p) : b.block({}, p),
         b.make_if(
-            b.binary(BinOp::Ne,
-                     b.intrinsic(IntrinsicId::TypeOf, {F}, p),
+            b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {F}, p),
                      b.str_literal("nil", p), p),
             b.call_value(F, {rt.call("$acons", {O, A}, p), K}, p),
-            is_exc ? b.block({}, p) : rt.call("$noinit", {b.str_literal(cname, p), A}, p),
+            is_exc ? NodeId{}
+                   : rt.call("$noinit", {b.str_literal(cname, p), A}, p),
             p)};
     body.push_back(b.make_return(O, p));
 
@@ -4764,7 +4771,8 @@ struct Binder {
 
     if (is_exception_name(g)) {
       return call_it(Takes{0, any, any}, [&](Args a, Args) {
-        return rt.call("$excnew", {b.str_literal(g, p), b.array_lit(a, p)}, p);
+        return rt.call("$excnew",
+                       {b.str_literal(g, p), b.array_lit(a, p)}, p);
       });
     }
     if (g == "sorted") {
@@ -5299,7 +5307,7 @@ bool nat_ffmt(NativeCall& c) {
 // in which a single '_' may stand between two digits. int() and float()
 // read their digits through this one function. ASCII only -- Python also
 // reads other scripts' digits and Unicode whitespace (README.md).
-bool is_digit(char c) { return c >= '0' && c <= '9'; }
+bool is_digit(char c) { return escapes::digit_value(c, 10) >= 0; }
 
 bool scan_digits(std::string_view s, size_t& i, std::string& out) {
   if (i >= s.size() || !is_digit(s[i])) return false;
@@ -5328,7 +5336,9 @@ std::string_view strip_number(std::string_view s) {
 bool equals_nocase(std::string_view s, std::string_view lower) {
   if (s.size() != lower.size()) return false;
   for (size_t i = 0; i < s.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(s[i])) != lower[i]) return false;
+    if (std::tolower(static_cast<unsigned char>(s[i])) != lower[i]) {
+      return false;
+    }
   }
   return true;
 }
@@ -5381,14 +5391,6 @@ std::optional<double> float_value(std::string_view s) {
   return literals::parse_float_literal(clean);
 }
 
-// Each answers nil when the text is not a number, and the caller words the
-// ValueError, which names the string as Python's does.
-bool nat_pyint(NativeCall& c) {
-  const auto text = int_text(c.arg(0).as_str());
-  c.result = text ? Value::make_str(*text) : Value();
-  return true;
-}
-
 // A finite double as [m, k], `m * 2 ** k` with m an int64 (its 53 bits).
 bool nat_dparts(NativeCall& c) {
   int e = 0;
@@ -5396,6 +5398,14 @@ bool nat_dparts(NativeCall& c) {
   c.result = Value::make_array(
       {Value::make_int(static_cast<int64_t>(std::ldexp(m, 53))),
        Value::make_int(e - 53)});
+  return true;
+}
+
+// Each answers nil when the text is not a number, and the caller words the
+// ValueError, which names the string as Python's does.
+bool nat_pyint(NativeCall& c) {
+  const auto text = int_text(c.arg(0).as_str());
+  c.result = text ? Value::make_str(*text) : Value();
   return true;
 }
 
@@ -5429,14 +5439,6 @@ std::string type_name_of(const Value& v) {
   }
   if (const std::string* n = instance_class_name(v)) return *n;
   return "object";
-}
-
-// A tuple, as `$tuple` makes one: its items in a record of its own kind.
-Value make_tuple(std::vector<Value> items) {
-  Value t = Value::make_object();
-  t.as_object()->meta = Value::make_array(
-      {Value::make_str(kTupleKind), Value::make_array(std::move(items))});
-  return t;
 }
 
 // An executor's trap as the exception python3 raises for the same fault:
@@ -5552,7 +5554,9 @@ Value convert_trap(const Value& trap, const void*) {
       break;  // no words of its own: the executor's message stands
   }
   return make_exception(cls, Value::make_str(msg),
-                        {make_tuple({Value::make_str(msg)})});
+                        {make_kind_record(kTupleKind,
+                                          {Value::make_array(
+                                              {Value::make_str(msg)})})});
 }
 
 const std::vector<vm::NativeDef>& stdlib() {

@@ -400,6 +400,24 @@ int main() {
              "make_exception: a plain object is none");
   }
 
+  // make_kind_record is of_kind's twin: the same meta, field for field.
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    run_with_natives(
+        b.intrinsic(IntrinsicId::Print,
+                    {b.intrinsic(IntrinsicId::MetaGet,
+                                 {of_kind(
+                                     b, b.object_lit({}), kTupleKind,
+                                     {b.literal(1), b.str_literal("x")})})}),
+        m, {}, "kind record: IR");
+    const Value host = make_kind_record(
+        kTupleKind, {Value::make_int(1), Value::make_str("x")});
+    check_eq(joined(), to_display(host.as_object()->meta) + "|",
+             "make_kind_record: the IR's meta");
+  }
+
   // An extra field after the message: the IR and C++ builders agree on it,
   // exception_record still reads the three, and an origin stamp goes after
   // it, so the extra stays at kExcArgs.

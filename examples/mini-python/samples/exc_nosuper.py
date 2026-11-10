@@ -26,3 +26,12 @@ class Both(Exception):
 
 b = Both(1, 2)
 show(lambda: (b.total, b.args, str(b), repr(b)))
+
+
+class Shown(Exception):
+    def __str__(self):
+        return "custom"
+
+
+s = Shown("a", 1)
+show(lambda: (str(s), s.args, repr(s)))

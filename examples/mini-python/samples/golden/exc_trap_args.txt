@@ -1,0 +1,5 @@
+('division by zero',) tuple 1
+ZeroDivisionError('division by zero') division by zero
+("object of type 'int' has no len()",) tuple 1
+TypeError("object of type 'int' has no len()")
+('pop from empty list',)

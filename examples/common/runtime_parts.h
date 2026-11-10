@@ -405,6 +405,18 @@ inline const std::vector<coreir::Value>* exception_record(
              : nullptr;
 }
 
+// A kind record built by a host function: of_kind's twin, an object whose
+// meta is [kind, fields...] -- a tuple, an exception -- for a front end that
+// makes one outside a helper.
+inline coreir::Value make_kind_record(
+    const std::string& kind, const std::vector<coreir::Value>& fields) {
+  coreir::Value v = coreir::Value::make_object();
+  std::vector<coreir::Value> rec{coreir::Value::make_str(kind)};
+  rec.insert(rec.end(), fields.begin(), fields.end());
+  v.as_object()->meta = coreir::Value::make_array(rec);
+  return v;
+}
+
 // A fresh builtin exception, built by a host function: the object
 // `exception()` builds in IR, for a front end that makes one outside a
 // helper -- the conversion of an executor's trap at a catch
@@ -413,12 +425,9 @@ inline const std::vector<coreir::Value>* exception_record(
 inline coreir::Value make_exception(
     const std::string& name, const coreir::Value& message,
     const std::vector<coreir::Value>& extra = {}) {
-  coreir::Value e = coreir::Value::make_object();
-  std::vector<coreir::Value> rec{coreir::Value::make_str(kExcKind),
-                                 coreir::Value::make_str(name), message};
-  rec.insert(rec.end(), extra.begin(), extra.end());
-  e.as_object()->meta = coreir::Value::make_array(rec);
-  return e;
+  std::vector<coreir::Value> fields{coreir::Value::make_str(name), message};
+  fields.insert(fields.end(), extra.begin(), extra.end());
+  return make_kind_record(kExcKind, fields);
 }
 
 // ---- Executor traps at a catch ---------------------------------------------
