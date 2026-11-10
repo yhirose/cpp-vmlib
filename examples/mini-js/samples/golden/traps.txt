@@ -3,7 +3,19 @@ TypeError: Cannot read properties of undefined (reading 'b')
 TypeError: Cannot read properties of undefined (reading '0')
 TypeError: Cannot set properties of undefined (setting 'y')
 TypeError: Cannot set properties of undefined (setting '2')
-TypeError
-TypeError
-TypeError
+TypeError: o.f is not a function
+TypeError: five is not a function
+TypeError: u is not a function
+TypeError: q.a.b is not a function
+TypeError: xs[0] is not a function
+TypeError: xs[k] is not a function
+TypeError: o.f is not a function
+TypeError: q.g(...).z is not a function
+TypeError: q.g(...) is not a function
+TypeError: o.f is not a function
+TypeError: 1 is not a function
+TypeError: (intermediate value).zz is not a function
+TypeError: five is not a function
+TypeError: o.f is not a function
+TypeError: this.zz is not a function
 RangeError: Maximum call stack size exceeded

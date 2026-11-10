@@ -323,6 +323,28 @@ them; `a.push(1, 2)` used to push only the first. Every other builtin
 matched by name reads its arguments one value each, and a spread in one is
 a bind-time error rather than a silently dropped argument.
 
+## A call of a non-function names its callee
+
+V8 words the failure with the callee as the source wrote it: `o.f is not a
+function`. The VM knows only that the value is no function, so the binder
+spells the callee the way V8's CallPrinter does and hands it over with
+the call (`Builder::note`, which `vm::compile` keeps per instruction), and
+the trap carries it as its name fact for `convert_trap` to word. Spelled:
+an identifier, `this`, `null`, `undefined`, `true`, `false` and a decimal
+integer as written; `.name`; an index by an identifier or a decimal
+integer (`xs[k]`, `xs[0]`) and by a string literal, which V8 prints as a
+member (`o['f']()` is `o.f`); `(...)` for a call (`q.g(...).z`); a
+parenthesis prints what it holds; and what V8 cannot spell, a `new`, an
+arrow or a function expression, is `(intermediate value)` followed by the
+suffixes (`(intermediate value).zz`). Any other shape (another index key,
+a comma expression, optional chaining, a template, a string, array or
+object literal) is the whole `(intermediate value) is not a function`,
+which is also what a call a helper makes on the program's behalf says.
+Known difference: a builtin method given an argument that is no function is
+worded by V8 from its own builtin (`[1].map(5)` is `number 5 is not a
+function`), and this subset has no such methods (`xs.map` is not a function
+here, whatever it is given).
+
 ## What is deliberately absent, and what quietly differs
 
 Absent, because none of it exercises a recipe further:

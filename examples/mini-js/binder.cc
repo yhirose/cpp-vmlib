@@ -48,12 +48,14 @@
 #include "escapes.h"
 #include "literals.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <peglib.h>
@@ -1897,7 +1899,10 @@ struct Binder {
     const std::string n(a.nodes[0]->token);
     const Ast& arglist = *a.nodes[1]->nodes[0];
     const auto chain = [&](NodeId built) {
-      return apply_suffixes(built, a, 2, a.nodes.size(), ctx);
+      // What V8 cannot spell of a `new`, it prints as "(intermediate
+      // value)" and goes on from there.
+      return apply_suffixes(built, a, 2, a.nodes.size(), ctx,
+                            std::string("(intermediate value)"));
     };
     // new Map(entries) and new Set(values), filled by $mfill/$sfill from
     // anything for...of walks.
@@ -1981,8 +1986,82 @@ struct Binder {
   // JavaScript's own rule is that `new`'s constructor call binds tighter
   // than nothing else in `postfix`, so whatever comes after it chains on
   // exactly the way it would on any other value.
+  // How V8's CallPrinter spells a callee in "x is not a function", which
+  // is what the trap a call of a non-function raises carries (convert_trap).
+  // A Callee is its text, or nothing for a shape this does not spell: the
+  // whole callee is then "(intermediate value)", which is also what V8
+  // prints for a receiver it cannot spell (`new C()`, a function) before
+  // the suffixes that follow it. Spelled: identifiers, `this`, null,
+  // undefined, true, false and decimal integers as written; `.name`; an
+  // index by a string literal (spelled as a member, as V8 does), by an
+  // identifier or by a decimal integer; `(...)` for a call; and a
+  // parenthesis prints what is inside it.
+  using Callee = std::optional<std::string>;
+  static bool is_decimal(std::string_view t) {
+    return !t.empty() &&
+           std::all_of(t.begin(), t.end(),
+                       [](char c) { return c >= '0' && c <= '9'; });
+  }
+  Callee primary_callee(const Ast& a) {
+    switch (a.tag) {
+      case "ident"_:
+      case "thisexpr"_:
+      case "literal"_:
+        return std::string(a.tag == "thisexpr"_ ? "this" : a.token);
+      case "number"_:
+        if (is_decimal(a.token)) return std::string(a.token);
+        return std::nullopt;
+      case "paren"_:
+        return primary_callee(*a.nodes[0]);
+      case "arrow"_:
+      case "funcexpr"_:
+      case "newexpr"_:
+        return std::string("(intermediate value)");
+      case "postfix"_: {
+        Callee t = primary_callee(*a.nodes[0]);
+        for (size_t i = 1; i < a.nodes.size(); ++i) {
+          t = suffix_callee(std::move(t), *a.nodes[i], a);
+        }
+        return t;
+      }
+      default:
+        return std::nullopt;
+    }
+  }
+  // `t` followed by suffix `sfx`.
+  Callee suffix_callee(Callee t, const Ast& sfx, const Ast& whole) {
+    if (!t) return t;
+    switch (sfx.tag) {
+      case "membersfx"_:
+        return *t + "." + std::string(sfx.nodes[0]->token);
+      case "callsfx"_:
+        return *t + "(...)";
+      case "indexsfx"_: {
+        const Ast& k = *sfx.nodes[0];
+        if (k.tag == "string"_) {
+          return *t + "." + unescape(std::string(k.token), whole);
+        }
+        if (k.tag == "ident"_ || (k.tag == "number"_ && is_decimal(k.token))) {
+          return *t + "[" + std::string(k.token) + "]";
+        }
+        return std::nullopt;
+      }
+      default:
+        return std::nullopt;
+    }
+  }
+
+  // A call of `callee`, named for the trap a non-function raises: `text` is
+  // what the callee is called (Callee), and none names nothing.
+  NodeId call_named(NodeId callee, std::vector<NodeId> before,
+                    const Args& args, SrcPos p, const Callee& text) {
+    const NodeId call = call_with(callee, std::move(before), args, p);
+    if (text) Builder(m).note(call, *text);
+    return call;
+  }
+
   NodeId apply_suffixes(NodeId cur, const Ast& a, size_t from, size_t limit,
-                        FnCtx& ctx) {
+                        FnCtx& ctx, Callee text) {
     Builder b(m);
     for (size_t i = from; i < limit; ++i) {
       const Ast& sfx = *a.nodes[i];
@@ -1991,9 +2070,12 @@ struct Binder {
         case "membersfx"_: {
           const std::string name(sfx.nodes[0]->token);
           if (i + 1 < limit && a.nodes[i + 1]->tag == "callsfx"_) {
-            cur = emit_method(cur, name, *a.nodes[i + 1], sfx, ctx);
+            cur = emit_method(cur, name, *a.nodes[i + 1], sfx, ctx,
+                              suffix_callee(text, sfx, a));
+            text = suffix_callee(suffix_callee(text, sfx, a), *a.nodes[i + 1],
+                                 a);
             ++i;
-            break;
+            continue;
           }
           cur = ops.call("$index", {cur, b.str_literal(name, p)}, p);
           break;
@@ -2002,11 +2084,13 @@ struct Binder {
           cur = ops.call("$index", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         case "callsfx"_:
-          cur = call_with(cur, {}, emit_call_args(*sfx.nodes[0], ctx), p);
+          cur = call_named(cur, {}, emit_call_args(*sfx.nodes[0], ctx), p,
+                           text);
           break;
         default:
           fail(sfx, "'++'/'--' is only supported as a statement");
       }
+      text = suffix_callee(std::move(text), sfx, a);
     }
     return cur;
   }
@@ -2015,12 +2099,14 @@ struct Binder {
     const Ast& prim = *a.nodes[0];
     size_t i = 1;
     NodeId cur;
+    Callee text;
     if (prim.tag == "ident"_ && !ref_of.count(&prim) && is_global(std::string(prim.token))) {
       cur = emit_global_call(a, limit, ctx, i);
     } else {
       cur = emit_expr(prim, ctx);
+      text = primary_callee(prim);
     }
-    return apply_suffixes(cur, a, i, limit, ctx);
+    return apply_suffixes(cur, a, i, limit, ctx, std::move(text));
   }
 
   // `console.log(...)` and friends: a global name is not a value here, it
@@ -2119,7 +2205,7 @@ struct Binder {
   // function. README.md lists the consequence -- an object of your own
   // must not put a function under one of these names.
   NodeId emit_method(NodeId recv, const std::string& name, const Ast& call,
-                     const Ast& at, FnCtx& ctx) {
+                     const Ast& at, FnCtx& ctx, const Callee& text) {
     const SrcPos p = pos_of(at);
     auto b = Builder(m).at(p);
     const Ast& arglist = *call.nodes[0];
@@ -2233,8 +2319,9 @@ struct Binder {
                   if (args.spread.valid()) a.spread = v.back()();
                   return a;
                 };
-                return b.make_if(no_method(), call_with(pr(), {}, held(), p),
-                                 call_with(mt(), {t()}, held(), p));
+                return b.make_if(no_method(),
+                                 call_named(pr(), {}, held(), p, text),
+                                 call_named(mt(), {t()}, held(), p, text));
               });
             });
       });
@@ -2467,9 +2554,14 @@ Value convert_trap(const Value& trap, const void*) {
             double_format::display_with(key, double_format::kJs) + "')";
       break;
     }
-    case TrapKind::NotCallable:
-      msg = "(intermediate value) is not a function";
+    case TrapKind::NotCallable: {
+      // The callee as V8 spells it, when the binder could (Callee), else
+      // the words V8 has for one it cannot.
+      const Value callee = trap_fact(trap, TrapFact::Name);
+      msg = (callee.is_str() ? callee.as_str() : "(intermediate value)") +
+            std::string(" is not a function");
       break;
+    }
     case TrapKind::Uninit:
       name = "ReferenceError";
       msg = "Cannot access '" + trap_name(trap) +

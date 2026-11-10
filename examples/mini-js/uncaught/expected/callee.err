@@ -1,0 +1,1 @@
+callee.js:6:2: uncaught: TypeError: o.f is not a function
