@@ -139,3 +139,29 @@ show(function() return table.concat({1, 2}, {}) end)
 show(function() return table.concat(1) end)
 show(function() return table.concat("s", ",") end)
 show(function() return table.concat({}, ",") .. "|" end)
+
+-- A library function called without an argument it requires names it and its
+-- number, in Lua's words; a method call counts after the receiver. An
+-- expanding last argument that yields nothing is not told apart from nil
+-- here (README.md).
+show(function() return tostring() end)
+show(function() return type() end)
+show(function() return getmetatable() end)
+show(function() for k in ipairs() do end end)
+show(function() for k in pairs() do end end)
+show(function() return math.floor() end)
+show(function() return rawget({}) end)
+show(function() return rawset({}, 1) end)
+show(function() return setmetatable() end)
+show(function() return string.upper() end)
+show(function() return string.rep("x") end)
+show(function() return ("x"):rep() end)
+show(function() return ("x"):sub() end)
+show(function() return string.len() end)
+show(function() return table.concat() end)
+show(function() return coroutine.create() end)
+show(function() return pcall() end)
+-- The arguments given run before the one that is missing.
+local function mark() print("ran") return 1 end
+show(function() return rawset({}, (mark())) end)
+print(tostring(nil), type(nil), string.len(12))

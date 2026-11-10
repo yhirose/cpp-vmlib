@@ -258,12 +258,18 @@ metamethods (`__lt`/`__le`/`__concat`/`__len`/`__unm`/`__div`/`__mod`/
 
 Quietly different:
 
-* **A runtime error's words are the executor's, or a helper's.** A trap
-  caught by `pcall` reads `chunk:line: cannot call bool` where Lua says
-  `attempt to call a boolean value`, and an error a library helper raises
-  (`bad argument #1 to 'select' ...`) has Lua's words but no `chunk:line:`
-  in front; nothing names the variable involved, the way Lua's
-  `(local 'x')` does.
+* **A runtime error names no variable.** Its words and its `chunk:line:`
+  are Lua's (`attempt to call a boolean value`, `bad argument #1 to
+  'select' ...`), but Lua adds `(local 'x')` or `(field 'y')` when it
+  knows the name involved, and the VM does not.
+* **A library function's missing argument is told only when it is written
+  out.** `tostring()` is Lua's `bad argument #1 to 'tostring' (value
+  expected)`; `tostring(f())` where `f` returns nothing is `tostring(nil)`,
+  because an expanding last argument is cut to one value (below) and not
+  counted. `table.insert(t)` is `table.insert(t, nil)` where Lua says
+  `wrong number of arguments`. A function called through a value
+  (`local t = tostring; t()`) takes the host function's convention and
+  reads the missing argument as nil.
 * **`error`'s level 2 is the frame's `call_pos`.** Where the caller is
   `pcall` (a C frame in Lua, which adds no position) it names the `pcall`
   line, after a tail call (`return f()`) it names the tail call's line where
@@ -281,6 +287,9 @@ Quietly different:
   in `$set` (the VM's own SetIndex has no such rule, and other languages'
   containers take those keys), after the metatable's `__newindex` has had
   its say, which takes any key and any value, a nil value included.
+* **A metatable's `__newindex` that is neither a function nor a table**
+  is called anyway, for the executor's own `attempt to call` error, where
+  Lua raises `attempt to index` on it.
 * **`table.concat(t, sep)` has no `i` and `j`.** They are evaluated and
   ignored, and the whole sequence is joined.
 * **`#` on a table with a hole may pick a different border.** Lua says any

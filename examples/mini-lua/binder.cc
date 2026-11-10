@@ -151,31 +151,100 @@ bool is_global(const std::string& n) {
          n == "rawset" || n == "rawget";
 }
 
-// How many arguments each library function that takes one value each
-// reads, by its qualified name: kReadsEvery for one that reads all it is
-// given, the string natives, which check their own. The arguments past
-// those still run -- runtime_parts' reading. A function missing here is
-// not bound at all, rather than lowered without its count and so losing
-// the arguments it does not read. One that takes every value as one array
-// (print, io.write, select, pcall, table.pack) has none past them, and is
-// not asked.
+// What this front end knows of each library function it lowers by name,
+// from one table: how many arguments it reads, for the ones that take one
+// value each (kReadsEvery for one that reads all it is given, the string
+// natives, which check their own; the arguments past those still run --
+// runtime_parts' reading), and each parameter's kind -- what Lua's "bad
+// argument" says it takes ("" is any value: `value expected`) and whether
+// leaving it out is one. A function missing here is not bound at all, rather
+// than lowered without its count and so losing the arguments it does not
+// read. One that takes every value as one array (print, io.write, pcall,
+// table.pack) has none past them, and is not asked. The name Lua's words give
+// a function is the last part of its key (`floor` for `math.floor`), and
+// every such word -- the missing argument, the wrong type of one, an
+// IR helper's own complaint -- is arg_complaint's, so that nothing else
+// spells one.
 constexpr size_t kReadsEvery = std::string::npos;
-std::optional<size_t> library_reads(const std::string& name) {
-  static const std::map<std::string, size_t> reads = {
-      {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
-      {"getmetatable", 1}, {"error", 2},         {"rawset", 3},
-      {"rawget", 2},       {"coroutine.create", 1},
-      {"coroutine.resume", 2},                   {"coroutine.yield", 1},
-      {"coroutine.status", 1},                   {"coroutine.wrap", 1},
-      {"table.concat", 2}, {"table.insert", 3},  {"table.unpack", 3},
-      {"string.upper", 1}, {"string.lower", 1},
-      {"string.rep", kReadsEvery},               {"string.sub", kReadsEvery},
-      {"string.len", kReadsEvery},               {"string.byte", kReadsEvery},
-      {"math.floor", 1},   {"math.type", 1},
+struct LibParam {
+  const char* expected;
+  bool required;
+};
+struct LibFn {
+  size_t reads;
+  std::vector<LibParam> params;
+};
+const std::map<std::string, LibFn>& library() {
+  constexpr LibParam any{"", true}, table{"table", true}, opt{"", false};
+  constexpr LibParam number{"number", true}, str{"string", true};
+  static const std::map<std::string, LibFn> fns = {
+      {"type", {1, {any}}},
+      {"tostring", {1, {any}}},
+      {"setmetatable", {2, {table, {"nil or table", true}}}},
+      {"getmetatable", {1, {any}}},
+      {"error", {2, {opt, {"number", false}}}},
+      {"rawset", {3, {table, any, any}}},
+      {"rawget", {2, {table, any}}},
+      {"ipairs", {1, {any}}},
+      {"pairs", {1, {any}}},
+      {"select", {kReadsEvery, {number}}},
+      {"pcall", {kReadsEvery, {any}}},
+      {"coroutine.create", {1, {{"function", true}}}},
+      {"coroutine.resume", {2, {{"thread", true}, opt}}},
+      {"coroutine.yield", {1, {opt}}},
+      {"coroutine.status", {1, {{"thread", true}}}},
+      {"coroutine.wrap", {1, {{"function", true}}}},
+      {"table.concat", {2, {table, {"string", false}}}},
+      {"table.insert", {3, {table, opt, opt}}},
+      {"table.unpack", {3, {opt, opt, opt}}},
+      {"string.upper", {1, {str}}},
+      {"string.lower", {1, {str}}},
+      {"string.rep", {kReadsEvery, {str, number, {"string", false}}}},
+      {"string.sub", {kReadsEvery, {str, number, {"number", false}}}},
+      {"string.len", {kReadsEvery, {str}}},
+      {"string.byte",
+       {kReadsEvery, {str, {"number", false}, {"number", false}}}},
+      {"math.floor", {1, {number}}},
+      {"math.type", {1, {any}}},
   };
-  const auto it = reads.find(name);
-  if (it == reads.end()) return std::nullopt;
-  return it->second;
+  return fns;
+}
+
+std::optional<size_t> library_reads(const std::string& name) {
+  const auto& fns = library();
+  const auto it = fns.find(name);
+  // The ones lowered on their own (and here for their words).
+  if (it == fns.end() || name == "ipairs" || name == "pairs" ||
+      name == "select" || name == "pcall") {
+    return std::nullopt;
+  }
+  return it->second.reads;
+}
+
+// The name Lua's words give a library function.
+std::string lib_name(const std::string& fn) {
+  return fn.substr(fn.rfind('.') + 1);
+}
+
+// "bad argument #k to 'f' (what)", the one place that says so. `shown` is
+// k as the caller counts it, which is one less for a method call (`s:rep()`
+// has its receiver for argument 0), where Lua does the same.
+std::string arg_error(const std::string& fn, size_t shown,
+                      const std::string& what) {
+  return "bad argument #" + std::to_string(shown) + " to '" +
+         lib_name(fn) + "' (" + what + ")";
+}
+
+// A parameter of the library function `fn`, k from 0, that is wrong: absent
+// (`got` is "no value") or of another type. A parameter taking any value
+// can only be absent.
+std::string arg_complaint(const std::string& fn, size_t k, size_t shown,
+                          const std::string& got) {
+  const char* expected = library().at(fn).params.at(k).expected;
+  return arg_error(fn, shown,
+                   *expected == '\0'
+                       ? "value expected"
+                       : std::string(expected) + " expected, got " + got);
 }
 
 // A `:name(...)` whose receiver is a string: one of the string library's.
@@ -836,18 +905,18 @@ struct Binder {
     RT r(*this);
     const auto [t, sep] = r.params("t", "sep");
     const auto [out, i, n, e] = r.locals("out", "i", "n", "e");
-    const auto bad_type = [&](const char* name, int index, const char* want,
+    const auto bad_type = [&](const char* name, int index,
                               FuncWriter::Slot v) {
       return r.nat("bad_type",
-                   {r.S(name), r.I(index), r.S(want), r.L(v)});
+                   {r.S(name), r.I(index), r.L(v)});
     };
     // The table and the separator are checked once, here; the loop reads a
     // table with `$get`.
-    r.add(r.iff(r.isnt(r.typ(t), "map"), bad_type("concat", 1, "table", t)));
+    r.add(r.iff(r.isnt(r.typ(t), "map"), bad_type("table.concat", 0, t)));
     r.add(r.iff(
         r.isnt(r.typ(sep), "string"),
         r.iff(r.both(r.isnt(r.typ(sep), "int"), r.isnt(r.typ(sep), "double")),
-              bad_type("concat", 2, "string", sep),
+              bad_type("table.concat", 1, sep),
               r.set(sep, r.call("$str", {r.L(sep)})))));
     r.add(r.set(out, r.S("")));
     r.add(r.set(i, r.I(1)));
@@ -895,8 +964,8 @@ struct Binder {
     r.add(r.iff(
         r.either(r.bin(BinOp::Lt, r.L(pos), r.I(1)),
                  r.bin(BinOp::Gt, r.L(pos), r.bin(BinOp::Add, r.L(k), r.I(1)))),
-        r.nat("arg_fail", {r.S("bad argument #2 to 'insert' (position out of "
-                               "bounds)")})));
+        r.nat("arg_fail", {r.S(arg_error("table.insert", 2,
+                                      "position out of bounds"))})));
     r.add(r.wh(r.bin(BinOp::Ge, r.L(k), r.L(pos)),
                r.blk({r.call("$set", {r.L(t), r.bin(BinOp::Add, r.L(k), r.I(1)),
                                       r.call("$get", {r.L(t), r.L(k)})}),
@@ -954,8 +1023,7 @@ struct Binder {
     const auto [all] = r.params("all");
     const auto [n, k, len] = r.locals("n", "k", "len");
     r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(all)), r.I(0)),
-                r.nat("arg_fail", {r.S("bad argument #1 to 'select' (number "
-                                      "expected, got no value)")})));
+                r.nat("arg_fail", {r.S(arg_complaint("select", 0, 1, "no value"))})));
     r.add(r.set(n, r.idx(r.L(all), r.I(0))));
     r.add(r.set(len, r.bin(BinOp::Sub, r.len(r.L(all)), r.I(1))));
     r.add(r.iff(r.both(r.is(r.typ(n), "string"),
@@ -966,8 +1034,7 @@ struct Binder {
                 r.set(k, r.bin(BinOp::Add, r.L(len),
                                r.bin(BinOp::Add, r.L(k), r.I(1))))));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(1)),
-                r.nat("arg_fail", {r.S("bad argument #1 to 'select' (index out "
-                                      "of range)")})));
+                r.nat("arg_fail", {r.S(arg_error("select", 1, "index out of range"))})));
     r.add(r.iff(r.bin(BinOp::Gt, r.L(k), r.L(len)), r.ret(r.arr({}))));
     // The kth value is all[k], n being all[0].
     r.add(r.ret(r.in(IntrinsicId::ArraySlice,
@@ -1035,18 +1102,47 @@ struct Binder {
     return b.call_value(b.native_ref(b.declare_native(name)), args);
   }
 
+  // The argument a call leaves out, which the function reads as nil -- or
+  // does not take: a required parameter (the table) that a call with no
+  // expanding last argument leaves out is Lua's "bad argument ... (value
+  // expected)", raised where the argument would have run, so the arguments
+  // before it have. `shown` is the parameter as the call counts it.
+  NodeId absent(const std::string& fn, size_t k, bool rest, size_t shown,
+                SrcPos p) {
+    auto b = Builder(m).at(p);
+    const auto& params = library().at(fn).params;
+    if (rest || k >= params.size() || !params[k].required) {
+      return b.nil_literal();
+    }
+    return native("arg_missing",
+                  {b.str_literal(fn), b.literal(static_cast<int64_t>(k)),
+                   b.literal(static_cast<int64_t>(shown))},
+                  p);
+  }
+
   // A string library function, by name: the two case maps are the VM's
   // own StrUpper/StrLower (ASCII, as Lua's are in the C locale), the rest
   // host functions.
-  NodeId string_call(const std::string& name, const std::vector<NodeId>& args,
-                     SrcPos p) {
+  NodeId string_call(const std::string& name, std::vector<NodeId> args,
+                     bool rest, bool method, SrcPos p) {
+    const std::string fn = "string." + name;
+    // A parameter the call leaves out and the function requires is its
+    // complaint, in the place of the argument (absent). A method call's
+    // receiver is its argument 0.
+    const auto& params = library().at(fn).params;
+    if (!rest && args.size() < params.size() && params[args.size()].required) {
+      args.push_back(
+          absent(fn, args.size(), false, args.size() + (method ? 0 : 1), p));
+    }
     if (name == "upper" || name == "lower") {
       auto b = Builder(m).at(p);
       return b.intrinsic(
           name == "upper" ? IntrinsicId::StrUpper : IntrinsicId::StrLower,
-          {args.empty() ? b.nil_literal() : args[0]});
+          {args[0]});
     }
-    return native("s_" + name, args, p);
+    // The method form counts its arguments from after the receiver, in a
+    // complaint of one (bad_arg).
+    return native((method ? "m_" : "s_") + name, args, p);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
@@ -1405,7 +1501,7 @@ struct Binder {
             auto bp = b.at(p);
             cur = {reading(bp, one_each, *library_reads("string." + name),
                            [&](const std::vector<NodeId>& read) {
-                             return string_call(name, read, p);
+                             return string_call(name, read, args.rest.valid(), true, p);
                            }),
                    false};
             break;
@@ -1517,7 +1613,8 @@ struct Binder {
     // built over them; every argument runs, read or not.
     const std::vector<NodeId>* read = &args;
     const auto a0 = [&](size_t k) {
-      return k < read->size() ? (*read)[k] : b.nil_literal(p);
+      return k < read->size() ? (*read)[k]
+                              : absent(name, k, vals.rest.valid(), k + 1, p);
     };
     const auto dispatch = [&]() -> Val {
       if (mem.empty()) {
@@ -1548,8 +1645,7 @@ struct Binder {
                                                     {t[0]()}),
                                         ba.str_literal("map")),
                                native("bad_type",
-                                      {ba.str_literal("rawset"), ba.literal(1),
-                                       ba.str_literal("table"), t[0]()},
+                                      {ba.str_literal("rawset"), ba.literal(0), t[0]()},
                                       p),
                                ba.block({raw_store(ba, t[0], t[1], t[2]),
                                         t[0]()}));
@@ -1599,7 +1695,7 @@ struct Binder {
         }
       }
       if (g == "string" && is_string_method(mem)) {
-        return {string_call(mem, args, p), false};
+        return {string_call(mem, args, vals.rest.valid(), false, p), false};
       }
       if (g == "math") {
         if (mem == "floor") return {native("floor", {a0(0)}, p), false};
@@ -1625,6 +1721,10 @@ struct Binder {
   // arguments follow -- f included, when it is the first of the expanding
   // last argument's values (`pcall(...)`).
   NodeId emit_pcall(const Values& args, FnCtx& ctx, SrcPos p) {
+    // `pcall()` has nothing to call.
+    if (args.firsts.empty() && !args.rest.valid()) {
+      return absent("pcall", 0, false, 1, p);
+    }
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
     // f and its arguments run first, outside the protection: an error in
@@ -1908,7 +2008,6 @@ struct Binder {
     const Ast& call = *list.nodes[0];
     const std::string which(call.nodes[0]->token);
     const Ast& args = *call.nodes[1]->nodes[0];
-    if (args.nodes.empty()) fail(a, "ipairs/pairs takes a table");
 
     const int32_t mark = ctx.mark();
     const auto& names = a.nodes[0]->nodes;
@@ -1934,7 +2033,10 @@ struct Binder {
     // The table is held by a Let for the whole loop; ipairs and pairs
     // read it alone, and anything after it still runs.
     const NodeId loop =
-        b.let(emit_expr(*args.nodes[0], ctx), [&](auto table) {
+        b.let(args.nodes.empty()
+                  ? absent(which, 0, false, 1, pos_of(*call.nodes[0]))
+                  : emit_expr(*args.nodes[0], ctx),
+              [&](auto table) {
           std::vector<NodeId> out;
           for (size_t k = 1; k < args.nodes.size(); ++k) {
             out.push_back(emit_expr(*args.nodes[k], ctx));
@@ -2375,15 +2477,18 @@ bool nat_mathtype(NativeCall& c) {
   return true;
 }
 
+// The ctx of the method forms of the string natives (`s:rep(n)`): not null.
+char kMethod = 0;
+
 // A library function's complaint of an argument, in Lua's words ("bad
 // argument #1 to 'floor' (number expected, got string)"): an Operands trap
 // on that argument, which the conversion gives its chunk and line.
-bool bad_arg(NativeCall& c, int index, const char* fn, const char* expected,
+bool bad_arg(NativeCall& c, const char* fn, size_t index,
              const SrcPos* at = nullptr) {
-  const std::string msg =
-      "bad argument #" + std::to_string(index + 1) + " to '" + fn + "' (" +
-      expected + " expected, got " +
-      (index < c.argc ? lua_typename(c.arg(index)) : "no value") + ")";
+  const std::string msg = arg_complaint(
+      fn, index, index + (c.ctx == nullptr ? 1 : 0),
+      index < static_cast<size_t>(c.argc) ? lua_typename(c.arg(index))
+                                          : "no value");
   const TrapFacts facts{.l = &c.arg(index)};
   c.error = at != nullptr
                 ? coreir::make_trap(TrapKind::Operands, msg, *at, facts)
@@ -2423,16 +2528,27 @@ bool nat_key_fail(NativeCall& c) {
 }
 
 // A library function's complaint of an argument that is there and of the
-// wrong type: the function's name, the argument's number, what it takes,
-// and the value it got.
+// wrong type: the function, the parameter's index from 0, and the value it
+// got.
 bool nat_bad_type(NativeCall& c) {
-  const Value& got = c.arg(3);
-  c.error = c.trap(
-      TrapKind::Operands,
-      "bad argument #" + std::to_string(c.arg(1).as_int()) + " to '" +
-          c.arg(0).as_str() + "' (" + c.arg(2).as_str() + " expected, got " +
-          lua_typename(got) + ")",
-      {.l = &got});
+  const Value& got = c.arg(2);
+  c.error = c.trap(TrapKind::Operands,
+                   arg_complaint(c.arg(0).as_str(),
+                                 static_cast<size_t>(c.arg(1).as_int()),
+                                 static_cast<size_t>(c.arg(1).as_int()) + 1,
+                                 lua_typename(got)),
+                   {.l = &got});
+  return false;
+}
+
+// A library function's complaint of an argument that is not there: the
+// function, the parameter's index from 0 and as the call counts it.
+bool nat_arg_missing(NativeCall& c) {
+  c.error = c.trap(TrapKind::Operands,
+                   arg_complaint(c.arg(0).as_str(),
+                                 static_cast<size_t>(c.arg(1).as_int()),
+                                 static_cast<size_t>(c.arg(2).as_int()),
+                                 "no value"));
   return false;
 }
 
@@ -2443,7 +2559,8 @@ bool nat_concat_bad(NativeCall& c) {
   c.error = c.trap(TrapKind::BadValue,
                    std::string("invalid value (") + lua_typename(v) +
                        ") at index " + std::to_string(c.arg(1).as_int()) +
-                       " in table for 'concat'",
+                       " in table for '" + lib_name("table.concat") +
+                       "'",
                    {.l = &v, .n = c.arg(1).as_int()});
   return false;
 }
@@ -2474,13 +2591,13 @@ bool nat_error_level(NativeCall& c) {
     if (!(std::floor(d) == d && d >= -0x1p63 && d < 0x1p63)) {
       c.error = coreir::make_trap(
           TrapKind::Operands,
-          "bad argument #2 to 'error' (number has no integer representation)",
+          arg_error("error", 2, "number has no integer representation"),
           here, {.l = &lv});
       return false;
     }
     level = static_cast<int64_t>(d);
   } else if (!lv.is_nil()) {
-    bad_arg(c, 1, "error", "number", &here);
+    bad_arg(c, "error", 1, &here);
     return false;
   }
   SrcPos at{};
@@ -2502,7 +2619,7 @@ bool nat_floor(NativeCall& c) {
     return true;
   }
   if (!v.is_double()) {
-    return bad_arg(c, 0, "floor", "number");
+    return bad_arg(c, "math.floor", 0);
   }
   const double d = v.as_double();
   double f = static_cast<double>(static_cast<int64_t>(d));
@@ -2520,7 +2637,7 @@ int64_t str_index(int64_t i, int64_t n) {
 
 bool nat_s_sub(NativeCall& c) {
   if (!c.arg(0).is_str()) {
-    return bad_arg(c, 0, "sub", "string");
+    return bad_arg(c, "string.sub", 0);
   }
   const std::string& s = c.arg(0).as_str();
   const auto n = static_cast<int64_t>(s.size());
@@ -2537,10 +2654,10 @@ bool nat_s_sub(NativeCall& c) {
 
 // string.rep(s, n [, sep]): n copies of s, sep between each two.
 bool nat_s_rep(NativeCall& c) {
-  if (!c.arg(0).is_str()) return bad_arg(c, 0, "rep", "string");
-  if (!c.arg(1).is_int()) return bad_arg(c, 1, "rep", "number");
+  if (!c.arg(0).is_str()) return bad_arg(c, "string.rep", 0);
+  if (!c.arg(1).is_int()) return bad_arg(c, "string.rep", 1);
   if (c.argc > 2 && !c.arg(2).is_nil() && !c.arg(2).is_str()) {
-    return bad_arg(c, 2, "rep", "string");
+    return bad_arg(c, "string.rep", 2);
   }
   const bool has_sep = c.argc > 2 && c.arg(2).is_str();
   std::string out;
@@ -2552,13 +2669,26 @@ bool nat_s_rep(NativeCall& c) {
   return true;
 }
 
+// A string argument as Lua reads one: a string, or a number written the
+// way tostring writes it.
+bool string_arg(NativeCall& c, const char* fn, size_t index,
+                std::string& out) {
+  const Value& v = c.arg(static_cast<int32_t>(index));
+  if (!v.is_str() && !v.is_number()) return bad_arg(c, fn, index);
+  out = lua_tostring(v);
+  return true;
+}
+
 bool nat_s_len(NativeCall& c) {
-  c.result = Value::make_int(static_cast<int64_t>(c.arg(0).as_str().size()));
+  std::string s;
+  if (!string_arg(c, "string.len", 0, s)) return false;
+  c.result = Value::make_int(static_cast<int64_t>(s.size()));
   return true;
 }
 
 bool nat_s_byte(NativeCall& c) {
-  const std::string& s = c.arg(0).as_str();
+  std::string s;
+  if (!string_arg(c, "string.byte", 0, s)) return false;
   const int64_t i = c.argc > 1 && c.arg(1).is_int() ? c.arg(1).as_int() : 1;
   if (i < 1 || i > static_cast<int64_t>(s.size())) {
     c.result = Value();
@@ -2675,12 +2805,17 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_rep", -1, nat_s_rep, nullptr},
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
+      {"m_sub", -1, nat_s_sub, &kMethod},
+      {"m_rep", -1, nat_s_rep, &kMethod},
+      {"m_len", -1, nat_s_len, &kMethod},
+      {"m_byte", -1, nat_s_byte, &kMethod},
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
       {"concat_bad", 2, nat_concat_bad, nullptr},
       {"key_fail", 1, nat_key_fail, nullptr},
-      {"bad_type", 4, nat_bad_type, nullptr},
+      {"bad_type", 3, nat_bad_type, nullptr},
+      {"arg_missing", 3, nat_arg_missing, nullptr},
       {"error_level", 4, nat_error_level, nullptr},
       trap_convert_def<&convert_trap>(),
   };
