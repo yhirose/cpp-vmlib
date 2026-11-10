@@ -864,8 +864,9 @@ by everything else is not quietly freed, and when the queue runs dry with
 any of them still suspended the run fails through `coreir_rt_fail` with a
 deadlock diagnostic -- Go's "all goroutines are asleep". The diagnostic has
 no position and no handler sees it; `RunOptions::deadlock_text` words it for
-a front end whose language words it differently. The entry frame is
-not a coroutine (a `CoroYield` there has no frames to park), so a front end
+a front end whose language words it differently (`describe` words a raised
+value; this words the one fatal that is not a value). The entry frame is not a
+coroutine (a `CoroYield` there has no frames to park), so a front end
 whose main *is* a green thread -- Go's -- spawns it from a bootstrap entry
 function and returns; mini-go does exactly that.
 
