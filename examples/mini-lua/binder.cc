@@ -835,17 +835,36 @@ struct Binder {
   void rt_concat() {
     RT r(*this);
     const auto [t, sep] = r.params("t", "sep");
-    const auto [out, i, n] = r.locals("out", "i", "n");
+    const auto [out, i, n, e] = r.locals("out", "i", "n", "e");
+    const auto bad_type = [&](const char* name, int index, const char* want,
+                              FuncWriter::Slot v) {
+      return r.nat("bad_type",
+                   {r.S(name), r.I(index), r.S(want), r.L(v)});
+    };
+    // The table and the separator are checked once, here; the loop reads a
+    // table with `$get`.
+    r.add(r.iff(r.isnt(r.typ(t), "map"), bad_type("concat", 1, "table", t)));
+    r.add(r.iff(
+        r.isnt(r.typ(sep), "string"),
+        r.iff(r.both(r.isnt(r.typ(sep), "int"), r.isnt(r.typ(sep), "double")),
+              bad_type("concat", 2, "string", sep),
+              r.set(sep, r.call("$str", {r.L(sep)})))));
     r.add(r.set(out, r.S("")));
     r.add(r.set(i, r.I(1)));
     r.add(r.set(n, r.call("$len", {r.L(t)})));
+    // An element is a string or a number, tried in that order; Lua writes
+    // a number the way tostring does.
+    const NodeId piece = r.iff(
+        r.is(r.typ(e), "string"), r.set(out, r.bin(BinOp::Add, r.L(out), r.L(e))),
+        r.iff(r.either(r.is(r.typ(e), "int"), r.is(r.typ(e), "double")),
+              r.set(out, r.bin(BinOp::Add, r.L(out),
+                               r.call("$str", {r.L(e)}))),
+              r.nat("concat_bad", {r.L(e), r.L(i)})));
     r.add(r.b.make_while(
         r.bin(BinOp::Le, r.L(i), r.L(n)),
         r.blk({r.iff(r.bin(BinOp::Gt, r.L(i), r.I(1)),
                      r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
-               r.set(out,
-                     r.bin(BinOp::Add, r.L(out),
-                           r.call("$str", {r.call("$get", {r.L(t), r.L(i)})}))),
+               r.set(e, r.call("$get", {r.L(t), r.L(i)})), piece,
                r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})));
     r.add(r.ret(r.L(out)));
     r.finish("$concat");
@@ -1562,7 +1581,7 @@ struct Binder {
       if (g == "table") {
         if (mem == "concat") {
           return {rt.call("$concat",
-                          {a0(0), args.size() > 1 ? args[1]
+                          {a0(0), args.size() > 1 ? a0(1)
                                                   : b.str_literal("", p)},
                           p),
                   false};
@@ -2417,6 +2436,18 @@ bool nat_bad_type(NativeCall& c) {
   return false;
 }
 
+// An element of table.concat's table that is neither a string nor a
+// number: Lua names its type and its index.
+bool nat_concat_bad(NativeCall& c) {
+  const Value& v = c.arg(0);
+  c.error = c.trap(TrapKind::BadValue,
+                   std::string("invalid value (") + lua_typename(v) +
+                       ") at index " + std::to_string(c.arg(1).as_int()) +
+                       " in table for 'concat'",
+                   {.l = &v, .n = c.arg(1).as_int()});
+  return false;
+}
+
 // A numeric for whose step is zero: Lua's own words.
 bool nat_for_step(NativeCall& c) {
   c.error = c.trap(TrapKind::BadValue, "'for' step is zero");
@@ -2647,6 +2678,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
+      {"concat_bad", 2, nat_concat_bad, nullptr},
       {"key_fail", 1, nat_key_fail, nullptr},
       {"bad_type", 4, nat_bad_type, nullptr},
       {"error_level", 4, nat_error_level, nullptr},

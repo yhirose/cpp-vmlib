@@ -62,3 +62,12 @@ newindex	nil	1
 newindex	absent	nil
 newindex	absent	2
 1	1
+traps.lua:133: invalid value (table) at index 2 in table for 'concat'
+traps.lua:134: invalid value (boolean) at index 3 in table for 'concat'
+traps.lua:135: invalid value (function) at index 3 in table for 'concat'
+1.50x03
+132
+traps.lua:138: bad argument #2 to 'concat' (string expected, got table)
+traps.lua:139: bad argument #1 to 'concat' (table expected, got number)
+traps.lua:140: bad argument #1 to 'concat' (table expected, got string)
+|

@@ -125,3 +125,17 @@ rawset(keys, 2, nil)
 local n = 0
 for _ in pairs(keys) do n = n + 1 end
 print(n, #keys)
+
+-- table.concat joins strings and numbers, a number written as tostring
+-- writes it, and the separator may be a number. Any other element names its
+-- type and index; a non-table is an argument error. (Its i and j arguments
+-- are not supported: README.md.)
+show(function() return table.concat({1, {}}) end)
+show(function() return table.concat({"a", "b", true}, ",") end)
+show(function() return table.concat({"a", "b", nothing}, ",") end)
+show(function() return table.concat({1.5, "x", 3}, 0) end)
+show(function() return table.concat({1, 2}, 3) end)
+show(function() return table.concat({1, 2}, {}) end)
+show(function() return table.concat(1) end)
+show(function() return table.concat("s", ",") end)
+show(function() return table.concat({}, ",") .. "|" end)

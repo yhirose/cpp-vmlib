@@ -281,6 +281,8 @@ Quietly different:
   in `$set` (the VM's own SetIndex has no such rule, and other languages'
   containers take those keys), after the metatable's `__newindex` has had
   its say, which takes any key and any value, a nil value included.
+* **`table.concat(t, sep)` has no `i` and `j`.** They are evaluated and
+  ignored, and the whole sequence is joined.
 * **`#` on a table with a hole may pick a different border.** Lua says any
   border is valid; this front end walks from 1 and Lua uses its array
   part's size, so the two can disagree about a table you have deleted from
