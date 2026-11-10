@@ -68,6 +68,7 @@ using namespace coreir;
 using namespace runtime_parts;
 
 namespace mini_lua {
+std::string& chunk_name();
 namespace {
 
 SrcPos pos_of(const Ast& a) {
@@ -162,7 +163,7 @@ constexpr size_t kReadsEvery = std::string::npos;
 std::optional<size_t> library_reads(const std::string& name) {
   static const std::map<std::string, size_t> reads = {
       {"type", 1},         {"tostring", 1},      {"setmetatable", 2},
-      {"getmetatable", 1}, {"error", 1},         {"rawset", 3},
+      {"getmetatable", 1}, {"error", 2},         {"rawset", 3},
       {"rawget", 2},       {"coroutine.create", 1},
       {"coroutine.resume", 2},                   {"coroutine.yield", 1},
       {"coroutine.status", 1},                   {"coroutine.wrap", 1},
@@ -1477,14 +1478,7 @@ struct Binder {
         if (g == "getmetatable") {
           return {b.intrinsic(IntrinsicId::MetaGet, {a0(0)}, p), false};
         }
-        if (g == "error") {
-          return {rt.call("$error",
-                          {a0(0), b.str_literal(chunk + ":" +
-                                                std::to_string(p.line) + ": ",
-                                                p)},
-                          p),
-                  false};
-        }
+        if (g == "error") return {emit_error(arglist, args.size(), a0(0), a0(1), p), false};
         // rawset/rawget: `$set`/`$get` without the metamethod detour --
         // `__newindex`'s own thunk needs one, on pain of calling itself.
         if (g == "rawset") {
@@ -1731,6 +1725,36 @@ struct Binder {
     const NodeId loop = b.make_while(b.bool_literal(true), b.block(body));
     if (end > mark) return b.scope(mark, end, loop);
     return loop;
+  }
+
+  // `error(v [, level])`. Level 1, the default, is `$error`: the line of
+  // this call. Level 0 is the same with no position. Any other level is
+  // the native's, called at no position of its own so that the position it
+  // blames (NativeExec::attributed of nothing) is the call that entered the
+  // function holding the `error`, which is level 2; the call's own position
+  // goes along as an argument for a level that turns out to be 1.
+  NodeId emit_error(const Ast* arglist, size_t argc, NodeId value,
+                    NodeId level, SrcPos p) {
+    auto b = Builder(m).at(p);
+    const auto level_is = [&](std::string_view digits) {
+      const Ast* l = arglist != nullptr && arglist->nodes.size() == 2
+                         ? arglist->nodes[1].get()
+                         : nullptr;
+      return l != nullptr && l->tag == "number"_ && l->token == digits;
+    };
+    if (argc < 2 || level_is("1")) {
+      return rt.call("$error",
+                     {value, b.str_literal(chunk + ":" +
+                                         std::to_string(p.line) + ": ")},
+                     p);
+    }
+    if (level_is("0")) {
+      return rt.call("$error", {value, b.str_literal("")}, p);
+    }
+    return native("error_level",
+                  {value, level, b.literal(static_cast<int64_t>(p.line)),
+                   b.literal(static_cast<int64_t>(p.col))},
+                  SrcPos{});
   }
 
   // A numeric literal, or a negated one, that is not zero.
@@ -2293,13 +2317,16 @@ bool nat_mathtype(NativeCall& c) {
 // A library function's complaint of an argument, in Lua's words ("bad
 // argument #1 to 'floor' (number expected, got string)"): an Operands trap
 // on that argument, which the conversion gives its chunk and line.
-bool bad_arg(NativeCall& c, int index, const char* fn, const char* expected) {
-  c.error = c.trap(
-      TrapKind::Operands,
+bool bad_arg(NativeCall& c, int index, const char* fn, const char* expected,
+             const SrcPos* at = nullptr) {
+  const std::string msg =
       "bad argument #" + std::to_string(index + 1) + " to '" + fn + "' (" +
-          expected + " expected, got " +
-          (index < c.argc ? lua_typename(c.arg(index)) : "no value") + ")",
-      {.l = &c.arg(index)});
+      expected + " expected, got " +
+      (index < c.argc ? lua_typename(c.arg(index)) : "no value") + ")";
+  const TrapFacts facts{.l = &c.arg(index)};
+  c.error = at != nullptr
+                ? coreir::make_trap(TrapKind::Operands, msg, *at, facts)
+                : c.trap(TrapKind::Operands, msg, facts);
   return false;
 }
 
@@ -2326,6 +2353,47 @@ bool nat_arg_fail(NativeCall& c) {
 // A numeric for whose step is zero: Lua's own words.
 bool nat_for_step(NativeCall& c) {
   c.error = c.trap(TrapKind::BadValue, "'for' step is zero");
+  return false;
+}
+
+// error(v, level) for a level other than the default one. A string gets
+// the position `level` frames up -- 1 is the call itself (line, col), 2 the
+// call that entered the function holding it, which is what attributing a
+// native with no position of its own blames; a program that is its own
+// caller (the main chunk) has none, and no position is added. Deeper
+// levels have no frame to read here, and add none. Anything but a string
+// is raised as it is.
+bool nat_error_level(NativeCall& c) {
+  const Value& v = c.arg(0);
+  const Value& lv = c.arg(1);
+  const SrcPos here{static_cast<uint32_t>(c.arg(2).as_int()),
+                    static_cast<uint32_t>(c.arg(3).as_int())};
+  int64_t level = 1;
+  if (lv.is_int()) {
+    level = lv.as_int();
+  } else if (lv.is_double()) {
+    const double d = lv.as_double();
+    if (!(std::floor(d) == d && d >= -0x1p63 && d < 0x1p63)) {
+      c.error = coreir::make_trap(
+          TrapKind::Operands,
+          "bad argument #2 to 'error' (number has no integer representation)",
+          here, {.l = &lv});
+      return false;
+    }
+    level = static_cast<int64_t>(d);
+  } else if (!lv.is_nil()) {
+    bad_arg(c, 1, "error", "number", &here);
+    return false;
+  }
+  SrcPos at{};
+  if (level == 1) at = here;
+  if (level == 2) at = c.exec->attributed(c.pos);
+  if (v.is_str() && at.line != 0) {
+    c.error = Value::make_str(chunk_name() + ":" + std::to_string(at.line) +
+                              ": " + v.as_str());
+  } else {
+    c.error = v;
+  }
   return false;
 }
 
@@ -2502,6 +2570,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
+      {"error_level", 4, nat_error_level, nullptr},
       trap_convert_def<&convert_trap>(),
   };
   return defs;

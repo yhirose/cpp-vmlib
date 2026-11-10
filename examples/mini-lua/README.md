@@ -237,6 +237,10 @@ the value of the `TryCatch` is the arm that ran.
 `error(msg)` prefixes a *string* message with the chunk name and line, Lua's
 default error level, which is why the binder is told the script's path.
 Anything else is raised unchanged, so a table can carry structured detail.
+`error(msg, 0)` adds nothing, and `error(msg, 2)` names the line of the call
+that entered the function holding the `error`, which Lua does by reading the
+caller's frame: here a native, called at no position of its own, is attributed
+to the frame's `call_pos`, the way a helper's failure is.
 A trap the executor raises itself -- `{} < 1` -- is caught by the same
 `pcall`, since `TryCatch` lands both, as its `{message, line, col}`
 object; pcall hands it back as Lua would, a string with the chunk and line
@@ -260,6 +264,17 @@ Quietly different:
   (`bad argument #1 to 'select' ...`) has Lua's words but no `chunk:line:`
   in front; nothing names the variable involved, the way Lua's
   `(local 'x')` does.
+* **`error`'s level 2 is the frame's `call_pos`.** Where the caller is
+  `pcall` (a C frame in Lua, which adds no position) it names the `pcall`
+  line, after a tail call (`return f()`) it names the tail call's line where
+  Lua names the line the tail-calling function was called from, and in a
+  coroutine's body (Lua: no position) it names the `resume`. A level of 3 or
+  more adds no position at all, there being no frame to read it from, and a
+  level written as a string (`error("x", "2")`) is an argument error where
+  Lua converts it.
+* **A numeric `for` reports its zero step at the line of the `for`.** Lua
+  uses the line of the `do` when the header spans lines. Its other header
+  errors (`'for' limit must be a number`) are the executor's own words.
 * **`#` on a table with a hole may pick a different border.** Lua says any
   border is valid; this front end walks from 1 and Lua uses its array
   part's size, so the two can disagree about a table you have deleted from

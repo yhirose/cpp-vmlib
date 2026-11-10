@@ -28,3 +28,21 @@ traps.lua:53: 'for' step is zero
 traps.lua:54: 'for' step is zero
 traps.lua:55: 'for' step is zero
 traps.lua:56: 'for' step is zero
+lvl0
+lvl0
+traps.lua:71: lvl2
+traps.lua:73: lvln
+traps.lua:74: lvln
+lvln
+lvln
+traps.lua:77: lvl1
+traps.lua:78: lvl1f
+traps.lua:79: lvlnil
+traps.lua:81: lvl2
+traps.lua:85: bad argument #2 to 'error' (number has no integer representation)
+traps.lua:86: bad argument #2 to 'error' (number expected, got table)
+traps.lua:87: bad argument #2 to 'error' (number expected, got boolean)
+true
+true
+42
+nil
