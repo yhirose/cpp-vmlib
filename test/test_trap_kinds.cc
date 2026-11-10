@@ -199,6 +199,11 @@ NodeId call_fn(Builder& b, int32_t fn, std::vector<NodeId> args = {}) {
   return b.call_value(b.make_closure(fn, 0, P), args, P);
 }
 
+// A call of a function that works, noted "first".
+NodeId noted_ok(Module& m, Builder& b) {
+  return b.note(call_fn(b, add_func(m, b, "f", 0, nil(b))), "first");
+}
+
 // A case's module: main guards `body` and hands the trap to probe().
 void run_case(const Case& c) {
   Module m;
@@ -341,13 +346,13 @@ void cases() {
        },
        "NotCallable|N:callvalue|int|nil|xs.f|0|0|cannot call int"},
       {"call named, its neighbour's own", [](Module& m, Builder& b) {
-         const NodeId ok = b.note(call_fn(b, add_func(m, b, "f", 0, nil(b))), "first");
-         return b.block({ok, b.note(b.call_value(num(b, 1), {}, P), "second")}, P);
+         const NodeId ok = noted_ok(m, b);
+         return b.block({ok, b.note(b.call_value(num(b, 1), {}, P), "second")},
+                        P);
        },
        "NotCallable|N:callvalue|int|nil|second|0|0|cannot call int"},
       {"call unnamed beside a named one", [](Module& m, Builder& b) {
-         const NodeId ok = b.note(call_fn(b, add_func(m, b, "f", 0, nil(b))), "first");
-         return b.block({ok, b.call_value(num(b, 1), {}, P)}, P);
+         return b.block({noted_ok(m, b), b.call_value(num(b, 1), {}, P)}, P);
        },
        "NotCallable|N:callvalue|int|nil||0|0|cannot call int"},
       {"call from a native", [](Module&, Builder& b) {

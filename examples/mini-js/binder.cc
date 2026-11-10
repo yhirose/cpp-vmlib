@@ -1977,15 +1977,6 @@ struct Binder {
     return chain(built);
   }
 
-  // A primary followed by `limit - 1` suffixes. The limit is what lets an
-  // assignment target reuse this for everything up to its last suffix --
-  // `o.a.b = v` needs `o.a` as a value and `b` as a key, which is this
-  // walk stopped one step early.
-  // The suffix loop, factored out so `new Foo(x).bar()` can resume it from
-  // an instance `emit_new` already built rather than from a primary --
-  // JavaScript's own rule is that `new`'s constructor call binds tighter
-  // than nothing else in `postfix`, so whatever comes after it chains on
-  // exactly the way it would on any other value.
   // How V8's CallPrinter spells a callee in "x is not a function", which
   // is what the trap a call of a non-function raises carries (convert_trap).
   // A Callee is its text, or nothing for a shape this does not spell: the
@@ -2060,6 +2051,15 @@ struct Binder {
     return call;
   }
 
+  // A primary followed by `limit - 1` suffixes. The limit is what lets an
+  // assignment target reuse this for everything up to its last suffix --
+  // `o.a.b = v` needs `o.a` as a value and `b` as a key, which is this
+  // walk stopped one step early.
+  // The suffix loop, factored out so `new Foo(x).bar()` can resume it from
+  // an instance `emit_new` already built rather than from a primary --
+  // JavaScript's own rule is that `new`'s constructor call binds tighter
+  // than nothing else in `postfix`, so whatever comes after it chains on
+  // exactly the way it would on any other value.
   NodeId apply_suffixes(NodeId cur, const Ast& a, size_t from, size_t limit,
                         FnCtx& ctx, Callee text) {
     Builder b(m);
@@ -2070,12 +2070,12 @@ struct Binder {
         case "membersfx"_: {
           const std::string name(sfx.nodes[0]->token);
           if (i + 1 < limit && a.nodes[i + 1]->tag == "callsfx"_) {
-            cur = emit_method(cur, name, *a.nodes[i + 1], sfx, ctx,
-                              suffix_callee(text, sfx, a));
-            text = suffix_callee(suffix_callee(text, sfx, a), *a.nodes[i + 1],
-                                 a);
+            // The member and its call are one step: `text` ends as the
+            // callee (`o.f`), and the update below adds the call's `(...)`.
+            text = suffix_callee(std::move(text), sfx, a);
+            cur = emit_method(cur, name, *a.nodes[i + 1], sfx, ctx, text);
             ++i;
-            continue;
+            break;
           }
           cur = ops.call("$index", {cur, b.str_literal(name, p)}, p);
           break;
@@ -2090,7 +2090,7 @@ struct Binder {
         default:
           fail(sfx, "'++'/'--' is only supported as a statement");
       }
-      text = suffix_callee(std::move(text), sfx, a);
+      text = suffix_callee(std::move(text), *a.nodes[i], a);
     }
     return cur;
   }

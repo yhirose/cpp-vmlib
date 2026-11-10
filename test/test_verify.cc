@@ -97,6 +97,27 @@ int main() {
              return n;
            }),
            "unknown binary operator", "binary op out of range");
+  // A call note is a Str const on a call node.
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.note(b.call_value(b.literal(1, p), {}, p), "o.f");
+           }),
+           "", "a noted call");
+  check_eq(verdict([&](Module&, Builder& b) {
+             return b.note(b.literal(1, p), "o.f");
+           }),
+           "call note on a node that is no call", "a note on a literal");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.note(b.call_value(b.literal(1, p), {}, p), "x");
+             m.note_of[n.v] = 99;
+             return n;
+           }),
+           "call note is not a string const", "a note past the consts");
+  check_eq(verdict([&](Module& m, Builder& b) {
+             const NodeId n = b.note(b.call_value(b.literal(1, p), {}, p), "x");
+             m.note_of[n.v] = 0;  // const 0 is the callee's int
+             return n;
+           }),
+           "call note is not a string const", "a note on a non-string const");
   check_eq(verdict([&](Module& m, Builder& b) {
              const NodeId n = b.unary(UnOp::Neg, b.literal(1, p), p);
              m.nodes[n.v].op = static_cast<uint8_t>(kLastUnOp) + 1;
