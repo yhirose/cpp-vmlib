@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -762,7 +763,7 @@ struct Binder {
         "$len", "$idx", "$setidx", "$slice", "$in", "$getattr", "$setattr",
         "$iter", "$iternext", "$exc", "$isexc", "$range", "$listadd",
         "$strmul", "$listmul", "$typename", "$type", "$join", "$dget", "$tolist",
-        "$toint", "$intfail", "$pyfloat", "$floatfail",
+        "$toint", "$intfail", "$pyfloat", "$floatfail", "$dtoint",
         // The calling convention this front end writes over the IR's.
         "$acons", "$aext", "$rest", "$kwhas", "$hasname", "$kwrest",
         "$kwcheck", "$kwmerge", "$missing", "$toomany",
@@ -2076,8 +2077,7 @@ struct Binder {
     RT r(*this);
     const auto [v] = r.params("v");
     const auto [s, i, neg, acc, c] = r.locals("s", "i", "neg", "acc", "c");
-    r.add(r.iff(r.is(r.typ(v), "double"),
-                r.ret(r.in(IntrinsicId::ToInt, {r.L(v)}))));
+    r.add(r.iff(r.is(r.typ(v), "double"), r.ret(r.call("$dtoint", {r.L(v)}))));
     r.add(r.iff(r.is(r.typ(v), "bool"), r.ret(r.iff(r.L(v), r.I(1), r.I(0)))));
     // `int("...")` accumulates through $mul and $add, so a literal too big
     // for an int64 becomes a bignum with nothing further to say about it.
@@ -2128,6 +2128,33 @@ struct Binder {
                         r.S("'"))}));
     r.add(r.ret(r.Nil()));
     r.finish("$toint");
+  }
+
+  // int(float): the truncation, exact. ToInt is the executor's and stops at
+  // an int64, so from 2^63 on (-2^63 itself is an int64) the double is its
+  // own mantissa times a power of two, which is the one thing a bignum
+  // multiplies exactly: `m * 2 ** k`, with the sign in `m`. Infinity and NaN
+  // are Python's two errors.
+  void rt_dtoint() {
+    RT r(*this);
+    const auto [d] = r.params("d");
+    const auto [parts] = r.locals("parts");
+    r.add(r.iff(r.bin(BinOp::Ne, r.L(d), r.L(d)),
+                r.call("$exc", {r.S("ValueError"),
+                                r.S("cannot convert float NaN to integer")})));
+    r.add(r.iff(r.bin(BinOp::Ne, r.bin(BinOp::Sub, r.L(d), r.L(d)), r.D(0.0)),
+                r.call("$exc",
+                       {r.S("OverflowError"),
+                        r.S("cannot convert float infinity to integer")})));
+    r.add(r.iff(
+        r.either(r.bin(BinOp::Ge, r.L(d), r.D(9223372036854775808.0)),
+                 r.bin(BinOp::Lt, r.L(d), r.D(-9223372036854775808.0))),
+        r.blk({r.set(parts, r.nat("dparts", {r.L(d)})),
+               r.ret(r.call("$mul",
+                            {r.idx(r.L(parts), r.I(0)),
+                             r.call("$pow", {r.I(2), r.idx(r.L(parts), r.I(1))})}))})));
+    r.add(r.ret(r.in(IntrinsicId::ToInt, {r.L(d)})));
+    r.finish("$dtoint");
   }
 
   // `float(x)`: what $tofloat is for a number, and for a string the parse
@@ -3305,7 +3332,7 @@ struct Binder {
 
   void emit_runtime() {
     rt_typename(); rt_type(); rt_join(); rt_dget(); rt_tolist(); rt_toint();
-    rt_intfail(); rt_pyfloat(); rt_floatfail();
+    rt_intfail(); rt_pyfloat(); rt_floatfail(); rt_dtoint();
     rt_isbig(); rt_isnum(); rt_tolimbs(); rt_mkbig(); rt_biglimbs();
     rt_bigsign(); rt_ucmp(); rt_uadd(); rt_usub(); rt_umul(); rt_bigadd();
     rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
@@ -5362,6 +5389,16 @@ bool nat_pyint(NativeCall& c) {
   return true;
 }
 
+// A finite double as [m, k], `m * 2 ** k` with m an int64 (its 53 bits).
+bool nat_dparts(NativeCall& c) {
+  int e = 0;
+  const double m = std::frexp(c.arg(0).as_double(), &e);
+  c.result = Value::make_array(
+      {Value::make_int(static_cast<int64_t>(std::ldexp(m, 53))),
+       Value::make_int(e - 53)});
+  return true;
+}
+
 bool nat_pyfloat(NativeCall& c) {
   const auto value = float_value(c.arg(0).as_str());
   c.result = value ? Value::make_double(*value) : Value();
@@ -5524,6 +5561,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"print", 1, nat_print, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
       {"pyint", 1, nat_pyint, nullptr},
+      {"dparts", 1, nat_dparts, nullptr},
       {"pyfloat", 1, nat_pyfloat, nullptr},
       double_format::dstr_def(double_format::kPython),
   };
