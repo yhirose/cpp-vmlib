@@ -329,6 +329,31 @@ void cases() {
       // ---- calls ----------------------------------------------------------
       {"call", [](Module&, Builder& b) { return b.call_value(num(b, 1), {}, P); },
        "NotCallable|N:callvalue|int|nil||0|0|cannot call int"},
+      // A front end's note on a call becomes the trap's name fact, on the
+      // instruction it was given to and no other: calls sharing one source
+      // position keep their own, and a call a native makes has none.
+      {"call named", [](Module&, Builder& b) {
+         return b.note(b.call_value(num(b, 1), {}, P), "o.f");
+       },
+       "NotCallable|N:callvalue|int|nil|o.f|0|0|cannot call int"},
+      {"spread named", [](Module&, Builder& b) {
+         return b.note(b.call_spread(num(b, 1), {}, arr(b), P), "xs.f");
+       },
+       "NotCallable|N:callvalue|int|nil|xs.f|0|0|cannot call int"},
+      {"call named, its neighbour's own", [](Module& m, Builder& b) {
+         const NodeId ok = b.note(call_fn(b, add_func(m, b, "f", 0, nil(b))), "first");
+         return b.block({ok, b.note(b.call_value(num(b, 1), {}, P), "second")}, P);
+       },
+       "NotCallable|N:callvalue|int|nil|second|0|0|cannot call int"},
+      {"call unnamed beside a named one", [](Module& m, Builder& b) {
+         const NodeId ok = b.note(call_fn(b, add_func(m, b, "f", 0, nil(b))), "first");
+         return b.block({ok, b.call_value(num(b, 1), {}, P)}, P);
+       },
+       "NotCallable|N:callvalue|int|nil||0|0|cannot call int"},
+      {"call from a native", [](Module&, Builder& b) {
+         return b.note(nat(b, kCalls, {num(b, 1)}), "calls");
+       },
+       "NotCallable|N:callvalue|int|nil||0|0|cannot call int"},
       {"enqueue", [](Module&, Builder& b) { return in(b, I::Enqueue, {num(b, 1)}); },
        "NotCallable|I:enqueue|int|nil||0|0|enqueue needs a function, not int"},
       {"coroutine", [](Module&, Builder& b) { return in(b, I::CoroCreate, {num(b, 1)}); },

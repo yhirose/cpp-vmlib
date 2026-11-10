@@ -1859,6 +1859,14 @@ struct Module {
   // here because a binder constructs a fresh Builder per node.
   std::map<std::pair<ConstKind, int64_t>, int32_t> scalar_index;
   std::unordered_map<std::string, int32_t> str_index;
+  // Words a front end wants a trap to be able to say about a call site,
+  // diagnostics only like FieldGet's name const: `notes` is the pool and
+  // `note_of` maps a CallValue/CallSpread node to its entry. Sparse, since
+  // most calls have nothing to say, and a map beside the nodes rather than a
+  // field in them so that the node, the instruction and dispatch stay as
+  // they were. Builder::note fills it.
+  std::vector<std::string> notes;
+  std::unordered_map<uint32_t, uint32_t> note_of;
   std::vector<Func> funcs;                      // funcs[0] is the entry point
   std::vector<std::vector<CaptureSrc>> capture_maps;
   // The host functions this module calls, by name; Tag::NativeRef indexes
@@ -2522,6 +2530,19 @@ public:
     children.insert(children.end(), args.begin(), args.end());
     children.push_back(spread);
     return emit(Tag::CallSpread, 0, p, 0, 0, children);
+  }
+  // Names a call node for a NotCallable trap: the callee as the source
+  // spells it (`o.f`), which the trap then carries as its name fact. Only
+  // a CallValue or CallSpread is asked; the node is returned for chaining.
+  NodeId note(NodeId call, const std::string& text) {
+    const auto it = m_.note_of.find(call.v);
+    if (it != m_.note_of.end()) {
+      m_.notes[it->second] = text;
+      return call;
+    }
+    m_.note_of.emplace(call.v, static_cast<uint32_t>(m_.notes.size()));
+    m_.notes.push_back(text);
+    return call;
   }
   // The host function Module::natives[index] names, as a callable value.
   NodeId native_ref(int32_t index, SrcPos p) {
@@ -5156,6 +5177,10 @@ struct Chunk {
   // culebra holds PosEntry, so error positions are structural rather than
   // hand-threaded through every instruction.
   std::vector<uint32_t> code_pos;
+  // Sparse: (pc, index into Program::notes) of the call instructions a
+  // front end named (Module::note_of), in pc order. Diagnostics only, read
+  // when a call of a non-function traps.
+  std::vector<std::pair<uint32_t, uint32_t>> notes;
   int32_t num_locals = 0;
   int32_t num_captures = 0;
   int32_t num_regs = 0;
@@ -5180,6 +5205,7 @@ struct Program {
   std::vector<coreir::Const> consts;
   std::vector<std::string> str_consts;  // bytes for ConstKind::Str
   std::vector<coreir::SrcPos> positions;
+  std::vector<std::string> notes;  // Module::notes
   std::vector<std::vector<coreir::CaptureSrc>> capture_maps;
   std::vector<std::string> natives;  // Module::natives, for Op::NativeRef
 
@@ -5197,6 +5223,16 @@ struct Program {
   // executor's own copy (Exec::pos_at) says why it is one.
   coreir::SrcPos pos_at(const Chunk& ch, size_t pc) const {
     return positions[ch.code_pos[pc]];
+  }
+
+  // What the front end said about the call at `ch`'s instruction `pc`
+  // (Module::note), or null.
+  const std::string* note_at(const Chunk& ch, size_t pc) const {
+    const auto it = std::lower_bound(
+        ch.notes.begin(), ch.notes.end(), static_cast<uint32_t>(pc),
+        [](const auto& e, uint32_t k) { return e.first < k; });
+    return it != ch.notes.end() && it->first == pc ? &notes[it->second]
+                                                    : nullptr;
   }
 
   // Which of this program's chunks `ch` is.
@@ -7007,6 +7043,14 @@ inline std::optional<std::string> shared_node(const Module& m) {
 inline std::optional<std::string> verify(const Module& m) {
   if (m.funcs.empty()) return std::string("module has no entry function");
   detail::Verifier v{m, {}, {}, {}, {}};
+  // A call note names a call node, and a pool entry that exists.
+  for (const auto& [node, note] : m.note_of) {
+    if (node >= m.nodes.size() || note >= m.notes.size() ||
+        (m.nodes[node].tag != Tag::CallValue &&
+         m.nodes[node].tag != Tag::CallSpread)) {
+      return std::string("call note on a node that is no call, or out of range");
+    }
+  }
   for (const Func& f : m.funcs) {
     if (static_cast<size_t>(f.num_locals) != f.local_names.size() ||
         static_cast<size_t>(f.num_captures) != f.capture_names.size()) {
@@ -8768,8 +8812,12 @@ struct FnCompiler {
           compile_operand(m.child(id, static_cast<uint32_t>(i + 1)));
         }
         const int32_t r = alloc_result(base, args_at);
+        const size_t at = ch.code.size();
         emit_call(r, callee, args_at, operands - (spread ? 1 : 0), spread,
                   tail, n.pos);
+        if (const auto it = m.note_of.find(id.v); it != m.note_of.end()) {
+          ch.notes.emplace_back(static_cast<uint32_t>(at), it->second);
+        }
         return r;
       }
       default:
@@ -8958,6 +9006,7 @@ inline Program compile(const coreir::Module& m) {
   p.consts = m.consts;
   p.str_consts = m.str_consts;
   p.positions = m.positions;
+  p.notes = m.notes;
   p.capture_maps = m.capture_maps;
   p.natives = m.natives;
   p.chunks.resize(m.funcs.size());
@@ -9760,10 +9809,21 @@ struct Exec {
   // the code to build: a callee that is no function, and a host function
   // given the wrong number of arguments. Out of line, with the trap's
   // facts built here, so the call paths stay what they were.
+  //
+  // `at_insn`: the call is the running frame's own call instruction, which
+  // every path that takes its window (push_closure_taking) is, and which has
+  // already stepped past it -- so the name the front end gave that
+  // instruction (Module::note) is the callee's. A call a native or the host
+  // makes is not, and names nothing.
   [[noreturn]] VMLIB_NOINLINE void not_callable(const Value& callee,
-                                                SrcPos pos) {
+                                                SrcPos pos, bool at_insn) {
+    const std::string* name = nullptr;
+    if (at_insn && !frames.empty() && frames.back()->pc > 0) {
+      name = p.note_at(*frames.back()->chunk, frames.back()->pc - 1);
+    }
     raise_trap(TrapKind::NotCallable,
-               {.verb = verb_of(Tag::CallValue), .l = &callee}, pos);
+               {.verb = verb_of(Tag::CallValue), .l = &callee, .name = name},
+               pos);
   }
   [[noreturn]] VMLIB_NOINLINE void native_arity_mismatch(const NativeObj* n,
                                                          int32_t argc,
@@ -9877,7 +9937,7 @@ struct Exec {
       return;
     }
     if (!callee.is_func()) {
-      not_callable(callee, pos);
+      not_callable(callee, pos, taking);
     }
     const ClosureObj* c = callee.as_closure();
     const Chunk& ch = p.chunks[static_cast<size_t>(c->func)];
