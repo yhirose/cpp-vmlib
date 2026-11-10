@@ -1,0 +1,1 @@
+convert_float_truncated.go:7:20: constant 3.9 truncated to int64

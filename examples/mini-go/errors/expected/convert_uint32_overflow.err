@@ -1,0 +1,1 @@
+convert_uint32_overflow.go:7:21: constant 4294967296 overflows uint32

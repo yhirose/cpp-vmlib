@@ -130,10 +130,11 @@ inline constexpr const char* kGrammar = R"(
   fieldaccess <- ident ('.' ident)+
   call       <- ident '(' _ args ')' _
   args       <- (expr (',' _ expr)*)?                         { no_ast_opt }
-  primary    <- number / strlit / ident / '(' _ expr ')' _
+  primary    <- float / number / strlit / ident / '(' _ expr ')' _
 
   strlit     <- '"' < ('\\' . / [^"\\\n])* > '"' _
-  number     <- < [0-9]+ ('.' [0-9]+)? > _
+  float      <- < [0-9]+ '.' [0-9]+ > _
+  number     <- < [0-9]+ > _
   # A keyword is not an identifier: without this `if <-ch {` reads as a
   # send to a channel named `if`.
   ident      <- !keyword < [a-zA-Z_] [a-zA-Z0-9_]* > _

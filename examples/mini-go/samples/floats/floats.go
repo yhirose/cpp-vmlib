@@ -15,4 +15,10 @@ func main() {
 
 	var h float64 = 1.0 / 3.0
 	fmt.Println(h != float64(g3))
+
+	// A minus folds into a float literal as it does into an integer one.
+	var neg float64 = -3.9
+	fmt.Println(neg)
+	fmt.Println(-3.9)
+	fmt.Println(float32(16777217))
 }

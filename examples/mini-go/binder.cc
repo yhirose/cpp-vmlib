@@ -802,6 +802,38 @@ struct Binder {
     return emit_convert(ty, {b.literal(v), Type::I64}, at);
   }
 
+  // A float literal, signed when a minus was folded into it, landing on
+  // `hint`. A float type takes it as a double (float32 rounds it); an
+  // integer type takes it only when it is exactly an integer, which is read
+  // off the text -- a float token is digits, a point, digits -- so that no
+  // double's 53 bits decide whether int64(9223372036854775807.0) fits. The
+  // integer part then goes through the same range checks an integer literal
+  // does. Any other target (bool, string) is left for the destination's own
+  // type check to refuse, as for any float64.
+  TypedExpr float_const_as(const std::string& text, std::optional<Type> hint,
+                           const Ast& at, SrcPos p) {
+    auto b = Builder(m).at(p);
+    const Type ty = hint.value_or(Type::F64);
+    if (ty == Type::I32 || ty == Type::I64 || ty == Type::U32) {
+      const size_t dot = text.find('.');
+      if (text.find_first_not_of('0', dot + 1) != std::string::npos) {
+        fail(at, "constant " + text + " truncated to " + type_name(ty));
+      }
+      return literal_as(parse_int(text.substr(0, dot), at), ty, at, p);
+    }
+    const NodeId lit = b.double_literal(literals::parse_float_literal(text));
+    if (ty == Type::F32) {
+      return {b.intrinsic(IntrinsicId::ToFloat32, {lit}), Type::F32};
+    }
+    return {lit, Type::F64};
+  }
+
+  // An untyped numeric constant: a literal, or a minus over one.
+  static bool is_constant(const Ast& a) {
+    const Ast& lit = a.tag == "neg"_ ? *a.nodes[0] : a;
+    return lit.tag == "number"_ || lit.tag == "float"_;
+  }
+
   [[noreturn]] void fail_at(SrcPos p, const std::string& msg) {
     coreir_rt::fail(msg, p.line, p.col);
   }
@@ -998,18 +1030,10 @@ struct Binder {
     switch (a.tag) {
       case "number"_: {
         const std::string tok(a.token);
-        if (tok.find('.') != std::string::npos) {
-          // A float literal is already a double; only F32 needs the extra
-          // rounding, and only int syntax has a width to be narrowed into.
-          const NodeId lit =
-              b.double_literal(literals::parse_float_literal(tok));
-          if (hint == Type::F32) {
-            return {b.intrinsic(IntrinsicId::ToFloat32, {lit}), Type::F32};
-          }
-          return {lit, Type::F64};
-        }
         return literal_as(parse_int(tok, a), hint.value_or(Type::I64), a, p);
       }
+      case "float"_:
+        return float_const_as(std::string(a.token), hint, a, p);
       // "x" -- a Str value, whatever the hint says: unlike an integer
       // literal, this one has a type of its own already, and the
       // destination's own same_type check is what reports a mismatch.
@@ -1024,6 +1048,10 @@ struct Binder {
         if (const auto f = literals::fold_neg_const(
                 *a.nodes[0], "integer literal out of range")) {
           return literal_as(*f, hint.value_or(Type::I64), a, p);
+        }
+        if (a.nodes[0]->tag == "float"_) {
+          return float_const_as("-" + std::string(a.nodes[0]->token), hint, a,
+                                p);
         }
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
         return emit_neg(v, a);
@@ -1172,7 +1200,14 @@ struct Binder {
           if (argsNode == nullptr || argsNode->nodes.size() != 1) {
             fail(a, "conversion takes exactly one argument");
           }
-          TypedExpr v = emit_expr(*argsNode->nodes[0], ctx, std::nullopt);
+          const Ast& arg = *argsNode->nodes[0];
+          // A constant converted to a number is that constant landing on the
+          // type, as in an assignment: it must be representable, not
+          // wrapped or truncated. Anything else converts at run time.
+          if (is_constant(arg) && *conv != Type::Bool && *conv != Type::Str) {
+            return emit_expr(arg, ctx, *conv);
+          }
+          TypedExpr v = emit_expr(arg, ctx, std::nullopt);
           return emit_convert(*conv, v, a);
         }
         const FuncInfo& info = func_of(a, callee);

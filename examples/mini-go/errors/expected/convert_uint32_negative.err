@@ -1,0 +1,1 @@
+convert_uint32_negative.go:7:21: constant -1 overflows uint32
