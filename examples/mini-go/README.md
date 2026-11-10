@@ -110,9 +110,9 @@ truncates or wraps, which is also Go's rule.
 
 Not modeled: constant arithmetic is not folded (`int32(2 * 1.5)` and
 `7 / 2.0` are not evaluated as exact constants), and typed constants are not
-tracked (`uint32(int32(-1))` is accepted where Go refuses). The type hint
-passes only rightward, so `3.0 * int64(2)` and `1 + x` for an int32 `x` are
-"cannot combine" here and valid Go.
+tracked (`uint32(int32(-1))` is accepted where Go refuses). A constant
+operand takes its type from the other operand, but only a single literal
+does: `1 + 2 + x` and `1 < 2 + x` are "cannot combine" here and valid Go.
 
 ## Structs are values: `Binder::copy_struct`
 

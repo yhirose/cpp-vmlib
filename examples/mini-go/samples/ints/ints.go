@@ -47,10 +47,7 @@ func main() {
 	fmt.Println(least / minus)
 	fmt.Println(least % minus)
 
-	// A constant converted to, or assigned to, an integer type must be
-	// exactly representable (see errors/ for the ones that are not); a
-	// float constant with no fraction is. A variable converts at run time,
-	// truncating toward zero.
+	// Constants take the type they land on (README, Constants).
 	var three int32 = 3.0
 	fmt.Println(three)
 	fmt.Println(int64(2.0))
@@ -62,4 +59,12 @@ func main() {
 	fmt.Println(int64(f))
 	var nf float64 = -3.9
 	fmt.Println(int64(nf))
+	var five int32 = 5
+	var ok bool = 1 < five
+	fmt.Println(ok)
+	fmt.Println(five < 1)
+	fmt.Println(1 + five == 6)
+	fmt.Println(3.0 * int64(2))
+	var xs []int64 = []int64{10, 20, 30}
+	fmt.Println(xs[2.0])
 }

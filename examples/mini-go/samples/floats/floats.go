@@ -21,4 +21,10 @@ func main() {
 	fmt.Println(neg)
 	fmt.Println(-3.9)
 	fmt.Println(float32(16777217))
+	// A constant has no negative zero: -0.0 is 0.
+	var one float64 = 1
+	var nz float64 = -0.0
+	fmt.Println(nz)
+	fmt.Println(-0.0)
+	fmt.Println(one / nz)
 }

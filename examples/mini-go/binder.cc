@@ -802,36 +802,62 @@ struct Binder {
     return emit_convert(ty, {b.literal(v), Type::I64}, at);
   }
 
-  // A float literal, signed when a minus was folded into it, landing on
-  // `hint`. A float type takes it as a double (float32 rounds it); an
-  // integer type takes it only when it is exactly an integer, which is read
-  // off the text -- a float token is digits, a point, digits -- so that no
-  // double's 53 bits decide whether int64(9223372036854775807.0) fits. The
-  // integer part then goes through the same range checks an integer literal
-  // does. Any other target (bool, string) is left for the destination's own
-  // type check to refuse, as for any float64.
-  TypedExpr float_const_as(const std::string& text, std::optional<Type> hint,
+  // An untyped numeric constant: a literal, or a minus over one. The one
+  // place that says so.
+  struct Literal {
+    const Ast& node;  // the number or float itself
+    bool negated;
+  };
+  static std::optional<Literal> literal_of(const Ast& a) {
+    const bool negated = a.tag == "neg"_;
+    const Ast& n = negated ? *a.nodes[0] : a;
+    if (n.tag == "number"_ || n.tag == "float"_) return Literal{n, negated};
+    return std::nullopt;
+  }
+  static bool is_constant(const Ast& a) { return literal_of(a).has_value(); }
+
+  // A constant landing on `hint`, or on its own type (int64, float64) when
+  // there is none. -9223372036854775808 is one constant, checked after the
+  // minus.
+  TypedExpr literal_const_as(const Literal& l, std::optional<Type> hint,
+                             const Ast& at, SrcPos p) {
+    if (l.node.tag == "float"_) return float_const_as(l, hint, at, p);
+    const std::string tok(l.node.token);
+    const int64_t v =
+        l.negated ? *literals::fold_neg_const(l.node, "integer literal out of range")
+                  : parse_int(tok, l.node);
+    return literal_as(v, hint.value_or(Type::I64), at, p);
+  }
+
+  // A float constant landing on `hint`. A float type takes it as a double
+  // (float32 rounds it); an integer type takes it only when it is exactly
+  // an integer, which is read off the text -- a float token is digits, a
+  // point, digits -- so that no double's 53 bits decide whether
+  // int64(9223372036854775807.0) fits. The integer part then goes through
+  // the same range checks an integer literal does. Any other target (bool,
+  // string) is left for the destination's own type check to refuse, as for
+  // any float64. A constant has no negative zero: -0.0 is 0.
+  TypedExpr float_const_as(const Literal& l, std::optional<Type> hint,
                            const Ast& at, SrcPos p) {
     auto b = Builder(m).at(p);
+    const std::string tok(l.node.token);
+    const std::string sign = l.negated ? "-" : "";
     const Type ty = hint.value_or(Type::F64);
+    const size_t dot = tok.find('.');
+    const bool integral = tok.find_first_not_of('0', dot + 1) == std::string::npos;
     if (ty == Type::I32 || ty == Type::I64 || ty == Type::U32) {
-      const size_t dot = text.find('.');
-      if (text.find_first_not_of('0', dot + 1) != std::string::npos) {
-        fail(at, "constant " + text + " truncated to " + type_name(ty));
+      if (!integral) {
+        fail(at, "constant " + sign + tok + " truncated to " + type_name(ty));
       }
-      return literal_as(parse_int(text.substr(0, dot), at), ty, at, p);
+      return literal_as(parse_int(sign + tok.substr(0, dot), l.node), ty, at, p);
     }
-    const NodeId lit = b.double_literal(literals::parse_float_literal(text));
+    const bool zero = tok.find_first_not_of("0.") == std::string::npos;
+    const NodeId lit = b.double_literal(
+        literals::parse_float_literal(zero ? "0.0" : sign + tok));
     if (ty == Type::F32) {
       return {b.intrinsic(IntrinsicId::ToFloat32, {lit}), Type::F32};
     }
     return {lit, Type::F64};
-  }
-
-  // An untyped numeric constant: a literal, or a minus over one.
-  static bool is_constant(const Ast& a) {
-    const Ast& lit = a.tag == "neg"_ ? *a.nodes[0] : a;
-    return lit.tag == "number"_ || lit.tag == "float"_;
   }
 
   [[noreturn]] void fail_at(SrcPos p, const std::string& msg) {
@@ -1028,12 +1054,9 @@ struct Binder {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
     switch (a.tag) {
-      case "number"_: {
-        const std::string tok(a.token);
-        return literal_as(parse_int(tok, a), hint.value_or(Type::I64), a, p);
-      }
+      case "number"_:
       case "float"_:
-        return float_const_as(std::string(a.token), hint, a, p);
+        return literal_const_as(*literal_of(a), hint, a, p);
       // "x" -- a Str value, whatever the hint says: unlike an integer
       // literal, this one has a type of its own already, and the
       // destination's own same_type check is what reports a mismatch.
@@ -1044,15 +1067,7 @@ struct Binder {
         return {b.varref(VarKind::Local, li.slot), li.type, li.second_half};
       }
       case "neg"_: {
-        // -9223372036854775808 is one constant, checked after the minus.
-        if (const auto f = literals::fold_neg_const(
-                *a.nodes[0], "integer literal out of range")) {
-          return literal_as(*f, hint.value_or(Type::I64), a, p);
-        }
-        if (a.nodes[0]->tag == "float"_) {
-          return float_const_as("-" + std::string(a.nodes[0]->token), hint, a,
-                                p);
-        }
+        if (const auto l = literal_of(a)) return literal_const_as(*l, hint, a, p);
         TypedExpr v = emit_expr(*a.nodes[0], ctx, hint);
         return emit_neg(v, a);
       }
@@ -1226,10 +1241,27 @@ struct Binder {
       case "additive"_:
       case "multiplicative"_: {
         const auto& ns = a.nodes;
-        TypedExpr acc = emit_expr(*ns[0], ctx, hint);
+        // A comparison's operands are not its result's type; an arithmetic
+        // operator's are.
+        const bool compares = a.tag == "equality"_ || a.tag == "relational"_;
+        const std::optional<Type> operand_hint =
+            compares ? std::nullopt : hint;
+        // A constant first operand takes its type from the second, as Go's
+        // untyped constant takes the other operand's; so the second is
+        // emitted first (a constant has no effect to order).
+        std::optional<TypedExpr> second;
+        TypedExpr acc;
+        if (ns.size() > 2 && is_constant(*ns[0]) && !is_constant(*ns[2])) {
+          second = emit_expr(*ns[2], ctx, operand_hint);
+          acc = emit_expr(*ns[0], ctx, hint_for(second->type));
+        } else {
+          acc = emit_expr(*ns[0], ctx, operand_hint);
+        }
         for (size_t i = 1; i + 1 < ns.size(); i += 2) {
           const Ast& op = *ns[i];
-          TypedExpr rhs = emit_expr(*ns[i + 1], ctx, acc.type);
+          TypedExpr rhs = i == 1 && second
+                              ? *second
+                              : emit_expr(*ns[i + 1], ctx, acc.type);
           acc = emit_binary(binop_of(op.token, op), acc, rhs, op);
         }
         return acc;
@@ -1293,7 +1325,9 @@ struct Binder {
   // or a bool. Go's own rule, minus the untyped-constant machinery -- a
   // bare `xs[0]` gets I64 from literal_as's own default and is fine.
   TypedExpr emit_index(const Ast& a, FuncCtx& ctx) {
-    TypedExpr idx = emit_expr(a, ctx, std::nullopt);
+    // A constant index is an int64 constant, as in Go (xs[2.0] is xs[2]).
+    TypedExpr idx = emit_expr(
+        a, ctx, is_constant(a) ? std::optional<Type>(Type::I64) : std::nullopt);
     if (idx.type != Type::I32 && idx.type != Type::I64 &&
         idx.type != Type::U32) {
       fail(a, "slice index must be an integer, not " +

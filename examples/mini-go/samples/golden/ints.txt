@@ -19,3 +19,8 @@
 6
 3
 -3
+true
+false
+true
+6
+30
