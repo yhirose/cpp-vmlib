@@ -352,15 +352,25 @@ inline NodeId read_modify_write(coreir::Builder::At& b, NodeId recv,
 inline constexpr char kExcKind[] = "exc";
 inline constexpr int64_t kExcName = 1;
 inline constexpr int64_t kExcMessage = 2;
+// Optional, and a front end's own: the state a language that keeps more than
+// a message (Python's `args`) puts after the three above, through the
+// builders' trailing `extra`. The readers below look no further than
+// kExcMessage, and an origin stamp (coreir::stamp_origin) goes after it.
+inline constexpr int64_t kExcArgs = 3;
 
-// A fresh exception of `type` (a kind's name node, or a class's table).
+// A fresh exception of `type` (a kind's name node, or a class's table), with
+// the front end's `extra` state after the message.
 inline NodeId exception(coreir::Builder::At& b, NodeId type, NodeId name,
-                        NodeId message) {
-  return with_meta(b, b.object_lit({}), type, {name, message});
+                        NodeId message,
+                        const std::vector<NodeId>& extra = {}) {
+  std::vector<NodeId> state{name, message};
+  state.insert(state.end(), extra.begin(), extra.end());
+  return with_meta(b, b.object_lit({}), type, state);
 }
 inline NodeId exception(FuncWriter& w, NodeId type, NodeId name,
-                        NodeId message) {
-  return exception(w.b, type, name, message);
+                        NodeId message,
+                        const std::vector<NodeId>& extra = {}) {
+  return exception(w.b, type, name, message, extra);
 }
 
 // Whether `v` is an exception: an Object whose meta is an exception's
@@ -400,12 +410,14 @@ inline const std::vector<coreir::Value>* exception_record(
 // helper -- the conversion of an executor's trap at a catch
 // (coreir::trap_kind), which has no IR to run. exception_record reads
 // it back, and test_runtime_parts holds the two builders to one shape.
-inline coreir::Value make_exception(const std::string& name,
-                                    const coreir::Value& message) {
+inline coreir::Value make_exception(
+    const std::string& name, const coreir::Value& message,
+    const std::vector<coreir::Value>& extra = {}) {
   coreir::Value e = coreir::Value::make_object();
-  e.as_object()->meta = coreir::Value::make_array(
-      {coreir::Value::make_str(kExcKind), coreir::Value::make_str(name),
-       message});
+  std::vector<coreir::Value> rec{coreir::Value::make_str(kExcKind),
+                                 coreir::Value::make_str(name), message};
+  rec.insert(rec.end(), extra.begin(), extra.end());
+  e.as_object()->meta = coreir::Value::make_array(rec);
   return e;
 }
 

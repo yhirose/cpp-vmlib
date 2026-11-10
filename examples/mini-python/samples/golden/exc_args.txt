@@ -1,0 +1,12 @@
+('division by zero',)
+('b',)
+('list index out of range',)
+((), ('a',), ('a', 2))
+((None,), ([1, 'x'],))
+('list index out of range',)
+('m',)
+()
+True
+tuple
+('p', 2)
+(3, 1)

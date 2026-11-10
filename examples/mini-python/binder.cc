@@ -197,7 +197,7 @@ bool is_builtin(const std::string& n) {
          n == "KeyError" || n == "IndexError" ||
          n == "ZeroDivisionError" || n == "StopIteration" ||
          n == "AttributeError" || n == "NotImplementedError" ||
-         n == "AssertionError";
+         n == "AssertionError" || n == "OverflowError";
 }
 
 // The builtins that can be handed around as values rather than called.
@@ -212,7 +212,7 @@ bool is_exception_name(const std::string& n) {
          n == "RuntimeError" || n == "KeyError" || n == "IndexError" ||
          n == "ZeroDivisionError" || n == "StopIteration" ||
          n == "AttributeError" || n == "NotImplementedError" ||
-         n == "AssertionError";
+         n == "AssertionError" || n == "OverflowError";
 }
 
 // A name that a builtin method answers to on *some* type. It has to lose
@@ -766,7 +766,7 @@ struct Binder {
         "$kwcheck", "$kwmerge", "$missing", "$toomany",
         // Inheritance: a chain of ordinary objects, walked.
         "$clsfind", "$isname", "$isinstv", "$isinst", "$supercall",
-        "$excinit", "$excmsg", "$noinit", "$dunder",
+        "$excinit", "$excset", "$excnew", "$excrepr", "$noinit", "$dunder",
         // Tuples, and the sequence builtins that hand them back.
         "$tuple", "$untup", "$istup", "$tupstr", "$unpack", "$items",
         "$values", "$enumerate", "$zip", "$sorted", "$sum", "$minmax",
@@ -1633,20 +1633,14 @@ struct Binder {
     r.add(r.iff(is_kind(r, v, kTupleKind),
                 r.ret(r.call("$tupstr",
                              {kind_field(r, r.L(v), kTupleItems)}))));
-    // A builtin exception displays as its message.
-    r.add(r.iff(
-        is_kind(r, v, kExcKind),
-        r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
     r.add(r.set(f, r.call("$dunder", {r.L(v), r.S("__str__")})));
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
-    // A class of the program's own that derives from a builtin exception
-    // displays as its message, the way the builtin ones do.
-    r.add(r.iff(
-        r.both(is_exception(r, v),
-               r.isnt(r.typ(kind_field(r, r.L(v), kExcMessage)), "nil")),
-        r.ret(r.call("$str", {kind_field(r, r.L(v), kExcMessage)}))));
+    // An exception, a builtin or a class of the program's that derives from
+    // one, displays as its text: $excset's, made from its args.
+    r.add(r.iff(is_exception(r, v),
+                r.ret(kind_field(r, r.L(v), kExcMessage))));
     r.add(r.iff(is_kind(r, v, kTypeKind),
                 r.ret(r.bin(BinOp::Add,
                             r.bin(BinOp::Add, r.S("<class '"),
@@ -1720,6 +1714,7 @@ struct Binder {
     r.add(r.iff(r.isnt(r.typ(f), "nil"),
                 r.ret(r.call("$str", {r.b.call_value(r.L(f), {r.arr({r.L(v)}),
                                                               r.Nil()})}))));
+    r.add(r.iff(is_exception(r, v), r.ret(r.call("$excrepr", {r.L(v)}))));
     r.add(r.ret(r.call("$str", {r.L(v)})));
     r.finish("$repr");
   }
@@ -1769,8 +1764,7 @@ struct Binder {
   void rt_exc() {
     RT r(*this);
     const auto [name, msg] = r.params("name", "msg");
-    r.add(r.b.make_throw(
-        exception(r, r.S(kExcKind), r.L(name), r.L(msg))));
+    r.add(r.b.make_throw(r.call("$excnew", {r.L(name), r.arr({r.L(msg)})})));
     r.finish("$exc");
   }
 
@@ -1825,8 +1819,8 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "map"),
         r.blk({r.iff(r.has(r.L(v), r.L(k)), r.ret(r.idx(r.L(v), r.L(k)))),
-               r.ret(r.call("$exc",
-                            {r.S("KeyError"), r.call("$repr", {r.L(k)})}))})));
+               r.b.make_throw(
+                   r.call("$excnew", {r.S("KeyError"), r.arr({r.L(k)})}))})));
     r.add(r.ret(r.idx(r.L(v), r.L(k))));
     r.finish("$idx");
   }
@@ -1940,7 +1934,12 @@ struct Binder {
             {r.iff(r.has(r.L(o), r.L(name)), r.ret(r.idx(r.L(o), r.L(name)))),
              r.set(found,
                    r.call("$clsfind", {instance_class(r, o), r.L(name)})),
-             r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found)))})));
+             r.iff(r.isnt(r.typ(found), "nil"), r.ret(r.L(found))),
+             // `e.args`: after an attribute or method of the program's own,
+             // which a class may name `args` too.
+             r.iff(r.both(r.bin(BinOp::Eq, r.L(name), r.S("args")),
+                          is_exception(r, o)),
+                   r.ret(kind_field(r, r.L(o), kExcArgs)))})));
     r.add(r.ret(r.call(
         "$exc",
         {r.S("AttributeError"),
@@ -2434,27 +2433,73 @@ struct Binder {
     r.finish("$supercall");
   }
 
-  // What str() of an exception made with these arguments says, as
-  // BaseException.__str__ does: nothing for none, the one argument, or the
-  // tuple of them all.
-  void rt_excmsg() {
+  // The one place an exception's state is made from its arguments: `a`, the
+  // array of what it was made with, kept as the tuple `e.args` answers, and
+  // the text str() says (BaseException.__str__): nothing for none, the one
+  // argument's str, the tuple's for several -- and for a KeyError with one
+  // argument, that argument's repr. The text is made now, not when it is
+  // asked for (README.md). A receiver that is no exception is left alone:
+  // `super().__init__()` from a class with no base reaches here too.
+  void rt_excset() {
     RT r(*this);
-    const auto [a] = r.params("a");
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(0)), r.ret(r.S(""))));
-    r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(a)), r.I(1)),
-                r.ret(r.idx(r.L(a), r.I(0)))));
-    r.add(r.ret(r.call("$str", {r.call("$tuple", {r.L(a)})})));
-    r.finish("$excmsg");
+    const auto [e, a] = r.params("e", "a");
+    const auto [t, text, n] = r.locals("t", "text", "n");
+    r.add(r.iff(
+        is_exception(r, e),
+        r.blk(
+            {r.set(t, r.call("$tuple", {r.L(a)})),
+             r.set(n, r.len(r.L(a))),
+             r.set(text, r.call("$str", {r.L(t)})),
+             r.iff(r.bin(BinOp::Eq, r.L(n), r.I(0)), r.set(text, r.S(""))),
+             r.iff(r.bin(BinOp::Eq, r.L(n), r.I(1)),
+                   r.set(text,
+                         r.iff(r.call("$isname", {r.L(e), r.S("KeyError")}),
+                               r.call("$repr", {r.idx(r.L(a), r.I(0))}),
+                               r.call("$str", {r.idx(r.L(a), r.I(0))})))),
+             set_kind_field(r, r.L(e), kExcMessage, r.L(text)),
+             set_kind_field(r, r.L(e), kExcArgs, r.L(t))})));
+    r.add(r.ret(r.Nil()));
+    r.finish("$excset");
+  }
+
+  // A builtin exception made with `a`, which is what `ValueError(...)` and
+  // every raise of the runtime's own do.
+  void rt_excnew() {
+    RT r(*this);
+    const auto [name, a] = r.params("name", "a");
+    const auto [e] = r.locals("e");
+    r.add(r.set(e, exception(r, r.S(kExcKind), r.L(name), r.S(""),
+                             {r.Nil()})));
+    r.add(r.call("$excset", {r.L(e), r.L(a)}));
+    r.add(r.ret(r.L(e)));
+    r.finish("$excnew");
+  }
+
+  // repr(e): `Name(arg, arg)`, its class's name for a program's own.
+  void rt_excrepr() {
+    RT r(*this);
+    const auto [e] = r.params("e");
+    const auto [name, s] = r.locals("name", "s");
+    r.add(r.set(name, kind_field(r, r.L(e), kExcName)));
+    r.add(r.iff(r.isnt(r.typ(name), "string"),
+                r.set(name, class_name(r, instance_class(r, e)))));
+    r.add(r.set(s, r.call("$liststr",
+                          {r.call("$untup", {kind_field(r, r.L(e), kExcArgs)})})));
+    r.add(r.ret(r.bin(
+        BinOp::Add,
+        r.bin(BinOp::Add, r.L(name),
+              r.bin(BinOp::Add, r.S("("),
+                    r.in(IntrinsicId::StrSlice,
+                         {r.L(s), r.I(1),
+                          r.bin(BinOp::Sub, r.len(r.L(s)), r.I(1))}))),
+        r.S(")"))));
+    r.finish("$excrepr");
   }
 
   void rt_excinit() {
     RT r(*this);
     const auto [self, a] = r.params("self", "a");
-    // Only an exception has a message to keep: `super().__init__()` from a
-    // class with no base reaches here too.
-    r.add(r.iff(is_exception(r, self),
-                set_kind_field(r, r.L(self), kExcMessage,
-                               r.call("$excmsg", {r.L(a)}))));
+    r.add(r.call("$excset", {r.L(self), r.L(a)}));
     r.add(r.ret(r.Nil()));
     r.finish("$excinit");
   }
@@ -3058,8 +3103,8 @@ struct Binder {
     const auto [c, k] = r.params("c", "k");
     r.add(r.iff(r.is(r.typ(c), "map"),
                 r.blk({r.iff(r.b.unary(UnOp::Not, r.has(r.L(c), r.L(k))),
-                             r.call("$exc", {r.S("KeyError"),
-                                             r.call("$repr", {r.L(k)})})),
+                             r.b.make_throw(r.call(
+                                 "$excnew", {r.S("KeyError"), r.arr({r.L(k)})}))),
                        r.in(IntrinsicId::ObjectRemove, {r.L(c), r.L(k)}),
                        r.ret(r.Nil())})));
     r.add(r.iff(r.is(r.typ(c), "array"),
@@ -3080,7 +3125,8 @@ struct Binder {
                        r.in(IntrinsicId::ObjectRemove, {r.L(d), r.L(k)}),
                        r.ret(r.L(v))})));
     r.add(r.iff(r.L(hasdflt), r.ret(r.L(dflt))));
-    r.add(r.call("$exc", {r.S("KeyError"), r.call("$repr", {r.L(k)})}));
+    r.add(r.b.make_throw(
+        r.call("$excnew", {r.S("KeyError"), r.arr({r.L(k)})})));
     r.add(r.ret(r.Nil()));
     r.finish("$dpop");
   }
@@ -3221,7 +3267,7 @@ struct Binder {
     rt_acons(); rt_aext(); rt_rest(); rt_kwhas(); rt_hasname(); rt_kwrest();
     rt_kwcheck(); rt_kwmerge(); rt_missing(); rt_toomany();
     rt_clsfind(); rt_isname(); rt_isinstv(); rt_isinst(); rt_supercall();
-    rt_excmsg(); rt_excinit(); rt_noinit(); rt_dunder();
+    rt_excset(); rt_excnew(); rt_excrepr(); rt_excinit(); rt_noinit(); rt_dunder();
     rt_tuple(); rt_untup(); rt_istup(); rt_tupstr(); rt_unpack(); rt_items();
     rt_values(); rt_enumerate(); rt_zip(); rt_sorted(); rt_sum();
     rt_minmax(); rt_next();
@@ -3602,12 +3648,14 @@ struct Binder {
       case "assertstmt"_:
         return b.make_if(
             b.unary(UnOp::Not, truthy(emit_expr(*a.nodes[0], ctx), p)),
-            rt.call("$exc",
-                    {b.str_literal("AssertionError"),
-                     a.nodes.size() > 1
-                         ? rt.call("$str", {emit_expr(*a.nodes[1], ctx)}, p)
-                         : b.str_literal("")},
-                    p),
+            b.make_throw(rt.call(
+                "$excnew",
+                {b.str_literal("AssertionError"),
+                 b.array_lit(a.nodes.size() > 1
+                                 ? std::vector<NodeId>{emit_expr(*a.nodes[1],
+                                                                 ctx)}
+                                 : std::vector<NodeId>{})},
+                p)),
             NodeId{});
       case "exprstmt"_:
         return emit_expr(*a.nodes[0], ctx);
@@ -4027,19 +4075,22 @@ struct Binder {
     auto bp = b.at(p);
     std::vector<NodeId> body{
         b.assign(VarKind::Local, 2,
-                 is_exc ? exception(bp, C, bp.nil_literal(), bp.nil_literal())
+                 is_exc ? exception(bp, C, bp.nil_literal(), bp.str_literal(""),
+                                    {bp.nil_literal()})
                         : new_instance(bp, C),
                  p),
         b.assign(VarKind::Local, 3,
                  rt.call("$clsfind", {C, b.str_literal("__init__", p)}, p),
                  p),
+        // BaseException.__new__ keeps the arguments before any __init__
+        // runs, so a class whose own __init__ never says super() has them.
+        is_exc ? rt.call("$excset", {O, A}, p) : b.block({}, p),
         b.make_if(
             b.binary(BinOp::Ne,
                      b.intrinsic(IntrinsicId::TypeOf, {F}, p),
                      b.str_literal("nil", p), p),
             b.call_value(F, {rt.call("$acons", {O, A}, p), K}, p),
-            is_exc ? rt.call("$excinit", {O, A}, p)
-                   : rt.call("$noinit", {b.str_literal(cname, p), A}, p),
+            is_exc ? b.block({}, p) : rt.call("$noinit", {b.str_literal(cname, p), A}, p),
             p)};
     body.push_back(b.make_return(O, p));
 
@@ -4633,9 +4684,7 @@ struct Binder {
 
     if (is_exception_name(g)) {
       return call_it(Takes{0, any, any}, [&](Args a, Args) {
-        auto bp = b.at(p);
-        return exception(bp, bp.str_literal(kExcKind), bp.str_literal(g),
-                         rt.call("$excmsg", {bp.array_lit(a)}, p));
+        return rt.call("$excnew", {b.str_literal(g, p), b.array_lit(a, p)}, p);
       });
     }
     if (g == "sorted") {
@@ -5189,6 +5238,14 @@ std::string type_name_of(const Value& v) {
   return "object";
 }
 
+// A tuple, as `$tuple` makes one: its items in a record of its own kind.
+Value make_tuple(std::vector<Value> items) {
+  Value t = Value::make_object();
+  t.as_object()->meta = Value::make_array(
+      {Value::make_str(kTupleKind), Value::make_array(std::move(items))});
+  return t;
+}
+
 // An executor's trap as the exception python3 raises for the same fault:
 // its class and its message (python 3.14's words, pinned by test/languages.sh).
 // Probed against 3.11 too; the rows that moved between the two are marked.
@@ -5301,7 +5358,8 @@ Value convert_trap(const Value& trap, const void*) {
     case TrapKind::Internal:
       break;  // no words of its own: the executor's message stands
   }
-  return make_exception(cls, Value::make_str(msg));
+  return make_exception(cls, Value::make_str(msg),
+                        {make_tuple({Value::make_str(msg)})});
 }
 
 const std::vector<vm::NativeDef>& stdlib() {
@@ -5322,18 +5380,17 @@ std::string describe(const Value& raised) {
   const Value v = converted_or_self<&convert_trap>(raised);
   const auto* exc = runtime_parts::exception_record(v);
   if (!exc) return double_format::display_with(v, double_format::kPython);
-  const Value& msg = (*exc)[kExcMessage];
   std::string name;
   if (const Value& k = (*exc)[kExcName]; k.is_str()) {
     name = k.as_str();
   } else if (const std::string* n = runtime_parts::class_name((*exc)[0])) {
     name = *n;
   }
-  if (name.empty() || msg.is_nil()) {
+  if (name.empty()) {
     return double_format::display_with(v, double_format::kPython);
   }
-  const std::string text =
-      double_format::display_with(msg, double_format::kPython);
+  // The text is $excset's, the one str() says too.
+  const std::string& text = (*exc)[kExcMessage].as_str();
   return text.empty() ? name : name + ": " + text;
 }
 

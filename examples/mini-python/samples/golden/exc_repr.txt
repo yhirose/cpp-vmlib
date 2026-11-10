@@ -1,0 +1,9 @@
+ZeroDivisionError('division by zero')
+KeyError('b') KeyError(3) KeyError()
+AssertionError() AssertionError('m')
+ValueError() ValueError('a', 2) ValueError(None)
+TypeError([1, 'x']) IndexError("it's")
+Plain(5) Plain() Keyed('k')
+ZeroDivisionError('division by zero')
+KeyError('zz')
+[ValueError('in a list')]

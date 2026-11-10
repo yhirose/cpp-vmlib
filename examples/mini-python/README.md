@@ -181,6 +181,21 @@ found by `$clsfind` exactly like any other method and called through the
 same convention as everything else; `$str`, `$repr` and `$eq` each try one
 before falling back to their builtin behavior.
 
+An exception keeps what it was made with, as the tuple `e.args` (slot 3 of
+its record, runtime_parts.h's `kExcArgs`), and everything else about it is
+made from that in one place, `$excset`: `str(e)` and the line an uncaught
+one ends with are its text (slot 2: nothing for no arguments, the argument's
+`str` for one, the tuple's for several, and for a `KeyError` with one
+argument that argument's `repr`), and `repr(e)` is `Name(arg, arg)` from the
+same arguments. `$excnew` makes a builtin one, the constructor of a class of
+the program's sets them before its `__init__` runs, as CPython's
+`BaseException.__new__` does, and `super().__init__(...)` sets them again.
+Two things follow from the text being made then, not when it is asked for:
+a user `__str__` or `__repr__` on an argument runs when the exception is
+made, and an argument that is mutated afterwards (a list) still shows what
+it was. `raise E` with a bare class, and `raise X from Y`, are not
+supported.
+
 `samples/inherit.py` is a three-level shape hierarchy, `super()` at every
 level including a synthesized default constructor, `isinstance` walking
 past two bases, `__str__`/`__repr__`/`__eq__` on plain objects, and a

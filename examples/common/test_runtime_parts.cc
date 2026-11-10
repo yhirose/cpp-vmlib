@@ -400,6 +400,38 @@ int main() {
              "make_exception: a plain object is none");
   }
 
+  // An extra field after the message: the IR and C++ builders agree on it,
+  // exception_record still reads the three, and an origin stamp goes after
+  // it, so the extra stays at kExcArgs.
+  {
+    Module m;
+    Builder bld(m);
+    auto b = bld.at(SrcPos{1, 1});
+    const NodeId ir = exception(b, b.str_literal(kExcKind),
+                                b.str_literal("E"), b.str_literal("m"),
+                                {b.str_literal("x")});
+    run_with_natives(
+        b.intrinsic(IntrinsicId::Print,
+                    {b.index(b.intrinsic(IntrinsicId::MetaGet, {ir}),
+                             b.literal(kExcArgs))}),
+        m, {}, "extra: IR");
+    check_eq(joined(), "x|", "exception(): the extra field is slot 3");
+    Value e = make_exception("E", Value::make_str("m"),
+                             {Value::make_str("x")});
+    const auto* rec = exception_record(e);
+    check_eq(rec && rec->size() == 4 && (*rec)[kExcArgs].is_str()
+                 ? (*rec)[kExcArgs].as_str()
+                 : "?",
+             "x", "make_exception: the extra read back");
+    stamp_origin(e, SrcPos{3, 4});
+    const auto* st = exception_record(e);
+    check_eq(st && st->size() == 7 && (*st)[kExcArgs].as_str() == "x" &&
+                     origin_of(e) && origin_of(e)->line == 3
+                 ? "ok"
+                 : "bad",
+             "ok", "stamped: the extra stays at index 3");
+  }
+
   // The conversion at a catch: a trap becomes the front end's exception, and
   // what is not a trap passes through, so a second catch (or a catch of a
   // thrown string) leaves it alone; and a converted exception carries the
