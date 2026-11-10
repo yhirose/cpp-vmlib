@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -43,6 +44,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <peglib.h>
@@ -760,7 +762,7 @@ struct Binder {
         "$len", "$idx", "$setidx", "$slice", "$in", "$getattr", "$setattr",
         "$iter", "$iternext", "$exc", "$isexc", "$range", "$listadd",
         "$strmul", "$listmul", "$typename", "$type", "$join", "$dget", "$tolist",
-        "$toint", "$intfail",
+        "$toint", "$intfail", "$pyfloat", "$floatfail",
         // The calling convention this front end writes over the IR's.
         "$acons", "$aext", "$rest", "$kwhas", "$hasname", "$kwrest",
         "$kwcheck", "$kwmerge", "$missing", "$toomany",
@@ -2082,7 +2084,10 @@ struct Binder {
     r.add(r.iff(
         r.is(r.typ(v), "string"),
         r.blk(
-            {r.set(s, r.call("$strip", {r.L(v), r.I(0), r.Nil()})),
+            {// The whole of `int()`'s grammar but the digits themselves, read
+             // in the one place float() reads its digits too (pyint).
+             r.set(s, r.nat("pyint", {r.L(v)})),
+             r.iff(r.is(r.typ(s), "nil"), r.call("$intfail", {r.L(v)})),
              r.set(i, r.I(0)),
              r.set(neg, r.Bo(false)),
              r.iff(r.bin(BinOp::Gt, r.len(r.L(s)), r.I(0)),
@@ -2111,8 +2116,56 @@ struct Binder {
                                           r.bin(BinOp::Sub, r.L(c), r.I(48))})),
                        r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1)))})),
              r.ret(r.iff(r.L(neg), r.call("$neg", {r.L(acc)}), r.L(acc)))})));
-    r.add(r.ret(r.L(v)));
+    r.add(r.iff(r.either(r.is(r.typ(v), "int"), r.call("$isbig", {r.L(v)})),
+                r.ret(r.L(v))));
+    r.add(r.call("$exc",
+                 {r.S("TypeError"),
+                  r.bin(BinOp::Add,
+                        r.bin(BinOp::Add,
+                              r.S("int() argument must be a string, a "
+                                  "bytes-like object or a real number, not '"),
+                              r.call("$typename", {r.L(v)})),
+                        r.S("'"))}));
+    r.add(r.ret(r.Nil()));
     r.finish("$toint");
+  }
+
+  // `float(x)`: what $tofloat is for a number, and for a string the parse
+  // pyfloat does -- a ValueError naming the string when it is not a float.
+  void rt_pyfloat() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    const auto [f] = r.locals("f");
+    r.add(r.iff(r.is(r.typ(v), "string"),
+                r.blk({r.set(f, r.nat("pyfloat", {r.L(v)})),
+                       r.iff(r.is(r.typ(f), "nil"),
+                             r.call("$floatfail", {r.L(v)})),
+                       r.ret(r.L(f))})));
+    r.add(r.iff(r.is(r.typ(v), "bool"),
+                r.ret(r.iff(r.L(v), r.D(1.0), r.D(0.0)))));
+    r.add(r.iff(r.call("$isnum", {r.L(v)}),
+                r.ret(r.call("$tofloat", {r.L(v)}))));
+    r.add(r.call("$exc",
+                 {r.S("TypeError"),
+                  r.bin(BinOp::Add,
+                        r.bin(BinOp::Add,
+                              r.S("float() argument must be a string or a "
+                                  "real number, not '"),
+                              r.call("$typename", {r.L(v)})),
+                        r.S("'"))}));
+    r.add(r.ret(r.Nil()));
+    r.finish("$pyfloat");
+  }
+
+  void rt_floatfail() {
+    RT r(*this);
+    const auto [v] = r.params("v");
+    r.add(r.call("$exc", {r.S("ValueError"),
+                          r.bin(BinOp::Add,
+                                r.S("could not convert string to float: "),
+                                r.call("$repr", {r.L(v)}))}));
+    r.add(r.ret(r.Nil()));
+    r.finish("$floatfail");
   }
 
   void rt_intfail() {
@@ -3252,7 +3305,7 @@ struct Binder {
 
   void emit_runtime() {
     rt_typename(); rt_type(); rt_join(); rt_dget(); rt_tolist(); rt_toint();
-    rt_intfail();
+    rt_intfail(); rt_pyfloat(); rt_floatfail();
     rt_isbig(); rt_isnum(); rt_tolimbs(); rt_mkbig(); rt_biglimbs();
     rt_bigsign(); rt_ucmp(); rt_uadd(); rt_usub(); rt_umul(); rt_bigadd();
     rt_bigmul(); rt_bstr(); rt_tofloat(); rt_neg(); rt_pyabs();
@@ -4731,7 +4784,7 @@ struct Binder {
       return convert(t, "$toint", [&] { return b.literal(0, p); });
     }
     if (g == "float") {
-      return convert(clinic(0, 1, 1), "$tofloat",
+      return convert(clinic(0, 1, 1), "$pyfloat",
                      [&] { return b.double_literal(0.0, p); });
     }
     if (g == "list") {
@@ -4845,7 +4898,7 @@ struct Binder {
     } else if (g == "int") {
       body = rtc("$toint");
     } else if (g == "float") {
-      body = rtc("$tofloat");
+      body = rtc("$pyfloat");
     } else if (g == "bool") {
       body = rtc("$truthy");
     } else if (g == "list") {
@@ -5212,6 +5265,109 @@ bool nat_ffmt(NativeCall& c) {
   return true;
 }
 
+// -- int() and float() read a string -----------------------------------------
+//
+// Python's grammar for the text of a number, which is neither C's (strtod
+// takes hex, "nan(1)" and a leading space) nor a literal's: a run of digits
+// in which a single '_' may stand between two digits. int() and float()
+// read their digits through this one function. ASCII only -- Python also
+// reads other scripts' digits and Unicode whitespace (README.md).
+bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+bool scan_digits(std::string_view s, size_t& i, std::string& out) {
+  if (i >= s.size() || !is_digit(s[i])) return false;
+  while (i < s.size()) {
+    if (is_digit(s[i])) {
+      out += s[i++];
+    } else if (s[i] == '_' && i + 1 < s.size() && is_digit(s[i + 1])) {
+      ++i;
+    } else {
+      break;
+    }
+  }
+  return true;
+}
+
+// `s` without the whitespace Python strips around a number.
+std::string_view strip_number(std::string_view s) {
+  const auto space = [](char c) {
+    return c == ' ' || (c >= '\t' && c <= '\r');
+  };
+  while (!s.empty() && space(s.front())) s.remove_prefix(1);
+  while (!s.empty() && space(s.back())) s.remove_suffix(1);
+  return s;
+}
+
+bool equals_nocase(std::string_view s, std::string_view lower) {
+  if (s.size() != lower.size()) return false;
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(s[i])) != lower[i]) return false;
+  }
+  return true;
+}
+
+// int(text): the digits with their sign ("-12", "12"), or nothing.
+std::optional<std::string> int_text(std::string_view s) {
+  s = strip_number(s);
+  size_t i = 0;
+  std::string out;
+  if (i < s.size() && (s[i] == '-' || s[i] == '+')) {
+    if (s[i] == '-') out += '-';
+    ++i;
+  }
+  if (!scan_digits(s, i, out) || i != s.size()) return std::nullopt;
+  return out;
+}
+
+// float(text): the double, or nothing. The grammar is Python's (the digits
+// above, an optional fraction and exponent, inf, infinity and nan in any
+// case), and the value is literals.h's, read from the digits alone.
+std::optional<double> float_value(std::string_view s) {
+  s = strip_number(s);
+  size_t i = 0;
+  std::string clean;
+  bool neg = false;
+  if (i < s.size() && (s[i] == '-' || s[i] == '+')) neg = s[i++] == '-';
+  const std::string_view word = s.substr(i);
+  if (equals_nocase(word, "inf") || equals_nocase(word, "infinity")) {
+    return neg ? -std::numeric_limits<double>::infinity()
+               : std::numeric_limits<double>::infinity();
+  }
+  if (equals_nocase(word, "nan")) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (neg) clean += '-';
+  bool any = scan_digits(s, i, clean);
+  if (i < s.size() && s[i] == '.') {
+    clean += '.';
+    ++i;
+    any = scan_digits(s, i, clean) || any;
+  }
+  if (!any) return std::nullopt;
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    clean += 'e';
+    ++i;
+    if (i < s.size() && (s[i] == '-' || s[i] == '+')) clean += s[i++];
+    if (!scan_digits(s, i, clean)) return std::nullopt;
+  }
+  if (i != s.size()) return std::nullopt;
+  return literals::parse_float_literal(clean);
+}
+
+// Each answers nil when the text is not a number, and the caller words the
+// ValueError, which names the string as Python's does.
+bool nat_pyint(NativeCall& c) {
+  const auto text = int_text(c.arg(0).as_str());
+  c.result = text ? Value::make_str(*text) : Value();
+  return true;
+}
+
+bool nat_pyfloat(NativeCall& c) {
+  const auto value = float_value(c.arg(0).as_str());
+  c.result = value ? Value::make_double(*value) : Value();
+  return true;
+}
+
 }  // namespace
 
 // What `type(v).__name__` says, from C++ -- the twin of $typename.
@@ -5367,6 +5523,8 @@ const std::vector<vm::NativeDef>& stdlib() {
       trap_convert_def<&convert_trap>(),
       {"print", 1, nat_print, nullptr},
       {"ffmt", 2, nat_ffmt, nullptr},
+      {"pyint", 1, nat_pyint, nullptr},
+      {"pyfloat", 1, nat_pyfloat, nullptr},
       double_format::dstr_def(double_format::kPython),
   };
   return defs;

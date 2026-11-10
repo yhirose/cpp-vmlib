@@ -1,0 +1,8 @@
+1.0
+0.0
+3.0
+1.1805916207174113e+21
+2.5
+TypeError float() argument must be a string or a real number, not 'NoneType'
+TypeError float() argument must be a string or a real number, not 'list'
+TypeError float() argument must be a string or a real number, not 'tuple'

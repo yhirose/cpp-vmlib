@@ -416,6 +416,11 @@ Quietly different:
   executor's traps, for the cases a sample asks about -- `IndexError`,
   `KeyError`, `ZeroDivisionError`, `TypeError`. Anything else the executor
   traps on is still catchable but carries no `type(e).__name__`.
+* **`int()` and `float()` read ASCII text.** The grammar is Python's (the
+  whitespace it strips, a sign, `inf`/`infinity`/`nan` in any case, digits
+  with a single `_` between two of them, a fraction and an exponent), read in
+  `pyint` and `pyfloat`, but only the ASCII digits and spaces: Python also
+  reads other scripts' digits (`int("\u0663")` is 3) and Unicode whitespace.
 * **A method is not a value.** `p.m()` works; `f = p.m` does not (a
   builtin handed around as a value is the one exception -- see above,
   where it is a function this front end writes for exactly that purpose).

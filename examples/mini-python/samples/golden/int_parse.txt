@@ -1,0 +1,16 @@
+10
+-100
+0
+99999999999999999999999
+ValueError invalid literal for int() with base 10: '1__0'
+ValueError invalid literal for int() with base 10: '_1'
+ValueError invalid literal for int() with base 10: '1_'
+ValueError invalid literal for int() with base 10: 'x'
+ValueError invalid literal for int() with base 10: ''
+ValueError invalid literal for int() with base 10: '1.5'
+TypeError int() argument must be a string, a bytes-like object or a real number, not 'NoneType'
+TypeError int() argument must be a string, a bytes-like object or a real number, not 'list'
+TypeError int() argument must be a string, a bytes-like object or a real number, not 'tuple'
+1
+2
+-2
