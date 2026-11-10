@@ -165,3 +165,19 @@ show(function() return pcall() end)
 local function mark() print("ran") return 1 end
 show(function() return rawset({}, (mark())) end)
 print(tostring(nil), type(nil), string.len(12))
+
+-- setmetatable wants a table, then nil or a table, and says which it did not
+-- get: the first argument first. string.upper wants a string.
+local notmeta, meta = 5, {}
+show(function() return setmetatable(1, {}) end)
+show(function() return setmetatable("s", {}) end)
+show(function() return setmetatable(nil, {}) end)
+show(function() return setmetatable({}, 1) end)
+show(function() return setmetatable({}, notmeta) end)
+show(function() return setmetatable(1, notmeta) end)
+show(function() return setmetatable(1, meta) end)
+show(function() return setmetatable({}, "x") end)
+show(function() return setmetatable({}, true) end)
+show(function() return string.upper({}) end)
+print(getmetatable(setmetatable({}, meta)) == meta)
+print(getmetatable(setmetatable({}, nil)))

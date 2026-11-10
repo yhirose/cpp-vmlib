@@ -188,6 +188,7 @@ const std::map<std::string, LibFn>& library() {
       {"ipairs", {1, {any}}},
       {"pairs", {1, {any}}},
       {"select", {kReadsEvery, {number}}},
+      {"for iterator", {kReadsEvery, {table}}},  // what `pairs` hands the loop
       {"pcall", {kReadsEvery, {any}}},
       {"coroutine.create", {1, {{"function", true}}}},
       {"coroutine.resume", {2, {{"thread", true}, opt}}},
@@ -1621,8 +1622,7 @@ struct Binder {
         if (g == "type") return {native("type", {a0(0)}, p), false};
         if (g == "tostring") return {rt.call("$str", {a0(0)}, p), false};
         if (g == "setmetatable") {
-          return {b.intrinsic(IntrinsicId::MetaSet, {a0(0), a0(1)}, p),
-                  false};
+          return {emit_setmetatable(arglist, a0(0), a0(1), p), false};
         }
         if (g == "getmetatable") {
           return {b.intrinsic(IntrinsicId::MetaGet, {a0(0)}, p), false};
@@ -1886,6 +1886,35 @@ struct Binder {
     const NodeId loop = b.make_while(b.bool_literal(true), b.block(body));
     if (end > mark) return b.scope(mark, end, loop);
     return loop;
+  }
+
+  // `setmetatable(t, m)`: the VM's MetaSet, which traps on a `t` that has
+  // no meta slot and takes any `m`; Lua wants `m` to be nil or a table. A
+  // guard says so, for an `m` that is not written out as one (a table
+  // constructor, nil), and its failure is one cold native that names
+  // whichever argument is wrong first.
+  NodeId emit_setmetatable(const Ast* arglist, NodeId table, NodeId meta,
+                           SrcPos p) {
+    auto b = Builder(m).at(p);
+    const Ast* second = arglist != nullptr && arglist->nodes.size() == 2
+                            ? arglist->nodes[1].get()
+                            : nullptr;
+    if (second != nullptr &&
+        (second->tag == "tablector"_ ||
+         (second->tag == "literal"_ && second->token == "nil"))) {
+      return b.intrinsic(IntrinsicId::MetaSet, {table, meta});
+    }
+    return b.lets({table, meta}, [&](const std::vector<Builder::Temp>& t) {
+      const auto type_not = [&](const char* name) {
+        return b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {t[1]()}),
+                        b.str_literal(name));
+      };
+      return b.block(
+          {b.make_if(b.make_if(type_not("map"), type_not("nil"),
+                               b.bool_literal(false)),
+                     native("setmt_bad", {t[0](), t[1]()}, p), NodeId{}),
+           b.intrinsic(IntrinsicId::MetaSet, {t[0](), t[1]()})});
+    });
   }
 
   // `error(v [, level])`. Level 1, the default, is `$error`: the line of
@@ -2565,6 +2594,12 @@ bool nat_concat_bad(NativeCall& c) {
   return false;
 }
 
+// setmetatable's guard failed: the table is the first thing wrong when it is
+// no table, the metatable otherwise.
+bool nat_setmt_bad(NativeCall& c) {
+  return bad_arg(c, "setmetatable", c.arg(0).is_map() ? 1 : 0);
+}
+
 // A numeric for whose step is zero: Lua's own words.
 bool nat_for_step(NativeCall& c) {
   c.error = c.trap(TrapKind::BadValue, "'for' step is zero");
@@ -2709,6 +2744,25 @@ std::string& chunk_name() {
   return name;
 }
 
+// The intrinsics whose trap is a library function's complaint of its first
+// argument: `setmetatable(1, {})` is MetaSet's on an int.
+struct ArgVerb {
+  IntrinsicId id;
+  const char* fn;
+};
+const ArgVerb* arg_verb(const Verb& verb) {
+  static constexpr ArgVerb verbs[] = {
+      {IntrinsicId::MetaSet, "setmetatable"},
+      {IntrinsicId::StrUpper, "string.upper"},
+      {IntrinsicId::StrLower, "string.lower"},
+      {IntrinsicId::ObjectKeys, "for iterator"},
+  };
+  for (const ArgVerb& v : verbs) {
+    if (verb.is(v.id)) return &v;
+  }
+  return nullptr;
+}
+
 // An executor's trap as the error Lua raises for the same fault: a string,
 // "chunk:line: attempt to ..." (Lua 5.4's words). The `(local 'x')` Lua adds
 // when it knows the variable is not here: the VM does not know its name.
@@ -2743,6 +2797,8 @@ Value convert_trap(const Value& trap, const void*) {
                   ? "attempt to perform bitwise operation on a " + type(L) +
                         " value"
                   : "attempt to perform arithmetic on a " + type(L) + " value";
+      } else if (verb.cls == VerbClass::Intrinsic && arg_verb(verb)) {
+        msg = arg_complaint(arg_verb(verb)->fn, 0, 1, type(L));
       } else if (verb.is(IntrinsicId::Len)) {
         msg = "attempt to get length of a " + type(L) + " value";
       } else if (verb.is(IntrinsicId::Pow)) {
@@ -2812,6 +2868,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
+      {"setmt_bad", 2, nat_setmt_bad, nullptr},
       {"concat_bad", 2, nat_concat_bad, nullptr},
       {"key_fail", 1, nat_key_fail, nullptr},
       {"bad_type", 3, nat_bad_type, nullptr},

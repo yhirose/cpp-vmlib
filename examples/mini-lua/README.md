@@ -287,6 +287,9 @@ Quietly different:
   in `$set` (the VM's own SetIndex has no such rule, and other languages'
   containers take those keys), after the metatable's `__newindex` has had
   its say, which takes any key and any value, a nil value included.
+* **`string.upper(5)` is an argument error.** Lua reads a number as the
+  string it writes as; `string.len` and `string.byte` do here, and the two
+  case maps (the VM's own StrUpper/StrLower) do not.
 * **A metatable's `__newindex` that is neither a function nor a table**
   is called anyway, for the executor's own `attempt to call` error, where
   Lua raises `attempt to index` on it.

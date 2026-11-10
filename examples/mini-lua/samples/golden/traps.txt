@@ -91,3 +91,15 @@ traps.lua:163: bad argument #1 to 'pcall' (value expected)
 ran
 traps.lua:166: bad argument #3 to 'rawset' (value expected)
 nil	nil	2
+traps.lua:172: bad argument #1 to 'setmetatable' (table expected, got number)
+traps.lua:173: bad argument #1 to 'setmetatable' (table expected, got string)
+traps.lua:174: bad argument #1 to 'setmetatable' (table expected, got nil)
+traps.lua:175: bad argument #2 to 'setmetatable' (nil or table expected, got number)
+traps.lua:176: bad argument #2 to 'setmetatable' (nil or table expected, got number)
+traps.lua:177: bad argument #1 to 'setmetatable' (table expected, got number)
+traps.lua:178: bad argument #1 to 'setmetatable' (table expected, got number)
+traps.lua:179: bad argument #2 to 'setmetatable' (nil or table expected, got string)
+traps.lua:180: bad argument #2 to 'setmetatable' (nil or table expected, got boolean)
+traps.lua:181: bad argument #1 to 'upper' (string expected, got table)
+true
+nil
