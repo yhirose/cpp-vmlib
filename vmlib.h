@@ -1078,6 +1078,9 @@ int64_t coreir_rt_in(int64_t line, int64_t col);
 // not implement this with longjmp: the throw's path out of vm::run runs
 // destructors (the executor and its containers among them), and jumping past
 // them is undefined behavior.
+//
+// A position of {0, 0} is no position (SrcPos): the stdio host then reports
+// "<path>: <message>" rather than "<path>:0:0: <message>".
 [[noreturn]] void coreir_rt_fail(const char* msg, int64_t line, int64_t col);
 
 // Called on every loop back-edge and call, so a host that wants to interrupt
@@ -5482,6 +5485,12 @@ struct RunOptions {
   // converted_or_self). A describe with no words for traps hands them back
   // as the message.
   std::string (*describe)(const coreir::Value&) = nullptr;
+  // How a deadlock is worded: the queue ran dry with `parked` scheduled
+  // coroutines still suspended, nothing left to wake them. describe words a
+  // raised value; this words the one fatal that is not a value (no handler
+  // or defer sees it), and the run fails with it at no position. Null:
+  // "deadlock: N coroutine(s) parked with nothing to wake them".
+  std::string (*deadlock_text)(int64_t parked) = nullptr;
 };
 
 // Run the bytecode, on a heap the caller owns. Use this to inspect what a
@@ -9347,6 +9356,7 @@ struct Exec {
   Runtime& rt;
   bool entry_frame_drops;  // RunOptions::entry_frame_drops
   std::string (*describe)(const Value&);  // RunOptions::describe
+  std::string (*deadlock_text)(int64_t) = nullptr;  // RunOptions::deadlock_text
   // max_frames as configured: an ExitHeadroom raises max_frames from it.
   const size_t depth_bound = max_frames;
 
@@ -10042,8 +10052,10 @@ struct Exec {
       if (co->state == CoroObj::State::Suspended) ++parked;
     }
     if (parked > 0) {
-      coreir_rt::fail("deadlock: " + std::to_string(parked) +
-                          " coroutine(s) parked with nothing to wake them",
+      coreir_rt::fail(deadlock_text
+                          ? deadlock_text(parked)
+                          : "deadlock: " + std::to_string(parked) +
+                                " coroutine(s) parked with nothing to wake them",
                       0, 0);
     }
   }
@@ -11553,6 +11565,7 @@ void run_with(const Program& p, coreir::Runtime& rt, const RunOptions& opts,
       .rt = rt,
       .entry_frame_drops = opts.entry_frame_drops,
       .describe = opts.describe,
+      .deadlock_text = opts.deadlock_text,
       .frames = FrameStack<Prof>(std::forward<ProfArgs>(prof_args)...)};
   // Link the program's declared host functions before anything runs: a
   // name the host did not supply is a configuration error of the whole
@@ -11822,8 +11835,13 @@ int64_t coreir_rt_in(int64_t line, int64_t col) {
 
 void coreir_rt_fail(const char* msg, int64_t line, int64_t col) {
   std::fflush(stdout);
-  std::fprintf(stderr, "%s:%" PRId64 ":%" PRId64 ": %s\n",
-               coreir_rt_default::detail::g_path.c_str(), line, col, msg);
+  const char* path = coreir_rt_default::detail::g_path.c_str();
+  if (line == 0 && col == 0) {  // no position (SrcPos)
+    std::fprintf(stderr, "%s: %s\n", path, msg);
+  } else {
+    std::fprintf(stderr, "%s:%" PRId64 ":%" PRId64 ": %s\n", path, line, col,
+                 msg);
+  }
   std::exit(1);
 }
 

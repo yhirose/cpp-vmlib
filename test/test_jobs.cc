@@ -332,6 +332,47 @@ int main() {
     check_eq(joined(), "parked|after|", "deadlock output");
   }
 
+  // --- 9b. RunOptions::deadlock_text words the deadlock: it is handed the
+  // parked count, only when something is parked. -------------------------
+  {
+    // N parked coroutines (each P above), or none: main enqueues `after`.
+    auto build = [&](int parked) {
+      Module m;
+      Builder b(m);
+      m.capture_maps.push_back({});
+      m.funcs.push_back({});
+      m.funcs.push_back(
+          {"P", 1, 0,
+           b.intrinsic(IntrinsicId::CoroYield, {b.nil_literal(p)}, p),
+           {"x"}, {}});
+      m.funcs.back().num_params = 1;
+      m.funcs.push_back({"after", 0, 0, say(b, "after"), {}, {}});
+      std::vector<NodeId> body;
+      for (int i = 0; i < parked; ++i) body.push_back(spawn(b, 1, 0));
+      body.push_back(enqueue(b, 2, 0));
+      m.funcs[0] = {"main", 0, 0, b.block(body, p), {}, {}};
+      return m;
+    };
+    static int hook_calls;
+    vm::RunOptions o;
+    o.deadlock_text = [](int64_t n) {
+      ++hook_calls;
+      return "asleep:" + std::to_string(n);
+    };
+    hook_calls = 0;
+    check_eq(run_module(build(1), "hook 1", o), "asleep:1", "hook: one parked");
+    check_eq(std::to_string(hook_calls), "1", "hook: called once");
+    hook_calls = 0;
+    check_eq(run_module(build(2), "hook 2", o), "asleep:2", "hook: two parked");
+    hook_calls = 0;
+    check_eq(run_module(build(0), "hook 0", o), "", "hook: none parked");
+    check_eq(std::to_string(hook_calls), "0", "hook: not called when none");
+    // Regression guard: no hook, today's words.
+    check_eq(run_module(build(2), "no hook"),
+             "deadlock: 2 coroutine(s) parked with nothing to wake them",
+             "no hook: default text");
+  }
+
   // --- 10. Woken twice: the second turn finds it done and is skipped. A
   // scheduled coroutine's uncaught throw ends the run like a job's. ------
   // W(x) { print "W" }   T(x) { throw "t" }

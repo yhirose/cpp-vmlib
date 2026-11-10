@@ -148,6 +148,12 @@ still runnable to their own ends, so a sample whose output must match
 `go run` synchronizes through channels rather than leaving output
 pending in a goroutine.
 
+A deadlock is reported as `<file>: fatal error: all goroutines are asleep -
+deadlock!` (`RunOptions::deadlock_text`; no position, no `panic:` prefix, no
+goroutine trace). Real Go prints that line without the file name, then the
+goroutine traces, and a compiled binary exits 2; here the exit code is 1,
+like every failure of this runtime.
+
 **A channel is an object, and its two operations are funcs in IR.** An
 unbuffered channel is `{recvq: [...], sendq: [...]}`, each queue holding
 `{co, value}` waiters. `$chan_send` and `$chan_recv`
