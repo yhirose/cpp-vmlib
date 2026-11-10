@@ -1,1 +1,1 @@
-quotient_inexact_zero.scm:5:10: uncaught: In procedure quotient: Numerical overflow
+quotient_inexact_zero.scm:3:10: uncaught: In procedure quotient: Numerical overflow

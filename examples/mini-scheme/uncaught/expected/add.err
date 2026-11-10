@@ -1,1 +1,1 @@
-add.scm:3:10: uncaught: In procedure +: Wrong type: "a"
+add.scm:2:10: uncaught: In procedure +: Wrong type: "a"

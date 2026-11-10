@@ -1,4 +1,3 @@
-; A procedure with a rest parameter needs the arguments before it.
-; Expected text: this front end's own words, not guile's.
+; A rest parameter still needs the arguments before it.
 (define (f a . rest) a)
 (display (f))

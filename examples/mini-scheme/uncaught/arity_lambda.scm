@@ -1,3 +1,2 @@
-; An anonymous procedure is named "lambda". Guile prints its address, which
-; no expected text could hold; this front end's own words.
+; An anonymous procedure is named lambda.
 ((lambda (x) (display x)))

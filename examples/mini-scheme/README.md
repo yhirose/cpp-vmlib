@@ -231,9 +231,10 @@ same list bound to a name instead, which every implementation agrees on.
 ## What is absent, and what quietly differs
 
 Absent: exact rationals (`(/ 1 2)` is `1/2` in Scheme and `0.5` here),
-`exact->inexact`, `inexact->exact`, `exact?` and `inexact?`, bignums (`examples/mini-python` is where that recipe lives; an integer
-literal past int64 is refused where it is read, not clamped), `define-syntax`
-and macros, `do`, vectors, characters, ports, `dynamic-wind`, `values` and
+`exact->inexact`, `inexact->exact`, `exact?` and `inexact?`, bignums
+(`examples/mini-python` is where that recipe lives; an integer literal
+past int64 is refused where it is read, not clamped), `define-syntax` and
+macros, `do`, vectors, characters, ports, `dynamic-wind`, `values` and
 `call-with-values`, and `case-lambda`.
 
 Quietly different:
@@ -247,35 +248,38 @@ Quietly different:
   two cannot be told apart.
 * **A special form always wins over a binding of the same name.** A program
   that rebinds `if` is not in this subset.
-* **`/` is exact only when it divides evenly.** Two exact integers whose
-  quotient is an integer give an exact integer, as in Scheme -- `(/ 6 3)`
-  is `2` -- and any other quotient is a double: `(/ 7 2)` is `3.5` where
-  Scheme's is `7/2`. With no rationals that is not a one-off: what is done
-  with the quotient afterwards differs too, `(* 2 (/ 6 4))` being `3.0`
-  here and `3` in Scheme. An exact zero divisor is an error whatever the
-  dividend (`(/ 7 0)`, `(/ 7.0 0)`, `(/ 1 2 0)`: "In procedure /: Numerical
-  overflow"), and an inexact one is `+inf.0` or `+nan.0` in both.
-* **A value-less expression answers `#<unspecified>`**, as in Scheme: an
-  `if` without an else, `when`/`unless`, a `cond` or `case` that matches
-  nothing, `set!`, `display`, `newline` and `for-each`. It is an object of
-  its own -- not `'()`, true in a condition, equal to every other one --
-  and each evaluation makes a fresh object, since the IR has no global to
-  share one. A record's mutator is the exception: `(set-px! r 5)` is `5` in
-  Guile 3.0 and `()` here.
-* **The wrong number of arguments is an error**, for every procedure a
-  program can call: a `define`d or `lambda` one, a record's constructor,
-  predicate, accessors and mutators, a library procedure used as a value
-  (`(map cons xs)`), and an escape continuation. The text is this front
-  end's -- "Wrong number of arguments to #<procedure f>", `lambda` for an
-  anonymous procedure, `continuation` for an escape -- where Guile's names
-  the formals (`#<procedure f (a b)>`) and, for a lambda, an address. A
-  library procedure is held to the arity this front end gives it, which is
-  narrower than Guile's in four places: `display` takes no port,
-  `number->string` no radix, `member` and `assoc` no third (the comparison)
-  argument, and an escape continuation takes exactly one value where
-  Guile's takes any number.
+* **`/` is exact only when it divides evenly.** `(/ 6 3)` is `2`, and any
+  other quotient of two exact integers is a double: `(/ 7 2)` is `3.5`
+  where Scheme's is `7/2`, and what is done with it differs too
+  (`(* 2 (/ 6 4))` is `3.0` here, `3` there). An exact zero divisor is an
+  error whatever the dividend (`(/ 7 0)`, `(/ 7.0 0)`, `(/ 1 2 0)`), and an
+  inexact one is `+inf.0` or `+nan.0`, in both. The cost is about 14
+  instructions more per exact division than a bare double one.
+* **A value-less expression answers `#<unspecified>`**: an `if` without an
+  else, `when`/`unless`, a `cond` or `case` that matches nothing, `set!`,
+  `display`, `newline` and `for-each`. It is an object of its own, true in
+  a condition and equal to every other one. Each evaluation makes a fresh
+  object (the IR has no global to share one), about 90 ns per fallthrough:
+  a one-armed `if` that falls through in a 3M-iteration loop runs 0.505 s
+  where a two-armed one runs 0.225 s. A record's mutator is the exception:
+  `(set-px! r 5)` is `5` in Guile 3.0 and `()` here.
+* **The wrong number of arguments is an error** for every procedure a
+  program can call, a library procedure used as a value (`(map cons xs)`)
+  and an escape continuation included. The text is this front end's,
+  "Wrong number of arguments to #<procedure f>" (`lambda` when anonymous,
+  `continuation` for an escape; `eq?` and `eqv?` share one procedure and
+  read as `eqv?`), where Guile's names the formals. The library takes
+  fewer arguments than Guile's in four places: `display` no port,
+  `number->string` no radix, `member` and `assoc` no comparison, and an
+  escape continuation exactly one value.
+* **Some errors are not traps.** The library's `car`/`cdr` "not a pair",
+  `list-ref`, `apply`, and the "wrong type argument" of `quotient`,
+  `remainder` and `modulo` are thrown strings: they report the helper's
+  position rather than the call's, in lower case, unlike the traps above.
+  About eight sites; the next thing to close.
 * **Numbers are the machine's.** An exact integer that leaves int64 wraps
-  rather than growing; Scheme's would be exact.
+  rather than growing; Scheme's would be exact (`(/ -9223372036854775808 -1)`
+  is itself).
 
 ## Testing
 

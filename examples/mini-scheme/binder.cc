@@ -79,7 +79,12 @@ constexpr int64_t kEscapeValue = 2;
 // which prints as "()" where this prints as guile's #<unspecified>. An
 // object whose kind record is all it is; the IR has no globals to hold one
 // shared instance, so each evaluation makes its own, and `$eqv` treats any
-// two as the same value.
+// two as the same value. The cost is two allocations and three instructions
+// per evaluation: a 3M-iteration tail loop whose one-armed `if` falls
+// through takes 60.0M instructions and 0.505 s, against 51.0M and 0.225 s
+// for a two-armed one. Sharing one needs a binder-owned variable every
+// function that can fall through captures, which pass A would have to know
+// in advance; a VM immediate would remove it (a cross-front-end decision).
 constexpr char kUnspecifiedKind[] = "unspecified";
 
 NodeId unspecified(Builder::At& b) {
@@ -644,6 +649,11 @@ struct Binder {
     NodeId cdr(NodeId v) { return idx(v, I(1)); }
 
     NodeId err(const std::string& msg) { return b.make_throw(S(msg)); }
+
+    // The fault of an exact zero divisor, raised by `op` on two ints: the
+    // operator is what `describe` names the procedure by. A trap, unlike
+    // `err`'s thrown string, is reported at the call.
+    NodeId trap_zero_div(BinOp op) { return bin(op, I(1), I(0)); }
   };
 
   void one(const std::string& name, int32_t nparams,
@@ -699,18 +709,21 @@ struct Binder {
     // trap's operator is what `describe` names the procedure by.
     one("$div", 2, [&](RT& r) {
       const NodeId a = r.L(0), b = r.L(1);
-      const NodeId zero_div = r.both(r.is(r.typ(r.L(1)), "int"),
-                                     r.bin(BinOp::Eq, b, r.I(0)));
-      // 1 over the zero: FloorDiv on two ints traps, where one with a
-      // double in it answers inf or nan.
-      const NodeId exact = r.both(r.is(r.typ(r.L(0)), "int"), r.is(r.typ(r.L(1)), "int"));
-      const NodeId inexact = r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {a}),
-                                   r.in(IntrinsicId::ToDouble, {b}));
-      return r.iff(
-          zero_div, r.bin(BinOp::FloorDiv, r.I(1), b),
-          r.iff(r.both(exact,
-                       r.bin(BinOp::Eq, r.bin(BinOp::Mod, a, b), r.I(0))),
-                r.bin(BinOp::FloorDiv, a, b), inexact));
+      // A node has one parent, so each test is built where it is read.
+      const auto is_int = [&](NodeId v) { return r.is(r.typ(v), "int"); };
+      const auto zero = [&] { return r.bin(BinOp::Eq, b, r.I(0)); };
+      const auto trap = [&] { return r.trap_zero_div(BinOp::FloorDiv); };
+      const auto inexact = [&] {
+        return r.bin(BinOp::Div, r.in(IntrinsicId::ToDouble, {a}),
+                     r.in(IntrinsicId::ToDouble, {b}));
+      };
+      // Two ints: Mod is asked of ints only, after the zero test.
+      const NodeId ints = r.iff(
+          zero(), trap(),
+          r.iff(r.bin(BinOp::Eq, r.bin(BinOp::Mod, a, b), r.I(0)),
+                r.bin(BinOp::FloorDiv, a, b), inexact()));
+      return r.iff(r.both(is_int(a), is_int(b)), ints,
+                   r.iff(r.both(is_int(b), zero()), trap(), inexact()));
     }, {"a", "b"});
     one("$zerop", 1, [&](RT& r) { return r.bin(BinOp::Eq, r.L(0), r.I(0)); },
         {"v"});
@@ -764,7 +777,8 @@ struct Binder {
     rt_disp();
     rt_listbody();
     one("$display", 1, [&](RT& r) {
-      return r.blk({r.nat("write", {r.call("$disp", {r.L(0)})}), unspecified(r.b)});
+      return r.blk({r.nat("write", {r.call("$disp", {r.L(0)})}),
+                    unspecified(r.b)});
     }, {"v"});
     one("$newline", 0, [&](RT& r) {
       return r.blk({r.nat("write", {r.S("\n")}), unspecified(r.b)});
@@ -780,6 +794,12 @@ struct Binder {
     for (const Builtin& bi : builtins()) {
       if (bi.fold != Fold::None) rt_fold_value(bi);
     }
+    // The name a procedure goes by in the program, which an arity error
+    // reads from the func: the builtin's own, not its helper's.
+    for (const Builtin& bi : builtins()) {
+      m.funcs[static_cast<size_t>(rt.func(value_rt(bi)))].name = bi.scheme;
+    }
+    m.funcs[static_cast<size_t>(rt.func("$escape"))].name = "continuation";
   }
 
   // A rest param arrives as an array, which emit_fn turns into a list
@@ -909,11 +929,8 @@ struct Binder {
     };
     r.add(r.iff(r.b.unary(UnOp::Not, r.both(integer(a), integer(b))),
                 r.err(scheme + ": wrong type argument")));
-    // A trap on two exact zeros' worth of ints, not a thrown string: it
-    // is the same fault the exact path raises, worded by `describe` and
-    // reported at the call.
     r.add(r.iff(r.bin(BinOp::Eq, r.L(b), r.I(0)),
-                r.bin(op, r.I(1), r.I(0))));
+                r.trap_zero_div(op)));
     // The quotient or the remainder, held by a Let for its zero test and
     // the answer.
     const NodeId value =
@@ -1100,7 +1117,8 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("#t"), r.S("#f")))));
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
-    r.add(r.iff(is_kind(r, v, kUnspecifiedKind), r.ret(r.S("#<unspecified>"))));
+    r.add(r.iff(is_kind(r, v, kUnspecifiedKind),
+                r.ret(r.S("#<unspecified>"))));
     // Guile prints an inexact number as the shortest round trip in
     // double_format.h's kGuile layout ("1.0e-4", "1.0e7", a ".0" on a whole
     // one, "+inf.0"), written by the host (dstr).
@@ -1253,6 +1271,7 @@ struct Binder {
   // keeps a tail call one.
   NodeId emit_seq(const Ast& a, size_t from, FnCtx& ctx, SrcPos p) {
     auto b = Builder(m).at(p);
+    // An empty body is a syntax error in Guile, so nothing reads this.
     if (from >= a.nodes.size()) return b.nil_literal();
     std::vector<NodeId> out;
     for (size_t i = from; i < a.nodes.size(); ++i) {
@@ -1283,6 +1302,7 @@ struct Binder {
     if (h == "quote") return datum(*a.nodes[1], p);
     if (h == "define") return emit_define(a, ctx);
     if (h == "define-record-type") return emit_define_record_type(a, ctx);
+    // Forms that only act at the top level, so nothing reads their value.
     if (h == "import") return b.nil_literal();
     if (h == "case") return emit_case(a, ctx);
     if (h == "lambda") return emit_closure(fn_of.at(&a), ctx, p);
@@ -1304,8 +1324,8 @@ struct Binder {
     if (h == "set!") {
       const auto it = ref_of.find(a.nodes[1].get());
       if (it == ref_of.end()) fail(*a.nodes[1], "set!: unbound variable");
-      return b.block({write_var(it->second, emit_form(*a.nodes[2], ctx), ctx, p),
-                      unspecified(b)});
+      const NodeId value = emit_form(*a.nodes[2], ctx);
+      return b.block({write_var(it->second, value, ctx, p), unspecified(b)});
     }
     if (h == "let" || h == "let*" || h == "letrec") return emit_let(a, ctx);
     if (h == "call/cc" || h == "call-with-current-continuation") {
@@ -1814,19 +1834,6 @@ const std::vector<vm::NativeDef>& stdlib() {
 // is the same name for the arithmetic and comparison procedures and, for
 // the three integer divisions, the operation each one lowers to. Guile's
 // backtrace and its text for the argument position are not reproduced.
-// The name a procedure goes by in the program: a library helper (`$car`,
-// or `$add*`, the same builtin as a value) by its Scheme name -- the first
-// builtin that lowers to it, so `eqv?` reads as `eq?` -- and a user
-// function by its own, which is `lambda` for an anonymous one.
-std::string scheme_name(std::string name) {
-  if (name == "$escape") return "continuation";
-  if (!name.empty() && name.back() == '*') name.pop_back();
-  for (const auto& b : builtins()) {
-    if (name == b.rt) return b.scheme;
-  }
-  return name;
-}
-
 std::string describe(const Value& v) {
   using namespace runtime_parts;
   const auto written = [](const Value& x) {
@@ -1856,6 +1863,7 @@ std::string describe(const Value& v) {
         case BinOp::Div: proc = "quotient"; break;
         case BinOp::Mod: proc = "remainder"; break;
         case BinOp::FloorMod: proc = "modulo"; break;
+        case BinOp::FloorDiv: proc = "/"; break;
         default: break;
       }
       return std::string("In procedure ") + proc + ": Numerical overflow";
@@ -1863,8 +1871,7 @@ std::string describe(const Value& v) {
     case TrapKind::Arity:
       // A spread's own count (CallSpread) names no procedure.
       if (trap_name(v).empty()) break;
-      return "Wrong number of arguments to #<procedure " +
-             scheme_name(trap_name(v)) + ">";
+      return "Wrong number of arguments to #<procedure " + trap_name(v) + ">";
     default:
       break;
   }

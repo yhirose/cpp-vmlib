@@ -1,4 +1,3 @@
-; Too many arguments are refused too; they were silently dropped. Expected
-; text: this front end's own words, not guile's.
+; Too many arguments are refused too.
 (define (f a) a)
 (display (f 1 2))

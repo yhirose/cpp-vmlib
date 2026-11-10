@@ -1,1 +1,1 @@
-arity_few.scm:6:10: uncaught: Wrong number of arguments to #<procedure f>
+arity_few.scm:3:10: uncaught: Wrong number of arguments to #<procedure f>

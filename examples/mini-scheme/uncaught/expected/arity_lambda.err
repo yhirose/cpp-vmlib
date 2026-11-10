@@ -1,1 +1,1 @@
-arity_lambda.scm:3:1: uncaught: Wrong number of arguments to #<procedure lambda>
+arity_lambda.scm:2:1: uncaught: Wrong number of arguments to #<procedure lambda>

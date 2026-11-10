@@ -1,1 +1,1 @@
-div_inexact_exact_zero.scm:4:10: uncaught: In procedure /: Numerical overflow
+div_inexact_exact_zero.scm:2:10: uncaught: In procedure /: Numerical overflow

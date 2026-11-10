@@ -1,4 +1,2 @@
-; (/ 7.0 0): the divisor is an exact zero, so this is an error too -- unlike
-; (/ 7.0 0.0), which is +inf.0 in guile and here. Expected text: this front
-; end's own words, not guile's.
+; (/ 7.0 0): an exact zero divisor under an inexact dividend is an error too.
 (display (/ 7.0 0))
