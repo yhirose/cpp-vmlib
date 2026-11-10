@@ -1733,6 +1733,23 @@ struct Binder {
     return loop;
   }
 
+  // A numeric literal, or a negated one, that is not zero.
+  static bool nonzero_literal(const Ast& e) {
+    switch (e.tag) {
+      case "number"_: {
+        const std::string digits(e.token);
+        const auto n = literals::parse_int_literal(digits);
+        return !n.fits || n.value != 0;
+      }
+      case "float"_:
+        return literals::parse_float_literal(e.token) != 0;
+      case "negexp"_:
+        return nonzero_literal(*e.nodes[0]);
+      default:
+        return false;
+    }
+  }
+
   NodeId emit_fornum(const Ast& a, FnCtx& ctx) {
     const SrcPos p = pos_of(a);
     auto b = Builder(m).at(p);
@@ -1769,11 +1786,21 @@ struct Binder {
               b.make_if(b.binary(BinOp::Gt, by(), b.literal(0)),
                         b.binary(BinOp::Le, I(), limit()),
                         b.binary(BinOp::Ge, I(), limit()));
-          return b.block(
-              {b.assign(VarKind::Local, iv, t[0]()),
-               b.make_while(cond, bend > bmark
+          // A step of zero is an error before the first iteration, as in
+          // Lua; a literal that is not zero cannot be one, and costs
+          // the loop nothing.
+          std::vector<NodeId> pre;
+          if (step == nullptr || !nonzero_literal(*step)) {
+            pre.push_back(b.make_if(
+                b.binary(BinOp::Eq, by(), b.literal(0)),
+                native("for_step", {}, p), NodeId{}));
+          }
+          pre.push_back(b.assign(VarKind::Local, iv, t[0]()));
+          pre.push_back(
+              b.make_while(cond, bend > bmark
                                       ? b.scope(bmark, bend, b.block(body))
-                                      : b.block(body))});
+                                      : b.block(body)));
+          return b.block(pre);
         });
     const int32_t end = ctx.release(mark);
     return b.scope(mark, end, loop);
@@ -2296,6 +2323,12 @@ bool nat_arg_fail(NativeCall& c) {
   return false;
 }
 
+// A numeric for whose step is zero: Lua's own words.
+bool nat_for_step(NativeCall& c) {
+  c.error = c.trap(TrapKind::BadValue, "'for' step is zero");
+  return false;
+}
+
 bool nat_floor(NativeCall& c) {
   const Value& v = c.arg(0);
   if (v.is_int()) {
@@ -2468,6 +2501,7 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_byte", -1, nat_s_byte, nullptr},
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
+      {"for_step", 0, nat_for_step, nullptr},
       trap_convert_def<&convert_trap>(),
   };
   return defs;

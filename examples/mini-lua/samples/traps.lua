@@ -46,3 +46,11 @@ show(function() return "a" .. tbl() end)
 show(function() return nothing() .. "a" end)
 show(function() return select(0, "x") end)
 show(function() table.insert({}, 5, "x") end)
+
+-- A numeric for whose step is zero fails before its first iteration, for an
+-- integer or a float step, written or computed.
+local zero = 0
+show(function() for i = 1, 10, 0 do end end)
+show(function() for i = 1.0, 10, 0 do end end)
+show(function() for i = 1, 10, 0.0 do end end)
+show(function() for i = 1, 10, zero do end end)

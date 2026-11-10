@@ -24,3 +24,7 @@ traps.lua:45: attempt to concatenate a table value
 traps.lua:46: attempt to concatenate a nil value
 traps.lua:47: bad argument #1 to 'select' (index out of range)
 traps.lua:48: bad argument #2 to 'insert' (position out of bounds)
+traps.lua:53: 'for' step is zero
+traps.lua:54: 'for' step is zero
+traps.lua:55: 'for' step is zero
+traps.lua:56: 'for' step is zero
