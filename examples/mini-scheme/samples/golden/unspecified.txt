@@ -1,0 +1,24 @@
+#<unspecified>
+#<unspecified>
+#<unspecified>
+#<unspecified>
+#<unspecified>
+#<unspecified>
+#<unspecified>
+
+#<unspecified>
+#<unspecified>
+shown#<unspecified>
+(1 #<unspecified> 2)
+(1 . #<unspecified>)
+(#<unspecified> #<unspecified>)
+#f
+#f
+#f
+#f
+true
+#f
+#t
+#t
+#t
+(#<unspecified>)

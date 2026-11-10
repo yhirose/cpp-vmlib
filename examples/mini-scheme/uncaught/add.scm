@@ -1,3 +1,3 @@
-; (+ 1 "a") ends the program with guile's error:
-; "In procedure +: Wrong type: \"a\"" (after a backtrace).
+; (+ 1 "a") ends the program with this front end's own words for the fault,
+; "In procedure +: Wrong type: \"a\"" (guile's has a backtrace and more).
 (display (+ 1 "a"))
