@@ -650,8 +650,40 @@ struct Binder {
     r.finish("$get");
   }
 
-  // Writing: assigning nil removes the key, which is what makes `#t` and
-  // `pairs` agree with Lua about what is in the table.
+  // The raw store of Lua's `t[key] = v`, for a table and a key that is
+  // already the one a table holds (IntegralKey): a nil or a NaN key is
+  // an error -- luaH_newkey's -- and then nil removes the key, anything
+  // else is set. One copy, for `$set` (after its metamethod) and `rawset`
+  // (which has none), each handing in what reads the table, the key and
+  // the value, in IR it may repeat.
+  template <class T, class K, class V>
+  NodeId raw_store(Builder::At& b, T table, K key, V value) {
+    const auto type_is = [&](NodeId v, const char* name) {
+      return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {v}),
+                      b.str_literal(name));
+    };
+    // The keys a program stores by are strings and ints, and one test tells
+    // so; only another gets asked whether it is nil or NaN.
+    const NodeId bad_key = b.make_if(
+        type_is(key(), "string"), b.bool_literal(false),
+        b.make_if(type_is(key(), "int"), b.bool_literal(false),
+                  b.make_if(type_is(key(), "nil"), b.bool_literal(true),
+                            b.make_if(type_is(key(), "double"),
+                                      b.binary(BinOp::Ne, key(), key()),
+                                      b.bool_literal(false)))));
+    return b.block(
+        {b.make_if(bad_key,
+                   b.call_value(b.native_ref(b.declare_native("key_fail")),
+                                {key()}),
+                   NodeId{}),
+         b.make_if(type_is(value(), "nil"),
+                   b.intrinsic(IntrinsicId::ObjectRemove, {table(), key()}),
+                   b.set_index(table(), key(), value()))});
+  }
+
+  // Writing. A key the table lacks is the metatable's first: its
+  // `__newindex`, which a nil value reaches too (`t.k = nil` is a store like
+  // any other); what the metamethod does not take is the raw store.
   void rt_set() {
     RT r(*this);
     const auto [t, k, v] = r.params("t", "k", "v");
@@ -659,13 +691,12 @@ struct Binder {
     r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.blk({r.b.set_index(r.L(t), r.L(k), r.L(v)), r.ret(r.L(v))})));
     r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
-    r.add(r.iff(r.is(r.typ(v), "nil"),
-                r.blk({r.in(IntrinsicId::ObjectRemove, {r.L(t), r.L(key)}),
-                       r.ret(r.L(v))})));
     // __newindex fires only for a key the raw table does not already
-    // have -- Lua's own rule, so an overwrite never consults it.
+    // have -- Lua's own rule, so an overwrite never consults it. A table
+    // with no metatable has none to consult.
     r.add(r.iff(
-        r.b.unary(UnOp::Not, r.has(r.L(t), r.L(key))),
+        r.both(r.isnt(r.typ(r.meta(r.L(t))), "nil"),
+               r.b.unary(UnOp::Not, r.has(r.L(t), r.L(key)))),
         r.blk(
             {r.set(m, r.call("$mm", {r.L(t), r.S("__newindex")})),
              r.iff(
@@ -675,7 +706,9 @@ struct Binder {
                         r.call("$one", {r.b.call_value(
                                            r.L(m), {r.L(t), r.L(k), r.L(v)})}),
                         r.ret(r.L(v))}))})));
-    r.add(r.b.set_index(r.L(t), r.L(key), r.L(v)));
+    r.add(raw_store(
+        r.b, [&] { return r.L(t); }, [&] { return r.L(key); },
+        [&] { return r.L(v); }));
     r.add(r.ret(r.L(v)));
     r.finish("$set");
   }
@@ -1483,16 +1516,25 @@ struct Binder {
         // `__newindex`'s own thunk needs one, on pain of calling itself.
         if (g == "rawset") {
           // The table is both where the store goes and the answer, so a
-          // Let holds it rather than its being evaluated twice.
-          return {b.let(a0(0),
-                        [&](auto t) {
-                          return b.block(
-                              {b.set_index(t(), b.intrinsic(IntrinsicId::IntegralKey, {a0(1)}, p),
-                                           a0(2), p),
-                               t()},
-                              p);
-                        },
-                        p),
+          // Let holds it rather than its being evaluated twice; so the
+          // key, which is read again by each check.
+          auto ba = b.at(p);
+          return {ba.lets({a0(0), ba.intrinsic(IntrinsicId::IntegralKey,
+                                             {a0(1)}),
+                          a0(2)},
+                         [&](const std::vector<Builder::Temp>& t) {
+                           return ba.make_if(
+                               ba.binary(BinOp::Ne,
+                                        ba.intrinsic(IntrinsicId::TypeOf,
+                                                    {t[0]()}),
+                                        ba.str_literal("map")),
+                               native("bad_type",
+                                      {ba.str_literal("rawset"), ba.literal(1),
+                                       ba.str_literal("table"), t[0]()},
+                                      p),
+                               ba.block({raw_store(ba, t[0], t[1], t[2]),
+                                        t[0]()}));
+                         }),
                   false};
         }
         if (g == "rawget") {
@@ -1814,7 +1856,7 @@ struct Binder {
           // Lua; a literal that is not zero cannot be one, and costs
           // the loop nothing.
           std::vector<NodeId> pre;
-          if (step == nullptr || !nonzero_literal(*step)) {
+          if (step != nullptr && !nonzero_literal(*step)) {
             pre.push_back(b.make_if(
                 b.binary(BinOp::Eq, by(), b.literal(0)),
                 native("for_step", {}, p), NodeId{}));
@@ -2350,6 +2392,31 @@ bool nat_arg_fail(NativeCall& c) {
   return false;
 }
 
+// A table key that is nil or NaN: Lua's `table index is nil`. The key is
+// the one fact (no verb), which is what tells the conversion this is not
+// the executor's own key fault.
+bool nat_key_fail(NativeCall& c) {
+  const Value& k = c.arg(0);
+  c.error = c.trap(TrapKind::KeyType,
+                   k.is_nil() ? "table index is nil" : "table index is NaN",
+                   {.l = &k});
+  return false;
+}
+
+// A library function's complaint of an argument that is there and of the
+// wrong type: the function's name, the argument's number, what it takes,
+// and the value it got.
+bool nat_bad_type(NativeCall& c) {
+  const Value& got = c.arg(3);
+  c.error = c.trap(
+      TrapKind::Operands,
+      "bad argument #" + std::to_string(c.arg(1).as_int()) + " to '" +
+          c.arg(0).as_str() + "' (" + c.arg(2).as_str() + " expected, got " +
+          lua_typename(got) + ")",
+      {.l = &got});
+  return false;
+}
+
 // A numeric for whose step is zero: Lua's own words.
 bool nat_for_step(NativeCall& c) {
   c.error = c.trap(TrapKind::BadValue, "'for' step is zero");
@@ -2536,8 +2603,18 @@ Value convert_trap(const Value& trap, const void*) {
     case TrapKind::Depth:
       msg = "stack overflow";
       break;
-    case TrapKind::None:
     case TrapKind::KeyType:
+      // A table key that is nil or NaN (nat_key_fail: no verb); a key
+      // fault of the executor's own keeps its message.
+      if (verb.cls == VerbClass::None) {
+        if (L.is_nil()) {
+          msg = "table index is nil";
+        } else if (L.is_double() && std::isnan(L.as_double())) {
+          msg = "table index is NaN";
+        }
+      }
+      break;
+    case TrapKind::None:
     case TrapKind::Range:
     case TrapKind::Arity:
     case TrapKind::Uninit:
@@ -2570,6 +2647,8 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
+      {"key_fail", 1, nat_key_fail, nullptr},
+      {"bad_type", 4, nat_bad_type, nullptr},
       {"error_level", 4, nat_error_level, nullptr},
       trap_convert_def<&convert_trap>(),
   };

@@ -46,3 +46,19 @@ true
 true
 42
 nil
+traps.lua:102: table index is nil
+traps.lua:103: table index is NaN
+traps.lua:104: table index is nil
+traps.lua:105: table index is NaN
+traps.lua:106: table index is nil
+traps.lua:107: table index is NaN
+traps.lua:108: table index is nil
+nil	nil	nil
+false
+false
+traps.lua:112: bad argument #1 to 'rawset' (table expected, got number)
+traps.lua:113: bad argument #1 to 'rawset' (table expected, got string)
+newindex	nil	1
+newindex	absent	nil
+newindex	absent	2
+1	1

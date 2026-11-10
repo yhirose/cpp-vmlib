@@ -90,3 +90,38 @@ print(select(2, pcall(function() error(obj, 2) end)) == obj)
 print(select(2, pcall(function() error(obj, 0) end)) == obj)
 print(select(2, pcall(function() error(42, 2) end)))
 print(select(2, pcall(function() error(nil, 2) end)))
+
+-- A table has no nil or NaN key: storing at one is an error, whatever the
+-- value (a nil value stores nothing, and still names a key), also in a
+-- constructor. Reading at one answers nil. A metatable's __newindex is asked
+-- first, and takes any key and any value; rawset has none to ask, and
+-- stores nothing for a nil value. (rawset's own message has no position in
+-- Lua, which is where this front end differs: README.md.)
+local keys = {}
+local nilkey
+show(function() keys[nil] = 1 end)
+show(function() keys[0/0] = 1 end)
+show(function() keys[nilkey] = nil end)
+show(function() keys[0/0] = nil end)
+show(function() return {[nilkey] = 1} end)
+show(function() return {[0/0] = 1} end)
+show(function() local a, b = 1, 2; keys[a], keys[nilkey] = a, b end)
+print(keys[nil], keys[0/0], keys[1])
+print((pcall(function() rawset(keys, nilkey, 1) end)))
+print((pcall(function() rawset(keys, 0/0, 1) end)))
+show(function() rawset(1, 2, 3) end)
+show(function() rawset("s", 2, 3) end)
+local seen = setmetatable({}, {__newindex = function(_, k, v)
+  print("newindex", k, v)
+end})
+seen[nilkey] = 1
+seen.absent = nil
+seen.absent = 2
+rawset(keys, "q", 5)
+rawset(keys, "q", nil)
+rawset(keys, 1, 1)
+rawset(keys, 2, 2)
+rawset(keys, 2, nil)
+local n = 0
+for _ in pairs(keys) do n = n + 1 end
+print(n, #keys)

@@ -275,6 +275,12 @@ Quietly different:
 * **A numeric `for` reports its zero step at the line of the `for`.** Lua
   uses the line of the `do` when the header spans lines. Its other header
   errors (`'for' limit must be a number`) are the executor's own words.
+* **`rawset`'s `table index is nil` has a position.** Lua raises it from
+  inside the C function, with none; every other error of this kind
+  (`t[nil] = 1`) is the same as Lua's. A store at a nil or NaN key checks it
+  in `$set` (the VM's own SetIndex has no such rule, and other languages'
+  containers take those keys), after the metatable's `__newindex` has had
+  its say, which takes any key and any value, a nil value included.
 * **`#` on a table with a hole may pick a different border.** Lua says any
   border is valid; this front end walks from 1 and Lua uses its array
   part's size, so the two can disagree about a table you have deleted from
