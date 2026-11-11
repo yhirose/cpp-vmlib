@@ -173,6 +173,9 @@ struct LibParam {
 struct LibFn {
   size_t reads;
   std::vector<LibParam> params;
+  // The VM operation that is this function's own, whose trap on its first
+  // argument is this function's complaint of it (convert_trap).
+  std::optional<IntrinsicId> intrinsic = std::nullopt;
 };
 const std::map<std::string, LibFn>& library() {
   constexpr LibParam any{"", true}, table{"table", true}, opt{"", false};
@@ -180,7 +183,8 @@ const std::map<std::string, LibFn>& library() {
   static const std::map<std::string, LibFn> fns = {
       {"type", {1, {any}}},
       {"tostring", {1, {any}}},
-      {"setmetatable", {2, {table, {"nil or table", true}}}},
+      {"setmetatable",
+       {2, {table, {"nil or table", true}}, IntrinsicId::MetaSet}},
       {"getmetatable", {1, {any}}},
       {"error", {2, {opt, {"number", false}}}},
       {"rawset", {3, {table, any, any}}},
@@ -188,7 +192,8 @@ const std::map<std::string, LibFn>& library() {
       {"ipairs", {1, {any}}},
       {"pairs", {1, {any}}},
       {"select", {kReadsEvery, {number}}},
-      {"for iterator", {kReadsEvery, {table}}},  // what `pairs` hands the loop
+      // What `pairs` hands the loop.
+      {"for iterator", {kReadsEvery, {table}, IntrinsicId::ObjectKeys}},
       {"pcall", {kReadsEvery, {any}}},
       {"coroutine.create", {1, {{"function", true}}}},
       {"coroutine.resume", {2, {{"thread", true}, opt}}},
@@ -198,8 +203,8 @@ const std::map<std::string, LibFn>& library() {
       {"table.concat", {2, {table, {"string", false}}}},
       {"table.insert", {3, {table, opt, opt}}},
       {"table.unpack", {3, {opt, opt, opt}}},
-      {"string.upper", {1, {str}}},
-      {"string.lower", {1, {str}}},
+      {"string.upper", {1, {str}, IntrinsicId::StrUpper}},
+      {"string.lower", {1, {str}, IntrinsicId::StrLower}},
       {"string.rep", {kReadsEvery, {str, number, {"string", false}}}},
       {"string.sub", {kReadsEvery, {str, number, {"number", false}}}},
       {"string.len", {kReadsEvery, {str}}},
@@ -208,7 +213,41 @@ const std::map<std::string, LibFn>& library() {
       {"math.floor", {1, {number}}},
       {"math.type", {1, {any}}},
   };
+  // What the rest of this file leans on, held where it is written: the
+  // required parameters come first (string_call, absent), a function that
+  // reads a count of arguments reads every parameter, and no two functions
+  // are one VM operation's.
+  static const bool checked = [] {
+    std::set<IntrinsicId> seen;
+    for (const auto& [name, fn] : fns) {
+      bool optional = false;
+      for (const LibParam& p : fn.params) {
+        if (optional && p.required) {
+          coreir_rt::fail("library: " + name + " requires after an optional",
+                          0, 0);
+        }
+        optional = optional || !p.required;
+      }
+      if (fn.reads != kReadsEvery && fn.reads < fn.params.size()) {
+        coreir_rt::fail("library: " + name + " reads fewer than it takes", 0,
+                        0);
+      }
+      if (fn.intrinsic && !seen.insert(*fn.intrinsic).second) {
+        coreir_rt::fail("library: " + name + " repeats an intrinsic", 0, 0);
+      }
+    }
+    return true;
+  }();
+  (void)checked;
   return fns;
+}
+
+// The library function whose own VM operation is `id`, if there is one.
+const std::string* library_of(IntrinsicId id) {
+  for (const auto& [name, fn] : library()) {
+    if (fn.intrinsic == id) return &name;
+  }
+  return nullptr;
 }
 
 std::optional<size_t> library_reads(const std::string& name) {
@@ -227,13 +266,20 @@ std::string lib_name(const std::string& fn) {
   return fn.substr(fn.rfind('.') + 1);
 }
 
-// "bad argument #k to 'f' (what)", the one place that says so. `shown` is
-// k as the caller counts it, which is one less for a method call (`s:rep()`
-// has its receiver for argument 0), where Lua does the same.
+// Parameter k of a library function (from 0, a method's receiver being
+// 0) as its call counts it, which is one less for a method call -- `s:rep()`
+// is missing its argument #1 -- where Lua does the same: the one rule,
+// decided where the call is lowered and handed to whatever words it.
+size_t shown_of(size_t k, bool method) { return k + (method ? 0 : 1); }
+
+// "bad argument #k to 'f' (what)", the one place that says so, for a
+// function the table has.
 std::string arg_error(const std::string& fn, size_t shown,
                       const std::string& what) {
-  return "bad argument #" + std::to_string(shown) + " to '" +
-         lib_name(fn) + "' (" + what + ")";
+  const auto& fns = library();
+  if (!fns.count(fn)) coreir_rt::fail("library: no " + fn, 0, 0);
+  return "bad argument #" + std::to_string(shown) + " to '" + lib_name(fn) +
+         "' (" + what + ")";
 }
 
 // A parameter of the library function `fn`, k from 0, that is wrong: absent
@@ -720,35 +766,41 @@ struct Binder {
     r.finish("$get");
   }
 
-  // The raw store of Lua's `t[key] = v`, for a table and a key that is
-  // already the one a table holds (IntegralKey): a nil or a NaN key is
-  // an error -- luaH_newkey's -- and then nil removes the key, anything
-  // else is set. One copy, for `$set` (after its metamethod) and `rawset`
-  // (which has none), each handing in what reads the table, the key and
-  // the value, in IR it may repeat.
-  template <class T, class K, class V>
-  NodeId raw_store(Builder::At& b, T table, K key, V value) {
-    const auto type_is = [&](NodeId v, const char* name) {
-      return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {v}),
+  // The two halves of the raw store of Lua's `t[key] = v`, for a table and
+  // a key that is already the one a table holds (IntegralKey), each handed
+  // what reads the table, the key and the value, in IR it may repeat. A new
+  // key must not be nil or NaN (luaH_newkey's rule: a key the table has is
+  // neither), and then nil removes the key and anything else is set. A
+  // key that is present is not looked up to skip the check: the lookup costs
+  // the check's own tests.
+  template <class K>
+  NodeId check_key(Builder::At& b, K key) {
+    const auto type_is = [&](const char* name) {
+      return b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {key()}),
                       b.str_literal(name));
     };
     // The keys a program stores by are strings and ints, and one test tells
     // so; only another gets asked whether it is nil or NaN.
-    const NodeId bad_key = b.make_if(
-        type_is(key(), "string"), b.bool_literal(false),
-        b.make_if(type_is(key(), "int"), b.bool_literal(false),
-                  b.make_if(type_is(key(), "nil"), b.bool_literal(true),
-                            b.make_if(type_is(key(), "double"),
+    const NodeId bad = b.make_if(
+        type_is("string"), b.bool_literal(false),
+        b.make_if(type_is("int"), b.bool_literal(false),
+                  b.make_if(type_is("nil"), b.bool_literal(true),
+                            b.make_if(type_is("double"),
                                       b.binary(BinOp::Ne, key(), key()),
                                       b.bool_literal(false)))));
-    return b.block(
-        {b.make_if(bad_key,
-                   b.call_value(b.native_ref(b.declare_native("key_fail")),
-                                {key()}),
-                   NodeId{}),
-         b.make_if(type_is(value(), "nil"),
-                   b.intrinsic(IntrinsicId::ObjectRemove, {table(), key()}),
-                   b.set_index(table(), key(), value()))});
+    return b.make_if(
+        bad,
+        b.call_value(b.native_ref(b.declare_native("key_fail")), {key()}),
+        NodeId{});
+  }
+
+  template <class T, class K, class V>
+  NodeId store_key(Builder::At& b, T table, K key, V value) {
+    return b.make_if(
+        b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {value()}),
+                 b.str_literal("nil")),
+        b.intrinsic(IntrinsicId::ObjectRemove, {table(), key()}),
+        b.set_index(table(), key(), value()));
   }
 
   // Writing. A key the table lacks is the metatable's first: its
@@ -758,6 +810,8 @@ struct Binder {
     RT r(*this);
     const auto [t, k, v] = r.params("t", "k", "v");
     const auto [key, m] = r.locals("key", "m");
+    const auto T = [&] { return r.L(t); };
+    const auto K = [&] { return r.L(key); };
     r.add(r.iff(r.isnt(r.typ(t), "map"),
                 r.blk({r.b.set_index(r.L(t), r.L(k), r.L(v)), r.ret(r.L(v))})));
     r.add(r.set(key, r.in(IntrinsicId::IntegralKey, {r.L(k)})));
@@ -765,20 +819,19 @@ struct Binder {
     // have -- Lua's own rule, so an overwrite never consults it. A table
     // with no metatable has none to consult.
     r.add(r.iff(
-        r.both(r.isnt(r.typ(r.meta(r.L(t))), "nil"),
-               r.b.unary(UnOp::Not, r.has(r.L(t), r.L(key)))),
+        r.both(r.isnt(r.typ(r.meta(T())), "nil"),
+               r.b.unary(UnOp::Not, r.has(T(), K()))),
         r.blk(
-            {r.set(m, r.call("$mm", {r.L(t), r.S("__newindex")})),
+            {r.set(m, r.call("$mm", {T(), r.S("__newindex")})),
              r.iff(
                  r.isnt(r.typ(m), "nil"),
                  r.blk({r.iff(r.is(r.typ(m), "map"),
                               r.ret(r.call("$set", {r.L(m), r.L(k), r.L(v)}))),
                         r.call("$one", {r.b.call_value(
-                                           r.L(m), {r.L(t), r.L(k), r.L(v)})}),
+                                           r.L(m), {T(), r.L(k), r.L(v)})}),
                         r.ret(r.L(v))}))})));
-    r.add(raw_store(
-        r.b, [&] { return r.L(t); }, [&] { return r.L(key); },
-        [&] { return r.L(v); }));
+    r.add(check_key(r.b, K));
+    r.add(store_key(r.b, T, K, [&] { return r.L(v); }));
     r.add(r.ret(r.L(v)));
     r.finish("$set");
   }
@@ -906,18 +959,17 @@ struct Binder {
     RT r(*this);
     const auto [t, sep] = r.params("t", "sep");
     const auto [out, i, n, e] = r.locals("out", "i", "n", "e");
-    const auto bad_type = [&](const char* name, int index,
-                              FuncWriter::Slot v) {
-      return r.nat("bad_type",
-                   {r.S(name), r.I(index), r.L(v)});
+    const auto bad_arg = [&](int k, FuncWriter::Slot v) {
+      return r.nat("arg_trap", {r.S("table.concat"), r.I(k), r.I(k + 1),
+                                r.L(v)});
     };
     // The table and the separator are checked once, here; the loop reads a
     // table with `$get`.
-    r.add(r.iff(r.isnt(r.typ(t), "map"), bad_type("table.concat", 0, t)));
+    r.add(r.iff(r.isnt(r.typ(t), "map"), bad_arg(0, t)));
     r.add(r.iff(
         r.isnt(r.typ(sep), "string"),
         r.iff(r.both(r.isnt(r.typ(sep), "int"), r.isnt(r.typ(sep), "double")),
-              bad_type("table.concat", 1, sep),
+              bad_arg(1, sep),
               r.set(sep, r.call("$str", {r.L(sep)})))));
     r.add(r.set(out, r.S("")));
     r.add(r.set(i, r.I(1)));
@@ -925,7 +977,8 @@ struct Binder {
     // An element is a string or a number, tried in that order; Lua writes
     // a number the way tostring does.
     const NodeId piece = r.iff(
-        r.is(r.typ(e), "string"), r.set(out, r.bin(BinOp::Add, r.L(out), r.L(e))),
+        r.is(r.typ(e), "string"),
+        r.set(out, r.bin(BinOp::Add, r.L(out), r.L(e))),
         r.iff(r.either(r.is(r.typ(e), "int"), r.is(r.typ(e), "double")),
               r.set(out, r.bin(BinOp::Add, r.L(out),
                                r.call("$str", {r.L(e)}))),
@@ -1024,7 +1077,8 @@ struct Binder {
     const auto [all] = r.params("all");
     const auto [n, k, len] = r.locals("n", "k", "len");
     r.add(r.iff(r.bin(BinOp::Eq, r.len(r.L(all)), r.I(0)),
-                r.nat("arg_fail", {r.S(arg_complaint("select", 0, 1, "no value"))})));
+                r.nat("arg_fail",
+                      {r.S(arg_complaint("select", 0, 1, "no value"))})));
     r.add(r.set(n, r.idx(r.L(all), r.I(0))));
     r.add(r.set(len, r.bin(BinOp::Sub, r.len(r.L(all)), r.I(1))));
     r.add(r.iff(r.both(r.is(r.typ(n), "string"),
@@ -1035,7 +1089,8 @@ struct Binder {
                 r.set(k, r.bin(BinOp::Add, r.L(len),
                                r.bin(BinOp::Add, r.L(k), r.I(1))))));
     r.add(r.iff(r.bin(BinOp::Lt, r.L(k), r.I(1)),
-                r.nat("arg_fail", {r.S(arg_error("select", 1, "index out of range"))})));
+                r.nat("arg_fail",
+                      {r.S(arg_error("select", 1, "index out of range"))})));
     r.add(r.iff(r.bin(BinOp::Gt, r.L(k), r.L(len)), r.ret(r.arr({}))));
     // The kth value is all[k], n being all[0].
     r.add(r.ret(r.in(IntrinsicId::ArraySlice,
@@ -1108,16 +1163,16 @@ struct Binder {
   // expanding last argument leaves out is Lua's "bad argument ... (value
   // expected)", raised where the argument would have run, so the arguments
   // before it have. `shown` is the parameter as the call counts it.
-  NodeId absent(const std::string& fn, size_t k, bool rest, size_t shown,
+  NodeId absent(const std::string& fn, size_t k, bool rest, bool method,
                 SrcPos p) {
     auto b = Builder(m).at(p);
     const auto& params = library().at(fn).params;
     if (rest || k >= params.size() || !params[k].required) {
       return b.nil_literal();
     }
-    return native("arg_missing",
+    return native("arg_trap",
                   {b.str_literal(fn), b.literal(static_cast<int64_t>(k)),
-                   b.literal(static_cast<int64_t>(shown))},
+                   b.literal(static_cast<int64_t>(shown_of(k, method)))},
                   p);
   }
 
@@ -1128,12 +1183,10 @@ struct Binder {
                      bool rest, bool method, SrcPos p) {
     const std::string fn = "string." + name;
     // A parameter the call leaves out and the function requires is its
-    // complaint, in the place of the argument (absent). A method call's
-    // receiver is its argument 0.
+    // complaint, in the place of the argument (absent).
     const auto& params = library().at(fn).params;
     if (!rest && args.size() < params.size() && params[args.size()].required) {
-      args.push_back(
-          absent(fn, args.size(), false, args.size() + (method ? 0 : 1), p));
+      args.push_back(absent(fn, args.size(), false, method, p));
     }
     if (name == "upper" || name == "lower") {
       auto b = Builder(m).at(p);
@@ -1141,9 +1194,10 @@ struct Binder {
           name == "upper" ? IntrinsicId::StrUpper : IntrinsicId::StrLower,
           {args[0]});
     }
-    // The method form counts its arguments from after the receiver, in a
-    // complaint of one (bad_arg).
-    return native((method ? "m_" : "s_") + name, args, p);
+    // The natives are told whether this is a method call, first, for the
+    // number a complaint of an argument shows (StrCall).
+    args.insert(args.begin(), Builder(m).at(p).literal(method ? 1 : 0));
+    return native("s_" + name, args, p);
   }
 
   NodeId emit_closure(int32_t g, FnCtx& ctx, SrcPos p) {
@@ -1502,7 +1556,8 @@ struct Binder {
             auto bp = b.at(p);
             cur = {reading(bp, one_each, *library_reads("string." + name),
                            [&](const std::vector<NodeId>& read) {
-                             return string_call(name, read, args.rest.valid(), true, p);
+                             return string_call(name, read, args.rest.valid(),
+                                                true, p);
                            }),
                    false};
             break;
@@ -1615,7 +1670,7 @@ struct Binder {
     const std::vector<NodeId>* read = &args;
     const auto a0 = [&](size_t k) {
       return k < read->size() ? (*read)[k]
-                              : absent(name, k, vals.rest.valid(), k + 1, p);
+                              : absent(name, k, vals.rest.valid(), false, p);
     };
     const auto dispatch = [&]() -> Val {
       if (mem.empty()) {
@@ -1627,7 +1682,9 @@ struct Binder {
         if (g == "getmetatable") {
           return {b.intrinsic(IntrinsicId::MetaGet, {a0(0)}, p), false};
         }
-        if (g == "error") return {emit_error(arglist, args.size(), a0(0), a0(1), p), false};
+        if (g == "error") {
+          return {emit_error(args.size(), a0(0), a0(1), p), false};
+        }
         // rawset/rawget: `$set`/`$get` without the metamethod detour --
         // `__newindex`'s own thunk needs one, on pain of calling itself.
         if (g == "rawset") {
@@ -1635,25 +1692,31 @@ struct Binder {
           // Let holds it rather than its being evaluated twice; so the
           // key, which is read again by each check.
           auto ba = b.at(p);
-          return {ba.lets({a0(0), ba.intrinsic(IntrinsicId::IntegralKey,
-                                             {a0(1)}),
-                          a0(2)},
-                         [&](const std::vector<Builder::Temp>& t) {
-                           return ba.make_if(
-                               ba.binary(BinOp::Ne,
-                                        ba.intrinsic(IntrinsicId::TypeOf,
-                                                    {t[0]()}),
-                                        ba.str_literal("map")),
-                               native("bad_type",
-                                      {ba.str_literal("rawset"), ba.literal(0), t[0]()},
-                                      p),
-                               ba.block({raw_store(ba, t[0], t[1], t[2]),
-                                        t[0]()}));
-                         }),
+          return {ba.lets(
+                      {a0(0), ba.intrinsic(IntrinsicId::IntegralKey, {a0(1)}),
+                       a0(2)},
+                      [&](const std::vector<Builder::Temp>& t) {
+                        const NodeId not_a_table = ba.binary(
+                            BinOp::Ne,
+                            ba.intrinsic(IntrinsicId::TypeOf, {t[0]()}),
+                            ba.str_literal("map"));
+                        return ba.make_if(
+                            not_a_table,
+                            native("arg_trap",
+                                   {ba.str_literal("rawset"), ba.literal(0),
+                                    ba.literal(1), t[0]()},
+                                   p),
+                            ba.block({check_key(ba, t[1]),
+                                      store_key(ba, t[0], t[1], t[2]),
+                                      t[0]()}));
+                      }),
                   false};
         }
         if (g == "rawget") {
-          return {b.index(a0(0), b.intrinsic(IntrinsicId::IntegralKey, {a0(1)}, p), p), false};
+          return {b.index(
+                      a0(0),
+                      b.intrinsic(IntrinsicId::IntegralKey, {a0(1)}, p), p),
+                  false};
         }
         fail(prim, "'" + g + "' is not supported here");
       }
@@ -1723,7 +1786,7 @@ struct Binder {
   NodeId emit_pcall(const Values& args, FnCtx& ctx, SrcPos p) {
     // `pcall()` has nothing to call.
     if (args.firsts.empty() && !args.rest.valid()) {
-      return absent("pcall", 0, false, 1, p);
+      return absent("pcall", 0, false, false, p);
     }
     auto b = Builder(m).at(p);
     const int32_t mark = ctx.mark();
@@ -1891,8 +1954,8 @@ struct Binder {
   // `setmetatable(t, m)`: the VM's MetaSet, which traps on a `t` that has
   // no meta slot and takes any `m`; Lua wants `m` to be nil or a table. A
   // guard says so, for an `m` that is not written out as one (a table
-  // constructor, nil), and its failure is one cold native that names
-  // whichever argument is wrong first.
+  // constructor, nil), and its failure names whichever argument is wrong
+  // first: the table, or else the metatable.
   NodeId emit_setmetatable(const Ast* arglist, NodeId table, NodeId meta,
                            SrcPos p) {
     auto b = Builder(m).at(p);
@@ -1905,41 +1968,38 @@ struct Binder {
       return b.intrinsic(IntrinsicId::MetaSet, {table, meta});
     }
     return b.lets({table, meta}, [&](const std::vector<Builder::Temp>& t) {
-      const auto type_not = [&](const char* name) {
-        return b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {t[1]()}),
+      const auto type_not = [&](int k, const char* name) {
+        return b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {t[k]()}),
                         b.str_literal(name));
       };
+      const auto complaint = [&](int k) {
+        return native("arg_trap",
+                      {b.str_literal("setmetatable"), b.literal(k),
+                       b.literal(k + 1), t[k]()},
+                      p);
+      };
       return b.block(
-          {b.make_if(b.make_if(type_not("map"), type_not("nil"),
+          {b.make_if(b.make_if(type_not(1, "map"), type_not(1, "nil"),
                                b.bool_literal(false)),
-                     native("setmt_bad", {t[0](), t[1]()}, p), NodeId{}),
+                     b.make_if(type_not(0, "map"), complaint(0), complaint(1)),
+                     NodeId{}),
            b.intrinsic(IntrinsicId::MetaSet, {t[0](), t[1]()})});
     });
   }
 
-  // `error(v [, level])`. Level 1, the default, is `$error`: the line of
-  // this call. Level 0 is the same with no position. Any other level is
-  // the native's, called at no position of its own so that the position it
-  // blames (NativeExec::attributed of nothing) is the call that entered the
-  // function holding the `error`, which is level 2; the call's own position
-  // goes along as an argument for a level that turns out to be 1.
-  NodeId emit_error(const Ast* arglist, size_t argc, NodeId value,
-                    NodeId level, SrcPos p) {
+  // `error(v [, level])`. With no level it is `$error`: the line of this
+  // call. Any level written out is the native's, called at no position of
+  // its own so that the position it blames (NativeExec::attributed of
+  // nothing) is the call that entered the function holding the `error`,
+  // which is level 2; this call's own position goes along as an argument for
+  // a level that turns out to be 1.
+  NodeId emit_error(size_t argc, NodeId value, NodeId level, SrcPos p) {
     auto b = Builder(m).at(p);
-    const auto level_is = [&](std::string_view digits) {
-      const Ast* l = arglist != nullptr && arglist->nodes.size() == 2
-                         ? arglist->nodes[1].get()
-                         : nullptr;
-      return l != nullptr && l->tag == "number"_ && l->token == digits;
-    };
-    if (argc < 2 || level_is("1")) {
+    if (argc < 2) {
       return rt.call("$error",
                      {value, b.str_literal(chunk + ":" +
-                                         std::to_string(p.line) + ": ")},
+                                           std::to_string(p.line) + ": ")},
                      p);
-    }
-    if (level_is("0")) {
-      return rt.call("$error", {value, b.str_literal("")}, p);
     }
     return native("error_level",
                   {value, level, b.literal(static_cast<int64_t>(p.line)),
@@ -2063,7 +2123,7 @@ struct Binder {
     // read it alone, and anything after it still runs.
     const NodeId loop =
         b.let(args.nodes.empty()
-                  ? absent(which, 0, false, 1, pos_of(*call.nodes[0]))
+                  ? absent(which, 0, false, false, pos_of(*call.nodes[0]))
                   : emit_expr(*args.nodes[0], ctx),
               [&](auto table) {
           std::vector<NodeId> out;
@@ -2506,23 +2566,38 @@ bool nat_mathtype(NativeCall& c) {
   return true;
 }
 
-// The ctx of the method forms of the string natives (`s:rep(n)`): not null.
-char kMethod = 0;
-
-// A library function's complaint of an argument, in Lua's words ("bad
-// argument #1 to 'floor' (number expected, got string)"): an Operands trap
-// on that argument, which the conversion gives its chunk and line.
-bool bad_arg(NativeCall& c, const char* fn, size_t index,
-             const SrcPos* at = nullptr) {
+// A library function's complaint of its parameter k (from 0), as the call
+// counts it (`shown`): of an argument of another type, or, with no `got`,
+// of one that is not there. An Operands trap on that argument, which the
+// conversion gives its chunk and line -- at `at` when the position is not
+// the call's own.
+bool arg_trap(NativeCall& c, const std::string& fn, size_t k, size_t shown,
+              const Value* got, const SrcPos* at = nullptr) {
   const std::string msg = arg_complaint(
-      fn, index, index + (c.ctx == nullptr ? 1 : 0),
-      index < static_cast<size_t>(c.argc) ? lua_typename(c.arg(index))
-                                          : "no value");
-  const TrapFacts facts{.l = &c.arg(index)};
+      fn, k, shown, got != nullptr ? lua_typename(*got) : "no value");
+  const TrapFacts facts{.l = got};
   c.error = at != nullptr
                 ? coreir::make_trap(TrapKind::Operands, msg, *at, facts)
                 : c.trap(TrapKind::Operands, msg, facts);
   return false;
+}
+
+// The same for a native's own k-th argument, as it was given.
+bool bad_arg(NativeCall& c, const char* fn, size_t k,
+             const SrcPos* at = nullptr) {
+  const auto i = static_cast<int32_t>(k);
+  return arg_trap(c, fn, k, shown_of(k, false),
+                  i < c.argc ? &c.arg(i) : nullptr, at);
+}
+
+// What IR hands the cold path of a complaint: the function, the parameter
+// and its number as the call counts it, and the value it got -- left out
+// for an argument the call does not have.
+bool nat_arg_trap(NativeCall& c) {
+  return arg_trap(c, c.arg(0).as_str(),
+                  static_cast<size_t>(c.arg(1).as_int()),
+                  static_cast<size_t>(c.arg(2).as_int()),
+                  c.argc > 3 ? &c.arg(3) : nullptr);
 }
 
 // `..` of a value that is neither a string nor a number: the operand that is
@@ -2545,39 +2620,13 @@ bool nat_arg_fail(NativeCall& c) {
   return false;
 }
 
-// A table key that is nil or NaN: Lua's `table index is nil`. The key is
-// the one fact (no verb), which is what tells the conversion this is not
-// the executor's own key fault.
+// A table key that is nil or NaN: Lua's `table index is nil`, in the words
+// of the trap itself -- the conversion leaves a KeyType trap alone.
 bool nat_key_fail(NativeCall& c) {
   const Value& k = c.arg(0);
   c.error = c.trap(TrapKind::KeyType,
                    k.is_nil() ? "table index is nil" : "table index is NaN",
                    {.l = &k});
-  return false;
-}
-
-// A library function's complaint of an argument that is there and of the
-// wrong type: the function, the parameter's index from 0, and the value it
-// got.
-bool nat_bad_type(NativeCall& c) {
-  const Value& got = c.arg(2);
-  c.error = c.trap(TrapKind::Operands,
-                   arg_complaint(c.arg(0).as_str(),
-                                 static_cast<size_t>(c.arg(1).as_int()),
-                                 static_cast<size_t>(c.arg(1).as_int()) + 1,
-                                 lua_typename(got)),
-                   {.l = &got});
-  return false;
-}
-
-// A library function's complaint of an argument that is not there: the
-// function, the parameter's index from 0 and as the call counts it.
-bool nat_arg_missing(NativeCall& c) {
-  c.error = c.trap(TrapKind::Operands,
-                   arg_complaint(c.arg(0).as_str(),
-                                 static_cast<size_t>(c.arg(1).as_int()),
-                                 static_cast<size_t>(c.arg(2).as_int()),
-                                 "no value"));
   return false;
 }
 
@@ -2592,12 +2641,6 @@ bool nat_concat_bad(NativeCall& c) {
                        "'",
                    {.l = &v, .n = c.arg(1).as_int()});
   return false;
-}
-
-// setmetatable's guard failed: the table is the first thing wrong when it is
-// no table, the metatable otherwise.
-bool nat_setmt_bad(NativeCall& c) {
-  return bad_arg(c, "setmetatable", c.arg(0).is_map() ? 1 : 0);
 }
 
 // A numeric for whose step is zero: Lua's own words.
@@ -2670,66 +2713,99 @@ int64_t str_index(int64_t i, int64_t n) {
   return i;
 }
 
-bool nat_s_sub(NativeCall& c) {
-  if (!c.arg(0).is_str()) {
-    return bad_arg(c, "string.sub", 0);
+// A string native's arguments: whether the call is a method call, first
+// (string_call), then the call's own, which a complaint of one numbers as
+// the call does.
+struct StrCall {
+  NativeCall& c;
+  bool method;
+  explicit StrCall(NativeCall& call)
+      : c(call), method(call.arg(0).as_int() != 0) {}
+  int32_t argc() const { return c.argc - 1; }
+  const Value& arg(int32_t k) const { return c.arg(k + 1); }
+  bool bad(const char* fn, int32_t k) const {
+    return arg_trap(c, fn, static_cast<size_t>(k),
+                    shown_of(static_cast<size_t>(k), method),
+                    k < argc() ? &arg(k) : nullptr);
   }
+  // A string argument as Lua reads one: a string, or a number written the
+  // way tostring writes it.
+  bool str(const char* fn, int32_t k, std::string& out) const {
+    if (!arg(k).is_str() && !arg(k).is_number()) return bad(fn, k);
+    out = lua_tostring(arg(k));
+    return true;
+  }
+  // An integer argument as Lua reads one: an int, or a float that holds one.
+  bool integer(const char* fn, int32_t k, int64_t& out) const {
+    const Value& v = arg(k);
+    if (v.is_int()) {
+      out = v.as_int();
+    } else if (v.is_double() && std::floor(v.as_double()) == v.as_double() &&
+               std::fabs(v.as_double()) < 0x1p63) {
+      out = static_cast<int64_t>(v.as_double());
+    } else {
+      return bad(fn, k);
+    }
+    return true;
+  }
+  bool has(int32_t k) const { return k < argc() && !arg(k).is_nil(); }
+};
+
+bool nat_s_sub(NativeCall& call) {
+  const StrCall c(call);
+  if (!c.arg(0).is_str()) return c.bad("string.sub", 0);
   const std::string& s = c.arg(0).as_str();
   const auto n = static_cast<int64_t>(s.size());
-  int64_t i = c.arg(1).is_int() ? c.arg(1).as_int() : 1;
-  int64_t j = c.argc > 2 && c.arg(2).is_int() ? c.arg(2).as_int() : -1;
+  int64_t i = 0;
+  int64_t j = -1;
+  if (!c.integer("string.sub", 1, i)) return false;
+  if (c.has(2) && !c.integer("string.sub", 2, j)) return false;
   i = str_index(i, n);
   if (j < 0) j = n + j + 1;
   if (j > n) j = n;
-  c.result = Value::make_str(i > j ? std::string()
-                                   : s.substr(static_cast<size_t>(i - 1),
-                                              static_cast<size_t>(j - i + 1)));
+  call.result = Value::make_str(
+      i > j ? std::string()
+            : s.substr(static_cast<size_t>(i - 1),
+                       static_cast<size_t>(j - i + 1)));
   return true;
 }
 
 // string.rep(s, n [, sep]): n copies of s, sep between each two.
-bool nat_s_rep(NativeCall& c) {
-  if (!c.arg(0).is_str()) return bad_arg(c, "string.rep", 0);
-  if (!c.arg(1).is_int()) return bad_arg(c, "string.rep", 1);
-  if (c.argc > 2 && !c.arg(2).is_nil() && !c.arg(2).is_str()) {
-    return bad_arg(c, "string.rep", 2);
-  }
-  const bool has_sep = c.argc > 2 && c.arg(2).is_str();
+bool nat_s_rep(NativeCall& call) {
+  const StrCall c(call);
+  if (!c.arg(0).is_str()) return c.bad("string.rep", 0);
+  int64_t n = 0;
+  if (!c.integer("string.rep", 1, n)) return false;
+  if (c.has(2) && !c.arg(2).is_str()) return c.bad("string.rep", 2);
+  const bool has_sep = c.has(2);
   std::string out;
-  for (int64_t k = 0; k < c.arg(1).as_int(); ++k) {
+  for (int64_t k = 0; k < n; ++k) {
     if (k > 0 && has_sep) out += c.arg(2).as_str();
     out += c.arg(0).as_str();
   }
-  c.result = Value::make_str(std::move(out));
+  call.result = Value::make_str(std::move(out));
   return true;
 }
 
-// A string argument as Lua reads one: a string, or a number written the
-// way tostring writes it.
-bool string_arg(NativeCall& c, const char* fn, size_t index,
-                std::string& out) {
-  const Value& v = c.arg(static_cast<int32_t>(index));
-  if (!v.is_str() && !v.is_number()) return bad_arg(c, fn, index);
-  out = lua_tostring(v);
-  return true;
-}
-
-bool nat_s_len(NativeCall& c) {
+bool nat_s_len(NativeCall& call) {
+  const StrCall c(call);
   std::string s;
-  if (!string_arg(c, "string.len", 0, s)) return false;
-  c.result = Value::make_int(static_cast<int64_t>(s.size()));
+  if (!c.str("string.len", 0, s)) return false;
+  call.result = Value::make_int(static_cast<int64_t>(s.size()));
   return true;
 }
 
-bool nat_s_byte(NativeCall& c) {
+bool nat_s_byte(NativeCall& call) {
+  const StrCall c(call);
   std::string s;
-  if (!string_arg(c, "string.byte", 0, s)) return false;
-  const int64_t i = c.argc > 1 && c.arg(1).is_int() ? c.arg(1).as_int() : 1;
+  if (!c.str("string.byte", 0, s)) return false;
+  int64_t i = 1;
+  if (c.has(1) && !c.integer("string.byte", 1, i)) return false;
   if (i < 1 || i > static_cast<int64_t>(s.size())) {
-    c.result = Value();
+    call.result = Value();
     return true;
   }
-  c.result = Value::make_int(
+  call.result = Value::make_int(
       static_cast<unsigned char>(s[static_cast<size_t>(i - 1)]));
   return true;
 }
@@ -2744,25 +2820,6 @@ std::string& chunk_name() {
   return name;
 }
 
-// The intrinsics whose trap is a library function's complaint of its first
-// argument: `setmetatable(1, {})` is MetaSet's on an int.
-struct ArgVerb {
-  IntrinsicId id;
-  const char* fn;
-};
-const ArgVerb* arg_verb(const Verb& verb) {
-  static constexpr ArgVerb verbs[] = {
-      {IntrinsicId::MetaSet, "setmetatable"},
-      {IntrinsicId::StrUpper, "string.upper"},
-      {IntrinsicId::StrLower, "string.lower"},
-      {IntrinsicId::ObjectKeys, "for iterator"},
-  };
-  for (const ArgVerb& v : verbs) {
-    if (verb.is(v.id)) return &v;
-  }
-  return nullptr;
-}
-
 // An executor's trap as the error Lua raises for the same fault: a string,
 // "chunk:line: attempt to ..." (Lua 5.4's words). The `(local 'x')` Lua adds
 // when it knows the variable is not here: the VM does not know its name.
@@ -2774,6 +2831,11 @@ Value convert_trap(const Value& trap, const void*) {
   // The operand an arithmetic or bitwise error blames: the first that is
   // not a number.
   const std::string culprit = type(L.is_number() ? R : L);
+  // A trap of a VM operation that is a library function's own.
+  const std::string* library_fn =
+      verb.cls == VerbClass::Intrinsic
+          ? library_of(static_cast<IntrinsicId>(verb.id))
+          : nullptr;
   std::string msg = trap_message(trap);
   switch (trap_kind(trap)) {
     case TrapKind::Operands:
@@ -2797,8 +2859,8 @@ Value convert_trap(const Value& trap, const void*) {
                   ? "attempt to perform bitwise operation on a " + type(L) +
                         " value"
                   : "attempt to perform arithmetic on a " + type(L) + " value";
-      } else if (verb.cls == VerbClass::Intrinsic && arg_verb(verb)) {
-        msg = arg_complaint(arg_verb(verb)->fn, 0, 1, type(L));
+      } else if (library_fn != nullptr) {
+        msg = arg_complaint(*library_fn, 0, 1, type(L));
       } else if (verb.is(IntrinsicId::Len)) {
         msg = "attempt to get length of a " + type(L) + " value";
       } else if (verb.is(IntrinsicId::Pow)) {
@@ -2820,18 +2882,8 @@ Value convert_trap(const Value& trap, const void*) {
     case TrapKind::Depth:
       msg = "stack overflow";
       break;
-    case TrapKind::KeyType:
-      // A table key that is nil or NaN (nat_key_fail: no verb); a key
-      // fault of the executor's own keeps its message.
-      if (verb.cls == VerbClass::None) {
-        if (L.is_nil()) {
-          msg = "table index is nil";
-        } else if (L.is_double() && std::isnan(L.as_double())) {
-          msg = "table index is NaN";
-        }
-      }
-      break;
     case TrapKind::None:
+    case TrapKind::KeyType:
     case TrapKind::Range:
     case TrapKind::Arity:
     case TrapKind::Uninit:
@@ -2861,18 +2913,12 @@ const std::vector<vm::NativeDef>& stdlib() {
       {"s_rep", -1, nat_s_rep, nullptr},
       {"s_len", -1, nat_s_len, nullptr},
       {"s_byte", -1, nat_s_byte, nullptr},
-      {"m_sub", -1, nat_s_sub, &kMethod},
-      {"m_rep", -1, nat_s_rep, &kMethod},
-      {"m_len", -1, nat_s_len, &kMethod},
-      {"m_byte", -1, nat_s_byte, &kMethod},
       {"concat_fail", 2, nat_concat_fail, nullptr},
       {"arg_fail", 1, nat_arg_fail, nullptr},
       {"for_step", 0, nat_for_step, nullptr},
-      {"setmt_bad", 2, nat_setmt_bad, nullptr},
       {"concat_bad", 2, nat_concat_bad, nullptr},
       {"key_fail", 1, nat_key_fail, nullptr},
-      {"bad_type", 3, nat_bad_type, nullptr},
-      {"arg_missing", 3, nat_arg_missing, nullptr},
+      {"arg_trap", -1, nat_arg_trap, nullptr},
       {"error_level", 4, nat_error_level, nullptr},
       trap_convert_def<&convert_trap>(),
   };

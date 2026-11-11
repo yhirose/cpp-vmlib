@@ -237,10 +237,9 @@ the value of the `TryCatch` is the arm that ran.
 `error(msg)` prefixes a *string* message with the chunk name and line, Lua's
 default error level, which is why the binder is told the script's path.
 Anything else is raised unchanged, so a table can carry structured detail.
-`error(msg, 0)` adds nothing, and `error(msg, 2)` names the line of the call
-that entered the function holding the `error`, which Lua does by reading the
-caller's frame: here a native, called at no position of its own, is attributed
-to the frame's `call_pos`, the way a helper's failure is.
+With a level it is a native called at no position of its own, which is
+attributed to the frame's `call_pos`: the call that entered the function,
+which is level 2.
 A trap the executor raises itself -- `{} < 1` -- is caught by the same
 `pcall`, since `TryCatch` lands both, as its `{message, line, col}`
 object; pcall hands it back as Lua would, a string with the chunk and line
@@ -321,14 +320,14 @@ Quietly different:
 
 ## Testing
 
-`ctest -R mini-lua-samples` runs the nine samples and requires each one's
+`ctest -R mini-lua-samples` runs the samples and requires each one's
 output to match a golden file captured from `lua` -- see PL/0's own README
 for why an external, independent oracle is what "passing" means here.
 
 Both sides run each sample from the samples directory by its bare
 filename, because Lua's error messages name the chunk as it was given.
 
-All nine samples are clean under ASan/UBSan/LeakSanitizer and under
+Every sample is clean under ASan/UBSan/LeakSanitizer and under
 `COREIR_GC_STRESS=1` (`just sanitizers`, `just gc-stress`), `tailcalls.lua`
 included -- a full collection per allocation costs it seconds, not the
 quadratic blowup that keeps `deep_calls` out of that lane.

@@ -161,6 +161,12 @@ show(function() return string.len() end)
 show(function() return table.concat() end)
 show(function() return coroutine.create() end)
 show(function() return pcall() end)
+-- The wrong type of an argument present, and a method call's count.
+show(function() return string.len({}) end)
+show(function() return string.byte({}) end)
+show(function() return ("x"):rep({}) end)
+show(function() return ("x"):sub({}) end)
+show(function() return math.floor({}) end)
 -- The arguments given run before the one that is missing.
 local function mark() print("ran") return 1 end
 show(function() return rawset({}, (mark())) end)
