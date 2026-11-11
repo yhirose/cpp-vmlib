@@ -32,11 +32,12 @@
 # nothing.
 #
 # A sample whose output the language does not fix (it depends on which
-# thread or timer gets there first) cannot have a golden: the oracle's one
-# run would be luck. So the update runs the oracle ORACLE_RUNS times per
-# case and writes nothing when two differ, and a goldens test that fails
-# runs it once more, to say the sample is the trouble rather than the
-# golden.
+# thread or timer gets there first) cannot have a golden: one run of the
+# oracle would be luck. So an update runs the oracle again, STABILITY_RUNS
+# more times per case, and writes nothing when one differs; and a goldens
+# test that fails runs it once more, to say the sample is the trouble rather
+# than the golden. Only a diagnosis: the second run never turns a failure
+# into a pass.
 
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
 if(ORACLE)
@@ -50,8 +51,7 @@ else()
   require_args(run_samples.cmake BIN DIR EXT LANG)
 endif()
 
-# How many times an update runs the oracle on a case (see above).
-set(ORACLE_RUNS 5)
+set(STABILITY_RUNS 4)
 
 set(update OFF)
 if(ORACLE AND "$ENV{VMLIB_UPDATE_GOLDENS}")
@@ -81,6 +81,31 @@ if(NOT sources)
   message(FATAL_ERROR "no *.${EXT} samples under ${DIR}")
 endif()
 
+# run_oracle(<out> <err> <rc>): the case being run -- `lead`, `name`, `dir`
+# and `input` of the loop below -- once.
+function(run_oracle out err rc)
+  execute_process(COMMAND ${BIN} ${lead} ${name}
+                  WORKING_DIRECTORY ${dir}
+                  ${input}
+                  OUTPUT_VARIABLE o ERROR_VARIABLE e RESULT_VARIABLE r)
+  set(${out} "${o}" PARENT_SCOPE)
+  set(${err} "${e}" PARENT_SCOPE)
+  set(${rc} ${r} PARENT_SCOPE)
+endfunction()
+
+# is_stable(<result> <out>): whether the case prints <out>, and exits 0,
+# every time it is run again.
+function(is_stable result out)
+  set(${result} ON PARENT_SCOPE)
+  foreach(_ RANGE 1 ${STABILITY_RUNS})
+    run_oracle(again err again_rc)
+    if(NOT again_rc EQUAL 0 OR NOT again STREQUAL out)
+      set(${result} OFF PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+endfunction()
+
 set(failed 0)
 set(made)
 foreach(src ${sources})
@@ -94,11 +119,7 @@ foreach(src ${sources})
   if(EXISTS ${dir}/${s}.stdin)
     set(input INPUT_FILE ${dir}/${s}.stdin)
   endif()
-  execute_process(COMMAND ${BIN} ${lead} ${name}
-                  WORKING_DIRECTORY ${dir}
-                  ${input}
-                  OUTPUT_VARIABLE out ERROR_VARIABLE err
-                  RESULT_VARIABLE rc)
+  run_oracle(out err rc)
 
   if(NOT rc EQUAL 0)
     message(SEND_ERROR "${s}: exited ${rc}\n--stdout--\n${out}--stderr--\n${err}")
@@ -107,17 +128,7 @@ foreach(src ${sources})
   endif()
 
   if(update)
-    set(stable ON)
-    foreach(i RANGE 2 ${ORACLE_RUNS})
-      execute_process(COMMAND ${BIN} ${lead} ${name}
-                      WORKING_DIRECTORY ${dir}
-                      ${input}
-                      OUTPUT_VARIABLE again RESULT_VARIABLE again_rc)
-      if(NOT again_rc EQUAL 0 OR NOT again STREQUAL out)
-        set(stable OFF)
-        break()
-      endif()
-    endforeach()
+    is_stable(stable "${out}")
     if(NOT stable)
       message(SEND_ERROR "${s}: the oracle's output differs between runs (a "
                          "nondeterministic sample); not writing the golden")
@@ -131,21 +142,21 @@ foreach(src ${sources})
   else()
     file(READ ${golden} want)
     if(NOT out STREQUAL want)
-      set(why "output does not match the golden file")
       if(ORACLE)
-        # Diagnosis only: the second run never turns a failure into a pass.
-        execute_process(COMMAND ${BIN} ${lead} ${name}
-                        WORKING_DIRECTORY ${dir}
-                        ${input}
-                        OUTPUT_VARIABLE again)
-        if(NOT again STREQUAL out)
-          string(CONCAT why "nondeterministic sample: the oracle printed different "
-                  "things on two runs")
-          set(out "${out}--- got, on a second run ---\n${again}")
-        endif()
+        run_oracle(again err again_rc)
+      else()
+        set(again "${out}")
       endif()
-      message(SEND_ERROR
-              "${s}: ${why}\n--- want ---\n${want}--- got ---\n${out}")
+      if(again STREQUAL out)
+        message(SEND_ERROR
+                "${s}: output does not match the golden file\n"
+                "--- want ---\n${want}--- got ---\n${out}")
+      else()
+        message(SEND_ERROR
+                "${s}: nondeterministic sample: the oracle printed different "
+                "things on two runs\n--- want ---\n${want}--- got ---\n"
+                "${out}--- got, on a second run ---\n${again}")
+      endif()
       set(failed 1)
     endif()
   endif()

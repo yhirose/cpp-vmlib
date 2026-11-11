@@ -1260,13 +1260,14 @@ knows, which CI installs from (`.github/actions/languages`) and
 `bench/languages` times against too -- and a version other than its pin
 is refused rather than compared, with the reason each version is pinned.
 `test/goldens.sh --update [FRONT_END...]` rewrites goldens from the
-language, by hand and never from the build. A sample must not depend on
-which thread or timer gets there first, since one run of the oracle would
-be luck: `--update` runs the oracle five times per sample and writes no
-golden when two runs differ, and a failing goldens test runs it once more
-to say so. A new front end gets the
+language, by hand and never from the build. A new front end gets the
 check from `add_front_end`'s `LANG`, its language's key there, and its
 install in that action.
+A sample must not depend on which thread or timer gets there first.
+`--update` re-runs the oracle several times and writes no golden when two
+runs differ; it only catches races that fire often (a one-in-fifty race
+usually passes), so the real guard is not writing such samples. A failing
+goldens test re-runs the oracle once, to say so when it was a flake.
 A failing program is checked the same way from the other side:
 `test/run_errors.cmake` runs a directory of programs that each end in an
 error and requires each report -- message, position and exit code -- to

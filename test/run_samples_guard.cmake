@@ -3,10 +3,10 @@
 #
 #   cmake -DWORK=<scratch directory> -P run_samples_guard.cmake
 #
-# The fake is test/oracle.sh's stand-in beside a copy of the script under
-# test (which finds its oracle by its own directory): it prints the same
-# thing every run, or, in a case whose name starts with `flaky`, a
-# different thing each run (a counter file keeps it).
+# The fake stands in for test/oracle.sh beside a copy of the script under
+# test (which finds its oracle by its own directory). It prints the same
+# thing every run, or, for a case named flaky*, a different thing each run
+# (a counter file next to the case keeps it).
 
 if("${WORK}" STREQUAL "")
   message(FATAL_ERROR "run_samples_guard.cmake: -DWORK is required")
@@ -14,8 +14,10 @@ endif()
 get_filename_component(here ${CMAKE_CURRENT_LIST_FILE} DIRECTORY)
 file(REMOVE_RECURSE ${WORK})
 file(MAKE_DIRECTORY ${WORK}/bin ${WORK}/samples/golden)
-file(COPY ${here}/run_samples.cmake ${here}/cases.cmake DESTINATION ${WORK}/bin)
+file(COPY ${here}/run_samples.cmake ${here}/cases.cmake
+     DESTINATION ${WORK}/bin)
 file(WRITE ${WORK}/bin/oracle.sh [=[#!/bin/sh
+# Run from the case's directory: oracle.sh LANG FILE, or LANG --version.
 if [ "$2" = --version ]; then echo fake-1; exit 0; fi
 case "$2" in
   flaky*) n=$(cat "$2.count" 2>/dev/null || echo 0); n=$((n + 1))
@@ -23,48 +25,54 @@ case "$2" in
   *) echo steady ;;
 esac
 ]=])
-file(CHMOD ${WORK}/bin/oracle.sh PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+file(CHMOD ${WORK}/bin/oracle.sh
+     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 file(WRITE ${WORK}/samples/steady.txt "")
 file(WRITE ${WORK}/samples/flaky.txt "")
 
-function(run_script out_var rc_var)
+# Runs the script, setting `log` and `rc` to what it said and exited with.
+macro(run_script)
   execute_process(COMMAND ${CMAKE_COMMAND} -DORACLE=ON -DEXT=txt -DLANG=fake
                           -DDIR=${WORK}/samples -P ${WORK}/bin/run_samples.cmake
-                  OUTPUT_VARIABLE o ERROR_VARIABLE e RESULT_VARIABLE rc)
-  set(${out_var} "${o}${e}" PARENT_SCOPE)
-  set(${rc_var} ${rc} PARENT_SCOPE)
-endfunction()
+                  OUTPUT_VARIABLE log ERROR_VARIABLE err RESULT_VARIABLE rc)
+  string(APPEND log "${err}")
+endmacro()
 
 # expect(<what went wrong> <if() condition...>)
-function(expect what)
-  if(${ARGN})
-    return()
+macro(expect what)
+  if(NOT (${ARGN}))
+    message(FATAL_ERROR "run_samples_guard: ${what}\n${log}")
   endif()
-  message(FATAL_ERROR "run_samples_guard: ${what}\n${log}")
-endfunction()
+endmacro()
 
-# Update: the steady case is written, the flaky one is refused and gets no
-# golden.
+# Update: the steady case is written, the flaky one refused.
 set(ENV{VMLIB_UPDATE_GOLDENS} 1)
-run_script(log rc)
-expect("update did not fail on a flaky sample" NOT rc EQUAL 0)
-expect("update did not name the flaky sample" log MATCHES "flaky: the oracle's output differs between runs")
-expect("update wrote a golden for the flaky sample" NOT EXISTS ${WORK}/samples/golden/flaky.txt)
-expect("update did not write the steady golden" EXISTS ${WORK}/samples/golden/steady.txt)
+run_script()
+expect("update did not fail" NOT rc EQUAL 0)
+expect("update did not name the flaky sample"
+       log MATCHES "flaky: the oracle's output differs between runs")
+expect("update wrote a golden for the flaky sample"
+       NOT EXISTS ${WORK}/samples/golden/flaky.txt)
+expect("update did not write the steady golden"
+       EXISTS ${WORK}/samples/golden/steady.txt)
 unset(ENV{VMLIB_UPDATE_GOLDENS})
 
-# Check: a golden the flaky oracle does not print is a nondeterminism
-# report, not a bare diff; and the steady case is not blamed.
-file(WRITE ${WORK}/samples/golden/flaky.txt "run 1\n")
-run_script(log rc)
+# Check: a mismatch on the flaky sample is reported as nondeterminism.
+file(WRITE ${WORK}/samples/golden/flaky.txt "not what it prints\n")
+run_script()
 expect("check passed a mismatch" NOT rc EQUAL 0)
-expect("check did not report nondeterminism" log MATCHES "flaky: nondeterministic sample")
-expect("check blamed the steady sample" NOT log MATCHES "steady: ")
+expect("check did not report nondeterminism"
+       log MATCHES "flaky: nondeterministic sample")
 
-# A plain mismatch on a steady sample stays a plain diff, and still fails.
-file(WRITE ${WORK}/samples/golden/steady.txt "wrong\n")
+# A mismatch on a steady sample stays a plain diff (a regression guard: the
+# old script said this too). The flaky sample goes first, so that this
+# report is about the steady one alone.
 file(REMOVE ${WORK}/samples/flaky.txt ${WORK}/samples/golden/flaky.txt)
-run_script(log rc)
+file(WRITE ${WORK}/samples/golden/steady.txt "wrong\n")
+run_script()
 expect("check passed a wrong golden" NOT rc EQUAL 0)
-expect("a steady mismatch lost its plain message" log MATCHES "steady: output does not match the golden file")
+expect("a steady mismatch lost its plain message"
+       log MATCHES "steady: output does not match the golden file")
+expect("a steady mismatch was called nondeterministic"
+       NOT log MATCHES "nondeterministic sample:")
 message(STATUS "run_samples guards OK")

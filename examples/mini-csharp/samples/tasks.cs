@@ -46,12 +46,8 @@ class Program {
 
   // An async method's body runs synchronously up to its first `await`,
   // which is why "body start" is noted before "after call".
-  //
-  // What follows the await must not write to Log: a console app has no
-  // SynchronizationContext, so real C# resumes it on a thread pool thread,
-  // which would race with Main's Note("after call") on the unsynchronized
-  // List. It leaves its note in a field instead, which Main reads once
-  // eager.Result has returned (the Task's completion orders the two).
+  // What follows the await must not write the shared Log: real C# resumes
+  // it on a thread-pool thread, racing with Main's Note("after call").
   static string EagerEnd;
 
   static async Task<int> Eager() {
