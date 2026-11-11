@@ -16,3 +16,27 @@ println(kind_of(|| xs[-1] = 0))
 println(kind_of(|| xs[3] = 0))
 let mixed = [1, 'x']
 println(kind_of(|| mixed[-1] += 1))
+
+# A lambda, a `fn` expression, a method and a constructor take a surplus
+# argument silently and name a missing one; a `fn name(...)` declaration
+# dispatches, so either miscount finds no method; a built-in method counts
+# its arguments without the receiver.
+fn said(f) { try { f(); 'no error' } catch e { "{e.kind}: {e.message}" } }
+
+let lam = fn (a, b) { a }
+println(said(|| lam(1)))
+println(lam(1, 2, 3))
+
+class C {
+  new(a) {}
+}
+println(said(|| C.new()))
+
+fn wide(a) { a }
+println(said(|| wide(1, 2)))
+fn joined(a, b) { a }
+println(said(|| joined(1)))
+
+println(said(|| [1].size(9)))
+println(said(|| [1].push()))
+println(said(|| [1].push(1, 2, 3)))

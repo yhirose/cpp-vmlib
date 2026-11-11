@@ -280,6 +280,22 @@ Quietly different:
   (`convert_trap`, in culebra's words: `TypeError: type error: ...`,
   `IndexError`, `ZeroDivisionError`, ...), and the errors this binder raises
   itself (`$err`) have the same shape. `e.line` and `e.col` are absent.
+* **A call's arity is culebra's, for the calls its tests pin.** A
+  `fn name(...)` declaration is `lenient_arity = false`, so the executor's
+  own trap covers a missing and a surplus argument alike at no cost, and
+  `convert_trap` words it `DispatchError: no matching method for \`name\``
+  (the trap fact that says "a function, not a host function" is its `Right`).
+  A lambda, a `fn` expression, a method and a constructor take a surplus
+  silently, as culebra's do, and begin with a check that is one compare when
+  nothing is missing: `ArityError: missing required argument 'b'`, the name
+  from the declaration (`Binder::missing_arg_check`; the constructor's
+  is before the instance is built, and takes the names of the class's own
+  `new`). A built-in method's trap is `ArityError: 'push' takes 1 argument
+  but 0 given`, the receiver not counted. What is not done: `__ARGS__`
+  (where the surplus lands in culebra), a check in a generator, the callback
+  arity checks (`[1].map(|a, b| a)` is a `TypeError` in culebra), and the
+  wording of `println`'s, `print`'s and `type_of`'s own counts, which no
+  test pins.
 * **A read counts a negative index from the end** (`[1, 2, 3][-1]` is `3`,
   `[-4]` is an `IndexError`), as culebra's does; a write does not, and nor
   does the read inside `xs[-1] += 1` (`$idxraw`), which culebra rejects

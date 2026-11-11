@@ -5,3 +5,11 @@ IndexError
 IndexError
 IndexError
 IndexError
+ArityError: missing required argument 'b'
+1
+ArityError: missing required argument 'a'
+DispatchError: no matching method for `wide`
+DispatchError: no matching method for `joined`
+ArityError: 'size' takes 0 arguments but 1 given
+ArityError: 'push' takes 1 argument but 0 given
+ArityError: 'push' takes 1 argument but 3 given

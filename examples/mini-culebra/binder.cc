@@ -173,7 +173,20 @@ bool is_builtin_method(const std::string& n) {
 // anything nested inside this function read this binding" decides between a
 // Local slot and a Cell, and it cannot be answered until the whole program
 // has been walked.
+// What a call may hand a function, and who says when it hands too few or
+// too many. culebra's two kinds of function disagree: a `fn name(...)`
+// declaration dispatches, so a surplus or a missing argument finds no
+// method (DispatchError); every other one (a lambda, a `fn` expression, a
+// method, a constructor) takes a surplus silently and raises ArityError for
+// a missing parameter, naming it.
+enum class Arity {
+  Dispatch,  // a declaration: the VM's own check, both directions
+  Checked,   // lenient to the VM; a prologue names a missing parameter
+  Lenient,   // called by the runtime with what it has: a `defer`, main
+};
+
 struct FnInfo {
+  Arity arity = Arity::Lenient;
   bool is_generator = false;
   // A class's constructor: synthesized, so it has no body to walk and
   // emit_class builds its Func by hand.
@@ -290,8 +303,9 @@ struct Binder {
       case "fndecl"_: {
         const Ast& id = *a.nodes[0];
         decl_of[&id] = declare(std::string(id.token), fn, false, id);
-        resolve_fn(a, fn, std::string(id.token), a.nodes[1].get(),
-                   *a.nodes[2]);
+        fns[static_cast<size_t>(resolve_fn(a, fn, std::string(id.token),
+                                           a.nodes[1].get(), *a.nodes[2]))]
+            .arity = Arity::Dispatch;
         return;
       }
       case "classdecl"_: {
@@ -308,6 +322,7 @@ struct Binder {
           const int32_t g = resolve_fn(mth, fn,
                                        std::string(id.token) + "." + mname,
                                        mth.nodes[1].get(), *mth.nodes[2]);
+          fns[static_cast<size_t>(g)].arity = Arity::Checked;
           methods.emplace_back(mname, g);
         }
         // The constructor is a function too, and the one thing it reads is
@@ -389,10 +404,14 @@ struct Binder {
         fail(a, "undefined variable '" + n + "'");
       }
       case "fnexpr"_:
-        resolve_fn(a, fn, "<fn>", a.nodes[0].get(), *a.nodes[1]);
+        fns[static_cast<size_t>(resolve_fn(a, fn, "<fn>", a.nodes[0].get(),
+                                           *a.nodes[1]))]
+            .arity = Arity::Checked;
         return;
       case "lambda"_:
-        resolve_fn(a, fn, "<lambda>", a.nodes[0].get(), *a.nodes[1]);
+        fns[static_cast<size_t>(resolve_fn(a, fn, "<lambda>", a.nodes[0].get(),
+                                           *a.nodes[1]))]
+            .arity = Arity::Checked;
         return;
       case "tryexpr"_: {
         resolve_block(*a.nodes[0], fn);
@@ -1059,6 +1078,7 @@ struct Binder {
 
     const int32_t ctor_fn = ctor_of.at(&a);
     int32_t init_params = 0;
+    int32_t init_fn = -1;  // the declared `new`, whose parameters name the ctor's
     bool has_drop = false;
     NodeId init = b.nil_literal();
     std::vector<std::pair<NodeId, NodeId>> kvs;
@@ -1067,13 +1087,14 @@ struct Binder {
       if (name == kNewField) {
         init_params =
             static_cast<int32_t>(fns[static_cast<size_t>(g)].params.size()) - 1;
+        init_fn = g;
         init = emit_closure(g, ctx, p);
         continue;
       }
       kvs.emplace_back(b.str_literal(name), emit_closure(g, ctx, p));
     }
     const std::string cname(a.nodes[0]->token);
-    emit_ctor(ctor_fn, init_params, has_drop, cname);
+    emit_ctor(ctor_fn, init_params, has_drop, cname, init_fn);
 
     std::vector<CaptureSrc> cs{{VarKind::Cell, cell}};
     const int32_t cm = static_cast<int32_t>(m.capture_maps.size());
@@ -1095,8 +1116,32 @@ struct Binder {
                      b.str_literal(cname))});
   }
 
+  // The ArityError for a call short of `params` (self first), as a
+  // statement that runs first in the body: `ArgCount` counts the receiver, so
+  // the parameter missing is `params[ArgCount]`. Spelled once, in the branch
+  // that is not taken, so a call that supplies everything pays one compare.
+  // NodeId{} when there is nothing to miss.
+  NodeId missing_arg_check(Builder::At b, const std::vector<int32_t>& params,
+                           SrcPos p) {
+    if (params.size() < 2) return NodeId{};
+    std::vector<NodeId> names;
+    for (const int32_t v : params) {
+      names.push_back(b.str_literal(rs.vars[static_cast<size_t>(v)].name));
+    }
+    const auto given = [&] { return b.intrinsic(IntrinsicId::ArgCount, {}); };
+    const NodeId msg = b.binary(
+        BinOp::Add,
+        b.binary(BinOp::Add, b.str_literal("missing required argument '"),
+                 b.index(b.array_lit(names), given())),
+        b.str_literal("'"));
+    return b.make_if(
+        b.binary(BinOp::Lt, given(),
+                 b.literal(static_cast<int64_t>(params.size()))),
+        rt.call("$err", {b.str_literal("ArityError"), msg}, p));
+  }
+
   void emit_ctor(int32_t g, int32_t init_params, bool has_drop,
-                 const std::string& cname) {
+                 const std::string& cname, int32_t init_fn) {
     Builder b(m);
     const SrcPos p{0, 0};
     const int32_t nparams = 1 + init_params;  // self, then `new`'s own
@@ -1104,9 +1149,17 @@ struct Binder {
     const NodeId C = b.varref(VarKind::Capture, 0, p);
     const NodeId O = b.varref(VarKind::Local, inst, p);
     auto bp = b.at(p);
-    std::vector<NodeId> body{b.assign(
-        VarKind::Local, inst,
-        new_instance(bp, kind_field(bp, C, kClassMethods)), p)};
+    // Before any instance is built.
+    std::vector<NodeId> body;
+    if (init_fn >= 0) {
+      const NodeId check = missing_arg_check(
+          bp, fns[static_cast<size_t>(init_fn)].params, p);
+      if (check.valid()) body.push_back(check);
+    }
+    body.push_back(b.assign(VarKind::Local, inst,
+                            new_instance(bp, kind_field(bp, C,
+                                                        kClassMethods)),
+                            p));
     if (has_drop) {
       body.push_back(bp.intrinsic(
           IntrinsicId::DropSet,
@@ -1514,6 +1567,13 @@ struct Binder {
     auto b = Builder(m).at(p);
 
     std::vector<NodeId> pre;
+    // First, before the cells a parameter's capture would make: a call that
+    // fails the check has nothing to unwind. A generator runs its body on
+    // resume, where ArgCount is not the call's.
+    if (fi.arity == Arity::Checked && !fi.is_generator) {
+      const NodeId check = missing_arg_check(b, fi.params, p);
+      if (check.valid()) pre.push_back(check);
+    }
     for (const int32_t v : fi.params) {
       const int32_t s = ctx.alloc_local(rs.vars[static_cast<size_t>(v)].name);
       rs.vars[static_cast<size_t>(v)].slot = s;
@@ -1544,7 +1604,7 @@ struct Binder {
     fn.num_locals = ctx.high_local;
     fn.local_names = ctx.names();
     fn.num_cells = rs.num_cells(f);
-    fn.lenient_arity = true;
+    fn.lenient_arity = fi.arity != Arity::Dispatch;
     fn.is_generator = fi.is_generator;
     fn.num_captures = m.funcs[static_cast<size_t>(rf.index)].num_captures;
     fn.capture_names = m.funcs[static_cast<size_t>(rf.index)].capture_names;
@@ -1806,9 +1866,23 @@ Value convert_trap(const Value& trap, const void*) {
       message = "divide by 0 error";
       break;
     case TrapKind::Arity:
-      kind = "DispatchError";
-      message = "no matching method for `" +
-                trap_name(trap) + "`";
+      if (trap_fact(trap, TrapFact::Right).is_bool()) {
+        // A declared function (the fact is whether it has a rest param,
+        // which a host function leaves nil): it dispatches, and a count
+        // that fits none of its definitions finds no method.
+        kind = "DispatchError";
+        message = "no matching method for `" + trap_name(trap) + "`";
+      } else {
+        // A host function: culebra's "'size' takes 0 arguments but 1
+        // given". A method's receiver is an argument here and not there.
+        kind = "ArityError";
+        const int64_t recv = is_builtin_method(trap_name(trap)) ? 1 : 0;
+        const int64_t want = trap_int(trap, TrapFact::M) - recv;
+        message = "'" + trap_name(trap) + "' takes " + std::to_string(want) +
+                  (want == 1 ? " argument" : " arguments") + " but " +
+                  std::to_string(trap_int(trap, TrapFact::N) - recv) +
+                  " given";
+      }
       break;
     case TrapKind::Uninit:
       kind = "NameError";
