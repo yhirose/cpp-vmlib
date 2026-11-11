@@ -1622,17 +1622,11 @@ struct Binder {
 
   // How Lua spells the callee of the call suffix `a.nodes[i]`, for the
   // trap a non-function raises (convert_trap): `local 'f'`, `upvalue 'f'`,
-  // `field 'x'`; none for any shape Lua's own spelling is not reproduced
-  // for (README.md lists them). A method call is named by its suffix.
-  std::optional<std::string> callee_name(const Ast& a, size_t i,
+  // `field 'x'`; none for any shape Lua's spelling is not reproduced for
+  // (README.md lists them). It is the value of the primary and the
+  // suffixes before `i`. A method call is named by its own suffix.
+  std::optional<std::string> callee_name(const Ast& a, size_t end,
                                          const FnCtx& ctx) const {
-    const Ast& prim = *a.nodes[0];
-    if (prim.tag == "ident"_ && !ref_of.count(&prim)) return std::nullopt;
-    return spelled(a, i, ctx);
-  }
-  // The value of `a`'s primary and its suffixes before `end`.
-  std::optional<std::string> spelled(const Ast& a, size_t end,
-                                     const FnCtx& ctx) const {
     if (end == 1) return primary_name(*a.nodes[0], ctx);
     const Ast& last = *a.nodes[end - 1];
     if (last.tag == "dotsfx"_) {
@@ -1656,7 +1650,7 @@ struct Binder {
       case "paren"_:
         return primary_name(*e.nodes[0], ctx);
       case "suffixedexp"_:
-        return spelled(e, e.nodes.size(), ctx);
+        return callee_name(e, e.nodes.size(), ctx);
       default:
         return std::nullopt;
     }

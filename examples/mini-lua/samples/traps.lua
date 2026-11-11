@@ -1,7 +1,7 @@
 -- What the VM itself traps on reaches pcall as the string Lua's own error
 -- would be: the chunk and line, then "attempt to ...". Lua adds the name of
--- the variable when it knows one ("(local 't')"); the VM names only the callee
--- of a call, so every operand here is the result of a call, which Lua does not.
+-- the variable when it knows one ("(local 't')"). The VM names only the callee
+-- of a call (README.md): every operand here is the result of a call, unnamed.
 local function tbl() return {} end
 local function nothing() end
 local function yes() return true end
@@ -213,15 +213,12 @@ print(("abc"):sub(2.0), ("abc"):sub(-2 ^ 63, 2.0))
 -- The callee of a call is named as Lua names it: a local, an upvalue, a
 -- field with a string key, a method.
 local nf
-local num, flt, yes_, str = 5, 1.5, true, "s"
+local num = 5
 local tt = {a = {}}
 local function g() return 1, 2 end
 show(function() nf() end)
 show(function() local lf; lf() end)
 show(function() num() end)
-show(function() flt() end)
-show(function() yes_() end)
-show(function() str() end)
 show(function() tt.x() end)
 show(function() tt.a.y() end)
 show(function() tt["x"]() end)
@@ -241,9 +238,10 @@ show(function() local function f() f = nil; f() end; f() end)
 local co2 = coroutine.create(function() nf() end)
 print(coroutine.resume(co2))
 
--- Not named: the callee is a table (it goes through __call), or a shape
--- Lua names and this does not spell (README.md), or a call's own result.
+-- Not named: a table callee, a call's own result, or a shape README.md
+-- lists as not spelled.
 show(function() tbl()() end)
 show(function() yes()() end)
 show(function() (nil)() end)
+show(function() local t = {m = function() end}; (t:m())() end)
 show(function(...) (...)() end)

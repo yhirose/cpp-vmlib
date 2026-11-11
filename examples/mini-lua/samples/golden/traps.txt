@@ -125,27 +125,25 @@ bc	ab
 traps.lua:219: attempt to call a nil value (upvalue 'nf')
 traps.lua:220: attempt to call a nil value (local 'lf')
 traps.lua:221: attempt to call a number value (upvalue 'num')
-traps.lua:222: attempt to call a number value (upvalue 'flt')
-traps.lua:223: attempt to call a boolean value (upvalue 'yes_')
-traps.lua:224: attempt to call a string value (upvalue 'str')
-traps.lua:225: attempt to call a nil value (field 'x')
-traps.lua:226: attempt to call a nil value (field 'y')
-traps.lua:227: attempt to call a nil value (field 'x')
-traps.lua:228: attempt to call a nil value (method 'm')
-traps.lua:229: attempt to call a nil value (method 'm')
-traps.lua:230: attempt to call a nil value (method 'nope')
+traps.lua:222: attempt to call a nil value (field 'x')
+traps.lua:223: attempt to call a nil value (field 'y')
+traps.lua:224: attempt to call a nil value (field 'x')
+traps.lua:225: attempt to call a nil value (method 'm')
+traps.lua:226: attempt to call a nil value (method 'm')
+traps.lua:227: attempt to call a nil value (method 'nope')
+traps.lua:228: attempt to call a nil value (upvalue 'nf')
+traps.lua:229: attempt to call a nil value (upvalue 'nf')
+traps.lua:230: attempt to call a nil value (upvalue 'nf')
 traps.lua:231: attempt to call a nil value (upvalue 'nf')
-traps.lua:232: attempt to call a nil value (upvalue 'nf')
+traps.lua:232: attempt to call a nil value (field 'x')
 traps.lua:233: attempt to call a nil value (upvalue 'nf')
-traps.lua:234: attempt to call a nil value (upvalue 'nf')
-traps.lua:235: attempt to call a nil value (field 'x')
-traps.lua:236: attempt to call a nil value (upvalue 'nf')
-traps.lua:237: attempt to call a nil value (field 'x')
-traps.lua:238: attempt to call a nil value (upvalue 'nf')
-traps.lua:239: attempt to call a nil value (local 'cell')
-traps.lua:240: attempt to call a nil value (upvalue 'f')
-false	traps.lua:241: attempt to call a nil value (upvalue 'nf')
-traps.lua:246: attempt to call a table value
-traps.lua:247: attempt to call a boolean value
-traps.lua:248: attempt to call a nil value
-traps.lua:249: attempt to call a nil value
+traps.lua:234: attempt to call a nil value (field 'x')
+traps.lua:235: attempt to call a nil value (upvalue 'nf')
+traps.lua:236: attempt to call a nil value (local 'cell')
+traps.lua:237: attempt to call a nil value (upvalue 'f')
+false	traps.lua:238: attempt to call a nil value (upvalue 'nf')
+traps.lua:243: attempt to call a table value
+traps.lua:244: attempt to call a boolean value
+traps.lua:245: attempt to call a nil value
+traps.lua:246: attempt to call a nil value
+traps.lua:247: attempt to call a nil value
