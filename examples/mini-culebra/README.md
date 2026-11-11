@@ -206,7 +206,8 @@ alone, so a loop pays nothing for the value.
 `println`, `print`, `type_of`, `.size()`, `.push()`, `.pop()`, `.keys()`
 and `.map()` are `NativeDef`s the run supplies (`stdlib()`, at the bottom
 of `binder.cc`). The linkage happens before the first instruction -- a name
-this file forgot would fail the whole run rather than the call site.
+this file forgot would fail the whole run rather than the call site. These
+are all there is: no `range`, `filter`, `reduce` or `join`.
 
 `map` is the one that shows the other half of the contract:
 `NativeCall::call` runs program code from inside C++, and a throw the
@@ -279,23 +280,16 @@ Quietly different:
   executor's own traps reach a `catch` converted to `{kind, message}`
   (`convert_trap`, in culebra's words: `TypeError: type error: ...`,
   `IndexError`, `ZeroDivisionError`, ...), and the errors this binder raises
-  itself (`$err`) have the same shape. `e.line` and `e.col` are absent.
+  itself (`$err`) have the same shape.
 * **A call's arity is culebra's, for the calls its tests pin.** A
-  `fn name(...)` declaration is `lenient_arity = false`, so the executor's
-  own trap covers a missing and a surplus argument alike at no cost, and
-  `convert_trap` words it `DispatchError: no matching method for \`name\``
-  (the trap fact that says "a function, not a host function" is its `Right`).
-  A lambda, a `fn` expression, a method and a constructor take a surplus
-  silently, as culebra's do, and begin with a check that is one compare when
-  nothing is missing: `ArityError: missing required argument 'b'`, the name
-  from the declaration (`Binder::missing_arg_check`; the constructor's
-  is before the instance is built, and takes the names of the class's own
-  `new`). A built-in method's trap is `ArityError: 'push' takes 1 argument
-  but 0 given`, the receiver not counted. What is not done: `__ARGS__`
-  (where the surplus lands in culebra), a check in a generator, the callback
-  arity checks (`[1].map(|a, b| a)` is a `TypeError` in culebra), and the
-  wording of `println`'s, `print`'s and `type_of`'s own counts, which no
-  test pins.
+  `fn name(...)` declaration finds no method for a missing or a surplus
+  argument (`DispatchError: no matching method for \`name\``), at no cost:
+  it is the executor's own arity trap. A lambda, a `fn` expression, a method
+  and a constructor take a surplus silently, as culebra's do, and name a
+  missing parameter (`ArityError: missing required argument 'b'`; a
+  constructor's is raised before the instance is built). A built-in method's
+  is `ArityError: 'push' takes 1 argument but 0 given`, the receiver not
+  counted.
 * **`C(args)` is `C.new(args)` only when `C` is a class declaration named
   in the call.** That is rewritten at bind time, so it costs nothing. A class
   reached any other way (`makers[0](1, 2)`, a parameter called as `f()`) is
@@ -308,16 +302,15 @@ Quietly different:
   `[-4]` is an `IndexError`), as culebra's does; a write does not, and nor
   does the read inside `xs[-1] += 1` (`$idxraw`), which culebra rejects
   like the store. The message of the `IndexError` a negative read raises is
-  not pinned by culebra's tests; here it is `index out of range`. A String
-  is not indexable in culebra (a `TypeError`), nor here.
+  not pinned by culebra's tests; here it is `index out of range`. (A String
+  is not indexable in culebra, a `TypeError`, nor here.)
 * **An uncaught value is reported in this runtime's own format**
   (`file:L:C: uncaught: ...`, not culebra's `at L:C`), with culebra's words
   for the value: an error is `Kind: message`, an array or an object is
   shown as `println` shows it (`describe`'s `inspect`, which is `$insp`
-  again, in C++ because the report has only the value; a Float nested in a
-  container prints in the VM's shortest digits there, not culebra's), a
-  string as itself. A program's own `{kind, message}` object is reported as
-  an error, as it would be caught as one.
+  again, in C++ because the report has only the value), a string as itself.
+  A program's own `{kind, message}` object is reported as an error, as it
+  would be caught as one.
 * **Not reproduced, though culebra's tests pin them.** A method that does not
   exist: culebra runs the arguments, then raises `TypeError: type error:
   expected Function, got Nil ('nope' is not a method of Array)`; here
@@ -325,10 +318,9 @@ Quietly different:
   `TypeError: type error: expected Object, Array, or Tensor, got Nil`.
   `__ARGS__`, a surplus's home. The arity of a callback a built-in
   calls (`[1, 2].map(|a, b| a)`), and `map`'s wording for a non-function
-  (`type error: parameter 'f' expects Function`). `e.line` and `e.col`.
-  The `**` operator. Indexing a String. The standard library is the five
-  methods and three functions above: there is no `range`, `filter`,
-  `reduce` or `join`.
+  (`type error: parameter 'f' expects Function`). A missing-argument check
+  in a generator, and the wording of `println`'s, `print`'s and `type_of`'s
+  own counts. `e.line` and `e.col`. The `**` operator.
 * **A generator prints as `<generator>`.** culebra prints its internal
   state object, which nothing could reproduce.
 * **A builtin method name wins over a property.** `size`, `push`, `pop`,

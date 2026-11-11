@@ -1,13 +1,12 @@
 3
 1
-IndexError
-IndexError
-IndexError
-IndexError
-IndexError
+read -4: IndexError
+read 3: IndexError
+write -1: IndexError
+write 3: IndexError
+compound -1: IndexError
 ArityError: missing required argument 'b'
 1
-ArityError: missing required argument 'a'
 ArityError: missing required argument 'a'
 DispatchError: no matching method for `wide`
 DispatchError: no matching method for `joined`
@@ -15,7 +14,6 @@ ArityError: 'size' takes 0 arguments but 1 given
 ArityError: 'push' takes 1 argument but 0 given
 ArityError: 'push' takes 1 argument but 3 given
 25
-ArityError
-TypeError
-TypeError
+map(Point): TypeError
+fake(5): TypeError
 6

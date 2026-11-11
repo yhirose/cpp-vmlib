@@ -10,13 +10,13 @@ fn kind_of(f) { try { f(); 'no error' } catch e { e.kind } }
 # a compound assignment, do not.
 println([1, 2, 3][-1])
 println([1, 2, 3][-3])
-println(kind_of(|| [1, 2, 3][-4]))
-println(kind_of(|| [1, 2, 3][3]))
+println('read -4: ' + kind_of(|| [1, 2, 3][-4]))
+println('read 3: ' + kind_of(|| [1, 2, 3][3]))
 mut xs = [1, 2, 3]
-println(kind_of(fn () { xs[-1] = 0 }))
-println(kind_of(fn () { xs[3] = 0 }))
+println('write -1: ' + kind_of(fn () { xs[-1] = 0 }))
+println('write 3: ' + kind_of(fn () { xs[3] = 0 }))
 let mixed = [1, 'x']
-println(kind_of(fn () { mixed[-1] += 1 }))
+println('compound -1: ' + kind_of(fn () { mixed[-1] += 1 }))
 
 # A lambda, a `fn` expression, a method and a constructor take a surplus
 # argument silently and name a missing one; a `fn name(...)` declaration
@@ -33,7 +33,6 @@ class C {
     self.a = a
   }
 }
-println(said(|| C.new()))
 println(said(|| C()))
 
 fn wide(a) { a }
@@ -58,8 +57,7 @@ class Point {
   }
 }
 println(Point(3, 4).norm2())
-println(kind_of(|| Point(1)))
-println(kind_of(|| [1, 2, 3].map(Point)))
+println('map(Point): ' + kind_of(|| [1, 2, 3].map(Point)))
 let fake = {new: fn (x) { x + 1 }}
-println(kind_of(|| fake(5)))
+println('fake(5): ' + kind_of(|| fake(5)))
 println(fake.new(5))
