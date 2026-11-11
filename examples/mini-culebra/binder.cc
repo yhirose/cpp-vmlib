@@ -446,7 +446,8 @@ struct Binder {
   static const std::vector<std::string>& rt_names() {
     static const std::vector<std::string> names = {
         "$eq",   "$disp",  "$insp", "$arrstr", "$objstr",
-        "$err",  "$idx",   "$setidx", "$mem", "$setmem", "$methodof",
+        "$err",  "$idx",   "$idxraw", "$setidx", "$mem", "$setmem",
+        "$methodof",
         "$iter", "$iternext", "$div", "$mod",
     };
     return names;
@@ -463,6 +464,12 @@ struct Binder {
   //         object and a key it has; one out of range or not a Long, a
   //         key an object lacks (a KeyError, where Index answers nil), a
   //         string receiver (a TypeError) are $idx's.
+  //         A negative index counts from the end here (culebra's read), so
+  //         the VM's own out-of-range trap is left only for what is out of
+  //         range either way.
+  //   $idxraw  the same read without the wrap: the read half of a compound
+  //         assignment (`xs[-1] += 1`), which culebra's write context
+  //         rejects as a negative index like the store does.
   //   $setidx  `xs[i] = v` and `o['k'] = v` on the same, a new key
   //         included; an index out of range is $setidx's.
   //   $setmem  `o.k = v` on an object, a new key included (an object with a
@@ -648,14 +655,26 @@ struct Binder {
   // `a[i]` and `o['k']`: strict, unlike `.` -- an absent key is a KeyError
   // and an out-of-range index an IndexError, both of which culebra raises
   // and this front end therefore raises too, rather than letting Index's
-  // own trap message stand in for one of them.
-  void rt_idx() {
+  // own trap message stand in for one of them. A read counts a negative
+  // index from the end (`xs[-1]` is the last); `wrap` is false for the read
+  // inside a compound assignment, where culebra does not.
+  void rt_idx(const char* name, bool wrap) {
     RT r(*this);
     const auto [recv, key] = r.params("recv", "key");
     std::vector<std::pair<NodeId, NodeId>> arms;
     // An array's index, out of range or no int, is the VM's trap, which
-    // the catch converts to culebra's IndexError and TypeError.
-    arms.emplace_back(r.S("array"), r.ret(r.idx(r.L(recv), r.L(key))));
+    // the catch converts to culebra's IndexError and TypeError. A negative
+    // Long that is still negative after the wrap is out of range too.
+    NodeId array_arm = r.ret(r.idx(r.L(recv), r.L(key)));
+    if (wrap) {
+      array_arm = r.blk(
+          {r.iff(r.is(r.typ(key), "int"),
+                 r.iff(r.bin(BinOp::Lt, r.L(key), r.I(0)),
+                       r.set(key, r.bin(BinOp::Add, r.L(key),
+                                        r.len(r.L(recv)))))),
+           array_arm});
+    }
+    arms.emplace_back(r.S("array"), array_arm);
     arms.emplace_back(
         r.S("object"),
         r.blk(
@@ -674,7 +693,7 @@ struct Binder {
                               r.S("type error: expected Array, got String")})));
     r.add(r.b.make_switch(r.typ(recv), arms,
                           r.ret(r.idx(r.L(recv), r.L(key)))));
-    r.finish("$idx");
+    r.finish(name);
   }
 
   void rt_setidx() {
@@ -796,7 +815,8 @@ struct Binder {
     rt_err();
     rt_division("$div", BinOp::Div);
     rt_division("$mod", BinOp::Mod);
-    rt_idx();
+    rt_idx("$idx", true);
+    rt_idx("$idxraw", false);
     rt_setidx();
     rt_mem();
     rt_setmem();
@@ -1474,7 +1494,7 @@ struct Binder {
     return b.lets({value, recv, key}, [&](const std::vector<Builder::Temp>& t) {
       const NodeId cur =
           op == "=" ? NodeId{}
-                    : rt.call(member ? "$mem" : "$idx", {t[1](), t[2]()}, p);
+                    : rt.call(member ? "$mem" : "$idxraw", {t[1](), t[2]()}, p);
       const auto store = [&](NodeId v) {
         return ops.call(member ? "$setmem" : "$setidx",
                         {t[1](), t[2](), v}, p);

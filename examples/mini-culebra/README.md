@@ -275,11 +275,17 @@ Quietly different:
   track that per property. It infers it: a class instance's fields are
   all mutable, a literal's are not, and neither are a class value's (where
   culebra prints a field added to one as `mut`).
-* **Runtime traps are not culebra's errors.** A call with the wrong arity
-  raises the executor's own trap value, which a `catch` lands but which
-  has no `.kind`. The errors this binder raises itself -- `IndexError`,
-  `KeyError` and `ZeroDivisionError` -- do carry `kind` and `message`,
-  because they are the ones the samples ask about.
+* **Runtime traps are worded as culebra's errors, not all of them.** The
+  executor's own traps reach a `catch` converted to `{kind, message}`
+  (`convert_trap`, in culebra's words: `TypeError: type error: ...`,
+  `IndexError`, `ZeroDivisionError`, ...), and the errors this binder raises
+  itself (`$err`) have the same shape. `e.line` and `e.col` are absent.
+* **A read counts a negative index from the end** (`[1, 2, 3][-1]` is `3`,
+  `[-4]` is an `IndexError`), as culebra's does; a write does not, and nor
+  does the read inside `xs[-1] += 1` (`$idxraw`), which culebra rejects
+  like the store. The message of the `IndexError` a negative read raises is
+  not pinned by culebra's tests; here it is `index out of range`. A String
+  is not indexable in culebra (a `TypeError`), nor here.
 * **A generator prints as `<generator>`.** culebra prints its internal
   state object, which nothing could reproduce.
 * **A builtin method name wins over a property.** `size`, `push`, `pop`,
@@ -288,7 +294,7 @@ Quietly different:
 
 ## Testing
 
-`ctest -R mini-culebra-samples` runs the eight samples and requires each
+`ctest -R mini-culebra-samples` runs the samples and requires each
 one's output to match a golden file captured from `culebra` -- see PL/0's
 own README for why an external, independent oracle is what "passing" means
 here.
@@ -300,7 +306,7 @@ whatever it shows is this front end's to follow. (`iterators.cul` names
 its class `Span`: culebra takes a class named `Range` for its own
 built-in range.)
 
-All eight samples are also clean under the two lanes
+All the samples are also clean under the two lanes
 `.github/workflows/ci.yml` runs over the rest of the suite --
 ASan/UBSan/LeakSanitizer, and `COREIR_GC_STRESS=1` (a full collection at
 every single allocation), which is the one that matters most here: this is
