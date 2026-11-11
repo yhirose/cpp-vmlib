@@ -362,11 +362,8 @@ Absent, because none of it exercises a recipe further:
 * **`==` and `!=`.** JavaScript's loose equality is the coercion ladder,
   and the ladder is what this subset does not have. Writing one is a
   bind-time error naming `===`.
-* **Coercions of `null`.** `null + 1` is `1` in JavaScript and `null < 1`
-  is `true`; here, as for `undefined`, they are traps
-  (`cannot add void and double`), because the VM refuses what the
-  language would coerce. A property of `null` and a call of it throw the
-  `TypeError` V8 does.
+* **Coercion of `null` (and `undefined`).** In arithmetic or a comparison
+  they are a `TypeError` here, where V8 coerces them.
 
 Quietly different, and therefore worth knowing:
 

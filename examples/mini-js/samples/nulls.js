@@ -5,30 +5,28 @@
 
 const u = undefined;
 const n = null;
-console.log(n === u, n === n, u === u, n !== u);
-console.log(typeof n, typeof u);
-console.log(String(n), String(u), 'a' + n, 'a' + u);
-// An array's join renders both as the empty string.
-console.log([n, u].join('-'), [1, n, 2].join('-'));
-console.log(!n, !u, n || 1, u || 2, n && 3);
-if (n) console.log('null is truthy');
-else console.log('null is falsy');
-console.log(n ? 'yes' : 'no');
-console.log(n === ({}).missing, ({ a: n }).a === n, ({ a: u }).a === u);
 
+// undefined: what the language itself produces as absent, as before.
 function noReturn() {}
-function emptyReturn() {
-  return;
-}
-function retNull() {
-  return null;
-}
-console.log(noReturn() === u, emptyReturn() === u, retNull() === n);
-console.log(noReturn() === n, retNull() === u);
 function second(a, b) {
   return b;
 }
-console.log(second(1) === u, second(1, null) === n, [1][5] === u);
+console.log(noReturn() === u, second(1) === u, ({}).missing === u);
+console.log(typeof u, String(u), 'a' + u, !u, u || 2);
+
+// null: its own value.
+function retNull() {
+  return null;
+}
+console.log(n === u, n !== u, n === n, retNull() === n, retNull() === u);
+console.log(n === noReturn(), n === ({}).missing, second(1, null) === n);
+console.log(typeof n, String(n), 'a' + n);
+// An array's join renders both as the empty string.
+console.log([n, u].join('-'), [1, n, 2].join('-'));
+console.log(!n, n || 1, n && 3, n ? 'yes' : 'no');
+if (n) console.log('null is truthy');
+else console.log('null is falsy');
+console.log(({ a: n }).a === n, ({ a: u }).a === u);
 
 // What a trap says about null, as V8 words it.
 function full(f) {

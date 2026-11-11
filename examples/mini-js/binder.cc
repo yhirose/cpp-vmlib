@@ -581,8 +581,11 @@ struct Binder {
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth,
-                                truthy_tags_except({"double", "string", "void"}))},
+                                truthy_tags_except(
+                                    {"double", "string", "void"}))},
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
+        // No "void": two voids are equal and a void against anything else is
+        // unequal, which rt_seq's type test and default Same already say.
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},
         {"$index", VmOp::index(tags_named({"array", "object"}),
@@ -604,7 +607,13 @@ struct Binder {
     // treats alike wherever it asks "nullish".
     template <class Slot>
     NodeId absent(const Slot& v) {
-      return either(is(typ(L(v)), "nil"), is(typ(L(v)), "void"));
+      return either(is(typ(v), "nil"), is(typ(v), "void"));
+    }
+    // The negation, written as two tag tests: each is one TypeIn, so there
+    // is no type string to keep in a local.
+    template <class Slot>
+    NodeId present(const Slot& v) {
+      return both(isnt(typ(v), "nil"), isnt(typ(v), "void"));
     }
   };
 
@@ -635,7 +644,8 @@ struct Binder {
   // -- "a question a language answers, not the VM", says binop_fault -- and
   // this is that answer: different types are unequal rather than an error,
   // and two objects are equal only when they are the same object, which is
-  // what IntrinsicId::Same is for.
+  // what IntrinsicId::Same is for. nil has an arm of its own; void needs
+  // none, the default Same answers for its one value.
   void rt_seq() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
@@ -655,6 +665,7 @@ struct Binder {
 
   // `typeof`, ES2023 13.5.3. TypeOf answers in the VM's own vocabulary
   // ("nil", "double", "array"); this is the mapping onto JavaScript's.
+  // void (null) is "object" through the default arm: do not add an arm.
   void rt_typeof() {
     RT r(*this);
     const auto [v] = r.params("v");
@@ -718,8 +729,7 @@ struct Binder {
             r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
                   r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
             r.set(e, r.idx(r.L(a), r.L(i))),
-            r.iff(r.both(r.isnt(r.typ(r.L(e)), "nil"),
-                        r.isnt(r.typ(r.L(e)), "void")),
+            r.iff(r.present(e),
                   r.set(out,
                         r.bin(BinOp::Add, r.L(out), r.call("$str", {r.L(e)})))),
             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
@@ -1096,7 +1106,8 @@ struct Binder {
   void rt_newresult() {
     RT r(*this);
     const auto [v, self] = r.params("v", "self");
-    for (const char* prim : {"nil", "void", "bool", "int", "double", "string"}) {
+    for (const char* prim :
+         {"nil", "void", "bool", "int", "double", "string"}) {
       r.add(r.iff(r.is(r.typ(v), prim), r.ret(r.L(self))));
     }
     r.add(r.ret(r.L(v)));
@@ -2542,8 +2553,8 @@ struct Binder {
 
 }  // namespace
 
-// A value as the words of a trap or of `throw` name it: null for void, else
-// to_display's (nil is undefined there, doubles are the caller's).
+// A value as the words of a trap or of `throw` name it: null for void,
+// undefined for nil, else the JavaScript display form (doubles as kJs).
 std::string display_name(const Value& v) {
   if (v.is_void()) return "null";
   if (v.is_nil()) return "undefined";
