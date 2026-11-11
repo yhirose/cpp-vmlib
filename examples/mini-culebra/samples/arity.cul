@@ -1,7 +1,8 @@
 # What a call may be given and what an index may be: the container and call
 # errors culebra raises as values with a `kind`. Every line is one the
 # culebra 0.8.0 test suite pins (tests/test_array_ops.cul,
-# test_runtime_errors.cul), so each runs unmodified under `culebra`.
+# test_runtime_errors.cul, test_positional_overflow.cul, test_class_call.cul),
+# so each runs unmodified under `culebra`.
 
 fn kind_of(f) { try { f(); 'no error' } catch e { e.kind } }
 
@@ -12,10 +13,10 @@ println([1, 2, 3][-3])
 println(kind_of(|| [1, 2, 3][-4]))
 println(kind_of(|| [1, 2, 3][3]))
 mut xs = [1, 2, 3]
-println(kind_of(|| xs[-1] = 0))
-println(kind_of(|| xs[3] = 0))
+println(kind_of(fn () { xs[-1] = 0 }))
+println(kind_of(fn () { xs[3] = 0 }))
 let mixed = [1, 'x']
-println(kind_of(|| mixed[-1] += 1))
+println(kind_of(fn () { mixed[-1] += 1 }))
 
 # A lambda, a `fn` expression, a method and a constructor take a surplus
 # argument silently and name a missing one; a `fn name(...)` declaration
@@ -28,9 +29,12 @@ println(said(|| lam(1)))
 println(lam(1, 2, 3))
 
 class C {
-  new(a) {}
+  new(a) {
+    self.a = a
+  }
 }
 println(said(|| C.new()))
+println(said(|| C()))
 
 fn wide(a) { a }
 println(said(|| wide(1, 2)))
@@ -40,3 +44,22 @@ println(said(|| joined(1)))
 println(said(|| [1].size(9)))
 println(said(|| [1].push()))
 println(said(|| [1].push(1, 2, 3)))
+
+# A class named in a call is constructed: `Point(3, 4)` is `Point.new(3, 4)`.
+# A class is not a function to a higher-order built-in, and an object with a
+# `new` field is not a class.
+class Point {
+  new(x, y) {
+    self.x = x
+    self.y = y
+  }
+  norm2() {
+    self.x * self.x + self.y * self.y
+  }
+}
+println(Point(3, 4).norm2())
+println(kind_of(|| Point(1)))
+println(kind_of(|| [1, 2, 3].map(Point)))
+let fake = {new: fn (x) { x + 1 }}
+println(kind_of(|| fake(5)))
+println(fake.new(5))

@@ -296,6 +296,14 @@ Quietly different:
   arity checks (`[1].map(|a, b| a)` is a `TypeError` in culebra), and the
   wording of `println`'s, `print`'s and `type_of`'s own counts, which no
   test pins.
+* **`C(args)` is `C.new(args)` only when `C` is a class declaration named
+  in the call.** That is rewritten at bind time, so it costs nothing. A class
+  reached any other way (`makers[0](1, 2)`, a parameter called as `f()`) is
+  an object this front end cannot tell from one with a `new` field, and
+  calling it is a `TypeError`: culebra constructs there too. `map(Point)`
+  stays a `TypeError` and an object with a `new` field is not callable, as in
+  culebra. A class with no `new` of its own cannot be constructed here at
+  all (culebra's `Empty()` answers an instance).
 * **A read counts a negative index from the end** (`[1, 2, 3][-1]` is `3`,
   `[-4]` is an `IndexError`), as culebra's does; a write does not, and nor
   does the read inside `xs[-1] += 1` (`$idxraw`), which culebra rejects

@@ -211,6 +211,7 @@ struct Binder {
   // constructor this binder synthesizes for it.
   std::map<const Ast*, std::vector<std::pair<std::string, int32_t>>> class_of;
   std::map<const Ast*, int32_t> ctor_of;
+  std::set<int32_t> class_vars;  // the VarIds a classdecl binds
   HelperTable rt{m};  // the runtime helpers, by name
   Operators ops{rt, operators()};  // the VM's operations standing in for them
 
@@ -315,6 +316,7 @@ struct Binder {
         // makes it a cell rather than a slot.
         const int32_t v = declare(std::string(id.token), fn, false, id);
         decl_of[&id] = v;
+        class_vars.insert(v);
         std::vector<std::pair<std::string, int32_t>> methods;
         for (size_t i = 1; i < a.nodes.size(); ++i) {
           const Ast& mth = *a.nodes[i];
@@ -1392,6 +1394,42 @@ struct Binder {
     }
   }
 
+  // `recv.name(args)`: a call of a built-in method, or of whatever
+  // `$methodof` finds, with the receiver in front.
+  NodeId emit_method_call(NodeId recv, const std::string& name,
+                          const Ast& arglist, FnCtx& ctx, SrcPos p) {
+    Builder b(m);
+    if (is_builtin_method(name)) {
+      // culebra's standard library, supplied by the host: the
+      // receiver goes first, and `map` calls back into the program
+      // from C++ (see stdlib()).
+      std::vector<NodeId> args = emit_args(arglist, ctx);
+      args.insert(args.begin(), recv);
+      return native(name, args, p);
+    }
+    // Every function's parameter 0 is `self`, so a method call is
+    // an ordinary call with the receiver in front. The receiver is
+    // both where the method is found and that `self`, so it runs
+    // once, into a temporary both read -- scoped to the call, so
+    // a receiver nothing else holds dies when the call returns, as
+    // it would have as a temporary value. The slot is claimed
+    // before the arguments are emitted: they run after it is
+    // written, so a scope of theirs must not hand it out again.
+    const int32_t mark = ctx.mark();
+    const int32_t t = ctx.alloc_local("$recv");
+    std::vector<NodeId> args = emit_args(arglist, ctx);
+    const NodeId self = b.varref(VarKind::Local, t, p);
+    const NodeId f =
+        rt.call("$methodof", {self, b.str_literal(name, p)}, p);
+    args.insert(args.begin(), self);
+    const NodeId call =
+        b.block({b.assign(VarKind::Local, t, recv, p),
+                 b.call_value(f, args, p)},
+                p);
+    const int32_t end = ctx.release(mark);
+    return b.scope(mark, end, call, p);
+  }
+
   NodeId emit_postfix(const Ast& a, size_t limit, FnCtx& ctx) {
     Builder b(m);
     const Ast& prim = *a.nodes[0];
@@ -1431,36 +1469,7 @@ struct Binder {
           if (i + 1 < limit && a.nodes[i + 1]->tag == "callsfx"_) {
             const Ast& arglist = *a.nodes[i + 1]->nodes[0];
             ++i;
-            if (is_builtin_method(name)) {
-              // culebra's standard library, supplied by the host: the
-              // receiver goes first, and `map` calls back into the program
-              // from C++ (see stdlib()).
-              std::vector<NodeId> args = emit_args(arglist, ctx);
-              args.insert(args.begin(), cur);
-              cur = native(name, args, p);
-              break;
-            }
-            // Every function's parameter 0 is `self`, so a method call is
-            // an ordinary call with the receiver in front. The receiver is
-            // both where the method is found and that `self`, so it runs
-            // once, into a temporary both read -- scoped to the call, so
-            // a receiver nothing else holds dies when the call returns, as
-            // it would have as a temporary value. The slot is claimed
-            // before the arguments are emitted: they run after it is
-            // written, so a scope of theirs must not hand it out again.
-            const int32_t mark = ctx.mark();
-            const int32_t t = ctx.alloc_local("$recv");
-            std::vector<NodeId> args = emit_args(arglist, ctx);
-            const NodeId self = b.varref(VarKind::Local, t, p);
-            const NodeId f =
-                rt.call("$methodof", {self, b.str_literal(name, p)}, p);
-            args.insert(args.begin(), self);
-            const NodeId call =
-                b.block({b.assign(VarKind::Local, t, cur, p),
-                         b.call_value(f, args, p)},
-                        p);
-            const int32_t end = ctx.release(mark);
-            cur = b.scope(mark, end, call, p);
+            cur = emit_method_call(cur, name, arglist, ctx, p);
             break;
           }
           cur = rt.call("$mem", {cur, b.str_literal(name, p)}, p);
@@ -1470,6 +1479,15 @@ struct Binder {
           cur = ops.call("$idx", {cur, emit_expr(*sfx.nodes[0], ctx)}, p);
           break;
         default: {  // callsfx: a plain call, with nil for `self`
+          // `C(args)` is `C.new(args)` (culebra's own rule), for a callee
+          // that is a class declaration by name. A class reached any other
+          // way (`makers[0](1)`, a parameter) is a value this front end
+          // cannot tell from an object, and is not callable.
+          if (i == 1 && prim.tag == "ident"_ && ref_of.count(&prim) &&
+              class_vars.count(ref_of.at(&prim))) {
+            cur = emit_method_call(cur, kNewField, *sfx.nodes[0], ctx, p);
+            break;
+          }
           std::vector<NodeId> args = emit_args(*sfx.nodes[0], ctx);
           args.insert(args.begin(), b.nil_literal(p));
           cur = b.call_value(cur, args, p);
