@@ -2178,13 +2178,23 @@ struct Fallback {
 // has (a, b) and, in a Try instruction, the ints it has (c, and the b that
 // try_mode adds the operator to):
 //   a: bits 0-15 `tags`, bits 16-31 `key_tags`.
-//   b: bits 0-7 `flags`, bits 8-21 `value_tags`.
+//   b: bits 0-7 `flags`, bits 8-(7+kMaxTags) `value_tags`.
 // Every reader and writer of them -- the Builder, fallback_of, verify(),
 // the compiler and the executor -- goes through these two, so no one
 // shifts by hand.
 struct FallbackBits {
   int32_t a = 0, b = 0;
 };
+// How many value tags a set can name: the room `value_tags` has. A Try
+// instruction's b is try_mode(op, b): 8 bits of operator, then the node's b,
+// 8 bits of flags, then value_tags, and the whole must stay a positive int32
+// (try_bits shifts it back arithmetically), so 8 + 8 + n <= 31 and n <= 15.
+// `tags` and `key_tags` have 16 bits each and never bind first. The
+// static_asserts below and after try_bits hold the round trip at the limit,
+// and kAllTags is asserted against this: a sixteenth tag is a redesign of the
+// packing, not a bump. (test_verify's out-of-range probe `kAllTags + 1` is
+// bit 15 while there are 15 tags, and has to be replaced at the sixteenth.)
+inline constexpr uint32_t kMaxTags = 15;
 inline constexpr FallbackBits pack_fallback(const Fallback& f) {
   return {static_cast<int32_t>(f.tags | f.key_tags << 16),
           static_cast<int32_t>(static_cast<uint32_t>(f.flags) |
@@ -2199,6 +2209,15 @@ inline constexpr Fallback unpack_fallback(NodeId callee, FallbackBits x) {
   const auto a = static_cast<uint32_t>(x.a), b = static_cast<uint32_t>(x.b);
   return {callee, tags_of(x), flags_of(x), a >> 16, b >> 8};
 }
+// Every bit of every set survives, at the limit (the literal, not kAllTags:
+// this is about the packing, whatever the tag count is).
+static_assert([] {
+  constexpr uint32_t full = (1u << kMaxTags) - 1;
+  const Fallback f = unpack_fallback(
+      NodeId{}, pack_fallback({NodeId{}, full, 0xff, full, full}));
+  return f.tags == full && f.flags == 0xff && f.key_tags == full &&
+         f.value_tags == full;
+}(), "pack_fallback keeps kMaxTags bits in each set");
 
 // The operands of a tag that may name a fallback -- Unary, Binary, Index
 // and SetIndex -- and 0 for every other tag. The fallback, when there is
@@ -3931,9 +3950,10 @@ inline const char* type_name(ValueTag t) {
 // never answers. kAllTags is the whole set, which `!=` complements against.
 inline constexpr uint32_t kAllTags =
     (1u << (static_cast<uint32_t>(kLastValueTag) + 1)) - 1;
-// pack_fallback puts three of these sets in two ints, 16 bits for the first
-// two and 14 for the third: a fifteenth tag would overflow into the flags.
-static_assert(kAllTags < (1u << 14), "pack_fallback has room for 14 tags");
+// pack_fallback puts three of these sets in two ints (kMaxTags, with its
+// derivation, is at FallbackBits).
+static_assert(kAllTags < (1u << kMaxTags),
+              "pack_fallback has no room for another tag");
 
 // Whether a set of tags holds `t`.
 inline constexpr bool has_tag(uint32_t set, ValueTag t) {
@@ -5020,6 +5040,14 @@ inline constexpr uint8_t try_op(int32_t mode) {
 inline constexpr coreir::FallbackBits try_bits(int32_t c, int32_t mode) {
   return {c, mode >> 8};
 }
+static_assert([] {
+  constexpr uint32_t full = (1u << coreir::kMaxTags) - 1;
+  const coreir::FallbackBits b =
+      coreir::pack_fallback({coreir::NodeId{}, full, 0xff, full, full});
+  const int32_t mode = try_mode(0xff, b.b);
+  const coreir::FallbackBits back = try_bits(b.a, mode);
+  return mode > 0 && try_op(mode) == 0xff && back.a == b.a && back.b == b.b;
+}(), "try_mode keeps a node's b, at kMaxTags bits of value_tags");
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
 // own Add..UGe, so the compiler and the executor can share one arithmetic
