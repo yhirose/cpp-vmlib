@@ -1943,19 +1943,55 @@ const std::vector<vm::NativeDef>& stdlib() {
   return defs;
 }
 
-// What an uncaught `throw` words its value with: to_display, but a Float
-// spelled as culebra prints it (`throw 0.0001` ends with "0.0001"). An
-// executor's trap reads as culebra's own error does, "TypeError: type
-// error: ..." (the position the report adds is culebra's `at 1:9`).
-std::string describe(const Value& raised) {
-  const Value v = converted_or_self<&convert_trap>(raised);
-  // A trap, or the error it was converted to and thrown again (which carries
-  // the place it first failed), reads as culebra reports a runtime error.
-  if (origin_of(v)) {
-    return v.as_object()->find("kind")->as_str() + ": " +
-           v.as_object()->find("message")->as_str();
+// A value as culebra shows it inside a container -- `$insp`, which is IR and
+// so out of reach of a host that has only the value: a string quoted,
+// a Float in culebra's digits, an array or an object by its elements, an
+// instance with its class's name and its fields `mut`.
+std::string inspect(const Value& v) {
+  if (v.is_str()) return "'" + v.as_str() + "'";
+  if (v.is_func() || v.is_native()) return "[function]";
+  if (v.is_generator()) return "<generator>";
+  if (v.is_array()) {
+    std::string out = "[";
+    for (const Value& item : v.as_array()->items) {
+      if (out.size() > 1) out += ", ";
+      out += inspect(item);
+    }
+    return out + "]";
+  }
+  if (v.is_object()) {
+    const std::string* cls = instance_class_name(v);
+    std::string out = cls != nullptr ? *cls + " {" : "{";
+    bool first = true;
+    for (const auto& kv : v.as_object()->props) {
+      if (!first) out += ", ";
+      first = false;
+      out += (cls != nullptr ? "mut " : "") + kv.first + ": " +
+             inspect(kv.second);
+    }
+    return out + "}";
   }
   return double_format::display_with(v, double_format::kCulebra);
+}
+
+// What an uncaught `throw` words its value with. An error, which is what a
+// trap converts to and what `$err` raises, is `Kind: message` as culebra
+// reports a runtime error ("TypeError: type error: ..."; the position the
+// report adds is its `at 1:9`); that is its shape, so a program's own
+// `throw {kind: ..., message: ...}` reads the same, which is as good as
+// any answer for a value culebra would show as an object. Anything else is
+// as println would show it, a string as itself.
+std::string describe(const Value& raised) {
+  const Value v = converted_or_self<&convert_trap>(raised);
+  if (v.is_object()) {
+    const Value* kind = v.as_object()->find("kind");
+    const Value* message = v.as_object()->find("message");
+    if (kind != nullptr && kind->is_str() && message != nullptr &&
+        message->is_str()) {
+      return kind->as_str() + ": " + message->as_str();
+    }
+  }
+  return v.is_str() ? v.as_str() : inspect(v);
 }
 
 Module bind_source(const std::string& source) {

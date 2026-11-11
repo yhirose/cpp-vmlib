@@ -1,0 +1,3 @@
+# A program's own {kind, message} object has the shape of an error, and is
+# reported as one.
+throw {kind: 'MyError', message: 'went wrong'}

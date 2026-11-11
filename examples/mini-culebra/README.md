@@ -310,6 +310,25 @@ Quietly different:
   like the store. The message of the `IndexError` a negative read raises is
   not pinned by culebra's tests; here it is `index out of range`. A String
   is not indexable in culebra (a `TypeError`), nor here.
+* **An uncaught value is reported in this runtime's own format**
+  (`file:L:C: uncaught: ...`, not culebra's `at L:C`), with culebra's words
+  for the value: an error is `Kind: message`, an array or an object is
+  shown as `println` shows it (`describe`'s `inspect`, which is `$insp`
+  again, in C++ because the report has only the value; a Float nested in a
+  container prints in the VM's shortest digits there, not culebra's), a
+  string as itself. A program's own `{kind, message}` object is reported as
+  an error, as it would be caught as one.
+* **Not reproduced, though culebra's tests pin them.** A method that does not
+  exist: culebra runs the arguments, then raises `TypeError: type error:
+  expected Function, got Nil ('nope' is not a method of Array)`; here
+  `$methodof` raises a `NameError` before them. A method call on `nil`:
+  `TypeError: type error: expected Object, Array, or Tensor, got Nil`.
+  `__ARGS__`, a surplus's home. The arity of a callback a built-in
+  calls (`[1, 2].map(|a, b| a)`), and `map`'s wording for a non-function
+  (`type error: parameter 'f' expects Function`). `e.line` and `e.col`.
+  The `**` operator. Indexing a String. The standard library is the five
+  methods and three functions above: there is no `range`, `filter`,
+  `reduce` or `join`.
 * **A generator prints as `<generator>`.** culebra prints its internal
   state object, which nothing could reproduce.
 * **A builtin method name wins over a property.** `size`, `push`, `pop`,

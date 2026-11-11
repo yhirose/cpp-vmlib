@@ -1,0 +1,4 @@
+# An error the front end raises itself (a KeyError here) is reported as a
+# trap is, "Kind: message", where it once read "<object>".
+let o = {a: 1}
+println(o['b'])

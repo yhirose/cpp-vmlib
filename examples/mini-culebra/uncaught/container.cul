@@ -1,0 +1,8 @@
+# An uncaught container is shown as println shows it, strings quoted and a
+# Float in culebra's digits, where it once read "<array>".
+class P {
+  new(x) {
+    self.x = x
+  }
+}
+throw [1, 2.5, 'a', {k: nil}, P(2)]
