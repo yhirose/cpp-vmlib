@@ -79,8 +79,7 @@ int main() {
   }
 
   // The value tags are named by type_name, which tags_named reads backwards:
-  // every tag is in the set of its own name, and the names a front end types
-  // reach a Void.
+  // every tag is in the set of its own name.
   for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastValueTag); ++i) {
     const auto t = static_cast<ValueTag>(i);
     if (std::string_view(type_name(t)) == "?" ||
@@ -145,10 +144,12 @@ int main() {
       std::fprintf(stderr, "FAIL: nil literal accessor\n");
       ++g_failures;
     }
-    if (m.const_kind(v) != ConstKind::Void ||
-        m.at(v).a == m.at(n).a) {
-      std::fprintf(stderr, "FAIL: void literal accessor, or its pool entry "
-                           "shared with nil\n");
+    if (m.const_kind(v) != ConstKind::Void) {
+      std::fprintf(stderr, "FAIL: void literal accessor\n");
+      ++g_failures;
+    }
+    if (m.at(v).a == m.at(n).a) {
+      std::fprintf(stderr, "FAIL: void and nil share a pool entry\n");
       ++g_failures;
     }
     if (m.const_kind(s) != ConstKind::Str || m.str_const(s) != "hi") {

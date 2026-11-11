@@ -98,7 +98,7 @@ to it:
 A few things worth knowing before you write a binder:
 
 - **Every node produces a value.** `Block` yields its last child, `If` the
-  branch taken, `CallValue` the callee's return value. Statements yield `Void`.
+  branch taken, `CallValue` the callee's return value. A statement's value is `nil`.
 - **A variable is one of three things** (`VarKind`): a `Local` slot in the
   frame, a `Cell` the frame owns and shares with closures, or a `Capture` the
   running closure brought with it. Slot indices are yours to assign.
@@ -296,7 +296,7 @@ finds a method, what is false, how a value prints. Where front ends here
 made the same decision and wrote it the same way, it is kept once, outside
 `vmlib.h`, in [examples/common/runtime_parts.h](examples/common/runtime_parts.h)
 -- the class layout and the walk up its bases, a for-each loop and the
-cursor it steps, the nil-and-false truthiness,
+cursor it steps, the nil-and-false truthiness (a `Void`, the second nil-like value, is truthy by default),
 two containers compared by what they hold, a promise settled once and
 awaited, an operator that is the VM's where the language agrees with it
 and the language's helper elsewhere -- and the end of that file lists

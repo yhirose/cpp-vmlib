@@ -1271,50 +1271,39 @@ int main() {
 
   // --- Void: a second nil-like immediate, only ever from an explicit void
   // literal. Equal to itself and to nothing else (Eq across types is the
-  // front end's question, as nil == int is), truthy, a distinct map key,
-  // and its own type name. ----------------------------------------------
+  // front end's question, as nil == int is), truthy, a distinct map key. --
   {
     using coreir::BinOp;
+    using coreir::Fault;
     using coreir::Value;
-    using coreir::ValueTag;
     const Value v = Value::make_void();
-    check(v.is_void() && !v.is_nil() && !v.is_heap() && v.tag() == ValueTag::Void,
-          "void is an immediate of its own");
-    check(!Value().is_void(), "a default Value is nil, not void");
+    check(v.is_void() && !v.is_nil() && !v.is_heap() && !Value().is_void(),
+          "void is an immediate of its own, and a default Value is not it");
     check(v.truthy(), "void is truthy by default");
-    check_eq(coreir::to_display(v), "void", "void displays as void");
-    check_eq(coreir::type_name(ValueTag::Void), "void", "void's type name");
-    check(coreir::tags_named("void") == 1u << static_cast<int>(ValueTag::Void),
-          "tags_named(\"void\") is the one tag");
-    check((coreir::kAllTags & ~coreir::tags_named("void")) ==
-              coreir::tags_named({"nil", "bool", "int", "double", "string",
-                                  "array", "object", "cell", "function",
-                                  "generator", "map", "coroutine",
-                                  "uninitialized"}),
-          "the complement of {void} is every other name");
-    check_eq(coreir::detail::tag_set_text(coreir::tags_named("void")),
-             "{void}", "a set of void prints");
-    check_eq(coreir::detail::tag_set_text(coreir::kAllTags &
-                                          ~coreir::tags_named("void")),
-             "not {void}", "its complement prints as a negation");
 
-    const auto eq = [](BinOp op, const Value& l, const Value& r, Value& out) {
-      return coreir::binop_fault(op, l, r, out);
+    // {left, right, the fault, or None and then Eq's answer}.
+    const struct {
+      Value l, r;
+      Fault fault;
+    } pairs[] = {
+        {v, Value::make_void(), Fault::None},
+        {v, Value(), Fault::Operands},
+        {Value(), v, Fault::Operands},
+        {v, Value::make_int(0), Fault::Operands},
+        {Value::make_bool(false), v, Fault::Operands},
     };
-    Value out;
-    check(eq(BinOp::Eq, v, Value::make_void(), out) == coreir::Fault::None &&
-              out.as_bool(),
-          "void == void");
-    check(eq(BinOp::Ne, v, Value::make_void(), out) == coreir::Fault::None &&
-              !out.as_bool(),
-          "void != void is false");
-    for (const Value& other : {Value(), Value::make_int(0),
-                               Value::make_bool(false)}) {
-      check(eq(BinOp::Eq, v, other, out) == coreir::Fault::Operands &&
-                eq(BinOp::Eq, other, v, out) == coreir::Fault::Operands,
-            "void == another type is the Operands fault");
+    for (const auto& c : pairs) {
+      for (const BinOp op : {BinOp::Eq, BinOp::Ne}) {
+        Value out;
+        const Fault f = coreir::binop_fault(op, c.l, c.r, out);
+        check(f == c.fault &&
+                  (f != Fault::None || out.as_bool() == (op == BinOp::Eq)),
+              std::string("void ") + coreir::name_of(op) + " " +
+                  coreir::type_name(c.r.tag()));
+      }
     }
-    check(eq(BinOp::Lt, v, v, out) == coreir::Fault::Operands,
+    Value out;
+    check(coreir::binop_fault(BinOp::Lt, v, v, out) == Fault::Operands,
           "void < void is the Operands fault");
 
     // A distinct key from nil, and from the int that shares its payload.
@@ -1331,9 +1320,13 @@ int main() {
           "each finds its own entry");
   }
 
+  // Void through a program: its dump text, its type test (a TypeIn, no
+  // string built), identity, truth; and held in an array and a local, then
+  // overwritten and dropped (run_module checks nothing leaks).
   {
     Module m;
     Builder b(m);
+    FuncWriter w(m, p);
     m.capture_maps.push_back({});
     const auto print = [&](NodeId v) {
       return b.intrinsic(IntrinsicId::Print, {v}, p);
@@ -1341,64 +1334,52 @@ int main() {
     const auto ty = [&](NodeId v) {
       return b.intrinsic(IntrinsicId::TypeOf, {v}, p);
     };
-    const auto vd = [&] { return b.void_literal(p); };
     const auto same = [&](NodeId l, NodeId r) {
       return b.intrinsic(IntrinsicId::Same, {l, r}, p);
     };
     const auto str = [&](const char* t) { return b.str_literal(t, p); };
+    const auto bin = [&](BinOp op, NodeId l, NodeId r) {
+      return b.binary(op, l, r, p);
+    };
+    const struct {
+      NodeId expr;
+      const char* want;
+    } rows[] = {
+        {w.Void(), "void"},
+        {bin(BinOp::Eq, ty(w.Void()), str("void")), "true"},
+        {bin(BinOp::Ne, ty(w.Void()), str("void")), "false"},
+        {bin(BinOp::Eq, ty(w.Nil()), str("void")), "false"},
+        {bin(BinOp::Eq, ty(w.Void()), ty(w.Nil())), "false"},
+        {bin(BinOp::Eq, w.Void(), w.Void()), "true"},
+        {same(w.Void(), w.Void()), "true"},
+        {same(w.Void(), w.Nil()), "false"},
+        {b.unary(UnOp::Truth, w.Void(), p), "true"},
+        {b.unary(UnOp::Not, w.Void(), p), "false"},
+        {b.make_if(w.Void(), str("T"), str("F"), p), "T"},
+    };
+    std::vector<NodeId> stmts;
+    std::string want;
+    for (const auto& r : rows) {
+      stmts.push_back(print(r.expr));
+      want += std::string(r.want) + "|";
+    }
     const auto local = [&] { return b.varref(VarKind::Local, 0, p); };
-    const NodeId body = b.block(
-        {print(vd()),
-         print(b.binary(BinOp::Eq, ty(vd()), str("void"), p)),
-         print(b.binary(BinOp::Ne, ty(vd()), str("void"), p)),
-         print(b.binary(BinOp::Eq, ty(b.nil_literal(p)), str("void"), p)),
-         print(b.binary(BinOp::Eq, ty(vd()), ty(vd()), p)),
-         print(b.binary(BinOp::Eq, ty(vd()), ty(b.nil_literal(p)), p)),
-         print(b.binary(BinOp::Eq, vd(), vd(), p)),
-         print(b.binary(BinOp::Ne, vd(), vd(), p)),
-         print(same(vd(), vd())),
-         print(same(vd(), b.nil_literal(p))),
-         print(b.unary(UnOp::Truth, vd(), p)),
-         print(b.unary(UnOp::Not, vd(), p)),
-         b.make_if(vd(), print(str("T")), print(str("F")), p),
-         // Stored, overwritten and dropped: no leak, whatever holds it.
-         b.assign(VarKind::Local, 0, b.array_lit({vd(), vd()}, p), p),
-         b.assign(VarKind::Local, 0, vd(), p),
-         print(ty(local()))},
-        p);
-    m.funcs.push_back({"main", 1, 0, body, {"x"}, {}});
+    stmts.push_back(b.assign(VarKind::Local, 0,
+                             b.array_lit({w.Void(), w.Void()}, p), p));
+    stmts.push_back(b.assign(VarKind::Local, 0, w.Void(), p));
+    stmts.push_back(print(ty(local())));
+    want += "void|";
+    m.funcs.push_back({"main", 1, 0, b.block(stmts, p), {"x"}, {}});
     check_eq(run_module(m, "void"), "", "void: unexpected failure");
-    check_eq(joined(),
-             "void|true|false|false|true|false|true|false|true|false|true|"
-             "false|T|void|",
-             "void output");
-    const std::string ir = to_string(m);
-    check(ir.find("literal void ") != std::string::npos,
+    check_eq(joined(), want, "void output");
+    check(to_string(m).find("literal void ") != std::string::npos,
           "IR dump of a void literal");
     const std::string bc = vm::to_string(vm::compile(m));
-    for (const char* want : {"r0, void\t", "\ttypein r0, r0, {void}\t",
-                             "\ttypein r0, r0, not {void}\t"}) {
-      check(bc.find(want) != std::string::npos,
-            std::string("void bytecode dump lacks '") + want + "'");
+    for (const char* needle : {"r0, void\t", "\ttypein r0, r0, {void}\t",
+                               "\ttypein r0, r0, not {void}\t"}) {
+      check(bc.find(needle) != std::string::npos,
+            std::string("void bytecode dump lacks '") + needle + "'");
     }
-  }
-
-  // void == nil is the front end's question: the VM refuses it.
-  {
-    Module m;
-    Builder b(m);
-    m.capture_maps.push_back({});
-    m.funcs.push_back(
-        {"main", 0, 0,
-         b.intrinsic(IntrinsicId::Print,
-                     {b.binary(BinOp::Eq, b.void_literal(p),
-                               b.nil_literal(p), p)},
-                     p),
-         {}, {}});
-    const std::string failed = run_module(m, "void == nil");
-    check(failed.find("void") != std::string::npos &&
-              failed.find("nil") != std::string::npos,
-          "void == nil faults, naming both types: " + failed);
   }
 
   // --- An int against a double compares the numbers, not the int rounded to

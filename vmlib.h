@@ -122,11 +122,8 @@ struct SrcPos {
 // host function registered for the run (vm::NativeDef), callable like a
 // closure.
 //
-// Void is a second nil-like immediate: JavaScript's null, Scheme's
-// unspecified value. It is a value like any other (truthy by default, equal
-// only to another Void), and nothing in the VM produces one: a statement, a
-// function that returns nothing, an If with no else all yield Nil. A front
-// end gets a Void only from an explicit void literal (ConstKind::Void).
+// Void is a second nil-like immediate (JavaScript's null, Scheme's
+// unspecified value) that only an explicit void literal produces.
 enum class ValueTag : uint8_t {
   Uninit, Nil, Void, Bool, Int, Double, Str, Array, Object, Cell, Func,
   Generator, Map, Coroutine, Native
@@ -1140,13 +1137,13 @@ namespace coreir {
 // Tags
 // ---------------------------------------------------------------------------
 
-// Convention: every node produces a value. A statement's value is Nil. Block
-// is the value of its last child, If the value of the branch taken, Call the
-// callee's return value. (ValueTag::Void is a different thing: a distinct
-// immediate a front end opts into with a void literal, never a statement's
-// value.) PL/0 never observes this -- every value is Nil -- but
-// fixing it now keeps an expression-oriented front end from having to redefine
-// Block/If/Call later, which would be a breaking change rather than a new tag.
+// Convention: every node produces a value. A statement's value is Nil (not
+// ValueTag::Void, which a front end opts into with a void literal). Block is
+// the value of its last child, If the value of the branch taken, Call the
+// callee's return value. PL/0 never observes this -- every value is Nil --
+// but fixing it now keeps an expression-oriented front end from having to
+// redefine Block/If/Call later, which would be a breaking change rather than
+// a new tag.
 enum class Tag : uint8_t {
   Literal,    // a = const pool index
   VarRef,     // op = VarKind, a = index
@@ -2069,14 +2066,12 @@ inline int32_t slot_limit(const Func& f, VarKind k) {
 //     the executor's dispatch. By hand: the enumerator (and, for an
 //     intrinsic's opcode, the above).
 //   ValueTag: -Wswitch fails type_name, to_display and on_heap_kind (truthy
-//     and binop_eval have a default: nothing flags them). By hand: the enumerator, placed
-//     before Str if it is an immediate and at the end if it is a heap tag
-//     (is_heap's single comparison, static_asserted), kLastValueTag
+//     and binop_eval have a default, so nothing flags them). By hand: the
+//     enumerator, before Str if it is an immediate and at the end if it is a
+//     heap tag (is_heap's comparison, static_asserted), kLastValueTag
 //     (static_asserted), a make_*/is_* pair, its arm in truthy if its truth
-//     is not the default's, and binop_eval/Op::Same if it can be equal to
-//     itself. kMaxTags (15, derived at FallbackBits) caps the count: a
-//     sixteenth tag is a redesign of the tag-set packing, which a
-//     static_assert on kAllTags announces.
+//     is not the default's, and binop_eval/Op::Same if it can equal itself.
+//     kMaxTags caps the count; a static_assert on kAllTags announces it.
 //   ConstKind: -Wswitch fails name_of(ConstKind), const_text,
 //     Compiler::literal_truthy and the executor's const_value. By hand: the
 //     enumerator (appended: the pool's (kind, bits) key is not an ordinal
@@ -2226,11 +2221,10 @@ struct FallbackBits {
 // instruction's b is try_mode(op, b): 8 bits of operator, then the node's b,
 // 8 bits of flags, then value_tags, and the whole must stay a positive int32
 // (try_bits shifts it back arithmetically), so 8 + 8 + n <= 31 and n <= 15.
-// `tags` and `key_tags` have 16 bits each and never bind first. The
-// static_asserts below and after try_bits hold the round trip at the limit,
-// and kAllTags is asserted against this: a sixteenth tag is a redesign of the
-// packing, not a bump. (test_verify's out-of-range probe `kAllTags + 1` is
-// bit 15 while there are 15 tags, and has to be replaced at the sixteenth.)
+// `tags` and `key_tags` have 16 bits each and never bind first. A sixteenth
+// tag is a repacking, not a bump; the first room to take is `flags`, whose
+// 8 bits hold 4 flags (kKnownFlags). The static_assert after try_bits holds
+// the round trip at the limit.
 inline constexpr uint32_t kMaxTags = 15;
 inline constexpr FallbackBits pack_fallback(const Fallback& f) {
   return {static_cast<int32_t>(f.tags | f.key_tags << 16),
@@ -2246,15 +2240,6 @@ inline constexpr Fallback unpack_fallback(NodeId callee, FallbackBits x) {
   const auto a = static_cast<uint32_t>(x.a), b = static_cast<uint32_t>(x.b);
   return {callee, tags_of(x), flags_of(x), a >> 16, b >> 8};
 }
-// Every bit of every set survives, at the limit (the literal, not kAllTags:
-// this is about the packing, whatever the tag count is).
-static_assert([] {
-  constexpr uint32_t full = (1u << kMaxTags) - 1;
-  const Fallback f = unpack_fallback(
-      NodeId{}, pack_fallback({NodeId{}, full, 0xff, full, full}));
-  return f.tags == full && f.flags == 0xff && f.key_tags == full &&
-         f.value_tags == full;
-}(), "pack_fallback keeps kMaxTags bits in each set");
 
 // The operands of a tag that may name a fallback -- Unary, Binary, Index
 // and SetIndex -- and 0 for every other tag. The fallback, when there is
@@ -4000,8 +3985,6 @@ static_assert(detail::is_fallback(type_name(static_cast<ValueTag>(
 // never answers. kAllTags is the whole set, which `!=` complements against.
 inline constexpr uint32_t kAllTags =
     (1u << (static_cast<uint32_t>(kLastValueTag) + 1)) - 1;
-// pack_fallback puts three of these sets in two ints (kMaxTags, with its
-// derivation, is at FallbackBits).
 static_assert(kAllTags < (1u << kMaxTags),
               "pack_fallback has no room for another tag");
 
@@ -4336,6 +4319,7 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       return ok;
     }
   }
+  // An immediate with no payload is equal to itself.
   if ((l.is_nil() && r.is_nil()) || (l.is_void() && r.is_void())) {
     if (op == BinOp::Eq || op == BinOp::Ne) {
       out = Value::make_bool(op == BinOp::Eq);
@@ -5091,14 +5075,20 @@ inline constexpr uint8_t try_op(int32_t mode) {
 inline constexpr coreir::FallbackBits try_bits(int32_t c, int32_t mode) {
   return {c, mode >> 8};
 }
+// Every bit of every set, at the limit (the literal, not kAllTags: this is
+// about the packing, whatever the tag count is), through pack_fallback,
+// try_mode and back.
 static_assert([] {
   constexpr uint32_t full = (1u << coreir::kMaxTags) - 1;
   const coreir::FallbackBits b =
       coreir::pack_fallback({coreir::NodeId{}, full, 0xff, full, full});
   const int32_t mode = try_mode(0xff, b.b);
   const coreir::FallbackBits back = try_bits(b.a, mode);
-  return mode > 0 && try_op(mode) == 0xff && back.a == b.a && back.b == b.b;
-}(), "try_mode keeps a node's b, at kMaxTags bits of value_tags");
+  const coreir::Fallback f = coreir::unpack_fallback(coreir::NodeId{}, back);
+  return mode > 0 && try_op(mode) == 0xff && back.a == b.a &&
+         f.tags == full && f.flags == 0xff && f.key_tags == full &&
+         f.value_tags == full;
+}(), "pack_fallback and try_mode keep kMaxTags bits in each set");
 
 // vm::Op's Add..UGe deliberately sit at a fixed offset from coreir::BinOp's
 // own Add..UGe, so the compiler and the executor can share one arithmetic
