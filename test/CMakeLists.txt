@@ -38,3 +38,9 @@ endforeach()
 add_executable(test_two_tus test_two_tus.cc test_two_tus_other.cc)
 target_link_libraries(test_two_tus PRIVATE vmlib)
 add_test(NAME two_tus COMMAND test_two_tus)
+
+# run_samples.cmake's guards against a sample whose output the language does
+# not fix, with a fake oracle (test/run_samples_guard.cmake).
+add_test(NAME run_samples_guard
+         COMMAND ${CMAKE_COMMAND} -DWORK=${CMAKE_CURRENT_BINARY_DIR}/run_samples_guard
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/run_samples_guard.cmake)

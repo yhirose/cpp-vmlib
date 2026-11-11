@@ -30,6 +30,13 @@
 # printed, and remove one no case makes -- by hand, never from the build: a
 # golden the front end's own test could refresh would be evidence of
 # nothing.
+#
+# A sample whose output the language does not fix (it depends on which
+# thread or timer gets there first) cannot have a golden: the oracle's one
+# run would be luck. So the update runs the oracle ORACLE_RUNS times per
+# case and writes nothing when two differ, and a goldens test that fails
+# runs it once more, to say the sample is the trouble rather than the
+# golden.
 
 include(${CMAKE_CURRENT_LIST_DIR}/cases.cmake)
 if(ORACLE)
@@ -42,6 +49,9 @@ if(ORACLE)
 else()
   require_args(run_samples.cmake BIN DIR EXT LANG)
 endif()
+
+# How many times an update runs the oracle on a case (see above).
+set(ORACLE_RUNS 5)
 
 set(update OFF)
 if(ORACLE AND "$ENV{VMLIB_UPDATE_GOLDENS}")
@@ -97,6 +107,23 @@ foreach(src ${sources})
   endif()
 
   if(update)
+    set(stable ON)
+    foreach(i RANGE 2 ${ORACLE_RUNS})
+      execute_process(COMMAND ${BIN} ${lead} ${name}
+                      WORKING_DIRECTORY ${dir}
+                      ${input}
+                      OUTPUT_VARIABLE again RESULT_VARIABLE again_rc)
+      if(NOT again_rc EQUAL 0 OR NOT again STREQUAL out)
+        set(stable OFF)
+        break()
+      endif()
+    endforeach()
+    if(NOT stable)
+      message(SEND_ERROR "${s}: the oracle's output differs between runs (a "
+                         "nondeterministic sample); not writing the golden")
+      set(failed 1)
+      continue()
+    endif()
     file(WRITE ${golden} "${out}")
   elseif(NOT EXISTS ${golden})
     message(SEND_ERROR "${s}: no golden file at ${golden}")
@@ -104,9 +131,21 @@ foreach(src ${sources})
   else()
     file(READ ${golden} want)
     if(NOT out STREQUAL want)
+      set(why "output does not match the golden file")
+      if(ORACLE)
+        # Diagnosis only: the second run never turns a failure into a pass.
+        execute_process(COMMAND ${BIN} ${lead} ${name}
+                        WORKING_DIRECTORY ${dir}
+                        ${input}
+                        OUTPUT_VARIABLE again)
+        if(NOT again STREQUAL out)
+          string(CONCAT why "nondeterministic sample: the oracle printed different "
+                  "things on two runs")
+          set(out "${out}--- got, on a second run ---\n${again}")
+        endif()
+      endif()
       message(SEND_ERROR
-              "${s}: output does not match the golden file\n"
-              "--- want ---\n${want}--- got ---\n${out}")
+              "${s}: ${why}\n--- want ---\n${want}--- got ---\n${out}")
       set(failed 1)
     endif()
   endif()
