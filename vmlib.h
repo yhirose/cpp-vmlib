@@ -1907,52 +1907,105 @@ struct Module {
 };
 
 // ---------------------------------------------------------------------------
-// Arity
+// Tag facts -- every fact about a tag that more than one pass reads, in one
+// row (the same shape and reasons as IntrinsicInfo below). name_of,
+// arity_of, yields_value and observable are one-line readers of
+// detail::tag_info, so a new Tag is one case there.
 //
-// -1 means variadic, or -- for If and Intrinsic -- "constrained, but not by a
-// single number." The fixed-arity tags have their shape stated exactly
-// once, here. If's 2-or-3 and Intrinsic's per-id count are still centralized,
-// just in Verifier::check_node and intrinsic_arity() respectively rather than
-// in this table. Call's shape (capture map length against the callee) has no
-// single-number arity at all and lives entirely in check_node.
+// Arity: -1 means variadic, or -- for If and Intrinsic -- "constrained, but
+// not by a single number." The fixed-arity tags have their shape stated
+// exactly once, here. If's 2-or-3 and Intrinsic's per-id count are still
+// centralized, just in Verifier::check_node and intrinsic_arity()
+// respectively rather than in this table. Call's shape (capture map length
+// against the callee) has no single-number arity at all and lives entirely
+// in check_node.
+//
+// yields_value: whether a tag yields a value usable as an operand. Under the
+// "every node produces a value" convention every tag does in principle, but
+// PL/0's statements are Void, and verify() uses this to catch a front end
+// that wires a statement into an operand position. Block and If were always
+// documented as producing one -- "Block is the value of its last child, If
+// the value of the branch taken" at the top of this header -- and were only
+// false here because PL/0 has no way to observe it. A function whose body is
+// a block that ends in an expression does observe it.
+//
+// observable: running a node of this kind can be told from not running it,
+// its children aside: it calls, writes, throws, suspends, makes a cell, or
+// builds an object a program could compare by identity (Same). The
+// structural tags -- If, Switch, Block, While, Scope, TryCatch -- are as
+// observable as what they hold, and decide nothing here themselves.
 // ---------------------------------------------------------------------------
 
-inline constexpr int arity_of(Tag t) {
+namespace detail {
+
+struct TagInfo {
+  const char* name;  // the IR's word for it (name_of, from_name)
+  int arity;         // child count; -1 variadic or constrained (see above)
+  bool yields_value;
+  bool observable;
+  constexpr TagInfo(const char* name_, int arity_, bool yields_value_,
+                    bool observable_)
+      : name(name_), arity(arity_), yields_value(yields_value_),
+        observable(observable_) {}
+};
+
+// One exhaustive switch with no default, as intrinsic_info is: a Tag added
+// without a row is a -Wswitch error rather than a silent "yields nothing".
+constexpr TagInfo tag_info(Tag t) {
   switch (t) {
-    case Tag::Literal:   return 0;
-    case Tag::VarRef:    return 0;
-    case Tag::Unary:     return -1;  // operand [, fallback]
-    case Tag::Binary:    return -1;  // lhs, rhs [, fallback]
-    case Tag::Assign:    return 1;
-    case Tag::If:        return -1;  // 2 or 3
-    case Tag::Switch:    return -1;  // subject, (key, body)*, optional default
-    case Tag::While:     return 2;
-    case Tag::Block:     return -1;
-    case Tag::Intrinsic: return -1;  // per IntrinsicId
-    case Tag::MakeClosure: return 0;
-    case Tag::CallValue:   return -1;  // callee, then args
-    case Tag::CallSpread:  return -1;  // callee, args, then the spread
-    case Tag::ArrayLit:    return -1;
-    case Tag::ObjectLit:   return -1;  // an even number: key, value, ...
-    case Tag::Index:       return -1;  // receiver, key [, fallback]
-    case Tag::SetIndex:    return -1;  // receiver, key, value [, fallback]
-    case Tag::FieldGet:    return 1;
-    case Tag::FieldSet:    return 2;
-    case Tag::Scope:       return -1;  // body, or body + release list
-    case Tag::Return:      return -1;  // 0 or 1
-    case Tag::Break:       return 0;
-    case Tag::Continue:    return 0;
-    case Tag::Throw:       return 1;
-    case Tag::TryCatch:    return 2;
-    case Tag::Defer:       return 1;
-    case Tag::CellFresh:   return 0;
-    case Tag::Yield:       return 1;
-    case Tag::NativeRef:   return 0;
-    case Tag::Let:         return 2;
-    case Tag::LetRef:      return 0;
+    case Tag::Literal:     return {"literal", 0, true, false};
+    case Tag::VarRef:      return {"varref", 0, true, false};
+    // arity: operand [, fallback]
+    case Tag::Unary:       return {"unary", -1, true, false};
+    // arity: lhs, rhs [, fallback]
+    case Tag::Binary:      return {"binary", -1, true, false};
+    case Tag::Assign:      return {"assign", 1, false, true};
+    // arity: 2 or 3
+    case Tag::If:          return {"if", -1, true, false};
+    // arity: subject, (key, body)*, optional default
+    case Tag::Switch:      return {"switch", -1, true, false};
+    case Tag::While:       return {"while", 2, false, false};
+    case Tag::Block:       return {"block", -1, true, false};
+    // arity: per IntrinsicId, see intrinsic_arity; observable: false here,
+    // per IntrinsicId, see observable(const Node&)
+    case Tag::Intrinsic:   return {"intrinsic", -1, true, false};
+    case Tag::MakeClosure: return {"makeclosure", 0, true, true};
+    // arity: callee, then args
+    case Tag::CallValue:   return {"callvalue", -1, true, true};
+    // arity: callee, args, then the spread
+    case Tag::CallSpread:  return {"callspread", -1, true, true};
+    case Tag::ArrayLit:    return {"arraylit", -1, true, true};
+    // arity: an even number: key, value, ...
+    case Tag::ObjectLit:   return {"objectlit", -1, true, true};
+    // arity: receiver, key [, fallback]
+    case Tag::Index:       return {"index", -1, true, false};
+    // arity: receiver, key, value [, fallback]
+    case Tag::SetIndex:    return {"setindex", -1, false, true};
+    case Tag::FieldGet:    return {"fieldget", 1, true, false};
+    case Tag::FieldSet:    return {"fieldset", 2, false, true};
+    // arity: body, or body + release list
+    case Tag::Scope:       return {"scope", -1, true, false};
+    // arity: 0 or 1
+    case Tag::Return:      return {"return", -1, false, true};
+    case Tag::Break:       return {"break", 0, false, true};
+    case Tag::Continue:    return {"continue", 0, false, true};
+    case Tag::Throw:       return {"throw", 1, false, true};
+    case Tag::TryCatch:    return {"try", 2, true, false};
+    case Tag::Defer:       return {"defer", 1, false, true};
+    case Tag::CellFresh:   return {"cellfresh", 0, false, true};
+    case Tag::Yield:       return {"yield", 1, true, true};
+    case Tag::NativeRef:   return {"nativeref", 0, true, false};
+    // observable: as observable as its init and body
+    case Tag::Let:         return {"let", 2, true, false};
+    // observable: a read of a value already made
+    case Tag::LetRef:      return {"letref", 0, true, false};
   }
-  return -1;
+  return {"?", -1, false, true};  // not a Tag
 }
+
+}  // namespace detail
+
+inline constexpr int arity_of(Tag t) { return detail::tag_info(t).arity; }
 
 // How many slots of a given kind a function has. One place, because the
 // verifier bounds-checks three different things against it (a VarRef, an
@@ -2049,42 +2102,8 @@ inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
   return static_cast<uint32_t>(detail::intrinsic_info(id).arity);
 }
 
-// Whether a tag yields a value usable as an operand. Under the "every node
-// produces a value" convention every tag does in principle, but PL/0's
-// statements are Void, and verify() uses this to catch a front end that wires
-// a statement into an operand position.
 inline constexpr bool yields_value(Tag t) {
-  switch (t) {
-    case Tag::Literal:
-    case Tag::VarRef:
-    case Tag::Unary:
-    case Tag::Binary:
-    case Tag::Intrinsic:
-    // Block and If were always documented as producing one -- "Block is the
-    // value of its last child, If the value of the branch taken" at the top
-    // of this header -- and were only false here because PL/0 has no way to
-    // observe it. A function whose body is a block that ends in an expression
-    // does observe it.
-    case Tag::Block:
-    case Tag::If:
-    case Tag::Switch:
-    case Tag::MakeClosure:
-    case Tag::CallValue:
-    case Tag::CallSpread:
-    case Tag::ArrayLit:
-    case Tag::ObjectLit:
-    case Tag::Index:
-    case Tag::FieldGet:
-    case Tag::Scope:
-    case Tag::TryCatch:
-    case Tag::Yield:
-    case Tag::NativeRef:
-    case Tag::Let:
-    case Tag::LetRef:
-      return true;
-    default:
-      return false;
-  }
+  return detail::tag_info(t).yields_value;
 }
 
 // ---------------------------------------------------------------------------
@@ -6257,46 +6276,12 @@ inline void free_heap_object(HeapObj* o) {
   });
 }
 
-// Extracted from the Dumper's node() switch below, so dump_ir()'s vocabulary
-// and this one are the same table read two ways: Unary/Binary/Intrinsic are
-// the exceptions, since the Dumper prints their *operator* name there
-// instead of the tag's.
-inline const char* name_of(Tag t) {
-  switch (t) {
-    case Tag::Literal:     return "literal";
-    case Tag::VarRef:      return "varref";
-    case Tag::Unary:       return "unary";
-    case Tag::Binary:      return "binary";
-    case Tag::Assign:      return "assign";
-    case Tag::If:          return "if";
-    case Tag::Switch:      return "switch";
-    case Tag::While:       return "while";
-    case Tag::Block:       return "block";
-    case Tag::Intrinsic:   return "intrinsic";
-    case Tag::MakeClosure: return "makeclosure";
-    case Tag::CallValue:   return "callvalue";
-    case Tag::CallSpread:  return "callspread";
-    case Tag::ArrayLit:    return "arraylit";
-    case Tag::ObjectLit:   return "objectlit";
-    case Tag::Index:       return "index";
-    case Tag::SetIndex:    return "setindex";
-    case Tag::FieldGet:    return "fieldget";
-    case Tag::FieldSet:    return "fieldset";
-    case Tag::Scope:       return "scope";
-    case Tag::Return:      return "return";
-    case Tag::Break:       return "break";
-    case Tag::Continue:    return "continue";
-    case Tag::Throw:       return "throw";
-    case Tag::TryCatch:    return "try";
-    case Tag::Defer:       return "defer";
-    case Tag::CellFresh:   return "cellfresh";
-    case Tag::Yield:       return "yield";
-    case Tag::NativeRef:   return "nativeref";
-    case Tag::Let:         return "let";
-    case Tag::LetRef:      return "letref";
-  }
-  return "?";
-}
+// The Dumper's node() starts from this wherever the word it prints is the
+// tag's, so dump_ir()'s vocabulary and this one are one table read two ways:
+// Unary/Binary/Intrinsic are the exceptions, since the Dumper prints their
+// *operator* name there instead of the tag's, and LetRef prints only the
+// temporary it reads.
+inline const char* name_of(Tag t) { return detail::tag_info(t).name; }
 
 inline const char* name_of(UnOp op) {
   switch (op) {
@@ -6910,12 +6895,13 @@ struct Dumper {
     indent(d);
     switch (n.tag) {
       case Tag::Literal:
-        out << "literal "
+        out << name_of(n.tag) << " "
             << const_text(m.consts[static_cast<size_t>(n.a)], m.str_consts);
         break;
       case Tag::VarRef: {
         auto v = view_varref(m, id);
-        out << "varref " << name_of(v.kind) << "[" << v.index << "]";
+        out << name_of(n.tag) << " " << name_of(v.kind) << "["
+            << v.index << "]";
         break;
       }
       case Tag::Unary: {
@@ -6932,18 +6918,20 @@ struct Dumper {
       }
       case Tag::Assign: {
         auto v = view_assign(m, id);
-        out << "assign " << name_of(v.kind) << "[" << v.index << "]";
+        out << name_of(n.tag) << " " << name_of(v.kind) << "["
+            << v.index << "]";
         break;
       }
-      case Tag::If:     out << "if"; break;
-      case Tag::Switch: out << "switch"; break;
+      case Tag::If:     out << name_of(n.tag); break;
+      case Tag::Switch: out << name_of(n.tag); break;
       case Tag::Scope: {
         const auto v = view_scope(m, id);
-        out << "scope local[" << v.first_local << ".." << v.end_local << ")";
+        out << name_of(n.tag) << " local[" << v.first_local << ".."
+            << v.end_local << ")";
         if (v.release_order.valid()) out << " +release";
         break;
       }
-      case Tag::Return:   out << "return"; break;
+      case Tag::Return:   out << name_of(n.tag); break;
       case Tag::Break:
       case Tag::Continue: {
         out << name_of(n.tag);
@@ -6952,38 +6940,39 @@ struct Dumper {
         if (depth > 0) out << " ^" << depth;  // how many loops it skips
         break;
       }
-      case Tag::Throw:    out << "throw"; break;
-      case Tag::Defer:    out << "defer"; break;
+      case Tag::Throw:    out << name_of(n.tag); break;
+      case Tag::Defer:    out << name_of(n.tag); break;
       case Tag::CellFresh:
-        out << "cellfresh cell[" << view_cellfresh(m, id).cell << "]";
+        out << name_of(n.tag) << " cell[" << view_cellfresh(m, id).cell << "]";
         break;
-      case Tag::Yield: out << "yield"; break;
+      case Tag::Yield: out << name_of(n.tag); break;
       case Tag::TryCatch:
-        out << "try caught=local[" << view_try(m, id).caught_local << "]";
+        out << name_of(n.tag) << " caught=local["
+            << view_try(m, id).caught_local << "]";
         break;
-      case Tag::While:  out << "while"; break;
-      case Tag::Block:  out << "block"; break;
+      case Tag::While:  out << name_of(n.tag); break;
+      case Tag::Block:  out << name_of(n.tag); break;
       case Tag::Intrinsic:
         out << name_of(static_cast<IntrinsicId>(n.op));
         break;
       case Tag::MakeClosure:
-        out << "makeclosure " << m.funcs[n.a].name << " #" << n.a
+        out << name_of(n.tag) << " " << m.funcs[n.a].name << " #" << n.a
             << " cmap=" << n.b;
         break;
       case Tag::CallValue:
-        out << "callvalue";
+        out << name_of(n.tag);
         break;
       case Tag::CallSpread:
-        out << "callspread";
+        out << name_of(n.tag);
         break;
-      case Tag::ArrayLit:  out << "arraylit"; break;
-      case Tag::ObjectLit: out << "objectlit"; break;
+      case Tag::ArrayLit:  out << name_of(n.tag); break;
+      case Tag::ObjectLit: out << name_of(n.tag); break;
       case Tag::Index:
-        out << "index";
+        out << name_of(n.tag);
         fallback(view_index(m, id).fallback);
         break;
       case Tag::SetIndex:
-        out << "setindex";
+        out << name_of(n.tag);
         fallback(view_set_index(m, id).fallback);
         break;
       // One case for both: FieldSetView is FieldView plus a value child, so
@@ -7000,13 +6989,15 @@ struct Dumper {
       }
       case Tag::NativeRef: {
         const int32_t idx = view_native_ref(m, id).index;
-        out << "nativeref " << m.natives[static_cast<size_t>(idx)] << " #"
-            << idx;
+        out << name_of(n.tag) << " " << m.natives[static_cast<size_t>(idx)]
+            << " #" << idx;
         break;
       }
       // The id is the temporary's name: `let t3` over its init and body,
       // and `t3` where the body reads it.
-      case Tag::Let:    out << "let t" << view_let(m, id).temp; break;
+      case Tag::Let:
+        out << name_of(n.tag) << " t" << view_let(m, id).temp;
+        break;
       case Tag::LetRef: out << "t" << view_let_ref(m, id); break;
     }
     out << "  @" << p.line << ":" << p.col << "\n";
@@ -7124,48 +7115,9 @@ inline std::optional<std::string> verify(const Module& m) {
 namespace detail {
 
 // Whether running a node of this kind can be told from not running it, its
-// children aside: it calls, writes, throws, suspends, makes a cell, or
-// builds an object a program could compare by identity (Same). The
-// structural tags -- If, Switch, Block, While, Scope, TryCatch -- are as
-// observable as what they hold, and decide nothing here themselves.
-inline constexpr bool observable(Tag t) {
-  switch (t) {
-    case Tag::Literal:
-    case Tag::VarRef:
-    case Tag::Unary:
-    case Tag::Binary:
-    case Tag::If:
-    case Tag::Switch:
-    case Tag::While:
-    case Tag::Block:
-    case Tag::Intrinsic:  // per IntrinsicId, below
-    case Tag::Index:
-    case Tag::FieldGet:
-    case Tag::Scope:
-    case Tag::TryCatch:
-    case Tag::NativeRef:
-    case Tag::Let:     // as observable as its init and body
-    case Tag::LetRef:  // a read of a value already made
-      return false;
-    case Tag::Assign:
-    case Tag::MakeClosure:
-    case Tag::CallValue:
-    case Tag::CallSpread:
-    case Tag::ArrayLit:
-    case Tag::ObjectLit:
-    case Tag::SetIndex:
-    case Tag::FieldSet:
-    case Tag::Return:
-    case Tag::Break:
-    case Tag::Continue:
-    case Tag::Throw:
-    case Tag::Defer:
-    case Tag::CellFresh:
-    case Tag::Yield:
-      return true;
-  }
-  return true;
-}
+// children aside (see TagInfo). Tag::Intrinsic is the one tag whose answer is
+// not its own: observable(const Node&) asks observable(IntrinsicId).
+inline constexpr bool observable(Tag t) { return tag_info(t).observable; }
 
 // The same per intrinsic. A string is a value here, so building one (ToStr,
 // StrSlice, ...) is not observable; building an array or a map is.
