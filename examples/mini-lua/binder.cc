@@ -287,11 +287,14 @@ std::string arg_error(const std::string& fn, size_t shown,
 // can only be absent.
 std::string arg_complaint(const std::string& fn, size_t k, size_t shown,
                           const std::string& got) {
-  const char* expected = library().at(fn).params.at(k).expected;
+  const std::string expected = library().at(fn).params.at(k).expected;
+  // A number where a number is wanted is one that holds no integer.
+  if (expected == "number" && got == "number") {
+    return arg_error(fn, shown, "number has no integer representation");
+  }
   return arg_error(fn, shown,
-                   *expected == '\0'
-                       ? "value expected"
-                       : std::string(expected) + " expected, got " + got);
+                   expected.empty() ? "value expected"
+                                    : expected + " expected, got " + got);
 }
 
 // A `:name(...)` whose receiver is a string: one of the string library's.
@@ -1677,7 +1680,11 @@ struct Binder {
         if (g == "type") return {native("type", {a0(0)}, p), false};
         if (g == "tostring") return {rt.call("$str", {a0(0)}, p), false};
         if (g == "setmetatable") {
-          return {emit_setmetatable(arglist, a0(0), a0(1), p), false};
+          return {emit_setmetatable(arglist, vals.rest.valid(),
+                                    a0(0), args.size() > 1 ? std::optional<NodeId>(a0(1))
+                                    : std::nullopt,
+                                    p),
+                  false};
         }
         if (g == "getmetatable") {
           return {b.intrinsic(IntrinsicId::MetaGet, {a0(0)}, p), false};
@@ -1956,32 +1963,46 @@ struct Binder {
   // guard says so, for an `m` that is not written out as one (a table
   // constructor, nil), and its failure names whichever argument is wrong
   // first: the table, or else the metatable.
-  NodeId emit_setmetatable(const Ast* arglist, NodeId table, NodeId meta,
+  NodeId emit_setmetatable(const Ast* arglist, bool rest,
+                           NodeId table, std::optional<NodeId> meta,
                            SrcPos p) {
     auto b = Builder(m).at(p);
-    const Ast* second = arglist != nullptr && arglist->nodes.size() == 2
-                            ? arglist->nodes[1].get()
-                            : nullptr;
-    if (second != nullptr &&
-        (second->tag == "tablector"_ ||
-         (second->tag == "literal"_ && second->token == "nil"))) {
-      return b.intrinsic(IntrinsicId::MetaSet, {table, meta});
+    const auto complaint = [&](int k, NodeId held) {
+      return native("arg_trap",
+                    {b.str_literal("setmetatable"), b.literal(k),
+                     b.literal(k + 1), held},
+                    p);
+    };
+    // The first argument is wrong before the second is looked at, as in
+    // Lua: the table when it is no table, else a metatable that is missing
+    // or wrong.
+    if (!meta && !rest) {
+      return b.let(table, [&](auto t) {
+        return b.make_if(
+            b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {t()}),
+                     b.str_literal("map")),
+            complaint(0, t()), absent("setmetatable", 1, false, false, p));
+      });
     }
-    return b.lets({table, meta}, [&](const std::vector<Builder::Temp>& t) {
+    const NodeId second = meta ? *meta : b.nil_literal();
+    const Ast* written = arglist != nullptr && arglist->nodes.size() == 2
+                             ? arglist->nodes[1].get()
+                             : nullptr;
+    if (written != nullptr &&
+        (written->tag == "tablector"_ ||
+         (written->tag == "literal"_ && written->token == "nil"))) {
+      return b.intrinsic(IntrinsicId::MetaSet, {table, second});
+    }
+    return b.lets({table, second}, [&](const std::vector<Builder::Temp>& t) {
       const auto type_not = [&](int k, const char* name) {
         return b.binary(BinOp::Ne, b.intrinsic(IntrinsicId::TypeOf, {t[k]()}),
                         b.str_literal(name));
       };
-      const auto complaint = [&](int k) {
-        return native("arg_trap",
-                      {b.str_literal("setmetatable"), b.literal(k),
-                       b.literal(k + 1), t[k]()},
-                      p);
-      };
       return b.block(
           {b.make_if(b.make_if(type_not(1, "map"), type_not(1, "nil"),
                                b.bool_literal(false)),
-                     b.make_if(type_not(0, "map"), complaint(0), complaint(1)),
+                     b.make_if(type_not(0, "map"), complaint(0, t[0]()),
+                               complaint(1, t[1]())),
                      NodeId{}),
            b.intrinsic(IntrinsicId::MetaSet, {t[0](), t[1]()})});
     });
@@ -2649,6 +2670,14 @@ bool nat_for_step(NativeCall& c) {
   return false;
 }
 
+// The int64 a double holds, when it holds one: a whole number in range, which
+// is not an infinity or a NaN.
+bool exact_int64(double d, int64_t& out) {
+  if (!(std::floor(d) == d && d >= -0x1p63 && d < 0x1p63)) return false;
+  out = static_cast<int64_t>(d);
+  return true;
+}
+
 // error(v, level) for a level other than the default one. A string gets
 // the position `level` frames up -- 1 is the call itself (line, col), 2 the
 // call that entered the function holding it, which is what attributing a
@@ -2665,15 +2694,10 @@ bool nat_error_level(NativeCall& c) {
   if (lv.is_int()) {
     level = lv.as_int();
   } else if (lv.is_double()) {
-    const double d = lv.as_double();
-    if (!(std::floor(d) == d && d >= -0x1p63 && d < 0x1p63)) {
-      c.error = coreir::make_trap(
-          TrapKind::Operands,
-          arg_error("error", 2, "number has no integer representation"),
-          here, {.l = &lv});
+    if (!exact_int64(lv.as_double(), level)) {
+      bad_arg(c, "error", 1, &here);
       return false;
     }
-    level = static_cast<int64_t>(d);
   } else if (!lv.is_nil()) {
     bad_arg(c, "error", 1, &here);
     return false;
@@ -2740,10 +2764,7 @@ struct StrCall {
     const Value& v = arg(k);
     if (v.is_int()) {
       out = v.as_int();
-    } else if (v.is_double() && std::floor(v.as_double()) == v.as_double() &&
-               std::fabs(v.as_double()) < 0x1p63) {
-      out = static_cast<int64_t>(v.as_double());
-    } else {
+    } else if (!v.is_double() || !exact_int64(v.as_double(), out)) {
       return bad(fn, k);
     }
     return true;

@@ -187,3 +187,25 @@ show(function() return setmetatable({}, true) end)
 show(function() return string.upper({}) end)
 print(getmetatable(setmetatable({}, meta)) == meta)
 print(getmetatable(setmetatable({}, nil)))
+
+-- The first argument of setmetatable is looked at before the second, so a
+-- bad table is the complaint whatever the metatable is or whether it is
+-- there. (The last three are guards.)
+show(function() return setmetatable(1) end)
+show(function() return setmetatable(nil) end)
+show(function() return setmetatable({}) end)
+show(function() return setmetatable(1, 2) end)
+show(function() return setmetatable({}, 2) end)
+
+-- A float that holds no integer, an infinity, a NaN or a number past int64
+-- where an integer is wanted: no integer representation, for the argument
+-- as the call counts it. A whole float is the integer.
+show(function() return ("x"):sub(1.5) end)
+show(function() return ("x"):rep(1.5) end)
+show(function() return string.sub("x", 1, 2.5) end)
+show(function() return string.byte(1, 1.5) end)
+show(function() return ("abc"):sub(1 / 0) end)
+show(function() return ("abc"):sub(0 / 0) end)
+show(function() return string.rep("x", 2 ^ 63) end)
+show(function() return ("abc"):sub(-2 ^ 63, 2 ^ 63) end)
+print(("abc"):sub(2.0), ("abc"):sub(-2 ^ 63, 2.0))

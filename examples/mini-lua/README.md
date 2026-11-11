@@ -286,6 +286,11 @@ Quietly different:
   in `$set` (the VM's own SetIndex has no such rule, and other languages'
   containers take those keys), after the metatable's `__newindex` has had
   its say, which takes any key and any value, a nil value included.
+* **A numeric string is not a number, and a number is not a string, for the
+  string library's parameters.** `string.rep("x", "2")`, `string.rep(5, 2)`
+  and `("abc"):sub("2")` are argument errors where Lua converts (as with
+  `error("x", "2")` above). A number is read as its `tostring` only by
+  `string.len` and `string.byte`.
 * **`string.upper(5)` is an argument error.** Lua reads a number as the
   string it writes as; `string.len` and `string.byte` do here, and the two
   case maps (the VM's own StrUpper/StrLower) do not.

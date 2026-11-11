@@ -108,3 +108,17 @@ traps.lua:186: bad argument #2 to 'setmetatable' (nil or table expected, got boo
 traps.lua:187: bad argument #1 to 'upper' (string expected, got table)
 true
 nil
+traps.lua:194: bad argument #1 to 'setmetatable' (table expected, got number)
+traps.lua:195: bad argument #1 to 'setmetatable' (table expected, got nil)
+traps.lua:196: bad argument #2 to 'setmetatable' (nil or table expected, got no value)
+traps.lua:197: bad argument #1 to 'setmetatable' (table expected, got number)
+traps.lua:198: bad argument #2 to 'setmetatable' (nil or table expected, got number)
+traps.lua:203: bad argument #1 to 'sub' (number has no integer representation)
+traps.lua:204: bad argument #1 to 'rep' (number has no integer representation)
+traps.lua:205: bad argument #3 to 'sub' (number has no integer representation)
+traps.lua:206: bad argument #2 to 'byte' (number has no integer representation)
+traps.lua:207: bad argument #1 to 'sub' (number has no integer representation)
+traps.lua:208: bad argument #1 to 'sub' (number has no integer representation)
+traps.lua:209: bad argument #2 to 'rep' (number has no integer representation)
+traps.lua:210: bad argument #2 to 'sub' (number has no integer representation)
+bc	ab
