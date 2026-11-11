@@ -257,11 +257,10 @@ Quietly different:
   instructions more per exact division than a bare double one.
 * **A value-less expression answers `#<unspecified>`**: an `if` without an
   else, `when`/`unless`, a `cond` or `case` that matches nothing, `set!`,
-  `display`, `newline` and `for-each`. It is an object of its own, true in
-  a condition and equal to every other one. Each evaluation makes a fresh
-  object (the IR has no global to share one), about 90 ns per fallthrough:
-  a one-armed `if` that falls through in a 3M-iteration loop runs 0.505 s
-  where a two-armed one runs 0.225 s. A record's mutator is the exception:
+  `display`, `newline` and `for-each`. It is the VM's void immediate, true
+  in a condition and `eq?` to every other one, and costs nothing to make:
+  a loop whose one-armed `if` falls through runs the same instructions as
+  one with two arms. A record's mutator is the exception:
   `(set-px! r 5)` is `5` in Guile 3.0 and `()` here.
 * **The wrong number of arguments is an error** for every procedure a
   program can call, a library procedure used as a value (`(map cons xs)`)

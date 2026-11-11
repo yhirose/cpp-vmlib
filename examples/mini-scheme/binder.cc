@@ -75,21 +75,11 @@ constexpr char kEscapeKind[] = "escape";
 constexpr int64_t kEscapeTag = 1;
 constexpr int64_t kEscapeValue = 2;
 // What an expression with no value answers (`(if #f #f)`, `set!`, `display`,
-// `for-each`): not '(), which Scheme's null? and eq? tell apart from it, and
-// which prints as "()" where this prints as guile's #<unspecified>. An
-// object whose kind record is all it is; the IR has no globals to hold one
-// shared instance, so each evaluation makes its own, and `$eqv` treats any
-// two as the same value. The cost is two allocations and three instructions
-// per evaluation: a 3M-iteration tail loop whose one-armed `if` falls
-// through takes 60.0M instructions and 0.505 s, against 51.0M and 0.225 s
-// for a two-armed one. Sharing one needs a binder-owned variable every
-// function that can fall through captures, which pass A would have to know
-// in advance; a VM immediate would remove it (a cross-front-end decision).
-constexpr char kUnspecifiedKind[] = "unspecified";
-
-NodeId unspecified(Builder::At& b) {
-  return of_kind(b, b.object_lit({}), kUnspecifiedKind, {});
-}
+// `for-each`): the VM's Void immediate, not '(), which Scheme's null? and
+// eq? tell apart from it and which prints as "()" where this prints as
+// guile's #<unspecified>. An immediate is one value however many are
+// made: eq? holds between any two, and nothing is allocated.
+NodeId unspecified(Builder::At& b) { return b.void_literal(); }
 
 SrcPos pos_of(const Ast& a) {
   return {static_cast<uint32_t>(a.line), static_cast<uint32_t>(a.column)};
@@ -976,11 +966,6 @@ struct Binder {
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
     r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
-    // Two unspecified values are one value, as in guile, though each
-    // evaluation made its own object.
-    r.add(r.iff(r.both(is_kind(r, a, kUnspecifiedKind),
-                       is_kind(r, b, kUnspecifiedKind)),
-                r.ret(r.Bo(true))));
     r.add(r.iff(r.either(r.is(r.typ(a), "bool"),
                          r.either(r.is(r.typ(a), "int"),
                                   r.either(r.is(r.typ(a), "double"),
@@ -1117,7 +1102,7 @@ struct Binder {
     r.add(r.iff(r.is(r.typ(v), "bool"),
                 r.ret(r.iff(r.L(v), r.S("#t"), r.S("#f")))));
     r.add(r.iff(r.is(r.typ(v), "string"), r.ret(r.L(v))));
-    r.add(r.iff(is_kind(r, v, kUnspecifiedKind),
+    r.add(r.iff(r.is(r.typ(v), "void"),
                 r.ret(r.S("#<unspecified>"))));
     // Guile prints an inexact number as the shortest round trip in
     // double_format.h's kGuile layout ("1.0e-4", "1.0e7", a ".0" on a whole
