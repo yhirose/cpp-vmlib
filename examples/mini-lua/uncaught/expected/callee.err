@@ -1,0 +1,1 @@
+callee.lua:2:4: uncaught: callee.lua:2: attempt to call a nil value (field 'x')

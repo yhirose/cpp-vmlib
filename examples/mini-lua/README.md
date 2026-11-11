@@ -257,10 +257,17 @@ metamethods (`__lt`/`__le`/`__concat`/`__len`/`__unm`/`__div`/`__mod`/
 
 Quietly different:
 
-* **A runtime error names no variable.** Its words and its `chunk:line:`
-  are Lua's (`attempt to call a boolean value`, `bad argument #1 to
-  'select' ...`), but Lua adds `(local 'x')` or `(field 'y')` when it
-  knows the name involved, and the VM does not.
+* **A runtime error names a variable only for a call.** Its words and its
+  `chunk:line:` are Lua's (`attempt to call a boolean value (local 'f')`,
+  `bad argument #1 to 'select' ...`). The callee of a failed call is named
+  as Lua names it for a local, an upvalue, a field with a string key
+  (`t.x()`, `t["x"]()`) and a method (`t:m()`). Not named, where Lua names
+  them: an operand of arithmetic, concatenation, a comparison or an index;
+  a table callee, with or without `__call` (Lua says `table value (local
+  't')` for the one without); `t[k]()`, `t[1]()`, `("x")()`; the iterator
+  of a generic `for` and a metamethod's name; and `(t:m())()`, which Lua
+  names `method 'm'`. (A name outside the library is a bind error here,
+  so `global 'f'` and `string.nope()` never arise.)
 * **A library function's missing argument is told only when it is written
   out.** `tostring()` is Lua's `bad argument #1 to 'tostring' (value
   expected)`; `tostring(f())` where `f` returns nothing is `tostring(nil)`,

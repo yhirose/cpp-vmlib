@@ -1537,7 +1537,7 @@ struct Binder {
         case "callsfx"_: {
           const Values args =
               emit_args(sfx.nodes.empty() ? nullptr : sfx.nodes[0].get(), ctx);
-          cur = {call_any(recv, {}, args, p), true};
+          cur = {call_any(recv, {}, args, p, callee_name(a, i, ctx)), true};
           break;
         }
         default: {  // methodsfx
@@ -1570,7 +1570,7 @@ struct Binder {
                          return call_any(
                              ops.call("$get", {self(), b.str_literal(name, p)},
                                      p),
-                             {self()}, args, p);
+                             {self()}, args, p, "method '" + name + "'");
                        },
                        p),
                  true};
@@ -1587,8 +1587,11 @@ struct Binder {
   // arguments have run -- as Lua does, so an argument that changes it is
   // seen. That path collects the arguments into an array; a plain call
   // never takes it, and `$fn` is read on both before any argument runs.
+  // `name` is how Lua spells the callee in "attempt to call a nil value
+  // (local 'f')", noted on the plain call only: a table is not named.
   NodeId call_any(NodeId callee, const std::vector<NodeId>& before,
-                  const Values& args, SrcPos p) {
+                  const Values& args, SrcPos p,
+                  const std::optional<std::string>& name = std::nullopt) {
     auto b = Builder(m).at(p);
     // The callee, then `before` and the arguments, each run once and held
     // by a Let, which both calls read.
@@ -1607,12 +1610,56 @@ struct Binder {
       };
       Values all{held(1, nb + na), rest()};
       const Values given{held(1 + nb, na), rest()};
+      const NodeId plain = call_with(t[0](), held(1, nb), given, p);
+      if (name) Builder(m).note(plain, *name);
       return b.make_if(
           b.binary(BinOp::Eq, b.intrinsic(IntrinsicId::TypeOf, {t[0]()}),
                    b.str_literal("map")),
           rt.call("$calltable", {t[0](), values_array(all, p)}, p),
-          call_with(t[0](), held(1, nb), given, p));
+          plain);
     });
+  }
+
+  // How Lua spells the callee of the call suffix `a.nodes[i]`, for the
+  // trap a non-function raises (convert_trap): `local 'f'`, `upvalue 'f'`,
+  // `field 'x'`; none for any shape Lua's own spelling is not reproduced
+  // for (README.md lists them). A method call is named by its suffix.
+  std::optional<std::string> callee_name(const Ast& a, size_t i,
+                                         const FnCtx& ctx) const {
+    const Ast& prim = *a.nodes[0];
+    if (prim.tag == "ident"_ && !ref_of.count(&prim)) return std::nullopt;
+    return spelled(a, i, ctx);
+  }
+  // The value of `a`'s primary and its suffixes before `end`.
+  std::optional<std::string> spelled(const Ast& a, size_t end,
+                                     const FnCtx& ctx) const {
+    if (end == 1) return primary_name(*a.nodes[0], ctx);
+    const Ast& last = *a.nodes[end - 1];
+    if (last.tag == "dotsfx"_) {
+      return "field '" + std::string(last.nodes[0]->token) + "'";
+    }
+    if (last.tag == "indexsfx"_ && last.nodes[0]->tag == "string"_) {
+      return "field '" + unescape(last.nodes[0]->token, *last.nodes[0]) + "'";
+    }
+    return std::nullopt;
+  }
+  std::optional<std::string> primary_name(const Ast& e,
+                                          const FnCtx& ctx) const {
+    switch (e.tag) {
+      case "ident"_: {
+        const auto it = ref_of.find(&e);
+        if (it == ref_of.end()) return std::nullopt;
+        const bool up = rs.access(ctx.fn, it->second).first == VarKind::Capture;
+        return std::string(up ? "upvalue '" : "local '") +
+               std::string(e.token) + "'";
+      }
+      case "paren"_:
+        return primary_name(*e.nodes[0], ctx);
+      case "suffixedexp"_:
+        return spelled(e, e.nodes.size(), ctx);
+      default:
+        return std::nullopt;
+    }
   }
 
   // The standard library, in the shapes this front end knows. A library
@@ -2843,7 +2890,8 @@ std::string& chunk_name() {
 
 // An executor's trap as the error Lua raises for the same fault: a string,
 // "chunk:line: attempt to ..." (Lua 5.4's words). The `(local 'x')` Lua adds
-// when it knows the variable is not here: the VM does not know its name.
+// when it knows the variable is not here: the VM does not know its name,
+// except for the callee of a call, which the binder notes (call_any).
 Value convert_trap(const Value& trap, const void*) {
   const Value L = trap_fact(trap, TrapFact::Left);
   const Value R = trap_fact(trap, TrapFact::Right);
@@ -2890,6 +2938,9 @@ Value convert_trap(const Value& trap, const void*) {
       break;
     case TrapKind::NotCallable:
       msg = "attempt to call a " + type(L) + " value";
+      if (const std::string name = trap_name(trap); !name.empty()) {
+        msg += " (" + name + ")";
+      }
       break;
     case TrapKind::NotIndexable:
     case TrapKind::Immutable:
