@@ -1967,53 +1967,86 @@ inline int32_t slot_limit(const Func& f, VarKind k) {
   return 0;
 }
 
-inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
+// IntrinsicInfo: every fact about an intrinsic that more than one pass
+// reads, in one row. name_of, intrinsic_arity, observable and the
+// bytecode's intrinsic_has_dst are one-line readers of this table, so a new
+// IntrinsicId is one case here (and one in vm::op_of, which owns the opcode).
+//
+// A switch rather than an array indexed by id, and a constructor with no
+// default arguments rather than designated initializers: -Wswitch makes a
+// missing enumerator a compile error (kLastIntrinsic is maintained by hand,
+// so a size check on an array could not see one), and a missing field is a
+// call that does not compile, where -Wmissing-field-initializers is not
+// reliable across compilers.
+namespace detail {
+
+struct IntrinsicInfo {
+  const char* name;  // the IR's word for it (name_of, from_name)
+  int arity;         // its operand count: one number, never variadic
+  bool has_dst;      // its opcode writes a destination register; false for
+                     // the statement-shaped ones, whose value is nil
+  bool observable;   // running it can be told from not running it
+                     // (shared_effects). A string is a value here, so
+                     // building one is not; building an array or a map is.
+  constexpr IntrinsicInfo(const char* name_, int arity_, bool has_dst_,
+                          bool observable_)
+      : name(name_), arity(arity_), has_dst(has_dst_),
+        observable(observable_) {}
+};
+
+constexpr IntrinsicInfo intrinsic_info(IntrinsicId id) {
   switch (id) {
-    case IntrinsicId::Print:   return 1;
-    case IntrinsicId::ReadInt: return 0;
-    case IntrinsicId::Len:     return 1;
-    case IntrinsicId::ToStr:   return 1;
-    case IntrinsicId::TypeOf:  return 1;
-    case IntrinsicId::ToInt:   return 1;
-    case IntrinsicId::ToDouble: return 1;
-    case IntrinsicId::Pow:     return 2;
-    case IntrinsicId::PrintRaw: return 1;
-    case IntrinsicId::ArrayPush: return 2;
-    case IntrinsicId::ArrayPop: return 1;
-    case IntrinsicId::ArrayConcat: return 2;
-    case IntrinsicId::ArrayFill: return 2;
-    case IntrinsicId::ObjectHas: return 2;
-    case IntrinsicId::ObjectKeys: return 1;
-    case IntrinsicId::ObjectRemove: return 2;
-    case IntrinsicId::ArgCount: return 0;
-    case IntrinsicId::Same: return 2;
-    case IntrinsicId::FnArity: return 1;
-    case IntrinsicId::Collect: return 0;
-    case IntrinsicId::HeapStats: return 0;
-    case IntrinsicId::GenResume: return 2;
-    case IntrinsicId::GenReturn: return 2;
-    case IntrinsicId::GenThrow: return 2;
-    case IntrinsicId::Enqueue: return 1;
-    case IntrinsicId::ToFloat32: return 1;
-    case IntrinsicId::IntegralKey: return 1;
-    case IntrinsicId::StrSlice: return 3;
-    case IntrinsicId::ArraySlice: return 3;
-    case IntrinsicId::StrByte: return 2;
-    case IntrinsicId::StrFromByte: return 1;
-    case IntrinsicId::StrUpper: return 1;
-    case IntrinsicId::StrLower: return 1;
-    case IntrinsicId::MapNew: return 0;
-    case IntrinsicId::CoroCreate: return 1;
-    case IntrinsicId::CoroResume: return 2;
-    case IntrinsicId::CoroYield: return 1;
-    case IntrinsicId::CoroClose: return 1;
-    case IntrinsicId::CoroStatus: return 1;
-    case IntrinsicId::CoroCurrent: return 0;
-    case IntrinsicId::MetaGet: return 1;
-    case IntrinsicId::MetaSet: return 2;
-    case IntrinsicId::DropSet: return 2;
+    case IntrinsicId::Print:         return {"print", 1, false, true};
+    case IntrinsicId::ReadInt:       return {"readint", 0, true, true};
+    case IntrinsicId::Len:           return {"len", 1, true, false};
+    case IntrinsicId::ToStr:         return {"tostr", 1, true, false};
+    case IntrinsicId::TypeOf:        return {"typeof", 1, true, false};
+    case IntrinsicId::ToInt:         return {"toint", 1, true, false};
+    case IntrinsicId::ToDouble:      return {"todouble", 1, true, false};
+    case IntrinsicId::Pow:           return {"pow", 2, true, false};
+    case IntrinsicId::PrintRaw:      return {"printraw", 1, false, true};
+    case IntrinsicId::ArrayPush:     return {"arraypush", 2, false, true};
+    case IntrinsicId::ArrayPop:      return {"arraypop", 1, true, true};
+    case IntrinsicId::ArrayConcat:   return {"arrayconcat", 2, false, true};
+    case IntrinsicId::ArrayFill:     return {"arrayfill", 2, true, true};
+    case IntrinsicId::ObjectHas:     return {"objecthas", 2, true, false};
+    case IntrinsicId::ObjectKeys:    return {"objectkeys", 1, true, true};
+    case IntrinsicId::ObjectRemove:  return {"objectremove", 2, false, true};
+    case IntrinsicId::ArgCount:      return {"argcount", 0, true, false};
+    case IntrinsicId::Same:          return {"same", 2, true, false};
+    case IntrinsicId::FnArity:       return {"fnarity", 1, true, false};
+    case IntrinsicId::Collect:       return {"collect", 0, true, true};
+    case IntrinsicId::HeapStats:     return {"heapstats", 0, true, true};
+    case IntrinsicId::GenResume:     return {"genresume", 2, true, true};
+    case IntrinsicId::GenReturn:     return {"genreturn", 2, true, true};
+    case IntrinsicId::GenThrow:      return {"genthrow", 2, true, true};
+    case IntrinsicId::Enqueue:       return {"enqueue", 1, false, true};
+    case IntrinsicId::ToFloat32:     return {"tofloat32", 1, true, false};
+    case IntrinsicId::IntegralKey:   return {"integralkey", 1, true, false};
+    case IntrinsicId::StrSlice:      return {"strslice", 3, true, false};
+    case IntrinsicId::ArraySlice:    return {"arrayslice", 3, true, true};
+    case IntrinsicId::StrByte:       return {"strbyte", 2, true, false};
+    case IntrinsicId::StrFromByte:   return {"strfrombyte", 1, true, false};
+    case IntrinsicId::StrUpper:      return {"strupper", 1, true, false};
+    case IntrinsicId::StrLower:      return {"strlower", 1, true, false};
+    case IntrinsicId::MapNew:        return {"mapnew", 0, true, true};
+    case IntrinsicId::CoroCreate:    return {"corocreate", 1, true, true};
+    case IntrinsicId::CoroResume:    return {"cororesume", 2, true, true};
+    case IntrinsicId::CoroYield:     return {"coroyield", 1, true, true};
+    case IntrinsicId::CoroClose:     return {"coroclose", 1, false, true};
+    case IntrinsicId::CoroStatus:    return {"corostatus", 1, true, false};
+    case IntrinsicId::CoroCurrent:   return {"corocurrent", 0, true, false};
+    case IntrinsicId::MetaGet:       return {"metaget", 1, true, false};
+    case IntrinsicId::MetaSet:       return {"metaset", 2, true, true};
+    case IntrinsicId::DropSet:       return {"dropset", 2, true, true};
   }
-  return 0;
+  return {"?", 0, true, true};  // not an IntrinsicId
+}
+
+}  // namespace detail
+
+inline constexpr uint32_t intrinsic_arity(IntrinsicId id) {
+  return static_cast<uint32_t>(detail::intrinsic_info(id).arity);
 }
 
 // Whether a tag yields a value usable as an operand. Under the "every node
@@ -4995,7 +5028,7 @@ static_assert(store_op_of(coreir::VarKind::Cell) == Op::StoreCell);
 
 // The intrinsics have no such offset -- their opcodes were not laid out to
 // have one -- so the correspondence is a table. It is still one table: with
-// this and coreir::intrinsic_arity, lowering an intrinsic needs no knowledge
+// this and coreir::detail::intrinsic_info, lowering an intrinsic needs no knowledge
 // of which intrinsic it is, and a new one is a case here rather than a new
 // arm in the compiler. The switch is exhaustive on purpose: -Wswitch reports
 // an id added to coreir without an opcode.
@@ -5053,30 +5086,65 @@ inline constexpr Op op_of(coreir::IntrinsicId id) {
 // intrinsics take their operands in a and b and produce nothing; in value
 // position the compiler follows them with a LoadNil.
 inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
-  using I = coreir::IntrinsicId;
-  switch (id) {
-    case I::Print:
-    case I::PrintRaw:
-    case I::ArrayPush:
-    case I::ArrayConcat:
-    case I::ObjectRemove:
-    case I::Enqueue:
-    case I::CoroClose:
-      return false;
-    default:
-      return true;
-  }
+  return coreir::detail::intrinsic_info(id).has_dst;
 }
 
-// The inverse of op_of(IntrinsicId), for a reader of bytecode (the dump)
-// that has the opcode and wants the intrinsic's shape back. A scan, since
-// only diagnostics ask.
-inline std::optional<coreir::IntrinsicId> intrinsic_of(Op op) {
+// An Insn has four operand fields. With a destination (in a) that leaves
+// three for arguments (b, c, d: a slice's receiver and two bounds); without
+// one, compile_intrinsic emits the arguments in a and b. An intrinsic wanting
+// more would need a different instruction shape.
+inline constexpr uint32_t kMaxIntrinsicArgs = 3;
+inline constexpr uint32_t max_intrinsic_args(bool has_dst) {
+  return has_dst ? kMaxIntrinsicArgs : 2;
+}
+inline constexpr bool every_intrinsic_fits_an_insn() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
     const auto id = static_cast<coreir::IntrinsicId>(i);
-    if (op_of(id) == op) return id;
+    if (coreir::intrinsic_arity(id) > max_intrinsic_args(intrinsic_has_dst(id))) {
+      return false;
+    }
   }
-  return std::nullopt;
+  return true;
+}
+static_assert(every_intrinsic_fits_an_insn(),
+              "an intrinsic's arguments must fit the Insn compile_intrinsic "
+              "emits: arity <= (has_dst ? 3 : 2)");
+
+// The inverse of op_of(IntrinsicId), for a reader of bytecode (the dump)
+// that has the opcode and wants the intrinsic's shape back: a table indexed
+// by opcode, built from op_of itself so the two cannot disagree, and
+// checked below to be a true inverse (no two intrinsics share an opcode).
+namespace detail {
+inline constexpr uint8_t kNotAnIntrinsic = 0xFF;
+constexpr std::array<uint8_t, 256> make_intrinsic_of() {
+  std::array<uint8_t, 256> t{};
+  for (uint8_t& e : t) e = kNotAnIntrinsic;
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
+    t[static_cast<uint8_t>(op_of(static_cast<coreir::IntrinsicId>(i)))] = i;
+  }
+  return t;
+}
+inline constexpr std::array<uint8_t, 256> kIntrinsicOfOp = make_intrinsic_of();
+constexpr bool intrinsic_of_is_inverse() {
+  size_t mapped = 0;
+  for (const uint8_t e : kIntrinsicOfOp) mapped += e != kNotAnIntrinsic;
+  // Injective: a shared opcode would leave one of the ids unmapped.
+  if (mapped != static_cast<size_t>(coreir::kLastIntrinsic) + 1) return false;
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
+    const auto op = op_of(static_cast<coreir::IntrinsicId>(i));
+    if (kIntrinsicOfOp[static_cast<uint8_t>(op)] != i) return false;
+  }
+  return true;
+}
+static_assert(intrinsic_of_is_inverse(),
+              "op_of(IntrinsicId) must give every intrinsic an opcode of its "
+              "own");
+}  // namespace detail
+
+inline constexpr std::optional<coreir::IntrinsicId> intrinsic_of(Op op) {
+  const uint8_t i = detail::kIntrinsicOfOp[static_cast<uint8_t>(op)];
+  if (i == detail::kNotAnIntrinsic) return std::nullopt;
+  return static_cast<coreir::IntrinsicId>(i);
 }
 
 struct Insn {
@@ -6293,54 +6361,9 @@ inline const char* name_of(VarKind k) {
 
 // Declared in ir.h and public, same as BinOp/VarKind above: a front end
 // resolving its own intrinsic name (codegen.h's `intrinsic(name:)`, say)
-// shares this rather than typing the 24 names a second time.
+// shares this rather than typing the names a second time.
 inline const char* name_of(IntrinsicId id) {
-  switch (id) {
-    case IntrinsicId::Print:   return "print";
-    case IntrinsicId::ReadInt: return "readint";
-    case IntrinsicId::Len:     return "len";
-    case IntrinsicId::ToStr:   return "tostr";
-    case IntrinsicId::TypeOf:  return "typeof";
-    case IntrinsicId::ToInt:   return "toint";
-    case IntrinsicId::ToDouble: return "todouble";
-    case IntrinsicId::Pow:     return "pow";
-    case IntrinsicId::PrintRaw: return "printraw";
-    case IntrinsicId::ArrayPush: return "arraypush";
-    case IntrinsicId::ArrayPop: return "arraypop";
-    case IntrinsicId::ArrayConcat: return "arrayconcat";
-    case IntrinsicId::ArrayFill: return "arrayfill";
-    case IntrinsicId::ObjectHas: return "objecthas";
-    case IntrinsicId::ObjectKeys: return "objectkeys";
-    case IntrinsicId::ObjectRemove: return "objectremove";
-    case IntrinsicId::ArgCount: return "argcount";
-    case IntrinsicId::Same: return "same";
-    case IntrinsicId::FnArity: return "fnarity";
-    case IntrinsicId::Collect: return "collect";
-    case IntrinsicId::HeapStats: return "heapstats";
-    case IntrinsicId::GenResume: return "genresume";
-    case IntrinsicId::GenReturn: return "genreturn";
-    case IntrinsicId::GenThrow: return "genthrow";
-    case IntrinsicId::Enqueue: return "enqueue";
-    case IntrinsicId::ToFloat32: return "tofloat32";
-    case IntrinsicId::IntegralKey: return "integralkey";
-    case IntrinsicId::StrSlice: return "strslice";
-    case IntrinsicId::ArraySlice: return "arrayslice";
-    case IntrinsicId::StrByte: return "strbyte";
-    case IntrinsicId::StrFromByte: return "strfrombyte";
-    case IntrinsicId::StrUpper: return "strupper";
-    case IntrinsicId::StrLower: return "strlower";
-    case IntrinsicId::MapNew: return "mapnew";
-    case IntrinsicId::CoroCreate: return "corocreate";
-    case IntrinsicId::CoroResume: return "cororesume";
-    case IntrinsicId::CoroYield: return "coroyield";
-    case IntrinsicId::CoroClose: return "coroclose";
-    case IntrinsicId::CoroStatus: return "corostatus";
-    case IntrinsicId::CoroCurrent: return "corocurrent";
-    case IntrinsicId::MetaGet: return "metaget";
-    case IntrinsicId::MetaSet: return "metaset";
-    case IntrinsicId::DropSet: return "dropset";
-  }
-  return "?";
+  return detail::intrinsic_info(id).name;
 }
 
 inline const char* name_of(ConstKind k) {
@@ -7147,54 +7170,7 @@ inline constexpr bool observable(Tag t) {
 // The same per intrinsic. A string is a value here, so building one (ToStr,
 // StrSlice, ...) is not observable; building an array or a map is.
 inline constexpr bool observable(IntrinsicId id) {
-  switch (id) {
-    case IntrinsicId::Len:
-    case IntrinsicId::ToStr:
-    case IntrinsicId::TypeOf:
-    case IntrinsicId::ToInt:
-    case IntrinsicId::ToDouble:
-    case IntrinsicId::Pow:
-    case IntrinsicId::ObjectHas:
-    case IntrinsicId::ArgCount:
-    case IntrinsicId::Same:
-    case IntrinsicId::FnArity:
-    case IntrinsicId::ToFloat32:
-    case IntrinsicId::IntegralKey:
-    case IntrinsicId::StrSlice:
-    case IntrinsicId::StrByte:
-    case IntrinsicId::StrFromByte:
-    case IntrinsicId::StrUpper:
-    case IntrinsicId::StrLower:
-    case IntrinsicId::CoroStatus:
-    case IntrinsicId::CoroCurrent:
-    case IntrinsicId::MetaGet:
-      return false;
-    case IntrinsicId::Print:
-    case IntrinsicId::ReadInt:
-    case IntrinsicId::PrintRaw:
-    case IntrinsicId::ArrayPush:
-    case IntrinsicId::ArrayPop:
-    case IntrinsicId::ArrayConcat:
-    case IntrinsicId::ArrayFill:
-    case IntrinsicId::ObjectKeys:
-    case IntrinsicId::ObjectRemove:
-    case IntrinsicId::Collect:
-    case IntrinsicId::HeapStats:
-    case IntrinsicId::GenResume:
-    case IntrinsicId::GenReturn:
-    case IntrinsicId::GenThrow:
-    case IntrinsicId::Enqueue:
-    case IntrinsicId::ArraySlice:
-    case IntrinsicId::MapNew:
-    case IntrinsicId::CoroCreate:
-    case IntrinsicId::CoroResume:
-    case IntrinsicId::CoroYield:
-    case IntrinsicId::CoroClose:
-    case IntrinsicId::MetaSet:
-    case IntrinsicId::DropSet:
-      return true;
-  }
-  return true;
+  return intrinsic_info(id).observable;
 }
 
 // Whether running `x` can be told from not running it, its children aside.
@@ -7683,7 +7659,15 @@ inline std::string to_string(const Program& p) {
         case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
         case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent:
         case Op::MetaGet: case Op::MetaSet: case Op::DropSet: {
-          const coreir::IntrinsicId id = *intrinsic_of(in.op);
+          const std::optional<coreir::IntrinsicId> found = intrinsic_of(in.op);
+          if (!found) {
+            coreir_rt::fail(std::string("vm::to_string: ") +
+                                detail::name_of(in.op) +
+                                " is listed as an intrinsic's opcode, but "
+                                "op_of(IntrinsicId) has none for it",
+                            0, 0);
+          }
+          const coreir::IntrinsicId id = *found;
           const int32_t regs[] = {in.a, in.b, in.c, in.d};
           const uint32_t n =
               coreir::intrinsic_arity(id) + (intrinsic_has_dst(id) ? 1 : 0);
@@ -8291,14 +8275,12 @@ struct FnCompiler {
       emit(Op::LoadNil, r, 0, 0, n.pos);
       return r;
     }
-    // Three, because an Insn has four operand fields and the widest
-    // intrinsic spends one of them on its destination (a slice: the
-    // receiver and two bounds). An intrinsic wanting more would need a
-    // different instruction shape, not a bigger array here.
-    constexpr uint32_t kMaxArgs = 3;
-    const uint32_t argc = std::min(intrinsic_arity(v.id), kMaxArgs);
+    // Every intrinsic's arguments fit the Insn (vm::kMaxIntrinsicArgs, and
+    // static_asserted for all of them next to intrinsic_has_dst), and
+    // verify() holds the node to its arity, so all of them are compiled.
+    const uint32_t argc = intrinsic_arity(v.id);
     const int32_t base = top;
-    int32_t a[kMaxArgs] = {0, 0, 0};
+    int32_t a[kMaxIntrinsicArgs] = {0, 0, 0};
     for (uint32_t i = 0; i < argc; ++i) {
       a[i] = compile_expr(m.child(id, i));
     }
