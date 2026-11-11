@@ -125,6 +125,95 @@ void expect(const Profiled& r, const std::string& what, uint64_t instructions,
   }
 }
 
+// What an intrinsic's name, arity, destination and opcode say once lowered.
+// Each id is compiled in value position with literal arguments, and the
+// instruction compile_intrinsic emitted is read back through the dump: the
+// destination (when there is one) and then the arguments, which is the
+// operand list the dump reads off arity + has_dst; the fields past them
+// zero. (That every id has an opcode of its own is a static_assert.)
+void check_intrinsic_layout(coreir::IntrinsicId id) {
+  using namespace coreir;
+  const char* name = name_of(id);
+  const SrcPos p{1, 1};
+  const uint32_t arity = intrinsic_arity(id);
+  const bool dst = vm::intrinsic_has_dst(id);
+  Module m;
+  Builder b(m);
+  m.capture_maps.push_back({});
+  std::vector<NodeId> args;
+  for (uint32_t i = 0; i < arity; ++i) args.push_back(b.literal(i + 1, p));
+  m.funcs.push_back(
+      {"main", 1, 0,
+       b.block({b.assign(VarKind::Local, 0, b.intrinsic(id, args, p), p)}, p),
+       {"t"}, {}});
+  if (auto err = verify(m)) return fail(name, "malformed IR: " + *err + "\n");
+  const vm::Program prog = vm::compile(m);
+  const vm::Insn* in = nullptr;
+  for (const vm::Insn& x : prog.chunks[0].code) {
+    if (x.op == vm::op_of(id)) in = &x;
+  }
+  if (in == nullptr) return fail(name, "its opcode was not emitted\n");
+  // The registers the layout names: a destination, then arguments, in the
+  // fields from a; the argument registers are the ones the arguments were
+  // compiled into, from the destination's own, which is released first.
+  std::vector<int32_t> want;
+  if (dst) want.push_back(in->a);
+  for (uint32_t i = 0; i < arity; ++i) want.push_back(in->a + i);
+  want.resize(4, 0);
+  const int32_t got[4] = {in->a, in->b, in->c, in->d};
+  for (int f = 0; f < 4; ++f) {
+    if (got[f] != want[f]) {
+      fail(name, "operand field " + std::to_string(f) + " is r" +
+                     std::to_string(got[f]) + ", want r" +
+                     std::to_string(want[f]) + "\n");
+    }
+  }
+  std::string line = std::string("\t") + vm::detail::name_of(in->op);
+  for (uint32_t k = 0; k < arity + (dst ? 1u : 0u); ++k) {
+    line += (k ? ", r" : " r") + std::to_string(want[k]);
+  }
+  line += "\t;";
+  if (vm::to_string(prog).find(line) == std::string::npos) {
+    fail(name, "the dump has no line " + line + "\n");
+  }
+}
+
+// One Insn per opcode through the dump: every opcode has a name of its own
+// and a format that reads nothing outside the program it was given.
+void check_every_opcode_dumps() {
+  std::map<std::string, int> seen;
+  vm::Program prog;
+  prog.consts.push_back(coreir::Const{});
+  prog.natives.push_back("native");
+  prog.positions.push_back(coreir::SrcPos{1, 1});
+  vm::Chunk ch;
+  ch.name = "all";
+  ch.switch_tables.emplace_back();
+  for (int i = 0; i <= static_cast<int>(vm::kLastOp); ++i) {
+    vm::Insn in;
+    in.op = static_cast<vm::Op>(i);
+    const std::string name = vm::detail::name_of(in.op);
+    if (name == "?") {
+      fail("opcode names", "opcode " + std::to_string(i) + " has none\n");
+    }
+    if (++seen[name] > 1) fail("opcode names", name + " is shared\n");
+    ch.code.push_back(in);
+    ch.code_pos.push_back(0);
+  }
+  // kLastOp is the last: the opcode past it is none.
+  if (std::string(vm::detail::name_of(static_cast<vm::Op>(
+          static_cast<int>(vm::kLastOp) + 1))) != "?") {
+    fail("kLastOp", "an opcode follows it\n");
+  }
+  prog.chunks.push_back(std::move(ch));
+  const std::string text = vm::to_string(prog);
+  for (const auto& [name, n] : seen) {
+    if (text.find("\t" + name) == std::string::npos) {
+      fail("opcode dump", "never printed " + name + "\n");
+    }
+  }
+}
+
 }  // namespace
 
 extern "C" {
@@ -550,6 +639,13 @@ int main() {
     expect(r, "returned if", 108,
            {{"main", 1, 14, 108}, {"sum", 4, 74, 94}, {"drop", 4, 20, 20}});
   }
+
+  // --- 10. What an intrinsic's facts say once lowered, and the dump of
+  //         every opcode (vmlib.h's checklist for a new one).
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastIntrinsic); ++i) {
+    check_intrinsic_layout(static_cast<I>(i));
+  }
+  check_every_opcode_dumps();
 
   return g_failures == 0 ? 0 : 1;
 }

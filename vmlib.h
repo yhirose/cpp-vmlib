@@ -1938,6 +1938,11 @@ struct Module {
 
 namespace detail {
 
+// The name both info functions answer for a value past their enum.
+constexpr bool is_fallback(const char* name) {
+  return name[0] == '?' && name[1] == '\0';
+}
+
 struct TagInfo {
   const char* name;  // the IR's word for it (name_of, from_name)
   int arity;         // child count; -1 variadic or constrained (see above)
@@ -2002,6 +2007,11 @@ constexpr TagInfo tag_info(Tag t) {
   }
   return {"?", -1, false, true};  // not a Tag
 }
+// -Wswitch makes a missing row a compile error; this makes a forgotten bump
+// of kLastTag one, which would otherwise stop every scan one short.
+static_assert(is_fallback(tag_info(static_cast<Tag>(
+                  static_cast<uint8_t>(kLastTag) + 1)).name),
+              "kLastTag is not the last Tag: move it");
 
 }  // namespace detail
 
@@ -2019,6 +2029,22 @@ inline int32_t slot_limit(const Func& f, VarKind k) {
   }
   return 0;
 }
+
+// Adding an intrinsic, a Tag or an Op: what the compiler checks, and what it
+// cannot.
+//   IntrinsicId: -Wswitch fails intrinsic_info (below) and vm::op_of until
+//     each has its row; a shared opcode or an arity the Insn cannot hold is
+//     a static_assert. By hand: the enumerator, kLastIntrinsic (a
+//     static_assert catches a forgotten bump), the executor's case for its
+//     opcode, the dump's operand list, and the wording of its trap in
+//     trap_text (which has a `default`, so nothing flags a missing one).
+//   Tag: -Wswitch fails tag_info and the Verifier::check_node switches,
+//     Dumper::node and compile_expr/compile_stmt. By hand: the enumerator,
+//     kLastTag (static_asserted), operands_of, allowed_flags, and what the
+//     verifier and the compiler do with it.
+//   Op: -Wswitch fails vm::detail::name_of(Op), the dump's format switch and
+//     the executor's dispatch. By hand: the enumerator (and, for an
+//     intrinsic's opcode, the above).
 
 // IntrinsicInfo: every fact about an intrinsic that more than one pass
 // reads, in one row. name_of, intrinsic_arity, observable and the
@@ -2095,6 +2121,12 @@ constexpr IntrinsicInfo intrinsic_info(IntrinsicId id) {
   }
   return {"?", 0, true, true};  // not an IntrinsicId
 }
+
+// -Wswitch makes a missing row a compile error; this makes a forgotten bump
+// of kLastIntrinsic one, which would otherwise stop every scan one short.
+static_assert(is_fallback(intrinsic_info(static_cast<IntrinsicId>(
+                  static_cast<uint8_t>(kLastIntrinsic) + 1)).name),
+              "kLastIntrinsic is not the last IntrinsicId: move it");
 
 }  // namespace detail
 
@@ -4971,6 +5003,11 @@ enum class Op : uint8_t {
   DropSet,      // a = dst, b = object reg, c = destructor reg
 };
 
+// The last opcode, for the scans (test_profile's one Insn per opcode) that
+// walk the range. Hand-maintained like coreir's kLast*; test_profile checks
+// that the value past it has no name.
+inline constexpr Op kLastOp = Op::DropSet;
+
 // A Try instruction's b: the operator (a UnOp or a BinOp, which the opcode
 // says) in the low byte, and above it the b of the node's FallbackBits
 // (coreir::pack_fallback); its c is the node's a.
@@ -5047,10 +5084,10 @@ static_assert(store_op_of(coreir::VarKind::Cell) == Op::StoreCell);
 
 // The intrinsics have no such offset -- their opcodes were not laid out to
 // have one -- so the correspondence is a table. It is still one table: with
-// this and coreir::detail::intrinsic_info, lowering an intrinsic needs no knowledge
-// of which intrinsic it is, and a new one is a case here rather than a new
-// arm in the compiler. The switch is exhaustive on purpose: -Wswitch reports
-// an id added to coreir without an opcode.
+// this and coreir::detail::intrinsic_info, lowering an intrinsic needs no
+// knowledge of which intrinsic it is, and a new one is a case here rather
+// than a new arm in the compiler. The switch is exhaustive on purpose:
+// -Wswitch reports an id added to coreir without an opcode.
 inline constexpr Op op_of(coreir::IntrinsicId id) {
   using I = coreir::IntrinsicId;
   switch (id) {
@@ -5113,15 +5150,12 @@ inline constexpr bool intrinsic_has_dst(coreir::IntrinsicId id) {
 // one, compile_intrinsic emits the arguments in a and b. An intrinsic wanting
 // more would need a different instruction shape.
 inline constexpr uint32_t kMaxIntrinsicArgs = 3;
-inline constexpr uint32_t max_intrinsic_args(bool has_dst) {
-  return has_dst ? kMaxIntrinsicArgs : 2;
-}
 inline constexpr bool every_intrinsic_fits_an_insn() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
     const auto id = static_cast<coreir::IntrinsicId>(i);
-    if (coreir::intrinsic_arity(id) > max_intrinsic_args(intrinsic_has_dst(id))) {
-      return false;
-    }
+    const uint32_t room =
+        intrinsic_has_dst(id) ? kMaxIntrinsicArgs : kMaxIntrinsicArgs - 1;
+    if (coreir::intrinsic_arity(id) > room) return false;
   }
   return true;
 }
@@ -5135,6 +5169,7 @@ static_assert(every_intrinsic_fits_an_insn(),
 // checked below to be a true inverse (no two intrinsics share an opcode).
 namespace detail {
 inline constexpr uint8_t kNotAnIntrinsic = 0xFF;
+static_assert(sizeof(Op) == 1, "kIntrinsicOfOp is indexed by Op");
 constexpr std::array<uint8_t, 256> make_intrinsic_of() {
   std::array<uint8_t, 256> t{};
   for (uint8_t& e : t) e = kNotAnIntrinsic;
@@ -5145,10 +5180,8 @@ constexpr std::array<uint8_t, 256> make_intrinsic_of() {
 }
 inline constexpr std::array<uint8_t, 256> kIntrinsicOfOp = make_intrinsic_of();
 constexpr bool intrinsic_of_is_inverse() {
-  size_t mapped = 0;
-  for (const uint8_t e : kIntrinsicOfOp) mapped += e != kNotAnIntrinsic;
-  // Injective: a shared opcode would leave one of the ids unmapped.
-  if (mapped != static_cast<size_t>(coreir::kLastIntrinsic) + 1) return false;
+  // The round trip of every id also proves op_of injective: a shared opcode
+  // would map back to only one of its ids.
   for (uint8_t i = 0; i <= static_cast<uint8_t>(coreir::kLastIntrinsic); ++i) {
     const auto op = op_of(static_cast<coreir::IntrinsicId>(i));
     if (kIntrinsicOfOp[static_cast<uint8_t>(op)] != i) return false;
@@ -7611,15 +7644,9 @@ inline std::string to_string(const Program& p) {
         case Op::CoroCreate: case Op::CoroResume: case Op::CoroYield:
         case Op::CoroClose: case Op::CoroStatus: case Op::CoroCurrent:
         case Op::MetaGet: case Op::MetaSet: case Op::DropSet: {
-          const std::optional<coreir::IntrinsicId> found = intrinsic_of(in.op);
-          if (!found) {
-            coreir_rt::fail(std::string("vm::to_string: ") +
-                                detail::name_of(in.op) +
-                                " is listed as an intrinsic's opcode, but "
-                                "op_of(IntrinsicId) has none for it",
-                            0, 0);
-          }
-          const coreir::IntrinsicId id = *found;
+          // Every opcode listed above is some intrinsic's; value() makes a
+          // case listed here that is not one throw, never read garbage.
+          const coreir::IntrinsicId id = intrinsic_of(in.op).value();
           const int32_t regs[] = {in.a, in.b, in.c, in.d};
           const uint32_t n =
               coreir::intrinsic_arity(id) + (intrinsic_has_dst(id) ? 1 : 0);
@@ -8227,7 +8254,7 @@ struct FnCompiler {
       emit(Op::LoadNil, r, 0, 0, n.pos);
       return r;
     }
-    // Every intrinsic's arguments fit the Insn (vm::kMaxIntrinsicArgs, and
+    // Every intrinsic's arguments fit the Insn (kMaxIntrinsicArgs,
     // static_asserted for all of them next to intrinsic_has_dst), and
     // verify() holds the node to its arity, so all of them are compiled.
     const uint32_t argc = intrinsic_arity(v.id);

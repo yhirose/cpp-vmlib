@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdint>
 #include <optional>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -42,129 +41,6 @@ void check_rejects_bogus(const char* enum_name) {
   if (from_name<E>("").has_value()) {
     std::fprintf(stderr, "FAIL: %s accepted an empty name\n", enum_name);
     ++g_failures;
-  }
-}
-
-// What every intrinsic's facts (name, arity, destination, opcode) have to
-// agree on once lowered. Each id is compiled in value position with literal
-// arguments, and the Insn compile_intrinsic emitted is read back: the
-// destination (when there is one) in a, the arguments after it, the unused
-// operand fields zero. That layout is what the bytecode dump reads back with
-// arity + has_dst operands, so the two are pinned to each other here.
-void check_intrinsic_layout(IntrinsicId id) {
-  const char* name = name_of(id);
-  Module m;
-  m.capture_maps.push_back({});
-  m.funcs.resize(1);
-  FuncWriter w(m);
-  const auto [t] = w.locals("t");
-  std::vector<NodeId> args;
-  for (uint32_t i = 0; i < intrinsic_arity(id); ++i) {
-    args.push_back(w.I(static_cast<int64_t>(i) + 1));
-  }
-  w.add(w.set(t, w.in(id, args)));
-  w.write(m.funcs[0], "main");
-  if (auto err = verify(m)) {
-    std::fprintf(stderr, "FAIL: %s: malformed IR: %s\n", name, err->c_str());
-    ++g_failures;
-    return;
-  }
-  const vm::Program p = vm::compile(m);
-  const vm::Insn* found = nullptr;
-  for (const vm::Insn& in : p.chunks[0].code) {
-    if (in.op == vm::op_of(id)) found = &in;
-  }
-  if (found == nullptr) {
-    std::fprintf(stderr, "FAIL: %s: its opcode was not emitted\n", name);
-    ++g_failures;
-    return;
-  }
-  const bool dst = vm::intrinsic_has_dst(id);
-  const int32_t base = found->a;
-  const int32_t arity = static_cast<int32_t>(intrinsic_arity(id));
-  const int32_t got[4] = {found->a, found->b, found->c, found->d};
-  for (int32_t f = 0; f < 4; ++f) {
-    // With a destination: a = dst (the first argument's register, released
-    // before it), then one field per argument. Without: the arguments from
-    // a, two at most.
-    int32_t arg = -1;
-    if (dst) {
-      arg = f - 1;
-    } else if (f < 2) {
-      arg = f;
-    }
-    int32_t want = (arg >= 0 && arg < arity) ? base + arg : 0;
-    if (dst && f == 0) want = base;
-    if (got[f] != want) {
-      std::fprintf(stderr, "FAIL: %s: operand field %d is r%d, want r%d\n",
-                   name, f, got[f], want);
-      ++g_failures;
-    }
-  }
-  const std::string text = vm::to_string(p);
-  // The dump prints arity + has_dst operands for it: count the registers on
-  // the instruction's line.
-  const std::string head = std::string("\t") + vm::detail::name_of(found->op) +
-                           " r";
-  const size_t at = text.find(head);
-  if (arity + (dst ? 1 : 0) > 0) {
-    if (at == std::string::npos) {
-      std::fprintf(stderr, "FAIL: %s: the dump lost its operands\n", name);
-      ++g_failures;
-    } else {
-      const size_t end = text.find('\t', at + 1);
-      const std::string line = text.substr(at, end - at);
-      int regs = 0;
-      for (size_t k = 0; k + 1 < line.size(); ++k) {
-        if ((line[k] == 'r' && (line[k + 1] >= '0' && line[k + 1] <= '9')) &&
-            (k == 0 || line[k - 1] == ' ')) {
-          ++regs;
-        }
-      }
-      if (regs != arity + (dst ? 1 : 0)) {
-        std::fprintf(stderr, "FAIL: %s: the dump prints %d operand(s), want %d\n",
-                     name, regs, arity + (dst ? 1 : 0));
-        ++g_failures;
-      }
-    }
-  }
-}
-
-// One Insn per opcode through the bytecode dump: every opcode has a name of
-// its own and a format that reads nothing outside the program it was given.
-void check_every_opcode_dumps() {
-  std::set<std::string> seen;
-  vm::Program p;
-  p.consts.push_back(coreir::Const{});
-  p.natives.push_back("native");
-  p.positions.push_back(SrcPos{1, 1});
-  vm::Chunk ch;
-  ch.name = "all";
-  ch.switch_tables.emplace_back();
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(vm::Op::DropSet); ++i) {
-    const auto op = static_cast<vm::Op>(i);
-    const std::string name = vm::detail::name_of(op);
-    if (name == "?") {
-      std::fprintf(stderr, "FAIL: opcode %d has no name\n", i);
-      ++g_failures;
-    } else if (!seen.insert(name).second) {
-      std::fprintf(stderr, "FAIL: opcode name \"%s\" is shared\n",
-                   name.c_str());
-      ++g_failures;
-    }
-    vm::Insn in;
-    in.op = op;
-    ch.code.push_back(in);
-    ch.code_pos.push_back(0);
-  }
-  p.chunks.push_back(std::move(ch));
-  const std::string text = vm::to_string(p);
-  for (const std::string& name : seen) {
-    if (text.find("\t" + name) == std::string::npos) {
-      std::fprintf(stderr, "FAIL: the dump never printed \"%s\"\n",
-                   name.c_str());
-      ++g_failures;
-    }
   }
 }
 
@@ -201,19 +77,6 @@ int main() {
   for (uint8_t i = 0; i <= static_cast<uint8_t>(ConstKind::Str); ++i) {
     check_round_trip(static_cast<ConstKind>(i), "ConstKind");
   }
-
-  // Each intrinsic's opcode is its own, and the opcode names it back.
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastIntrinsic); ++i) {
-    const auto id = static_cast<IntrinsicId>(i);
-    const std::optional<IntrinsicId> back = vm::intrinsic_of(vm::op_of(id));
-    if (!back.has_value() || *back != id) {
-      std::fprintf(stderr, "FAIL: %s does not round-trip through op_of\n",
-                   name_of(id));
-      ++g_failures;
-    }
-    check_intrinsic_layout(id);
-  }
-  check_every_opcode_dumps();
 
   check_rejects_bogus<Tag>("Tag");
   check_rejects_bogus<UnOp>("UnOp");
