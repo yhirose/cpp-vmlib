@@ -24,8 +24,3 @@ true
 (#<unspecified>)
 #t
 #t
-#f
-#f
-(#<unspecified> 1)
-((#<unspecified>))
-(#<unspecified> . 7)

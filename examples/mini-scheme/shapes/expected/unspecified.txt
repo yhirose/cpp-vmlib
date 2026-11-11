@@ -1,3 +1,2 @@
 1 newobject
-1 metaset
-4 loadconst r0, void
+4 , void

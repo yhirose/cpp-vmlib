@@ -958,14 +958,14 @@ struct Binder {
     r.finish("$expt");
   }
 
-  // eq? on two immediates is their value; on two heap values it is
+  // eq? on two immediates is their value (nil and void have no payload, so
+  // Same, tag and payload, is true of any two); on two heap values it is
   // identity -- except that a symbol is a string here (see README.md), so
   // strings compare by value and `(eq? 'a 'a)` answers what Scheme does.
   void rt_eqv() {
     RT r(*this);
     const auto [a, b] = r.params("a", "b");
     r.add(r.iff(r.bin(BinOp::Ne, r.typ(a), r.typ(b)), r.ret(r.Bo(false))));
-    r.add(r.iff(r.is(r.typ(a), "nil"), r.ret(r.Bo(true))));
     r.add(r.iff(r.either(r.is(r.typ(a), "bool"),
                          r.either(r.is(r.typ(a), "int"),
                                   r.either(r.is(r.typ(a), "double"),
@@ -1821,9 +1821,14 @@ const std::vector<vm::NativeDef>& stdlib() {
 // backtrace and its text for the argument position are not reproduced.
 std::string describe(const Value& v) {
   using namespace runtime_parts;
+  // The VM spells its immediates its own way (nil, true, void); a Scheme
+  // program's are `()`, `#t`/`#f` and `#<unspecified>`, as `$disp` writes them.
   const auto written = [](const Value& x) {
-    return x.is_str() ? "\"" + x.as_str() + "\""
-                      : double_format::display_with(x, double_format::kGuile);
+    if (x.is_str()) return "\"" + x.as_str() + "\"";
+    if (x.is_nil()) return std::string("()");
+    if (x.is_bool()) return std::string(x.as_bool() ? "#t" : "#f");
+    if (x.is_void()) return std::string("#<unspecified>");
+    return double_format::display_with(x, double_format::kGuile);
   };
   const Value L = trap_fact(v, TrapFact::Left);
   const Value R = trap_fact(v, TrapFact::Right);

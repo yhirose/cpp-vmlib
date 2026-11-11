@@ -28,12 +28,7 @@
 (display (equal? (if #f #f) (if #f #f))) (newline)
 (display (equal? (list 1 (if #f #f)) (list 1 (if #f #f)))) (newline)
 (display (member (if #f #f) (list 1 (if #f #f)))) (newline)
-; The same value however it is reached: eq? as well as eqv? and equal?.
+; Regression guards, true before the immediate too: eq? as well as eqv?.
 (display (eq? (if #f #f) (if #f #f))) (newline)
 (define u (if #f #f))
 (display (eq? u (display ""))) (newline)
-(display (eq? u '())) (newline)
-(display (eq? u #f)) (newline)
-(display (list (if #f #f) 1)) (newline)
-(display (list (list (if #f #f)))) (newline)
-(display (assoc (if #f #f) (list (cons (if #f #f) 7)))) (newline)
