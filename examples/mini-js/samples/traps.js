@@ -3,8 +3,8 @@
 // so the faults left are a property of undefined, a call of a non-function
 // and the stack. A call's message names the callee as V8 prints it
 // ("o.f is not a function"): the binder spells the callee and the VM hands
-// it back with the trap (README, "A call of a non-function"). null is
-// undefined here, so the properties are read from undefined.
+// it back with the trap (README, "A call of a non-function"). A property of
+// null reads as V8 words it too (samples/nulls.js).
 
 function full(f) {
   try {

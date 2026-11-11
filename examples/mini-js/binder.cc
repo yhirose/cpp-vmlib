@@ -581,7 +581,7 @@ struct Binder {
   static Operators::Table operators() {
     return {
         {"$truthy", VmOp::unary(UnOp::Truth,
-                                truthy_tags_except({"double", "string"}))},
+                                truthy_tags_except({"double", "string", "void"}))},
         {"$add", VmOp::binary(BinOp::Add, add_tags())},
         {"$seq", VmOp::binary(BinOp::Eq, tags_named({"nil", "bool", "double",
                                                      "string"}))},
@@ -600,6 +600,12 @@ struct Binder {
   // says under how it is built.
   struct RT : HelperWriter {
     explicit RT(Binder& bd) : HelperWriter(bd.rt) {}
+    // v is undefined (nil) or null (void): the two absences JavaScript
+    // treats alike wherever it asks "nullish".
+    template <class Slot>
+    NodeId absent(const Slot& v) {
+      return either(is(typ(L(v)), "nil"), is(typ(L(v)), "void"));
+    }
   };
 
   // ToBoolean, ES2023 7.1.2. The VM's own Value::truthy() is close but
@@ -618,7 +624,9 @@ struct Binder {
                     r.bin(BinOp::Ne, r.L(v), r.D(0.0)), r.Bo(false))));
     arms.emplace_back(r.S("string"),
                       r.ret(r.bin(BinOp::Gt, r.len(r.L(v)), r.I(0))));
+    // undefined and null, the two falsy absences (the VM calls Void true).
     arms.emplace_back(r.S("nil"), r.ret(r.Bo(false)));
+    arms.emplace_back(r.S("void"), r.ret(r.Bo(false)));
     r.add(r.b.make_switch(r.typ(v), arms, r.ret(r.Bo(true))));
     r.finish("$truthy");
   }
@@ -679,6 +687,7 @@ struct Binder {
     std::vector<std::pair<NodeId, NodeId>> arms;
     arms.emplace_back(r.S("string"), r.ret(r.L(v)));
     arms.emplace_back(r.S("nil"), r.ret(r.S("undefined")));
+    arms.emplace_back(r.S("void"), r.ret(r.S("null")));
     for (const char* t : {"bool", "int"}) {
       arms.emplace_back(r.S(t), r.ret(r.in(IntrinsicId::ToStr, {r.L(v)})));
     }
@@ -709,7 +718,8 @@ struct Binder {
             r.iff(r.bin(BinOp::Gt, r.L(i), r.I(0)),
                   r.set(out, r.bin(BinOp::Add, r.L(out), r.L(sep)))),
             r.set(e, r.idx(r.L(a), r.L(i))),
-            r.iff(r.isnt(r.typ(e), "nil"),
+            r.iff(r.both(r.isnt(r.typ(r.L(e)), "nil"),
+                        r.isnt(r.typ(r.L(e)), "void")),
                   r.set(out,
                         r.bin(BinOp::Add, r.L(out), r.call("$str", {r.L(e)})))),
             r.set(i, r.bin(BinOp::Add, r.L(i), r.I(1))),
@@ -798,9 +808,11 @@ struct Binder {
             find_in_chain(r, cls, k),
             r.ret(r.Nil()),
         }));
-    // undefined has no properties: the VM's trap of the read, which the
-    // catch words as V8 does.
-    arms.emplace_back(r.S("nil"), r.ret(r.idx(r.L(recv), r.L(key))));
+    // undefined and null have no properties: the VM's trap of the read,
+    // which the catch words as V8 does.
+    for (const char* t : {"nil", "void"}) {
+      arms.emplace_back(r.S(t), r.ret(r.idx(r.L(recv), r.L(key))));
+    }
     r.add(r.b.make_switch(r.typ(recv), arms, r.ret(r.Nil())));
     r.finish("$index");
   }
@@ -841,7 +853,7 @@ struct Binder {
     // that takes no property.
     r.add(r.b.make_switch(
         r.typ(recv), arms,
-        r.blk({r.iff(r.is(r.typ(recv), "nil"),
+        r.blk({r.iff(r.absent(recv),
                      r.blk({r.b.set_index(r.L(recv), r.L(key), r.L(val)),
                             r.ret(r.L(val))})),
                r.ret(r.call("$throwtype",
@@ -1036,12 +1048,12 @@ struct Binder {
 
   // new Map(entries) and new Set(values): the new collection, filled from
   // whatever for...of could walk ($iter) -- each entry a [key, value]
-  // pair for a Map -- and left empty for undefined.
+  // pair for a Map -- and left empty for undefined and null.
   void rt_fill(const std::string& name, bool pairs) {
     RT r(*this);
     const auto [o, init] = r.params("o", "init");
     const auto [it, st, e] = r.locals("it", "st", "e");
-    r.add(r.iff(r.is(r.typ(init), "nil"), r.ret(r.L(o))));
+    r.add(r.iff(r.absent(init), r.ret(r.L(o))));
     const NodeId add =
         pairs ? r.call("$mset", {r.L(o), r.idx(r.L(e), r.I(0)),
                                  r.idx(r.L(e), r.I(1))})
@@ -1084,7 +1096,7 @@ struct Binder {
   void rt_newresult() {
     RT r(*this);
     const auto [v, self] = r.params("v", "self");
-    for (const char* prim : {"nil", "bool", "int", "double", "string"}) {
+    for (const char* prim : {"nil", "void", "bool", "int", "double", "string"}) {
       r.add(r.iff(r.is(r.typ(v), prim), r.ret(r.L(self))));
     }
     r.add(r.ret(r.L(v)));
@@ -1691,7 +1703,7 @@ struct Binder {
         const std::string t(a.token);
         if (t == "true") return b.bool_literal(true);
         if (t == "false") return b.bool_literal(false);
-        return b.nil_literal();  // null and undefined are the same value here
+        return t == "null" ? b.void_literal() : b.nil_literal();
       }
       case "ident"_: {
         const auto it = ref_of.find(&a);
@@ -2530,12 +2542,20 @@ struct Binder {
 
 }  // namespace
 
+// A value as the words of a trap or of `throw` name it: null for void, else
+// to_display's (nil is undefined there, doubles are the caller's).
+std::string display_name(const Value& v) {
+  if (v.is_void()) return "null";
+  if (v.is_nil()) return "undefined";
+  return double_format::display_with(v, double_format::kJs);
+}
+
 // An executor's trap as the Error V8 throws for the same fault: {name,
 // message}, the shape `new Error(...)` builds here. JavaScript coerces
 // where the VM refuses, so what traps is what has no JavaScript value to
 // coerce to: a property of undefined, a call of a non-function, a
-// binding read before its declaration, the stack. The null/undefined
-// distinction is not kept here (both are nil), so the words say undefined.
+// binding read before its declaration, the stack. undefined is nil and null
+// is void, and the words name each as V8 does.
 Value convert_trap(const Value& trap, const void*) {
   const Value L = trap_fact(trap, TrapFact::Left);
   const Value R = trap_fact(trap, TrapFact::Right);
@@ -2549,7 +2569,7 @@ Value convert_trap(const Value& trap, const void*) {
                             : R;
       const bool write = verb.is(Tag::SetIndex) || verb.is(Tag::FieldSet);
       msg = std::string("Cannot ") + (write ? "set" : "read") +
-            " properties of " + (L.is_nil() ? "undefined" : to_display(L)) +
+            " properties of " + display_name(L) +
             " (" + (write ? "setting" : "reading") + " '" +
             double_format::display_with(key, double_format::kJs) + "')";
       break;
@@ -2607,7 +2627,7 @@ std::string describe(const Value& raised) {
                                    : name->as_str() + ": " + msg->as_str();
     }
   }
-  return double_format::display_with(v, double_format::kJs);
+  return display_name(v);
 }
 
 const std::vector<vm::NativeDef>& stdlib() {

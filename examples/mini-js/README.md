@@ -362,14 +362,14 @@ Absent, because none of it exercises a recipe further:
 * **`==` and `!=`.** JavaScript's loose equality is the coercion ladder,
   and the ladder is what this subset does not have. Writing one is a
   bind-time error naming `===`.
+* **Coercions of `null`.** `null + 1` is `1` in JavaScript and `null < 1`
+  is `true`; here, as for `undefined`, they are traps
+  (`cannot add void and double`), because the VM refuses what the
+  language would coerce. A property of `null` and a call of it throw the
+  `TypeError` V8 does.
 
 Quietly different, and therefore worth knowing:
 
-* **`null` and `undefined` are the same value.** Both lower to nil, so
-  `null === undefined` answers `true` here and `false` in JavaScript, and
-  `typeof null` is `"undefined"` rather than `"object"`. Distinguishing
-  them would need a second scalar the IR does not have, or a heap
-  singleton every site would have to reach.
 * **A builtin method name wins over a property.** `x.push(...)`,
   `.slice`, `.join`, `.pop`, `.next`, `.return`, `.throw`, `.get`, `.set`,
   `.has`, `.delete`, `.add`, `.then` and `.catch` are resolved at bind time

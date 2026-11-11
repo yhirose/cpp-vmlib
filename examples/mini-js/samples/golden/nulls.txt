@@ -1,0 +1,24 @@
+false true true true
+object undefined
+null undefined anull aundefined
+- 1--2
+true true 1 2 null
+null is falsy
+no
+false true true
+true true true
+false false
+true true true
+TypeError: Cannot read properties of null (reading 'x')
+TypeError: Cannot read properties of null (reading '0')
+TypeError: Cannot set properties of null (setting 'x')
+TypeError: n is not a function
+TypeError: null is not a function
+TypeError: Cannot read properties of null (reading 'x')
+TypeError: Cannot read properties of undefined (reading 'x')
+true false object null
+1
+0 0 0
+2 null key undefined key
+2 true true
+true false
