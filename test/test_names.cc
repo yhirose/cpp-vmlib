@@ -74,8 +74,25 @@ int main() {
        ++i) {
     check_round_trip(static_cast<IntrinsicId>(i), "IntrinsicId");
   }
-  for (uint8_t i = 0; i <= static_cast<uint8_t>(ConstKind::Str); ++i) {
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastConstKind); ++i) {
     check_round_trip(static_cast<ConstKind>(i), "ConstKind");
+  }
+
+  // The value tags are named by type_name, which tags_named reads backwards:
+  // every tag is in the set of its own name, and the names a front end types
+  // reach a Void.
+  for (uint8_t i = 0; i <= static_cast<uint8_t>(kLastValueTag); ++i) {
+    const auto t = static_cast<ValueTag>(i);
+    if (std::string_view(type_name(t)) == "?" ||
+        !has_tag(tags_named(type_name(t)), t)) {
+      std::fprintf(stderr, "FAIL: ValueTag %d has no name round trip\n", i);
+      ++g_failures;
+    }
+  }
+  if (from_name<ConstKind>("void") != ConstKind::Void ||
+      tags_named("void") != 1u << static_cast<int>(ValueTag::Void)) {
+    std::fprintf(stderr, "FAIL: \"void\" does not name Void\n");
+    ++g_failures;
   }
 
   check_rejects_bogus<Tag>("Tag");
@@ -110,6 +127,7 @@ int main() {
     const NodeId d = b.double_literal(3.5, p);
     const NodeId n = b.nil_literal(p);
     const NodeId s = b.str_literal("hi", p);
+    const NodeId v = b.void_literal(p);
 
     if (m.const_kind(i) != ConstKind::Int || m.int_const(i) != 42) {
       std::fprintf(stderr, "FAIL: int literal accessors\n");
@@ -125,6 +143,12 @@ int main() {
     }
     if (m.const_kind(n) != ConstKind::Nil) {
       std::fprintf(stderr, "FAIL: nil literal accessor\n");
+      ++g_failures;
+    }
+    if (m.const_kind(v) != ConstKind::Void ||
+        m.at(v).a == m.at(n).a) {
+      std::fprintf(stderr, "FAIL: void literal accessor, or its pool entry "
+                           "shared with nil\n");
       ++g_failures;
     }
     if (m.const_kind(s) != ConstKind::Str || m.str_const(s) != "hi") {

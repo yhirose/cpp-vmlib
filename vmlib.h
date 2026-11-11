@@ -121,14 +121,22 @@ struct SrcPos {
 // rather than lexically (Yield inside an is_generator body). Native is a
 // host function registered for the run (vm::NativeDef), callable like a
 // closure.
+//
+// Void is a second nil-like immediate: JavaScript's null, Scheme's
+// unspecified value. It is a value like any other (truthy by default, equal
+// only to another Void), and nothing in the VM produces one: a statement, a
+// function that returns nothing, an If with no else all yield Nil. A front
+// end gets a Void only from an explicit void literal (ConstKind::Void).
 enum class ValueTag : uint8_t {
-  Uninit, Nil, Bool, Int, Double, Str, Array, Object, Cell, Func, Generator,
-  Map, Coroutine, Native
+  Uninit, Nil, Void, Bool, Int, Double, Str, Array, Object, Cell, Func,
+  Generator, Map, Coroutine, Native
 };
 
 // The last enumerator, for the scans (tags_named) that walk the enum's
 // range -- kLastTag's own reason, for the value model's enum.
 inline constexpr ValueTag kLastValueTag = ValueTag::Native;
+// How a new tag is added (and what stops a forgotten step) is the checklist
+// above intrinsic_info.
 
 // The immediates come first and the heap tags last, so Value::is_heap is a
 // single comparison against Str. Order is load-bearing, not cosmetic.
@@ -413,6 +421,14 @@ class Value {
     return r;
   }
 
+  // The nil-like value a front end asks for by name (ConstKind::Void). A
+  // default Value is Nil, which is what every VM-internal "no value" is.
+  static Value make_void() {
+    Value r;
+    r.tag_ = ValueTag::Void;
+    return r;
+  }
+
   static Value make_bool(bool v) {
     Value r;
     r.tag_ = ValueTag::Bool;
@@ -509,6 +525,7 @@ class Value {
   bool is_array() const { return tag_ == ValueTag::Array; }
   bool is_object() const { return tag_ == ValueTag::Object; }
   bool is_nil() const { return tag_ == ValueTag::Nil; }
+  bool is_void() const { return tag_ == ValueTag::Void; }
   bool is_cell() const { return tag_ == ValueTag::Cell; }
   bool is_func() const { return tag_ == ValueTag::Func; }
   bool is_generator() const { return tag_ == ValueTag::Generator; }
@@ -545,7 +562,8 @@ class Value {
   CoroObj* as_coroutine() const { return reinterpret_cast<CoroObj*>(data_); }
   NativeObj* as_native() const { return reinterpret_cast<NativeObj*>(data_); }
 
-  // nil, false and zero are false; everything else is true. A string's
+  // nil, false and zero are false; everything else is true (Void too: a
+  // front end whose null is falsy lowers its own test). A string's
   // emptiness and NaN are deliberately not special-cased -- JavaScript calls
   // both falsy, Lua calls neither, and that disagreement is what makes it a
   // language's decision rather than the VM's. A front end wanting other rules
@@ -1122,9 +1140,11 @@ namespace coreir {
 // Tags
 // ---------------------------------------------------------------------------
 
-// Convention: every node produces a value. Statements produce Void. Block is
-// the value of its last child, If the value of the branch taken, Call the
-// callee's return value. PL/0 never observes this -- everything is Void -- but
+// Convention: every node produces a value. A statement's value is Nil. Block
+// is the value of its last child, If the value of the branch taken, Call the
+// callee's return value. (ValueTag::Void is a different thing: a distinct
+// immediate a front end opts into with a void literal, never a statement's
+// value.) PL/0 never observes this -- every value is Nil -- but
 // fixing it now keeps an expression-oriented front end from having to redefine
 // Block/If/Call later, which would be a breaking change rather than a new tag.
 enum class Tag : uint8_t {
@@ -1738,7 +1758,10 @@ inline constexpr bool operator!=(NodeId a, NodeId b) { return a.v != b.v; }
 // `bits` is the payload for Int, Bool and Double (the last as its bit
 // pattern); for Str it indexes Module::str_consts rather than holding the
 // bytes, so Const stays a two-word POD and the pool stays in one place.
-enum class ConstKind : uint8_t { Nil, Int, Bool, Double, Str };
+enum class ConstKind : uint8_t { Nil, Int, Bool, Double, Str, Void };
+// The last enumerator, for the scans (from_name, the name round trip) that
+// walk the range: guarded after name_of(ConstKind).
+inline constexpr ConstKind kLastConstKind = ConstKind::Void;
 
 struct Const {
   ConstKind kind = ConstKind::Int;
@@ -1922,7 +1945,7 @@ struct Module {
 //
 // yields_value: whether a tag yields a value usable as an operand. Under the
 // "every node produces a value" convention every tag does in principle, but
-// PL/0's statements are Void, and verify() uses this to catch a front end
+// PL/0's statements are Nil, and verify() uses this to catch a front end
 // that wires a statement into an operand position. Block and If were always
 // documented as producing one -- "Block is the value of its last child, If
 // the value of the branch taken" at the top of this header -- and were only
@@ -2030,8 +2053,8 @@ inline int32_t slot_limit(const Func& f, VarKind k) {
   return 0;
 }
 
-// Adding an intrinsic, a Tag or an Op: what the compiler checks, and what it
-// cannot.
+// Adding an intrinsic, a Tag, an Op, a ValueTag or a ConstKind: what the
+// compiler checks, and what it cannot.
 //   IntrinsicId: -Wswitch fails intrinsic_info (below) and vm::op_of until
 //     each has its row; a shared opcode or an arity the Insn cannot hold is
 //     a static_assert. By hand: the enumerator, kLastIntrinsic (a
@@ -2045,6 +2068,20 @@ inline int32_t slot_limit(const Func& f, VarKind k) {
 //   Op: -Wswitch fails vm::detail::name_of(Op), the dump's format switch and
 //     the executor's dispatch. By hand: the enumerator (and, for an
 //     intrinsic's opcode, the above).
+//   ValueTag: -Wswitch fails type_name, to_display and on_heap_kind (truthy
+//     and binop_eval have a default: nothing flags them). By hand: the enumerator, placed
+//     before Str if it is an immediate and at the end if it is a heap tag
+//     (is_heap's single comparison, static_asserted), kLastValueTag
+//     (static_asserted), a make_*/is_* pair, its arm in truthy if its truth
+//     is not the default's, and binop_eval/Op::Same if it can be equal to
+//     itself. kMaxTags (15, derived at FallbackBits) caps the count: a
+//     sixteenth tag is a redesign of the tag-set packing, which a
+//     static_assert on kAllTags announces.
+//   ConstKind: -Wswitch fails name_of(ConstKind), const_text,
+//     Compiler::literal_truthy and the executor's const_value. By hand: the
+//     enumerator (appended: the pool's (kind, bits) key is not an ordinal
+//     anyone stores), kLastConstKind (static_asserted), and the Builder's and
+//     FuncWriter's literal helper.
 
 // IntrinsicInfo: every fact about an intrinsic that more than one pass
 // reads, in one row. name_of, intrinsic_arity, observable and the
@@ -2425,6 +2462,9 @@ public:
     return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Double, bits), 0,
                 {});
   }
+  NodeId void_literal(SrcPos p) {
+    return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Void, 0), 0, {});
+  }
   NodeId nil_literal(SrcPos p) {
     return emit(Tag::Literal, 0, p, intern_scalar(ConstKind::Nil, 0), 0, {});
   }
@@ -2676,6 +2716,7 @@ public:
     NodeId bool_literal(bool v) { return b().bool_literal(v, p_); }
     NodeId double_literal(double v) { return b().double_literal(v, p_); }
     NodeId nil_literal() { return b().nil_literal(p_); }
+    NodeId void_literal() { return b().void_literal(p_); }
     NodeId str_literal(const std::string& s) { return b().str_literal(s, p_); }
     NodeId varref(VarKind k, int32_t i) { return b().varref(k, i, p_); }
     NodeId unary(UnOp op, NodeId x) { return b().unary(op, x, p_); }
@@ -2904,7 +2945,7 @@ const char* name_of(UnOp op);
 const char* name_of(BinOp op);
 const char* name_of(VarKind k);
 const char* name_of(IntrinsicId id);
-const char* name_of(ConstKind k);
+constexpr const char* name_of(ConstKind k);
 
 // The inverse: a string a front end holds (a builder call's `op:`/`kind:`
 // argument, say), resolved back to the enumerator name_of prints for it, or
@@ -3639,6 +3680,7 @@ class FuncWriter {
   NodeId D(double v) { return b.double_literal(v); }
   NodeId Bo(bool v) { return b.bool_literal(v); }
   NodeId Nil() { return b.nil_literal(); }
+  NodeId Void() { return b.void_literal(); }
   NodeId arr(const std::vector<NodeId>& items) { return b.array_lit(items); }
   NodeId obj(const std::vector<std::pair<std::string, NodeId>>& kvs) {
     std::vector<std::pair<NodeId, NodeId>> out;
@@ -3922,10 +3964,11 @@ class HelperWriter : public FuncWriter {
 
 namespace coreir {
 
-inline const char* type_name(ValueTag t) {
+inline constexpr const char* type_name(ValueTag t) {
   switch (t) {
     case ValueTag::Uninit: return "uninitialized";
     case ValueTag::Nil:    return "nil";
+    case ValueTag::Void:   return "void";
     case ValueTag::Bool:   return "bool";
     case ValueTag::Int:    return "int";
     case ValueTag::Double: return "double";
@@ -3944,6 +3987,13 @@ inline const char* type_name(ValueTag t) {
   }
   return "?";
 }
+
+// -Wswitch makes a missing row a compile error; this makes a forgotten bump
+// of kLastValueTag one, which would otherwise stop tags_named and
+// tag_set_text one tag short.
+static_assert(detail::is_fallback(type_name(static_cast<ValueTag>(
+                  static_cast<uint8_t>(kLastValueTag) + 1))),
+              "kLastValueTag is not the last ValueTag: move it");
 
 // type_name read backwards, as a set of tags (bit t for ValueTag t): every
 // tag type_name calls `name` -- two for "function" -- and none for a name it
@@ -4286,7 +4336,7 @@ VMLIB_INLINE Fault binop_fault(BinOp op, const Value& l, const Value& r,
       return ok;
     }
   }
-  if (l.is_nil() && r.is_nil()) {
+  if ((l.is_nil() && r.is_nil()) || (l.is_void() && r.is_void())) {
     if (op == BinOp::Eq || op == BinOp::Ne) {
       out = Value::make_bool(op == BinOp::Eq);
       return ok;
@@ -4531,6 +4581,7 @@ inline Value length_of(const Value& v) {
 inline std::string to_display(const Value& v) {
   switch (v.tag()) {
     case ValueTag::Nil:  return "nil";
+    case ValueTag::Void: return "void";
     case ValueTag::Bool: return v.as_bool() ? "true" : "false";
     case ValueTag::Int:  return std::to_string(v.as_int());
     case ValueTag::Double: {
@@ -5838,8 +5889,8 @@ void on_heap_kind(HeapObj* o, F&& f) {
     case ValueTag::Coroutine: f(*static_cast<CoroObj*>(o)); break;
     case ValueTag::Native:    f(*static_cast<NativeObj*>(o)); break;
     // Not heap objects; listed so that a new tag is a -Wswitch warning here.
-    case ValueTag::Uninit: case ValueTag::Nil: case ValueTag::Bool:
-    case ValueTag::Int: case ValueTag::Double:
+    case ValueTag::Uninit: case ValueTag::Nil: case ValueTag::Void:
+    case ValueTag::Bool: case ValueTag::Int: case ValueTag::Double:
       break;
   }
 }
@@ -6412,16 +6463,20 @@ inline const char* name_of(IntrinsicId id) {
   return detail::intrinsic_info(id).name;
 }
 
-inline const char* name_of(ConstKind k) {
+inline constexpr const char* name_of(ConstKind k) {
   switch (k) {
     case ConstKind::Nil:    return "nil";
     case ConstKind::Int:    return "int";
     case ConstKind::Bool:   return "bool";
     case ConstKind::Double: return "double";
     case ConstKind::Str:    return "str";
+    case ConstKind::Void:   return "void";
   }
   return "?";
 }
+static_assert(detail::is_fallback(name_of(static_cast<ConstKind>(
+                  static_cast<uint8_t>(kLastConstKind) + 1))),
+              "kLastConstKind is not the last ConstKind: move it");
 
 // The inverse of each name_of above: name_of, run over every value the enum
 // holds, until one matches -- so the two directions can never name the same
@@ -6462,7 +6517,7 @@ inline std::optional<IntrinsicId> from_name<IntrinsicId>(std::string_view s) {
 }
 template <>
 inline std::optional<ConstKind> from_name<ConstKind>(std::string_view s) {
-  return detail::scan_names(s, ConstKind::Str);
+  return detail::scan_names(s, kLastConstKind);
 }
 
 namespace detail {
@@ -6892,6 +6947,7 @@ inline std::string const_text(const Const& c,
       std::memcpy(&d, &c.bits, sizeof d);
       return to_display(Value::make_double(d));
     }
+    case ConstKind::Void: return to_display(Value::make_void());
     case ConstKind::Str:
       if (c.bits >= 0 && static_cast<size_t>(c.bits) < strs.size()) {
         return "\"" + strs[static_cast<size_t>(c.bits)] + "\"";
@@ -8500,6 +8556,7 @@ struct FnCompiler {
       case ConstKind::Double:
         return Value::make_double(m.double_const(id)).truthy();
       case ConstKind::Str:    return true;
+      case ConstKind::Void:   return Value::make_void().truthy();
     }
     return true;
   }
@@ -10012,6 +10069,8 @@ struct Exec {
     switch (c.kind) {
       case ConstKind::Nil:
         return Value();
+      case ConstKind::Void:
+        return Value::make_void();
       case ConstKind::Bool:
         return Value::make_bool(c.bits != 0);
       case ConstKind::Int:

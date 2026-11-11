@@ -1269,6 +1269,138 @@ int main() {
     }
   }
 
+  // --- Void: a second nil-like immediate, only ever from an explicit void
+  // literal. Equal to itself and to nothing else (Eq across types is the
+  // front end's question, as nil == int is), truthy, a distinct map key,
+  // and its own type name. ----------------------------------------------
+  {
+    using coreir::BinOp;
+    using coreir::Value;
+    using coreir::ValueTag;
+    const Value v = Value::make_void();
+    check(v.is_void() && !v.is_nil() && !v.is_heap() && v.tag() == ValueTag::Void,
+          "void is an immediate of its own");
+    check(!Value().is_void(), "a default Value is nil, not void");
+    check(v.truthy(), "void is truthy by default");
+    check_eq(coreir::to_display(v), "void", "void displays as void");
+    check_eq(coreir::type_name(ValueTag::Void), "void", "void's type name");
+    check(coreir::tags_named("void") == 1u << static_cast<int>(ValueTag::Void),
+          "tags_named(\"void\") is the one tag");
+    check((coreir::kAllTags & ~coreir::tags_named("void")) ==
+              coreir::tags_named({"nil", "bool", "int", "double", "string",
+                                  "array", "object", "cell", "function",
+                                  "generator", "map", "coroutine",
+                                  "uninitialized"}),
+          "the complement of {void} is every other name");
+    check_eq(coreir::detail::tag_set_text(coreir::tags_named("void")),
+             "{void}", "a set of void prints");
+    check_eq(coreir::detail::tag_set_text(coreir::kAllTags &
+                                          ~coreir::tags_named("void")),
+             "not {void}", "its complement prints as a negation");
+
+    const auto eq = [](BinOp op, const Value& l, const Value& r, Value& out) {
+      return coreir::binop_fault(op, l, r, out);
+    };
+    Value out;
+    check(eq(BinOp::Eq, v, Value::make_void(), out) == coreir::Fault::None &&
+              out.as_bool(),
+          "void == void");
+    check(eq(BinOp::Ne, v, Value::make_void(), out) == coreir::Fault::None &&
+              !out.as_bool(),
+          "void != void is false");
+    for (const Value& other : {Value(), Value::make_int(0),
+                               Value::make_bool(false)}) {
+      check(eq(BinOp::Eq, v, other, out) == coreir::Fault::Operands &&
+                eq(BinOp::Eq, other, v, out) == coreir::Fault::Operands,
+            "void == another type is the Operands fault");
+    }
+    check(eq(BinOp::Lt, v, v, out) == coreir::Fault::Operands,
+          "void < void is the Operands fault");
+
+    // A distinct key from nil, and from the int that shares its payload.
+    coreir::Runtime rt;
+    coreir::Runtime::Scope scope(rt);
+    Value mv = Value::make_map();
+    coreir::MapObj* map = mv.as_map();
+    map->set(Value(), Value::make_int(1));
+    map->set(v, Value::make_int(2));
+    map->set(Value::make_int(0), Value::make_int(3));
+    check(map->live == 3, "nil, void and 0 are three keys");
+    check(map->find(v) != nullptr && map->find(v)->as_int() == 2 &&
+              map->find(Value())->as_int() == 1,
+          "each finds its own entry");
+  }
+
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    const auto print = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::Print, {v}, p);
+    };
+    const auto ty = [&](NodeId v) {
+      return b.intrinsic(IntrinsicId::TypeOf, {v}, p);
+    };
+    const auto vd = [&] { return b.void_literal(p); };
+    const auto same = [&](NodeId l, NodeId r) {
+      return b.intrinsic(IntrinsicId::Same, {l, r}, p);
+    };
+    const auto str = [&](const char* t) { return b.str_literal(t, p); };
+    const auto local = [&] { return b.varref(VarKind::Local, 0, p); };
+    const NodeId body = b.block(
+        {print(vd()),
+         print(b.binary(BinOp::Eq, ty(vd()), str("void"), p)),
+         print(b.binary(BinOp::Ne, ty(vd()), str("void"), p)),
+         print(b.binary(BinOp::Eq, ty(b.nil_literal(p)), str("void"), p)),
+         print(b.binary(BinOp::Eq, ty(vd()), ty(vd()), p)),
+         print(b.binary(BinOp::Eq, ty(vd()), ty(b.nil_literal(p)), p)),
+         print(b.binary(BinOp::Eq, vd(), vd(), p)),
+         print(b.binary(BinOp::Ne, vd(), vd(), p)),
+         print(same(vd(), vd())),
+         print(same(vd(), b.nil_literal(p))),
+         print(b.unary(UnOp::Truth, vd(), p)),
+         print(b.unary(UnOp::Not, vd(), p)),
+         b.make_if(vd(), print(str("T")), print(str("F")), p),
+         // Stored, overwritten and dropped: no leak, whatever holds it.
+         b.assign(VarKind::Local, 0, b.array_lit({vd(), vd()}, p), p),
+         b.assign(VarKind::Local, 0, vd(), p),
+         print(ty(local()))},
+        p);
+    m.funcs.push_back({"main", 1, 0, body, {"x"}, {}});
+    check_eq(run_module(m, "void"), "", "void: unexpected failure");
+    check_eq(joined(),
+             "void|true|false|false|true|false|true|false|true|false|true|"
+             "false|T|void|",
+             "void output");
+    const std::string ir = to_string(m);
+    check(ir.find("literal void ") != std::string::npos,
+          "IR dump of a void literal");
+    const std::string bc = vm::to_string(vm::compile(m));
+    for (const char* want : {"r0, void\t", "\ttypein r0, r0, {void}\t",
+                             "\ttypein r0, r0, not {void}\t"}) {
+      check(bc.find(want) != std::string::npos,
+            std::string("void bytecode dump lacks '") + want + "'");
+    }
+  }
+
+  // void == nil is the front end's question: the VM refuses it.
+  {
+    Module m;
+    Builder b(m);
+    m.capture_maps.push_back({});
+    m.funcs.push_back(
+        {"main", 0, 0,
+         b.intrinsic(IntrinsicId::Print,
+                     {b.binary(BinOp::Eq, b.void_literal(p),
+                               b.nil_literal(p), p)},
+                     p),
+         {}, {}});
+    const std::string failed = run_module(m, "void == nil");
+    check(failed.find("void") != std::string::npos &&
+              failed.find("nil") != std::string::npos,
+          "void == nil faults, naming both types: " + failed);
+  }
+
   // --- An int against a double compares the numbers, not the int rounded to
   // a double: past 2^53 the two disagree, and Eq stopped being transitive
   // (2^53 and 2^53+1 were both equal to 2^53.0, and not to each other).
