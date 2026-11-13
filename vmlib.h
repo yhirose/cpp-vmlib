@@ -1891,7 +1891,7 @@ struct Module {
   // The host functions this module calls, by name; Tag::NativeRef indexes
   // this. Resolved against the run's RunOptions::natives by vm::run.
   std::vector<std::string> natives;
-  // The id the next Builder::let gives its temporary: one per Let in the
+  // The id the next Builder::new_temp gives a temporary: one per Let in the
   // module, so a LetRef names its Let wherever the two are built.
   int32_t next_let = 0;
 
@@ -2514,9 +2514,7 @@ public:
   // parents.
   class Temp {
    public:
-    NodeId operator()() const {
-      return Builder(*m_).emit(Tag::LetRef, 0, p_, id_, 0, {});
-    }
+    NodeId operator()() const { return Builder(*m_).let_ref(id_, p_); }
 
    private:
     friend class Builder;
@@ -2526,20 +2524,31 @@ public:
     SrcPos p_;
   };
 
+  // A Let in pieces, for a front end that cannot hand its body over as a
+  // callback (one bound into another language): new_temp gives the
+  // temporary its id, let_ref reads it (each call a fresh LetRef), let_with
+  // binds it over a body already built. The one place ids are given and Lets
+  // are emitted; lets and let are made of these.
+  int32_t new_temp() { return m_.next_let++; }
+  NodeId let_ref(int32_t temp, SrcPos p) {
+    return emit(Tag::LetRef, 0, p, temp, 0, {});
+  }
+  NodeId let_with(int32_t temp, NodeId init, NodeId body, SrcPos p) {
+    return emit(Tag::Let, 0, p, temp, 0, {init, body});
+  }
+
   // Lets, nested in order -- inits[0] runs first, each init once -- with
   // `body(ts)` building over them, ts[i]() reading inits[i]: a call's
-  // arguments, run once and read by whichever of its forms runs. The one
-  // place temporaries get their ids (the module's next) and Let nodes are
-  // emitted.
+  // arguments, run once and read by whichever of its forms runs.
   template <class F>
   NodeId lets(const std::vector<NodeId>& inits, F body, SrcPos p) {
     std::vector<Temp> ts;
     for (size_t i = 0; i < inits.size(); ++i) {
-      ts.push_back(Temp(m_, m_.next_let++, p));
+      ts.push_back(Temp(m_, new_temp(), p));
     }
     NodeId out = body(ts);
     for (size_t i = inits.size(); i-- > 0;) {
-      out = emit(Tag::Let, 0, p, ts[i].id_, 0, {inits[i], out});
+      out = let_with(ts[i].id_, inits[i], out, p);
     }
     return out;
   }

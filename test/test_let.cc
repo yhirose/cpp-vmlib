@@ -469,6 +469,28 @@ int main() {
     check_eq(joined(), "a|b|9|", "lets: in order, each its own");
   }
 
+  // --- 8b. A Let built in pieces, and a Builder::let after it taking the
+  //         next id. print(let t = 20 in t + t); print(let u = 1 in u)
+  {
+    Module m;
+    Builder b(m);
+    const int32_t t = b.new_temp();
+    const NodeId sum = b.binary(BinOp::Add, b.let_ref(t, p), b.let_ref(t, p), p);
+    const NodeId held = b.let_with(t, b.literal(20, p), sum, p);
+    const NodeId other =
+        b.let(b.literal(1, p), [&](Temp u) { return u(); }, p);
+    m.funcs.push_back({"main", 0, 0,
+                       b.block({b.intrinsic(IntrinsicId::Print, {held}, p),
+                                b.intrinsic(IntrinsicId::Print, {other}, p)},
+                               p),
+                       {},
+                       {}});
+    check_eq(run_module(m, "pieces"), "", "pieces: failure");
+    check_eq(joined(), "40|1|", "pieces: both reads see the one value");
+    check_eq(std::to_string(view_let(m, other).temp), std::to_string(t + 1),
+             "pieces: Builder::let takes the id after new_temp's");
+  }
+
   // --- 9. A callee a Let holds: the call's result still lands below its
   //        arguments, where a native's borrowed arguments, released after
   //        the result is written, cannot take it with them.
